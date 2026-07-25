@@ -383,11 +383,11 @@ func readPowerStateInternal(station *BaseStation) error {
 	buf := make([]byte, 1)
 	n, err := station.characteristic.Read(buf)
 	if err != nil {
-		station.setPowerStateInternal(PowerStateUnknown, RawPowerStateUnknown)
+		station.LastPowerReadAt = time.Time{}
 		return fmt.Errorf("failed to read power characteristic for %s: %w", station.Name, err)
 	}
 	if n != 1 {
-		station.setPowerStateInternal(PowerStateUnknown, RawPowerStateUnknown)
+		station.LastPowerReadAt = time.Time{}
 		return fmt.Errorf("unexpected bytes read (%d) for power on %s", n, station.Name)
 	}
 
@@ -427,7 +427,7 @@ func decodePowerStateWithHistory(raw byte, previous PowerState, bootingSince, no
 // Assumes caller holds the write lock (station.mutex.Lock()).
 func readChannelInternal(station *BaseStation) error {
 	if station.modeCharacteristic == nil {
-		station.Channel = ChannelUnknown
+		station.LastChannelReadAt = time.Time{}
 		return fmt.Errorf("mode characteristic is nil for %s", station.Name)
 	}
 
@@ -436,17 +436,17 @@ func readChannelInternal(station *BaseStation) error {
 	buf := make([]byte, 5)
 	n, err := station.modeCharacteristic.Read(buf)
 	if err != nil {
-		station.Channel = ChannelUnknown
+		station.LastChannelReadAt = time.Time{}
 		return fmt.Errorf("failed to read channel for %s: %w", station.Name, err)
 	}
 	if n < 1 || n > 4 {
-		station.Channel = ChannelUnknown
+		station.LastChannelReadAt = time.Time{}
 		return fmt.Errorf("unexpected bytes read (%d) for channel on %s", n, station.Name)
 	}
 
 	channel, err := DecodeChannel(buf[:n])
 	if err != nil {
-		station.Channel = ChannelUnknown
+		station.LastChannelReadAt = time.Time{}
 		return fmt.Errorf("invalid channel for %s: %w", station.Name, err)
 	}
 	station.Channel = channel
@@ -551,8 +551,8 @@ func connectAndDiscoverInternal(station *BaseStation) error {
 			station.characteristic = nil
 			station.modeCharacteristic = nil
 			station.identifyCharacteristic = nil
-			station.setPowerStateInternal(PowerStateUnknown, RawPowerStateUnknown)
-			station.Channel = ChannelUnknown
+			station.LastPowerReadAt = time.Time{}
+			station.LastChannelReadAt = time.Time{}
 			station.LastError = err.Error()
 			return fmt.Errorf("connection failed internal: %w", err)
 		}
@@ -582,7 +582,27 @@ func connectAndDiscoverInternal(station *BaseStation) error {
 		for i := 0; i < maxRetries; i++ {
 			if i > 0 {
 				log.Printf("Bluetooth: Retrying discovery for %s (attempt %d/%d)...", station.Name, i+1, maxRetries)
+				disconnectInternal(station)
 				time.Sleep(500 * time.Millisecond)
+				device, connectErr := adapter.Connect(station.Address, bluetooth.ConnectionParams{})
+				if connectErr != nil {
+					err = fmt.Errorf("connection retry failed: %w", connectErr)
+					continue
+				}
+				station.device = device
+				station.isConnected = true
+				connectedStationsMutex.Lock()
+				found := false
+				for _, connected := range connectedStations {
+					if connected == station {
+						found = true
+						break
+					}
+				}
+				if !found {
+					connectedStations = append(connectedStations, station)
+				}
+				connectedStationsMutex.Unlock()
 			}
 
 			services, discoverErr := station.device.DiscoverServices(nil)
@@ -1138,8 +1158,8 @@ func disconnectInternal(s *BaseStation) {
 	s.characteristic = nil
 	s.modeCharacteristic = nil
 	s.identifyCharacteristic = nil
-	s.setPowerStateInternal(PowerStateUnknown, RawPowerStateUnknown)
-	s.Channel = ChannelUnknown
+	s.LastPowerReadAt = time.Time{}
+	s.LastChannelReadAt = time.Time{}
 
 	connectedStationsMutex.Lock()
 	newConnectedStations := make([]*BaseStation, 0, len(connectedStations))
@@ -1171,18 +1191,7 @@ func ReleaseStationForScan(station *BaseStation) {
 	station.mutex.Lock()
 	defer station.mutex.Unlock()
 
-	powerState := station.PowerState
-	rawPowerState := station.RawPowerState
-	channel := station.Channel
-	lastStateUpdate := station.LastStateUpdate
-	bootingSince := station.bootingSince
 	disconnectInternal(station)
-	station.PowerState = powerState
-	station.RawPowerState = rawPowerState
-	station.Channel = channel
-	station.LastStateUpdate = lastStateUpdate
-	station.bootingSince = bootingSince
-	station.CapabilitiesKnown = false
 }
 
 // DisconnectAllStations disconnects all tracked stations.

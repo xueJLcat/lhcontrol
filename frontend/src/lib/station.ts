@@ -12,10 +12,17 @@ export function isCurrentPowerState(station: StationInfo, state: PowerTarget): b
   return station.powerStateConfirmed && station.powerState === powerStateValue(state);
 }
 
+export function maySetPower(station: StationInfo, state: PowerTarget): boolean {
+  // Capability data is cached from the last GATT discovery and can become
+  // incomplete after a rescan. The backend refreshes missing capabilities
+  // before every power operation, so the frontend must not block that recovery
+  // path. It will return a structured unsupported error if the refreshed
+  // device genuinely cannot perform the target operation.
+  return station.powerState !== 3;
+}
+
 export function canSetPower(station: StationInfo, state: PowerTarget): boolean {
-  return station.capabilitiesKnown && station.capabilities.powerWrite &&
-    station.powerState !== 3 &&
-    (state !== 'standby' || station.capabilities.standby) &&
+  return maySetPower(station, state) &&
     !isCurrentPowerState(station, state);
 }
 

@@ -419,16 +419,62 @@ var _ GAPDevice = Device{}
 
 // Device is a connection to a remote peripheral.
 type Device struct {
-	ctx    context.Context
-	cancel context.CancelFunc
-
 	Address Address // the MAC address of the device
+	state   *deviceState
+	ctx     context.Context
+}
+
+// deviceState owns all WinRT objects for one connection. Device is copied by
+// value throughout the public API, so mutable ownership must live behind a
+// shared pointer.
+type deviceState struct {
+	operationMutex sync.Mutex
+	disconnectOnce sync.Once
+	closed         atomic.Bool
+	cleanupErr     error
+	cancel         context.CancelFunc
 
 	device                        *bluetooth.BluetoothLEDevice
 	session                       *genericattributeprofile.GattSession
 	connectionStatusListenerToken foundation.EventRegistrationToken
 	connectionStatusListener      *foundation.TypedEventHandler
-	disconnected                  *int32 // shared flag preventing re-entrant Disconnect
+	connectionStatusListenerAdded bool
+	services                      []*genericattributeprofile.GattDeviceService
+	characteristics               []*genericattributeprofile.GattCharacteristic
+}
+
+func (d Device) beginOperation() (*deviceState, error) {
+	if d.state == nil || d.state.closed.Load() {
+		return nil, errors.New("bluetooth: device is disconnected")
+	}
+	d.state.operationMutex.Lock()
+	if d.state.closed.Load() {
+		d.state.operationMutex.Unlock()
+		return nil, errors.New("bluetooth: device is disconnected")
+	}
+	return d.state, nil
+}
+
+func (d Device) endOperation() {
+	if d.state != nil {
+		d.state.operationMutex.Unlock()
+	}
+}
+
+func (d Device) registerService(service *genericattributeprofile.GattDeviceService) error {
+	if d.state == nil || d.state.closed.Load() {
+		return errors.New("bluetooth: device is disconnected")
+	}
+	d.state.services = append(d.state.services, service)
+	return nil
+}
+
+func (d Device) registerCharacteristic(characteristic *genericattributeprofile.GattCharacteristic) error {
+	if d.state == nil || d.state.closed.Load() {
+		return errors.New("bluetooth: device is disconnected")
+	}
+	d.state.characteristics = append(d.state.characteristics, characteristic)
+	return nil
 }
 
 // Connect starts a connection attempt to the given peripheral device address.
@@ -494,17 +540,16 @@ func (a *Adapter) Connect(address Address, params ConnectionParams) (Device, err
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	disconnectedFlag := new(int32)
+	state := &deviceState{
+		cancel:  cancel,
+		device:  bleDevice,
+		session: newSession,
+	}
 
 	device := Device{
-		ctx:    ctx,
-		cancel: cancel,
-
 		Address: address,
-
-		device:       bleDevice,
-		session:      newSession,
-		disconnected: disconnectedFlag,
+		state:   state,
+		ctx:     ctx,
 	}
 
 	// https://learn.microsoft.com/es-es/uwp/api/windows.devices.bluetooth.bluetoothledevice.connectionstatuschanged?view=winrt-26100
@@ -516,17 +561,23 @@ func (a *Adapter) Connect(address Address, params ConnectionParams) (Device, err
 	)
 
 	handler := foundation.NewTypedEventHandler(ole.NewGUID(connectionStatusChangedGUID), func(instance *foundation.TypedEventHandler, sender, arg unsafe.Pointer) {
-		if atomic.LoadInt32(disconnectedFlag) != 0 {
+		if state.closed.Load() {
 			return
 		}
-		status, err := bleDevice.GetConnectionStatus()
+		state.operationMutex.Lock()
+		if state.closed.Load() {
+			state.operationMutex.Unlock()
+			return
+		}
+		status, err := state.device.GetConnectionStatus()
+		state.operationMutex.Unlock()
 		if err != nil {
 			return
 		}
 		if status == bluetooth.BluetoothConnectionStatusDisconnected {
-			if atomic.CompareAndSwapInt32(disconnectedFlag, 0, 1) {
-				device.Disconnect()
-			}
+			// Do not release the currently executing handler on its own
+			// callback stack. Disconnect is idempotent across Device copies.
+			go func() { _ = device.Disconnect() }()
 		}
 
 		if a.connectHandler != nil {
@@ -534,16 +585,23 @@ func (a *Adapter) Connect(address Address, params ConnectionParams) (Device, err
 		}
 	})
 
-	token, err := device.device.AddConnectionStatusChanged(handler)
-
-	device.connectionStatusListenerToken = token
-	device.connectionStatusListener = handler
+	// Serialize registration with teardown. The callback may run as soon as
+	// AddConnectionStatusChanged returns, so publish all handler ownership
+	// before allowing it to inspect or disconnect the shared state.
+	state.operationMutex.Lock()
+	state.connectionStatusListener = handler
+	token, err := state.device.AddConnectionStatusChanged(handler)
 
 	if err != nil {
-		_ = handler.Release()
-		device.connectionStatusListener = nil
+		state.connectionStatusListener = nil
+		state.operationMutex.Unlock()
+		handler.Release()
+		_ = device.Disconnect()
 		return device, err
 	}
+	state.connectionStatusListenerToken = token
+	state.connectionStatusListenerAdded = true
+	state.operationMutex.Unlock()
 
 	return device, nil
 }
@@ -551,55 +609,66 @@ func (a *Adapter) Connect(address Address, params ConnectionParams) (Device, err
 // Disconnect from the BLE device. This method is non-blocking and does not
 // wait until the connection is fully gone.
 func (d Device) Disconnect() error {
-	// Atomically mark the device as disconnected so the connection status
-	// callback (which shares this flag across all Device copies) immediately
-	// returns instead of calling Disconnect recursively.
-	if d.disconnected != nil && !atomic.CompareAndSwapInt32(d.disconnected, 0, 1) {
+	if d.state == nil {
 		return nil
 	}
 
-	d.cancel()
+	state := d.state
+	state.disconnectOnce.Do(func() {
+		state.closed.Store(true)
+		state.operationMutex.Lock()
+		defer state.operationMutex.Unlock()
 
-	// Remove the connection status listener before closing the session so
-	// that session.Close() cannot trigger a re-entrant Disconnect call
-	// through the status-changed callback, which would double-release the
-	// underlying COM objects and crash the process.
-	if d.device != nil {
-		_ = d.device.RemoveConnectionStatusChanged(d.connectionStatusListenerToken)
-	}
-
-	if d.connectionStatusListener != nil {
-		d.connectionStatusListener.Release()
-		d.connectionStatusListener = nil
-	}
-
-	var firstErr error
-
-	if d.session != nil {
-		if err := d.session.Close(); err != nil {
-			firstErr = err
+		if state.cancel != nil {
+			state.cancel()
 		}
-		d.session.Release()
-		d.session = nil
-	}
-
-	if d.device != nil {
-		if err := d.device.Close(); err != nil && firstErr == nil {
-			firstErr = err
+		if state.device != nil && state.connectionStatusListenerAdded {
+			_ = state.device.RemoveConnectionStatusChanged(state.connectionStatusListenerToken)
 		}
-		d.device.Release()
-		d.device = nil
-	}
-
-	return firstErr
+		if state.connectionStatusListener != nil {
+			state.connectionStatusListener.Release()
+			state.connectionStatusListener = nil
+		}
+		for _, characteristic := range state.characteristics {
+			if characteristic != nil {
+				characteristic.Release()
+			}
+		}
+		state.characteristics = nil
+		for _, service := range state.services {
+			if service != nil {
+				_ = service.Close()
+				service.Release()
+			}
+		}
+		state.services = nil
+		if state.session != nil {
+			_ = state.session.SetMaintainConnection(false)
+			if err := state.session.Close(); err != nil {
+				state.cleanupErr = err
+			}
+			state.session.Release()
+			state.session = nil
+		}
+		if state.device != nil {
+			if err := state.device.Close(); err != nil && state.cleanupErr == nil {
+				state.cleanupErr = err
+			}
+			state.device.Release()
+			state.device = nil
+		}
+	})
+	return state.cleanupErr
 }
 
 // Connected returns whether the device is currently connected.
 func (d Device) Connected() (bool, error) {
-	if d.device == nil {
+	state, err := d.beginOperation()
+	if err != nil {
 		return false, nil
 	}
-	status, err := d.device.GetConnectionStatus()
+	defer d.endOperation()
+	status, err := state.device.GetConnectionStatus()
 	if err != nil {
 		return false, err
 	}

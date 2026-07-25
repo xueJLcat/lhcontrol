@@ -21,7 +21,7 @@
   import { Activity, CircleAlert } from 'lucide-svelte';
   import type { PowerFeedback, PowerTarget, StationInfo } from './lib/types';
   import {
-    canSetPower, isCurrentPowerState, powerTargetLabel, stateLabel
+    canSetPower, isCurrentPowerState, maySetPower, powerTargetLabel, stateLabel
   } from './lib/station';
   import { pushToast } from './lib/toast';
   import AppHeader from './lib/components/AppHeader.svelte';
@@ -70,8 +70,8 @@
   );
   $: anyDeviceOperation = Object.values(operationInProgress).some(Boolean) ||
     Object.values(powerTargetByAddress).some(Boolean);
-  $: bluetoothControlBusy = anyDeviceOperation || isStatusChecking;
-  $: globalLocked = isLoading || isBulkLoading || isStatusChecking;
+  $: bluetoothControlBusy = anyDeviceOperation;
+  $: globalLocked = isLoading || isBulkLoading;
 
   function stationBusy(address: string): boolean {
     return Boolean(operationInProgress[address] || powerTargetByAddress[address]);
@@ -128,7 +128,7 @@
   }
 
   async function handleScanClick() {
-    if (isLoading || isBulkLoading || bluetoothControlBusy) return;
+    if (isLoading || isBulkLoading || isStatusChecking || bluetoothControlBusy) return;
     isLoading = true;
     operationInProgress = {};
     powerTargetByAddress = {};
@@ -202,8 +202,7 @@
 
   function eligiblePowerStations(state: PowerTarget): StationInfo[] {
     return stations.filter((station) =>
-      station.isPresent && station.capabilitiesKnown && station.capabilities.powerWrite &&
-      station.powerState !== 3 && (state !== 'standby' || station.capabilities.standby)
+      station.isPresent && maySetPower(station, state)
     );
   }
 
@@ -217,7 +216,7 @@
   }
 
   async function handleBulkPower(state: PowerTarget) {
-    if (isLoading || isBulkLoading || bluetoothControlBusy || !hasEligiblePowerStations(state)) return;
+    if (isLoading || isBulkLoading || stations.length === 0) return;
     isBulkLoading = true;
     bulkTarget = state;
     const targetLabel = powerTargetLabel(state);
@@ -339,11 +338,11 @@
   <AppHeader
     {isLoading}
     {isBulkLoading}
-    locked={isLoading || isBulkLoading || bluetoothControlBusy}
+    locked={isLoading || isBulkLoading}
     {bulkTarget}
-    canOn={hasEligiblePowerStations('on')}
-    canStandby={hasEligiblePowerStations('standby')}
-    canSleep={hasEligiblePowerStations('sleep')}
+    canOn={stations.length > 0}
+    canStandby={stations.length > 0}
+    canSleep={stations.length > 0}
     allOn={allEligibleAtState('on')}
     allStandby={allEligibleAtState('standby')}
     allSleep={allEligibleAtState('sleep')}

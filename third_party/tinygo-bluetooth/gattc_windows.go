@@ -47,8 +47,14 @@ const (
 // Passing a nil slice of UUIDs will return a complete list of
 // services.
 func (d Device) DiscoverServices(filterUUIDs []UUID) ([]DeviceService, error) {
+	state, err := d.beginOperation()
+	if err != nil {
+		return nil, err
+	}
+	defer d.endOperation()
+
 	// IAsyncOperation<GattDeviceServicesResult>
-	getServicesOperation, err := d.device.GetGattServicesWithCacheModeAsync(bluetooth.BluetoothCacheModeUncached)
+	getServicesOperation, err := state.device.GetGattServicesWithCacheModeAsync(bluetooth.BluetoothCacheModeUncached)
 	if err != nil {
 		return nil, err
 	}
@@ -121,6 +127,11 @@ func (d Device) DiscoverServices(filterUUIDs []UUID) ([]DeviceService, error) {
 			}
 		} else {
 			// The caller wants to get all services, in any order.
+			if err := d.registerService(srv); err != nil {
+				_ = srv.Close()
+				srv.Release()
+				return nil, err
+			}
 			services = append(services, makeService(serviceUuid, srv, d))
 		}
 	}
@@ -192,6 +203,14 @@ func (s DeviceService) UUID() UUID {
 // Passing a nil slice of UUIDs will return a complete
 // list of characteristics.
 func (s DeviceService) DiscoverCharacteristics(filterUUIDs []UUID) ([]DeviceCharacteristic, error) {
+	if s.deviceService == nil || s.service == nil {
+		return nil, errors.New("bluetooth: service is unavailable")
+	}
+	if _, err := s.device.beginOperation(); err != nil {
+		return nil, err
+	}
+	defer s.device.endOperation()
+
 	getCharacteristicsOp, err := s.service.GetCharacteristicsWithCacheModeAsync(bluetooth.BluetoothCacheModeUncached)
 	if err != nil {
 		return nil, err
@@ -271,6 +290,10 @@ func (s DeviceService) DiscoverCharacteristics(filterUUIDs []UUID) ([]DeviceChar
 			}
 		} else {
 			// The caller wants to get all characteristics, in any order.
+			if err := s.device.registerCharacteristic(characteristic); err != nil {
+				characteristic.Release()
+				return nil, err
+			}
 			characteristics = append(characteristics, s.makeCharacteristic(characteristicUUID, characteristic, properties))
 		}
 	}
@@ -321,7 +344,12 @@ func (c DeviceCharacteristic) Properties() uint32 {
 
 // GetMTU returns the MTU for the characteristic.
 func (c DeviceCharacteristic) GetMTU() (uint16, error) {
-	return c.service.device.session.GetMaxPduSize()
+	state, err := c.service.device.beginOperation()
+	if err != nil {
+		return 0, err
+	}
+	defer c.service.device.endOperation()
+	return state.session.GetMaxPduSize()
 }
 
 // Write replaces the characteristic value with a new value. The
@@ -346,6 +374,11 @@ func (c DeviceCharacteristic) WriteWithoutResponse(p []byte) (n int, err error) 
 }
 
 func (c DeviceCharacteristic) write(p []byte, mode genericattributeprofile.GattWriteOption) (n int, err error) {
+	if _, err := c.service.device.beginOperation(); err != nil {
+		return 0, err
+	}
+	defer c.service.device.endOperation()
+
 	// Convert data to buffer
 	writer, err := streams.NewDataWriter()
 	if err != nil {
@@ -365,6 +398,9 @@ func (c DeviceCharacteristic) write(p []byte, mode genericattributeprofile.GattW
 
 	// IAsyncOperation<GattCommunicationStatus>
 	asyncOp, err := c.characteristic.WriteValueWithOptionAsync(value, mode)
+	if err != nil {
+		return 0, err
+	}
 
 	if err := awaitAsyncOperation(asyncOp, genericattributeprofile.SignatureGattCommunicationStatus); err != nil {
 		return 0, err
@@ -391,6 +427,11 @@ func (c DeviceCharacteristic) Read(data []byte) (int, error) {
 	if c.properties&genericattributeprofile.GattCharacteristicPropertiesRead == 0 {
 		return 0, errNoRead
 	}
+
+	if _, err := c.service.device.beginOperation(); err != nil {
+		return 0, err
+	}
+	defer c.service.device.endOperation()
 
 	readOp, err := c.characteristic.ReadValueWithCacheModeAsync(bluetooth.BluetoothCacheModeUncached)
 	if err != nil {
@@ -429,8 +470,7 @@ func (c DeviceCharacteristic) Read(data []byte) (int, error) {
 		return 0, err
 	}
 
-	copy(data, readBuffer)
-	return len(readBuffer), nil
+	return copy(data, readBuffer), nil
 }
 
 // EnableNotifications enables notifications or indicate in the Client Characteristic

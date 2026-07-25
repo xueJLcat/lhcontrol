@@ -184,11 +184,11 @@ func TestSetAllStationsPowerSkipsIneligibleStations(t *testing.T) {
 	manager := NewManager(config.NewConfig())
 	manager.stations["already-on"] = &internalbluetooth.BaseStation{
 		Name: "LHB-ON", Present: true, PowerState: internalbluetooth.PowerStateOn, RawPowerState: 0x0B,
-		Capabilities: internalbluetooth.Capabilities{PowerWrite: true},
+		Capabilities: internalbluetooth.Capabilities{PowerWrite: true}, CapabilitiesKnown: true, LastPowerReadAt: time.Now(),
 	}
 	manager.stations["booting"] = &internalbluetooth.BaseStation{
 		Name: "LHB-BOOTING", Present: true, PowerState: internalbluetooth.PowerStateBooting,
-		Capabilities: internalbluetooth.Capabilities{PowerWrite: true},
+		Capabilities: internalbluetooth.Capabilities{PowerWrite: true}, CapabilitiesKnown: true,
 	}
 	manager.stations["not-visible"] = &internalbluetooth.BaseStation{
 		Name: "LHB-OFFLINE", Present: false, PowerState: internalbluetooth.PowerStateSleep,
@@ -201,7 +201,7 @@ func TestSetAllStationsPowerSkipsIneligibleStations(t *testing.T) {
 
 	manager.stations["no-standby"] = &internalbluetooth.BaseStation{
 		Name: "LHB-NO-STANDBY", Present: true, PowerState: internalbluetooth.PowerStateSleep,
-		Capabilities: internalbluetooth.Capabilities{PowerWrite: true, Standby: false},
+		Capabilities: internalbluetooth.Capabilities{PowerWrite: true, Standby: false}, CapabilitiesKnown: true,
 	}
 	if err := manager.SetAllStationsPower("standby"); err != nil {
 		t.Fatalf("SetAllStationsPower() should skip stations without standby capability, got %v", err)
@@ -266,5 +266,37 @@ func TestScanStatusLifecycleAndDefensiveCopy(t *testing.T) {
 func TestFallbackStationNameUsesAddressSuffix(t *testing.T) {
 	if got, want := fallbackStationName("AA:BB:CC:DD:EE:FF"), "LHB-CCDDEEFF"; got != want {
 		t.Fatalf("fallbackStationName() = %q, want %q", got, want)
+	}
+}
+
+func TestStalePowerStateIsNotConfirmed(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	manager.stations["stale"] = &internalbluetooth.BaseStation{
+		Name:          "LHB-STALE",
+		PowerState:    internalbluetooth.PowerStateOn,
+		RawPowerState: 0x0B,
+	}
+
+	infos := manager.GetStationInfo()
+	if len(infos) != 1 || infos[0].PowerFresh || infos[0].PowerStateConfirmed {
+		t.Fatalf("stale cached power was reported as confirmed: %+v", infos)
+	}
+}
+
+func TestStatusCheckDoesNotReconnectDisconnectedStation(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	manager.stations["disconnected"] = &internalbluetooth.BaseStation{
+		Name:          "LHB-DISCONNECTED",
+		Present:       true,
+		PowerState:    internalbluetooth.PowerStateSleep,
+		RawPowerState: 0x00,
+	}
+
+	infos, err := manager.CheckAllStationStatuses()
+	if err != nil {
+		t.Fatalf("CheckAllStationStatuses() error = %v", err)
+	}
+	if len(infos) != 1 || infos[0].PowerState != int(internalbluetooth.PowerStateSleep) || infos[0].ConnectionState != "disconnected" {
+		t.Fatalf("passive status check changed disconnected station: %+v", infos)
 	}
 }

@@ -237,7 +237,7 @@ func (m *Manager) GetStationInfo() []StationInfo {
 			Address:             snapshot.Address,
 			PowerState:          int(snapshot.PowerState),
 			PowerStateName:      snapshot.PowerState.String(),
-			PowerStateConfirmed: bluetooth.IsPowerStateConfirmed(snapshot.PowerState, snapshot.RawPowerState),
+			PowerStateConfirmed: powerFresh && bluetooth.IsPowerStateConfirmed(snapshot.PowerState, snapshot.RawPowerState),
 			RawPowerState:       snapshot.RawPowerState,
 			Channel:             snapshot.Channel,
 			ChannelConflict: snapshot.Present && scanFresh && channelFresh &&
@@ -506,16 +506,14 @@ func (m *Manager) CheckAllStationStatuses() ([]StationInfo, error) {
 		return m.GetStationInfo(), err
 	}
 	if !m.statusOperationMutex.TryLock() {
-		return m.GetStationInfo(), ErrOperationInProgress
+		return m.GetStationInfo(), nil
 	}
 	defer m.statusOperationMutex.Unlock()
-	if err := m.beginOperation(); err != nil {
-		return m.GetStationInfo(), err
+	if m.isScanning.Load() {
+		return m.GetStationInfo(), nil
 	}
-	defer m.endOperation()
 
 	stationsToRead := make([]*bluetooth.BaseStation, 0)
-	stationsToFetch := make([]*bluetooth.BaseStation, 0)
 
 	m.stationsMutex.RLock()
 	for _, stationPtr := range m.stations {
@@ -527,13 +525,11 @@ func (m *Manager) CheckAllStationStatuses() ([]StationInfo, error) {
 		}
 		if stationPtr.IsConnected() {
 			stationsToRead = append(stationsToRead, stationPtr)
-		} else {
-			stationsToFetch = append(stationsToFetch, stationPtr)
 		}
 	}
 	m.stationsMutex.RUnlock()
 
-	if len(stationsToRead) == 0 && len(stationsToFetch) == 0 {
+	if len(stationsToRead) == 0 {
 		return m.GetStationInfo(), nil
 	}
 
@@ -551,7 +547,7 @@ func (m *Manager) CheckAllStationStatuses() ([]StationInfo, error) {
 			workerErr := runSafely("station status worker", func() error {
 				if err := bluetooth.ReadPowerState(ptr); err != nil {
 					bluetooth.DisconnectStation(ptr)
-					return bluetooth.FetchInitialPowerState(ptr)
+					return err
 				}
 				return nil
 			})
@@ -561,22 +557,6 @@ func (m *Manager) CheckAllStationStatuses() ([]StationInfo, error) {
 				statusErrorsMutex.Unlock()
 			}
 		}(stationToRead)
-	}
-
-	for _, stationToFetch := range stationsToFetch {
-		wg.Add(1)
-		go func(ptr *bluetooth.BaseStation) {
-			defer wg.Done()
-			semaphore <- struct{}{}
-			defer func() { <-semaphore }()
-			if err := runSafely("station status fetch worker", func() error {
-				return bluetooth.FetchInitialPowerState(ptr)
-			}); err != nil {
-				statusErrorsMutex.Lock()
-				statusErrors = append(statusErrors, fmt.Errorf("%s: %w", ptr.Address.String(), err))
-				statusErrorsMutex.Unlock()
-			}
-		}(stationToFetch)
 	}
 
 	wg.Wait()
@@ -644,11 +624,16 @@ func (m *Manager) SetStationPower(address, state string) (PowerActionResult, err
 		return PowerActionResult{}, err
 	}
 	defer m.endStationOperation(canonicalAddress)
-	capabilities := stationPtr.Snapshot().Capabilities
-	if !capabilities.PowerWrite {
+	snapshot := stationPtr.Snapshot()
+	capabilities := snapshot.Capabilities
+	if !snapshot.CapabilitiesKnown || !capabilities.PowerWrite {
 		err = runSafely("power capability refresh", func() error {
 			var refreshErr error
-			capabilities, refreshErr = bluetooth.RefreshCapabilities(stationPtr)
+			if snapshot.CapabilitiesKnown {
+				capabilities, refreshErr = bluetooth.RefreshCapabilities(stationPtr)
+			} else {
+				capabilities, refreshErr = bluetooth.EnsureCapabilities(stationPtr)
+			}
 			return refreshErr
 		})
 		if err != nil {
@@ -657,6 +642,9 @@ func (m *Manager) SetStationPower(address, state string) (PowerActionResult, err
 	}
 	if !capabilities.PowerWrite {
 		return PowerActionResult{}, fmt.Errorf("%w: power write is unavailable", ErrUnsupported)
+	}
+	if target == bluetooth.PowerStateStandby && !capabilities.Standby {
+		return PowerActionResult{}, fmt.Errorf("%w: standby is unavailable", ErrUnsupported)
 	}
 	var controlResult bluetooth.PowerControlResult
 	err = runSafely("power operation", func() error {
@@ -915,12 +903,13 @@ func (m *Manager) setAllStationsPowerDetailed(state string, visibleOnly bool) (B
 		case snapshot.PowerState == bluetooth.PowerStateBooting:
 			stationResult.Skipped = true
 			stationResult.Reason = "station is booting"
-		case target == bluetooth.PowerStateStandby &&
+		case snapshot.CapabilitiesKnown && target == bluetooth.PowerStateStandby &&
 			snapshot.Capabilities.PowerWrite &&
 			!snapshot.Capabilities.Standby:
 			stationResult.Skipped = true
 			stationResult.Reason = "standby is not supported"
 		case snapshot.PowerState == target &&
+			isFresh(snapshot.LastPowerReadAt, time.Now()) &&
 			bluetooth.IsPowerStateConfirmed(snapshot.PowerState, snapshot.RawPowerState):
 			stationResult.Skipped = true
 			stationResult.Success = true
@@ -964,10 +953,12 @@ func (m *Manager) setAllStationsPowerDetailed(state string, visibleOnly bool) (B
 				stationResult.Name = snapshot.Name
 				capabilities := snapshot.Capabilities
 				var err error
-				if capabilities.PowerWrite {
+				if snapshot.CapabilitiesKnown && capabilities.PowerWrite {
 					capabilities, err = bluetooth.EnsureCapabilities(s)
-				} else {
+				} else if snapshot.CapabilitiesKnown {
 					capabilities, err = bluetooth.RefreshCapabilities(s)
+				} else {
+					capabilities, err = bluetooth.EnsureCapabilities(s)
 				}
 				if err == nil && !capabilities.PowerWrite {
 					err = fmt.Errorf("%w: power write is unavailable", ErrUnsupported)

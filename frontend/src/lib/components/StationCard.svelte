@@ -27,7 +27,9 @@
     wasRenaming = renaming;
   }
 
-  $: unverified = station.powerState >= 0 && station.powerState !== 3 && !station.powerStateConfirmed;
+  $: hasKnownPower = station.powerState >= 0 && station.powerState !== 3;
+  $: stalePower = hasKnownPower && !station.powerFresh;
+  $: unverified = hasKnownPower && station.powerFresh && !station.powerStateConfirmed;
 
   function openDetails() {
     if (!renaming) onOpenDetails(station);
@@ -89,9 +91,9 @@
     <div class="card-sub">
       <Bluetooth size={12} />
       <span class="mono addr">{station.address}</span>
-      <span class="state-badge" class:unverified>
+      <span class="state-badge" class:unverified class:stale={stalePower} title={stalePower ? `Last known state; last successful read ${station.lastPowerReadAt || 'unknown'}` : ''}>
         {#if station.powerState === 3}<LoaderCircle class="spin" size={10} />{/if}
-        {stateLabel(station)}{unverified ? ' ?' : ''}
+        {stateLabel(station)}{stalePower ? ' · stale' : unverified ? ' ?' : ''}
       </span>
       {#if !station.isPresent}<span class="muted-badge" title="Not detected in the latest scan; direct power control can still be attempted">not visible</span>{/if}
       {#if station.isPresent && !station.seenInLatestScan}<span class="muted-badge" title="Missed by one scan; retained until a second consecutive miss">scan stale</span>{/if}

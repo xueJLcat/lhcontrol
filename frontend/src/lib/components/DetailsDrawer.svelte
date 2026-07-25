@@ -38,7 +38,7 @@
     <dl>
       <dt>Original name</dt><dd>{station.originalName}</dd>
       <dt>Address</dt><dd class="mono">{station.address}</dd>
-      <dt>Power</dt><dd>{stateLabel(station)} · {station.powerStateConfirmed ? 'confirmed' : 'unverified'} (raw {station.rawPowerState})</dd>
+      <dt>Power</dt><dd>{stateLabel(station)} · {station.powerFresh ? station.powerStateConfirmed ? 'confirmed' : 'unverified' : 'last known, stale'} (raw {station.rawPowerState})</dd>
       <dt>Channel</dt><dd class="mono">{station.channel || 'Unable to verify'}</dd>
       <dt>Connection</dt><dd>{station.connectionState}</dd>
       <dt>Last seen</dt><dd>{station.lastSeenAt || '—'}</dd>
@@ -49,7 +49,7 @@
     </dl>
     {#if station.lastError}<div class="alert danger">{station.lastError}</div>{/if}
     {#if !station.capabilitiesKnown}
-      <div class="alert">Capabilities could not be verified. Refresh before using device controls.</div>
+      <div class="alert">Capabilities could not be verified. Power commands will retry discovery; unsupported operations will be reported.</div>
     {/if}
     <div class="drawer-actions">
       <button class="btn" on:click={() => onRefresh(station)} disabled={busy || locked}><RefreshCw size={15} /> Refresh capabilities</button>
@@ -83,7 +83,7 @@
           <span class="group-label">{group.label}</span>
           <div class="capabilities">
             {#each group.entries as [key, label]}
-              <span class:supported={station.capabilities[key]}>{label}</span>
+              <span class:supported={station.capabilitiesKnown && station.capabilities[key]}>{label}</span>
             {/each}
           </div>
         </div>

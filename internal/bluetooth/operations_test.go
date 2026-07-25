@@ -262,8 +262,8 @@ func TestReadChannelRejectsOverlongValue(t *testing.T) {
 	if err := readChannelInternal(station); err == nil {
 		t.Fatal("readChannelInternal() unexpectedly accepted five bytes")
 	}
-	if station.Channel != ChannelUnknown {
-		t.Fatalf("channel = %d, want unknown", station.Channel)
+	if station.Channel != 3 || !station.LastChannelReadAt.IsZero() {
+		t.Fatalf("failed read did not retain channel as stale: %+v", station.Snapshot())
 	}
 }
 
@@ -393,6 +393,11 @@ func TestFetchInitialPowerStateReportsPartialReadErrors(t *testing.T) {
 		nil,
 		Capabilities{PowerRead: true, ChannelRead: true},
 	)
+	station.PowerState = PowerStateOn
+	station.RawPowerState = 0x09
+	station.Channel = 4
+	station.LastPowerReadAt = time.Now()
+	station.LastChannelReadAt = time.Now()
 
 	err := FetchInitialPowerState(station)
 	var initialErr *InitialReadError
@@ -402,8 +407,9 @@ func TestFetchInitialPowerStateReportsPartialReadErrors(t *testing.T) {
 	if !errors.Is(err, powerErr) || !errors.Is(err, channelErr) {
 		t.Fatalf("InitialReadError does not preserve underlying errors: %v", err)
 	}
-	if station.PowerState != PowerStateUnknown || station.Channel != ChannelUnknown {
-		t.Fatalf("failed reads did not produce unknown values: %+v", station.Snapshot())
+	if station.PowerState != PowerStateOn || station.RawPowerState != 0x09 || station.Channel != 4 ||
+		!station.LastPowerReadAt.IsZero() || !station.LastChannelReadAt.IsZero() {
+		t.Fatalf("failed reads did not preserve stale values: %+v", station.Snapshot())
 	}
 }
 
