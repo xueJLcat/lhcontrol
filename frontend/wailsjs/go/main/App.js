@@ -6,12 +6,24 @@ export function CheckAllStationStatuses() {
   return window['go']['main']['App']['CheckAllStationStatuses']();
 }
 
+export function GetAPIStatus() {
+  return window['go']['main']['App']['GetAPIStatus']();
+}
+
 export function GetCurrentStationInfo() {
   return window['go']['main']['App']['GetCurrentStationInfo']();
 }
 
+export function GetScanStatus() {
+  return window['go']['main']['App']['GetScanStatus']();
+}
+
 export function Greet(arg1) {
   return window['go']['main']['App']['Greet'](arg1);
+}
+
+export function IdentifyStation(arg1) {
+  return window['go']['main']['App']['IdentifyStation'](arg1);
 }
 
 export function IsScanning() {
@@ -34,8 +46,16 @@ export function PowerOnStation(arg1) {
   return window['go']['main']['App']['PowerOnStation'](arg1);
 }
 
+export function RefreshStationCapabilities(arg1) {
+  return window['go']['main']['App']['RefreshStationCapabilities'](arg1);
+}
+
 export function RenameStation(arg1, arg2) {
   return window['go']['main']['App']['RenameStation'](arg1, arg2);
+}
+
+export function RenameStationByAddress(arg1, arg2) {
+  return window['go']['main']['App']['RenameStationByAddress'](arg1, arg2);
 }
 
 export function SaveConfig() {
@@ -44,4 +64,20 @@ export function SaveConfig() {
 
 export function ScanAndFetchStations() {
   return window['go']['main']['App']['ScanAndFetchStations']();
+}
+
+export function SetAllStationsPower(arg1) {
+  return window['go']['main']['App']['SetAllStationsPower'](arg1);
+}
+
+export function SetAllStationsPowerDetailed(arg1) {
+  return window['go']['main']['App']['SetAllStationsPowerDetailed'](arg1);
+}
+
+export function SetStationChannel(arg1, arg2) {
+  return window['go']['main']['App']['SetStationChannel'](arg1, arg2);
+}
+
+export function SetStationPower(arg1, arg2) {
+  return window['go']['main']['App']['SetStationPower'](arg1, arg2);
 }

@@ -85,15 +85,15 @@ func flashWindowEx(hwnd syscall.Handle, flags uint32, count uint32, timeout uint
 }
 
 // BringWindowToFront finds the existing window, tries to set foreground, and flashes it (Windows specific)
-func BringWindowToFront(appTitle string) {
+func BringWindowToFront(appTitle string) bool {
 	hwnd, err := findWindow(appTitle)
 	if err != nil {
 		log.Printf("Error finding window: %v", err)
-		return
+		return false
 	}
 	if hwnd == 0 {
 		log.Println("Existing window not found.")
-		return
+		return false
 	}
 
 	// Try restoring and setting foreground first
@@ -106,4 +106,5 @@ func BringWindowToFront(appTitle string) {
 		log.Println("SetForegroundWindow succeeded.")
 		// Optional: Maybe stop flashing if it was started? But SetForegroundWindow should take precedence.
 	}
+	return true
 }

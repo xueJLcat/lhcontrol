@@ -5,7 +5,6 @@
     "useDefineForClassFields": true,
     "module": "ESNext",
     "resolveJsonModule": true,
-    "baseUrl": ".",
     "allowJs": true,
     "checkJs": true,
     "isolatedModules": true

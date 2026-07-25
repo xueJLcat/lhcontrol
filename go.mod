@@ -5,8 +5,12 @@ go 1.24.0
 require (
 	github.com/gofiber/fiber/v2 v2.52.10
 	github.com/wailsapp/wails/v2 v2.11.0
-	tinygo.org/x/bluetooth v0.13.0
+	tinygo.org/x/bluetooth v0.15.0
 )
+
+// Keep the Windows BLE implementation local until the upstream scanner
+// validates WinRT pointers/errors and serialises watcher teardown.
+replace tinygo.org/x/bluetooth => ./third_party/tinygo-bluetooth
 
 require (
 	github.com/andybalholm/brotli v1.2.0 // indirect
@@ -31,13 +35,8 @@ require (
 	github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
-	github.com/saltosystems/winrt-go v0.0.0-20241223121953-98e32661f6ff // indirect
+	github.com/saltosystems/winrt-go v0.0.0-20260317170058-9c2fec580d96 // indirect
 	github.com/samber/lo v1.52.0 // indirect
-	github.com/sirupsen/logrus v1.9.3 // indirect
-	github.com/soypat/cyw43439 v0.0.0-20251110224555-0a1d121ea3af // indirect
-	github.com/soypat/seqs v0.0.0-20250630134107-01c3f05666ba // indirect
-	github.com/tinygo-org/cbgo v0.0.4 // indirect
-	github.com/tinygo-org/pio v0.2.0 // indirect
 	github.com/tkrajina/go-reflector v0.5.8 // indirect
 	github.com/valyala/bytebufferpool v1.0.0 // indirect
 	github.com/valyala/fasthttp v1.68.0 // indirect
@@ -45,7 +44,6 @@ require (
 	github.com/wailsapp/go-webview2 v1.0.23 // indirect
 	github.com/wailsapp/mimetype v1.4.1 // indirect
 	golang.org/x/crypto v0.45.0 // indirect
-	golang.org/x/exp v0.0.0-20251113190631-e25ba8c21ef6 // indirect
 	golang.org/x/net v0.47.0 // indirect
 	golang.org/x/sys v0.38.0 // indirect
 	golang.org/x/text v0.31.0 // indirect

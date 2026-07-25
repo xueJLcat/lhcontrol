@@ -1,623 +1,482 @@
 <script lang="ts">
-  import { onMount, onDestroy, tick } from 'svelte';
+  import { onDestroy, onMount } from 'svelte';
+  import { flip } from 'svelte/animate';
+  import { cubicOut } from 'svelte/easing';
+  import { fade } from 'svelte/transition';
   import {
-    ScanAndFetchStations,
-    GetCurrentStationInfo,
-    PowerOnStation,
-    PowerOffStation,
-    PowerOnAllStations,
-    PowerOffAllStations,
-    RenameStation,
     CheckAllStationStatuses,
-    IsScanning
+    GetAPIStatus,
+    GetCurrentStationInfo,
+    GetScanStatus,
+    IdentifyStation,
+    IsScanning,
+    RefreshStationCapabilities,
+    RenameStationByAddress,
+    ScanAndFetchStations,
+    SetAllStationsPowerDetailed,
+    SetStationChannel,
+    SetStationPower
   } from '../wailsjs/go/main/App';
+  import { EventsOn } from '../wailsjs/runtime/runtime';
+  import { Activity, CircleAlert } from 'lucide-svelte';
+  import type { PowerFeedback, PowerTarget, StationInfo } from './lib/types';
   import {
-    RefreshCw,
-    Power,
-    Edit2,
-    Check,
-    X,
-    Zap,
-    Activity,
-    Loader2,
-    Bluetooth
-  } from 'lucide-svelte';
-
-  interface StationInfo {
-    name: string;
-    originalName: string;
-    address: string;
-    powerState: number; // -1: Unknown, 0: Off, 1: On
-  }
+    canSetPower, isCurrentPowerState, powerTargetLabel, stateLabel
+  } from './lib/station';
+  import { pushToast } from './lib/toast';
+  import AppHeader from './lib/components/AppHeader.svelte';
+  import StationCard from './lib/components/StationCard.svelte';
+  import DetailsDrawer from './lib/components/DetailsDrawer.svelte';
+  import ChannelModal from './lib/components/ChannelModal.svelte';
+  import StatusFooter from './lib/components/StatusFooter.svelte';
+  import Toast from './lib/components/Toast.svelte';
 
   let stations: StationInfo[] = [];
-  let statusMessage: string = "Ready to scan.";
-  let operationInProgress: { [address: string]: boolean } = {};
-  let isLoading: boolean = false;
-  let isBulkLoading: boolean = false;
-
-  // --- Renaming State --- //
+  let statusMessage = 'Ready to scan.';
+  let operationInProgress: Record<string, boolean> = {};
+  let powerTargetByAddress: Record<string, PowerTarget | undefined> = {};
+  let powerFeedbackByAddress: Record<string, PowerFeedback | undefined> = {};
+  let isLoading = false;
+  let isBulkLoading = false;
+  let isStatusChecking = false;
+  let bulkTarget: PowerTarget | null = null;
   let editingAddress: string | null = null;
-  let editingName: string = '';
-  let nameInput: HTMLInputElement;
+  let selectedAddress: string | null = null;
+  let channelEditorOpen = false;
+  let channelError = '';
+  let statusCheckInterval: ReturnType<typeof setInterval> | null = null;
+  let apiStatusInterval: ReturnType<typeof setInterval> | null = null;
+  let cancelExternalScanListener: (() => void) | null = null;
+  let cancelExternalScanFailureListener: (() => void) | null = null;
+  let apiRunning = false;
+  let apiError = '';
 
-  let statusCheckInterval: any = null;
+  $: sortedStations = [...stations].sort((a, b) => {
+    const ac = a.channel > 0 ? a.channel : Number.MAX_SAFE_INTEGER;
+    const bc = b.channel > 0 ? b.channel : Number.MAX_SAFE_INTEGER;
+    return ac - bc || a.name.localeCompare(b.name) || a.address.localeCompare(b.address);
+  });
+  $: selectedStation = stations.find((station) => station.address === selectedAddress) ?? null;
+  $: conflictStations = stations.filter((station) => station.channelConflict);
+  $: occupiedChannels = new Map(
+    stations
+      .filter((station) => station.isPresent && station.scanFresh && station.channelFresh &&
+        station.address !== selectedAddress && station.channel > 0)
+      .map((station) => [station.channel, station.name])
+  );
+  $: hasUnknownVisibleChannel = stations.some(
+    (station) => station.isPresent && station.address !== selectedAddress &&
+      (!station.scanFresh || !station.channelFresh || station.channel === 0)
+  );
+  $: anyDeviceOperation = Object.values(operationInProgress).some(Boolean) ||
+    Object.values(powerTargetByAddress).some(Boolean);
+  $: bluetoothControlBusy = anyDeviceOperation || isStatusChecking;
+  $: globalLocked = isLoading || isBulkLoading || isStatusChecking;
 
-  // --- Reactive Sorting --- //
-  $: sortedStations = [...stations].sort((a, b) => a.address.localeCompare(b.address));
+  function stationBusy(address: string): boolean {
+    return Boolean(operationInProgress[address] || powerTargetByAddress[address]);
+  }
 
-  // --- Lifecycle --- //
   onMount(() => {
+    refreshAPIStatus();
+    apiStatusInterval = setInterval(refreshAPIStatus, 15000);
+    cancelExternalScanListener = EventsOn('external-scan-completed', async (updated: StationInfo[]) => {
+      stations = updated || [];
+      const scanStatus = await GetScanStatus().catch(() => null);
+      const found = scanStatus?.found ?? stations.filter((station) => station.seenInLatestScan).length;
+      statusMessage = `External scan completed: found ${found}; ${stations.length} known station(s).`;
+    });
+    cancelExternalScanFailureListener = EventsOn('external-scan-failed', (message: string) => {
+      statusMessage = `External scan failed: ${message}`;
+      pushToast(`External scan failed: ${message}`);
+    });
     statusCheckInterval = setInterval(periodicStatusCheck, 15000);
     handleScanClick();
   });
 
+  function refreshAPIStatus() {
+    GetAPIStatus().then((status) => {
+      apiRunning = status.running;
+      apiError = status.error;
+    }).catch((error) => {
+      apiRunning = false;
+      apiError = String(error);
+    });
+  }
+
   onDestroy(() => {
-    if (statusCheckInterval) {
-      clearInterval(statusCheckInterval);
-    }
+    if (statusCheckInterval) clearInterval(statusCheckInterval);
+    if (apiStatusInterval) clearInterval(apiStatusInterval);
+    cancelExternalScanListener?.();
+    cancelExternalScanFailureListener?.();
   });
 
-  // --- Periodic Status Check --- //
   async function periodicStatusCheck() {
+    if (isStatusChecking || isLoading || isBulkLoading || anyDeviceOperation) return;
+    isStatusChecking = true;
     try {
-      const scanning = await IsScanning();
-      if (!scanning && !isLoading && !isBulkLoading) {
-        const currentList = await CheckAllStationStatuses();
-        stations = currentList || [];
+      if (!(await IsScanning())) {
+        stations = (await CheckAllStationStatuses()) || [];
       }
     } catch (error) {
-      console.error("Error during periodic status check:", error);
+      console.error('Periodic status check failed:', error);
+      stations = (await GetCurrentStationInfo().catch(() => stations)) || stations;
+      statusMessage = `Status refresh incomplete: ${error}`;
+    } finally {
+      isStatusChecking = false;
     }
   }
 
-  // Handles the Scan button click
   async function handleScanClick() {
-    if (isLoading || isBulkLoading) return;
+    if (isLoading || isBulkLoading || bluetoothControlBusy) return;
     isLoading = true;
-    statusMessage = "Scanning for base stations...";
     operationInProgress = {};
-
+    powerTargetByAddress = {};
+    powerFeedbackByAddress = {};
+    statusMessage = 'Scanning for base stations...';
     try {
-      const result = await ScanAndFetchStations();
-      stations = result || [];
-      if (stations.length > 0) {
-        statusMessage = `Found ${stations.length} station(s).`;
-      } else {
-        statusMessage = "No stations found.";
-      }
+      stations = (await ScanAndFetchStations()) || [];
+      const scanStatus = await GetScanStatus().catch(() => null);
+      const warning = scanStatus?.warnings?.join(' ');
+      const found = scanStatus?.found ?? stations.filter((station) => station.seenInLatestScan).length;
+      statusMessage = warning
+        ? `Found ${found}; ${stations.length} known station(s). ${warning}`
+        : found ? `Found ${found}; ${stations.length} known station(s).` : 'No stations found in this scan.';
     } catch (error) {
       statusMessage = `Scan failed: ${error}`;
-      console.error("Error scan/update:", error);
+      pushToast(`Scan failed: ${error}`);
     } finally {
       isLoading = false;
     }
   }
 
   async function fetchLatestList() {
-       cancelRename();
-       try {
-           const currentList = await GetCurrentStationInfo();
-           stations = currentList || [];
-       } catch (error) {
-           console.error("Error fetching list:", error);
-           statusMessage = `Error refreshing list: ${error}`;
-       }
-  }
-
-  async function togglePower(station: StationInfo) {
-    if (station.powerState === -1 || operationInProgress[station.address] || isLoading || isBulkLoading) {
-      return;
-    }
-
-    const targetState = station.powerState === 0 ? 'ON' : 'OFF';
-
-    // Optimistic UI update could be done here, but we wait for confirmation for reliability
-    statusMessage = `Turning ${station.name} ${targetState}...`;
-    operationInProgress = { ...operationInProgress, [station.address]: true };
-    stations = [...stations];
-
-    try {
-      if (station.powerState === 0) {
-        await PowerOnStation(station.address);
-      } else {
-        await PowerOffStation(station.address);
-      }
-      statusMessage = `Turned ${station.name} ${targetState}.`;
-      setTimeout(fetchLatestList, 1500);
-    } catch (error) {
-      statusMessage = `Failed to toggle ${station.name}: ${error}`;
-      console.error(`Error toggling power for ${station.name}:`, error);
-    } finally {
-       operationInProgress = { ...operationInProgress, [station.address]: false };
-       stations = [...stations];
-    }
-  }
-
-  async function handlePowerOnAll() {
-    if (isLoading || isBulkLoading) return;
-    isBulkLoading = true;
-    statusMessage = "Powering ON all stations...";
-    try {
-      await PowerOnAllStations();
-      statusMessage = "Power ON command sent.";
-    } catch (error) {
-      statusMessage = `Error powering on all: ${error}`;
-    } finally {
-      isBulkLoading = false;
-      setTimeout(fetchLatestList, 1500);
-    }
-  }
-
-  async function handlePowerOffAll() {
-    if (isLoading || isBulkLoading) return;
-    isBulkLoading = true;
-    statusMessage = "Powering OFF all stations...";
-    try {
-      await PowerOffAllStations();
-      statusMessage = "Power OFF command sent.";
-    } catch (error) {
-      statusMessage = `Error powering off all: ${error}`;
-    } finally {
-      isBulkLoading = false;
-      setTimeout(fetchLatestList, 1500);
-    }
-  }
-
-  // --- Renaming Logic --- //
-  async function startRename(station: StationInfo) {
-    if (isLoading || isBulkLoading || operationInProgress[station.address]) return;
     cancelRename();
+    try {
+      stations = (await GetCurrentStationInfo()) || [];
+    } catch (error) {
+      statusMessage = `Error refreshing list: ${error}`;
+    }
+  }
+
+  async function setPower(station: StationInfo, state: PowerTarget) {
+    if (!canSetPower(station, state) || stationBusy(station.address) || globalLocked) return;
+    const targetLabel = powerTargetLabel(state);
+    powerTargetByAddress = { ...powerTargetByAddress, [station.address]: state };
+    powerFeedbackByAddress = {
+      ...powerFeedbackByAddress,
+      [station.address]: { kind: 'pending', text: `Switching to ${targetLabel}…` }
+    };
+    statusMessage = `Setting ${station.name} to ${targetLabel}…`;
+    try {
+      const result = await SetStationPower(station.address, state);
+      stations = stations.map((current) => current.address === station.address ? result.station : current);
+      powerFeedbackByAddress = {
+        ...powerFeedbackByAddress,
+        [station.address]: result.confirmed
+          ? { kind: 'success', text: `${targetLabel} confirmed` }
+          : { kind: 'warning', text: result.confirmationError
+              ? `${targetLabel} sent · confirmation failed`
+              : `${targetLabel} sent · status unavailable` }
+      };
+      statusMessage = result.confirmed
+        ? `${station.name} is ${targetLabel}.`
+        : result.confirmationError
+          ? `${station.name}: command sent, but confirmation failed. ${result.confirmationError}`
+          : `${station.name}: ${targetLabel} command sent; this firmware cannot confirm the state.`;
+    } catch (error) {
+      const errorText = String(error);
+      await fetchLatestList();
+      const actual = stations.find((current) => current.address === station.address);
+      const actualState = actual ? stateLabel(actual) : 'unknown';
+      powerFeedbackByAddress = {
+        ...powerFeedbackByAddress,
+        [station.address]: { kind: 'error', text: `Failed · actual ${actualState}` }
+      };
+      statusMessage = `Power change failed for ${station.name}: ${errorText}`;
+      pushToast(`Power change failed for ${station.name}: ${errorText}`);
+    } finally {
+      powerTargetByAddress = { ...powerTargetByAddress, [station.address]: undefined };
+    }
+  }
+
+  function eligiblePowerStations(state: PowerTarget): StationInfo[] {
+    return stations.filter((station) =>
+      station.isPresent && station.capabilitiesKnown && station.capabilities.powerWrite &&
+      station.powerState !== 3 && (state !== 'standby' || station.capabilities.standby)
+    );
+  }
+
+  function hasEligiblePowerStations(state: PowerTarget): boolean {
+    return eligiblePowerStations(state).some((station) => !isCurrentPowerState(station, state));
+  }
+
+  function allEligibleAtState(state: PowerTarget): boolean {
+    const eligible = eligiblePowerStations(state);
+    return eligible.length > 0 && eligible.every((station) => isCurrentPowerState(station, state));
+  }
+
+  async function handleBulkPower(state: PowerTarget) {
+    if (isLoading || isBulkLoading || bluetoothControlBusy || !hasEligiblePowerStations(state)) return;
+    isBulkLoading = true;
+    bulkTarget = state;
+    const targetLabel = powerTargetLabel(state);
+    statusMessage = `Setting all available stations to ${targetLabel}…`;
+    try {
+      const result = await SetAllStationsPowerDetailed(state);
+      await fetchLatestList();
+      const confirmed = result.results.filter((item) => item.success && !item.skipped && item.confirmed).length;
+      const unconfirmed = result.results.filter((item) => item.success && !item.skipped && !item.confirmed).length;
+      const skipped = result.results.filter((item) => item.skipped);
+      const failed = result.results.filter((item) => !item.success && !item.skipped);
+      statusMessage = failed.length
+        ? `${confirmed} confirmed, ${unconfirmed} sent but unconfirmed, ${skipped.length} skipped, ${failed.length} failed: ${failed.map((item) => `${item.name || item.address}: ${item.error}`).join(' | ')}`
+        : `${confirmed} confirmed; ${unconfirmed} sent but unconfirmed; ${skipped.length} skipped for ${targetLabel}.`;
+      if (failed.length) pushToast(`Bulk ${targetLabel}: ${failed.length} station(s) failed. See status bar.`);
+    } catch (error) {
+      await fetchLatestList();
+      statusMessage = `Bulk ${targetLabel} operation partially failed: ${error}`;
+      pushToast(`Bulk ${targetLabel} operation partially failed: ${error}`);
+    } finally {
+      isBulkLoading = false;
+      bulkTarget = null;
+    }
+  }
+
+  function startRename(station: StationInfo) {
+    if (operationInProgress[station.address]) return;
     editingAddress = station.address;
-    editingName = station.name;
-    await tick();
-    nameInput?.focus();
-    nameInput?.select();
   }
 
   function cancelRename() {
     editingAddress = null;
-    editingName = '';
   }
 
-  async function saveRename(station: StationInfo) {
-    const newNameTrimmed = editingName.trim();
-    const originalNameToUpdate = station.originalName;
-
-    if (newNameTrimmed === station.name) {
-      cancelRename();
-      return;
-    }
-
+  async function saveRename(station: StationInfo, name: string) {
     cancelRename();
-    // Don't set global isLoading to avoid blocking everything, just show status
-    statusMessage = "Updating name...";
-
+    if (name === station.name) return;
     try {
-      if (newNameTrimmed === "") {
-        await RenameStation(originalNameToUpdate, "");
-        statusMessage = `Reset name for ${originalNameToUpdate}.`;
-      } else {
-        await RenameStation(originalNameToUpdate, newNameTrimmed);
-        statusMessage = `Renamed to ${newNameTrimmed}.`;
-      }
-      // Fetching for consistency after a short delay to allow backend to update
-      setTimeout(fetchLatestList, 500);
+      await RenameStationByAddress(station.address, name);
+      await fetchLatestList();
+      statusMessage = name ? `Renamed to ${name}.` : `Reset name for ${station.originalName}.`;
     } catch (error) {
       statusMessage = `Error renaming: ${error}`;
+      pushToast(`Error renaming: ${error}`);
     }
   }
 
-  function handleRenameKeydown(event: KeyboardEvent, station: StationInfo) {
-    if (event.key === 'Enter') {
-      saveRename(station);
-    } else if (event.key === 'Escape') {
-      cancelRename();
+  async function identify(station: StationInfo) {
+    if (stationBusy(station.address) || globalLocked) return;
+    operationInProgress = { ...operationInProgress, [station.address]: true };
+    try {
+      await IdentifyStation(station.address);
+      await fetchLatestList();
+      statusMessage = `Identify signal sent to ${station.name}.`;
+    } catch (error) {
+      await fetchLatestList();
+      statusMessage = `Identify failed for ${station.name}: ${error}`;
+      pushToast(`Identify failed for ${station.name}: ${error}`);
+    } finally {
+      operationInProgress = { ...operationInProgress, [station.address]: false };
+    }
+  }
+
+  async function refreshCapabilities(station: StationInfo) {
+    if (stationBusy(station.address) || globalLocked) return;
+    operationInProgress = { ...operationInProgress, [station.address]: true };
+    try {
+      const updated = await RefreshStationCapabilities(station.address);
+      stations = stations.map((current) => current.address === station.address ? updated : current);
+      statusMessage = `Capabilities refreshed for ${station.name}.`;
+    } catch (error) {
+      await fetchLatestList();
+      statusMessage = `Capability refresh failed for ${station.name}: ${error}`;
+      pushToast(`Capability refresh failed for ${station.name}: ${error}`);
+    } finally {
+      operationInProgress = { ...operationInProgress, [station.address]: false };
+    }
+  }
+
+  function openChannelEditor(_station: StationInfo) {
+    channelError = '';
+    channelEditorOpen = true;
+  }
+
+  async function saveChannel(targetChannel: number) {
+    if (!selectedStation || !selectedStation.scanFresh ||
+      stationBusy(selectedStation.address) || globalLocked ||
+      (selectedStation.channel > 0 && selectedStation.channel === targetChannel)) return;
+    const address = selectedStation.address;
+    operationInProgress = { ...operationInProgress, [address]: true };
+    channelError = '';
+    try {
+      const result = await SetStationChannel(address, targetChannel);
+      await fetchLatestList();
+      channelEditorOpen = false;
+      statusMessage = `Channel changed from ${result.previousChannel || 'unknown'} to ${result.channel}. ${result.warnings.join(' ')}`;
+    } catch (error) {
+      await fetchLatestList();
+      const actual = stations.find((station) => station.address === address)?.channel ?? 0;
+      channelError = `${String(error)} Actual readback: ${actual || 'unknown'}.`;
+    } finally {
+      operationInProgress = { ...operationInProgress, [address]: false };
+    }
+  }
+
+  function handleGlobalKeydown(event: KeyboardEvent) {
+    if (event.key !== 'Escape') return;
+    if (channelEditorOpen) {
+      channelEditorOpen = false;
+    } else if (selectedAddress) {
+      selectedAddress = null;
     }
   }
 </script>
 
+<svelte:window on:keydown={handleGlobalKeydown} />
+
 <div class="app-container">
-  <header>
-    <div class="title-group">
-      <div class="logo-icon">
-        <Activity size={24} color="var(--color-primary)" />
-      </div>
-      <h1>Lighthouse Control</h1>
-    </div>
-
-    <div class="global-controls">
-       <button class="btn btn-primary" on:click={handleScanClick} disabled={isLoading || isBulkLoading}>
-         {#if isLoading}
-           <Loader2 class="spin" size={16} />
-           <span>Scanning...</span>
-         {:else}
-           <RefreshCw size={16} />
-           <span>Scan</span>
-         {/if}
-       </button>
-
-       <div class="button-group">
-         <button class="btn btn-surface" on:click={handlePowerOnAll} disabled={isLoading || isBulkLoading || stations.length === 0}>
-            {#if isBulkLoading}
-              <Loader2 class="spin" size={16} />
-            {:else}
-              <Zap size={16} />
-            {/if}
-            <span>All On</span>
-         </button>
-         <button class="btn btn-surface" on:click={handlePowerOffAll} disabled={isLoading || isBulkLoading || stations.length === 0}>
-            {#if isBulkLoading}
-              <Loader2 class="spin" size={16} />
-            {:else}
-              <Power size={16} />
-            {/if}
-            <span>All Off</span>
-         </button>
-       </div>
-    </div>
-  </header>
+  <AppHeader
+    {isLoading}
+    {isBulkLoading}
+    locked={isLoading || isBulkLoading || bluetoothControlBusy}
+    {bulkTarget}
+    canOn={hasEligiblePowerStations('on')}
+    canStandby={hasEligiblePowerStations('standby')}
+    canSleep={hasEligiblePowerStations('sleep')}
+    allOn={allEligibleAtState('on')}
+    allStandby={allEligibleAtState('standby')}
+    allSleep={allEligibleAtState('sleep')}
+    onScan={handleScanClick}
+    onBulkPower={handleBulkPower}
+  />
 
   <main>
-    {#if sortedStations.length > 0}
-        <div class="station-grid">
-          {#each sortedStations as station (station.address)}
-            <div
-              class="station-card"
-              class:is-on={station.powerState === 1}
-              class:is-off={station.powerState === 0}
-              class:is-unknown={station.powerState === -1}
-            >
-              <div class="card-content">
-                <div class="station-identity">
-                  {#if editingAddress === station.address}
-                    <div class="rename-container">
-                      <input
-                        type="text"
-                        bind:this={nameInput}
-                        bind:value={editingName}
-                        on:keydown={(e) => handleRenameKeydown(e, station)}
-                        on:blur={cancelRename}
-                        class="rename-input"
-                        placeholder="Station Name"
-                      />
-                      <button class="icon-btn success" on:mousedown|preventDefault={() => saveRename(station)}>
-                        <Check size={16} />
-                      </button>
-                      <button class="icon-btn danger" on:mousedown|preventDefault={cancelRename}>
-                        <X size={16} />
-                      </button>
-                    </div>
-                  {:else}
-                    <div class="name-row">
-                      <h3 title={station.name}>{station.name}</h3>
-                      <button class="icon-btn ghost" on:click={() => startRename(station)} title="Rename">
-                        <Edit2 size={12} />
-                      </button>
-                    </div>
-                    <div class="info-row">
-                      <Bluetooth size={12} class="text-muted" />
-                      <span class="address">{station.address}</span>
-                      {#if station.name !== station.originalName}
-                        <span class="original-name">({station.originalName})</span>
-                      {/if}
-                    </div>
-                  {/if}
-                </div>
-              </div>
-
-              <div class="card-action">
-                <button
-                  class="btn btn-sm toggle-btn"
-                  class:btn-success={station.powerState === 0}
-                  class:btn-danger={station.powerState === 1}
-                  on:click={() => togglePower(station)}
-                  disabled={station.powerState === -1 || operationInProgress[station.address] || isLoading || isBulkLoading}
-                >
-                  {#if operationInProgress[station.address]}
-                      <Loader2 class="spin" size={16} />
-                  {:else}
-                      <Power size={16} />
-                      <span>{station.powerState === 0 ? 'Turn On' : 'Turn Off'}</span>
-                  {/if}
-                </button>
-              </div>
-            </div>
-          {/each}
-        </div>
-    {:else if !isLoading && !isBulkLoading}
-        <div class="empty-state">
-          <Activity size={48} color="var(--text-muted)" />
-          <p>No base stations found.</p>
-          <button class="btn btn-primary" on:click={handleScanClick}>Scan Now</button>
-        </div>
-     {:else if isLoading}
-         <div class="loading-state">
-            <Loader2 class="spin" size={32} color="var(--color-primary)" />
-            <p>Scanning...</p>
-         </div>
+    {#if conflictStations.length}
+      <div class="alert danger"><CircleAlert size={18} /> Channel conflict detected on {conflictStations.length} visible station(s).</div>
+    {/if}
+    {#if sortedStations.length}
+      <div class="station-grid">
+        {#each sortedStations as station, index (station.address)}
+          <div
+            animate:flip={{ duration: 300, easing: cubicOut }}
+            in:fade={{ duration: 180, delay: Math.min(index * 30, 240) }}
+          >
+            <StationCard
+              {station}
+              renaming={editingAddress === station.address}
+              feedback={powerFeedbackByAddress[station.address]}
+              pendingTarget={powerTargetByAddress[station.address]}
+              busy={stationBusy(station.address)}
+              locked={globalLocked}
+              onPower={setPower}
+              onOpenDetails={(s) => selectedAddress = s.address}
+              onStartRename={startRename}
+              onSaveRename={saveRename}
+              onCancelRename={cancelRename}
+            />
+          </div>
+        {/each}
+      </div>
+    {:else if !isLoading}
+      <div class="empty">
+        <div class="empty-icon"><Activity size={40} /></div>
+        <p>No base stations found.</p>
+        <button class="btn primary" on:click={handleScanClick}>Scan Now</button>
+      </div>
     {/if}
   </main>
 
-  <div class="status-bar">
-    <div class="status-content">
-      <Activity size={12} />
-      <span>{statusMessage}</span>
-    </div>
-  </div>
+  <StatusFooter {statusMessage} {apiRunning} {apiError} />
 </div>
 
+{#if selectedStation}
+  <div
+    class="scrim"
+    role="presentation"
+    transition:fade={{ duration: 200 }}
+    on:click={() => selectedAddress = null}
+  ></div>
+  <DetailsDrawer
+    station={selectedStation}
+    busy={stationBusy(selectedStation.address)}
+    locked={globalLocked}
+    onClose={() => selectedAddress = null}
+    onRefresh={refreshCapabilities}
+    onIdentify={identify}
+    onOpenChannelEditor={openChannelEditor}
+  />
+{/if}
+
+{#if channelEditorOpen && selectedStation}
+  <div
+    class="modal-scrim"
+    role="presentation"
+    transition:fade={{ duration: 180 }}
+    on:click={() => channelEditorOpen = false}
+  >
+    <ChannelModal
+      station={selectedStation}
+      {occupiedChannels}
+      {hasUnknownVisibleChannel}
+      error={channelError}
+      busy={stationBusy(selectedStation.address)}
+      locked={globalLocked}
+      onClose={() => channelEditorOpen = false}
+      onSave={saveChannel}
+      onIdentify={identify}
+    />
+  </div>
+{/if}
+
+<Toast />
+
 <style>
-  .app-container {
-    display: flex;
-    flex-direction: column;
-    height: 100vh;
-    background-color: var(--bg-app);
-  }
-
-  header {
-    padding: var(--spacing-md);
-    background-color: var(--bg-surface);
-    border-bottom: 1px solid var(--color-border);
-    display: flex;
-    flex-direction: column;
-    gap: var(--spacing-sm);
-    box-shadow: var(--shadow-sm);
-  }
-
-  .title-group {
-    display: flex;
-    align-items: center;
-    gap: var(--spacing-sm);
-    justify-content: center;
-  }
-
-  .logo-icon {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  }
-
-  h1 {
-    font-size: 1.1rem;
-    font-weight: 700;
-    margin: 0;
-    color: var(--text-primary);
-  }
-
-  .global-controls {
-    display: flex;
-    gap: var(--spacing-sm);
-    justify-content: center;
-  }
-
-  .button-group {
-    display: flex;
-    gap: var(--spacing-xs);
-    background-color: var(--bg-app);
-    padding: 2px;
-    border-radius: var(--radius-md);
-  }
-
-  main {
-    flex: 1;
-    padding: var(--spacing-md);
-    overflow-y: auto;
-    position: relative;
-    max-width: 100%;
-    margin: 0 auto;
-    width: 100%;
-    box-sizing: border-box;
-  }
-
-  /* Buttons */
-  .btn {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: var(--spacing-sm);
-    padding: 0.4rem 0.8rem;
-    border: none;
-    border-radius: var(--radius-md);
-    font-size: 0.85rem;
-    font-weight: 600;
-    cursor: pointer;
-    transition: var(--transition);
-    color: white;
-  }
-
-  .btn-sm {
-      padding: 0.3rem 0.6rem;
-      font-size: 0.8rem;
-  }
-
-  .btn:disabled {
-    opacity: 0.6;
-    cursor: not-allowed;
-  }
-
-  .btn-primary {
-    background-color: var(--color-primary);
-  }
-  .btn-primary:hover:not(:disabled) {
-    background-color: var(--color-primary-hover);
-  }
-
-  .btn-surface {
-    background-color: var(--bg-surface);
-    color: var(--text-secondary);
-  }
-  .btn-surface:hover:not(:disabled) {
-    background-color: var(--bg-surface-hover);
-    color: var(--text-primary);
-  }
-
-  .btn-success { background-color: var(--color-success); }
-  .btn-success:hover:not(:disabled) { filter: brightness(1.1); }
-
-  .btn-danger { background-color: var(--color-danger); }
-  .btn-danger:hover:not(:disabled) { filter: brightness(1.1); }
-
-  .icon-btn {
-    background: none;
-    border: none;
-    cursor: pointer;
-    padding: 2px;
-    border-radius: var(--radius-sm);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    transition: var(--transition);
-  }
-
-  .icon-btn.ghost { color: var(--text-muted); }
-  .icon-btn.ghost:hover { color: var(--text-primary); background-color: rgba(255,255,255,0.1); }
-
-  .icon-btn.success { color: var(--color-success); }
-  .icon-btn.success:hover { background-color: rgba(34, 197, 94, 0.1); }
-
-  .icon-btn.danger { color: var(--color-danger); }
-  .icon-btn.danger:hover { background-color: rgba(239, 68, 68, 0.1); }
-
-  /* Station Grid */
+  .app-container { display: flex; flex-direction: column; height: 100vh; }
+  main { flex: 1; padding: var(--spacing-md); overflow: auto; }
   .station-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    gap: 0.6rem;
+  }
+  .scrim {
+    position: fixed;
+    inset: 0;
+    background: rgba(3, 6, 12, 0.6);
+    backdrop-filter: blur(2px);
+    z-index: 10;
+  }
+  .modal-scrim {
+    position: fixed;
+    inset: 0;
+    background: rgba(3, 6, 12, 0.6);
+    backdrop-filter: blur(2px);
+    z-index: 20;
     display: flex;
-    flex-direction: column;
-    gap: var(--spacing-sm);
-  }
-
-  .station-card {
-    background-color: var(--bg-surface);
-    border-radius: var(--radius-md);
-    border: 1px solid var(--color-border);
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: var(--spacing-sm) var(--spacing-md);
-    overflow: hidden;
-    transition: var(--transition);
-    position: relative;
-    min-height: 60px;
-  }
-
-  .station-card:hover {
-    transform: translateY(-1px);
-    box-shadow: var(--shadow-sm);
-    border-color: var(--text-muted);
-  }
-
-  /* Status indicators on card border */
-  .station-card.is-on { border-left: 3px solid var(--color-success); }
-  .station-card.is-off { border-left: 3px solid var(--color-danger); }
-  .station-card.is-unknown { border-left: 3px solid var(--text-muted); }
-
-  .card-content {
-      flex: 1;
-      display: flex;
-      flex-direction: column;
-      justify-content: center;
-      padding-right: var(--spacing-md);
-      overflow: hidden;
-  }
-
-  .station-identity {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    width: 100%;
-  }
-
-  .name-row {
-    display: flex;
-    align-items: center;
-    gap: var(--spacing-xs);
-  }
-
-  .name-row h3 {
-    margin: 0;
-    font-size: 0.95rem;
-    color: var(--text-primary);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
-  .original-name {
-    font-size: 0.75rem;
-    color: var(--text-muted);
-    font-style: italic;
-    margin-left: 4px;
-  }
-
-  .info-row {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    color: var(--text-secondary);
-    font-size: 0.8rem;
-  }
-
-  .card-action {
-      flex-shrink: 0;
-  }
-
-  /* Renaming */
-  .rename-container {
-    display: flex;
-    align-items: center;
-    gap: var(--spacing-xs);
-    width: 100%;
-  }
-
-  .rename-input {
-    background-color: var(--bg-input);
-    border: 1px solid var(--color-primary);
-    color: white;
-    padding: 2px 6px;
-    border-radius: var(--radius-sm);
-    font-family: inherit;
-    font-size: 0.9rem;
-    width: 100%;
-    outline: none;
-  }
-
-  /* States */
-  .empty-state, .loading-state {
-    display: flex;
-    flex-direction: column;
     align-items: center;
     justify-content: center;
+    padding: 1rem;
+  }
+  .empty {
     height: 100%;
-    min-height: 150px;
-    color: var(--text-muted);
-    gap: var(--spacing-md);
-  }
-
-  /* Status Bar */
-  .status-bar {
-    background-color: var(--bg-surface);
-    border-top: 1px solid var(--color-border);
-    padding: 2px var(--spacing-md);
-    font-size: 0.75rem;
-    color: var(--text-secondary);
     display: flex;
+    flex-direction: column;
     justify-content: center;
-    min-height: 24px;
+    align-items: center;
+    gap: 0.7rem;
+    color: var(--text-muted);
   }
-
-  .status-content {
+  .empty-icon {
+    width: 88px;
+    height: 88px;
     display: flex;
     align-items: center;
-    gap: var(--spacing-sm);
+    justify-content: center;
+    border-radius: 999px;
+    border: 1px solid var(--color-border);
+    background: var(--bg-surface);
+    color: var(--color-primary);
+    box-shadow: 0 0 32px rgba(76, 141, 255, 0.15);
   }
-
-  /* Utilities */
-  :global(.spin) {
-    animation: spin 1s linear infinite;
-  }
-
-  @keyframes spin {
-    from { transform: rotate(0deg); }
-    to { transform: rotate(360deg); }
-  }
+  .empty p { margin: 0; font-size: 0.85rem; }
 </style>

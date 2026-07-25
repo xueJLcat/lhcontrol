@@ -9,8 +9,12 @@ A simple application to control Valve Lighthouse (SteamVR) base stations v2.0 po
 ## Features
 
 *   Scan for nearby Lighthouse base stations.
-*   Display discovered stations and their current power state (On/Off/Unknown).
-*   Toggle the power state of individual base stations.
+*   Display all Lighthouse 2.0 power states (Sleep/Standby/Booting/On/Unknown).
+*   Display the optical channel (1-16) reported by Lighthouse 2.0 stations.
+*   Set individual stations to On, Standby, or Sleep.
+*   Identify a physical station by flashing its LED when supported.
+*   Detect channel conflicts and safely change a channel with mandatory readback.
+*   Display firmware, hardware, model, serial-number, manufacturer, and BLE capabilities.
 *   Power On/Off all known base stations simultaneously.
 *   Rename base stations (locally) for easier identification.
 *   Persistent list of discovered stations across scans (within a single app session).
@@ -63,8 +67,9 @@ A simple application to control Valve Lighthouse (SteamVR) base stations v2.0 po
 1.  Launch the application.
 2.  Click **Scan** to discover nearby base stations.
 3.  The application will attempt to connect to discovered stations to determine their power state.
-4.  Use the **Toggle Power** button next to each station to turn it On or Off.
-5.  Use the **Power On All** or **Power Off All** buttons to control all known stations simultaneously.
+4.  Use the **Power** menu to select On, Standby, or Sleep.
+5.  Open **Details** to inspect capabilities and metadata, identify a station, or safely change its channel.
+6.  Use the **All** controls to change all stations retained as visible by the latest reliable scans.
 
 ## Troubleshooting
 
@@ -81,12 +86,12 @@ This application also exposes a simple HTTP API on `http://127.0.0.1:7575` for b
 *   **`POST /allon`**
     *   **Description:** Attempts to turn ON all known base stations.
     *   **Request Body:** None
-    *   **Response:** `200 OK` on success (or if command sent).
+    *   **Response:** `200 OK` after all stations confirm the ON state; `409 Conflict` if another Bluetooth operation is active.
 
 *   **`POST /alloff`**
     *   **Description:** Attempts to turn OFF all known base stations.
     *   **Request Body:** None
-    *   **Response:** `200 OK` on success (or if command sent).
+    *   **Response:** `200 OK` after all stations confirm the OFF state; `409 Conflict` if another Bluetooth operation is active.
 
 *   **`GET /status`**
     *   **Description:** Returns the current list of known base stations and their states.
@@ -98,23 +103,46 @@ This application also exposes a simple HTTP API on `http://127.0.0.1:7575` for b
             "name": "LHB-STATION1_RENAMED",
             "originalName": "LHB-XXXXXXXX",
             "address": "XX:XX:XX:XX:XX:XX",
-            "powerState": 1 
+            "powerState": 1,
+            "channel": 3
           },
           {
             "name": "LHB-YYYYYYYY",
             "originalName": "LHB-YYYYYYYY",
             "address": "YY:YY:YY:YY:YY:YY",
-            "powerState": 0
+            "powerState": 0,
+            "channel": 8
           }
           // ... more stations
         ]
         ```
-        (Power States: -1 = Unknown, 0 = Off, 1 = On)
+        (Power States: -1 = Unknown, 0 = Sleep, 1 = On, 2 = Standby, 3 = Booting. Channel: 0 = Unknown, 1-16 = optical channel.)
 
 *   **`POST /scan`**
     *   **Description:** Triggers a background scan for base stations (approx. 5s scan + 7s state fetch). The list returned by `/status` will update once complete.
     *   **Request Body:** None
-    *   **Response:** `202 Accepted` (indicates the scan has started).
+    *   **Response:** `202 Accepted` when the scan starts; `409 Conflict` if another Bluetooth operation is active.
+
+*   **`GET /scan/status`**
+    *   **Description:** Returns scan state, timestamps, warnings, and the number actually seen in the most recent scan.
+
+*   **`POST /stations/power`**
+    *   **Body:** `{"state":"on"}`, `{"state":"standby"}`, or `{"state":"sleep"}`.
+    *   **Response:** A structured result for every attempted visible station, including command-sent, success, confirmation, and error fields.
+
+*   **`POST /stations/:address/power`**
+    *   **Body:** `{"state":"on"}`, `{"state":"standby"}`, or `{"state":"sleep"}`.
+    *   **Response:** The updated station plus a `confirmed` flag. A writable-only firmware returns `confirmed: false`.
+
+*   **`POST /stations/:address/identify`**
+    *   **Description:** Flashes the selected physical station when Identify is supported.
+
+*   **`POST /stations/:address/refresh`**
+    *   **Description:** Forces service/characteristic discovery and refreshes capabilities, metadata, power, and channel values.
+
+*   **`PUT /stations/:address/channel`**
+    *   **Body:** `{"channel":5}` (valid range: 1-16).
+    *   **Description:** Rejects visible conflicts, writes the channel, and succeeds only after readback matches.
 
 **Example Usage (curl):**
 
