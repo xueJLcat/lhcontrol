@@ -81,24 +81,6 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
-body::before {
-  content: '';
-  position: fixed;
-  inset: -60%;
-  z-index: 0;
-  pointer-events: none;
-  background: conic-gradient(from 0deg at 50% 50%, transparent 0deg, rgba(76, 141, 255, 0.05) 12deg, transparent 24deg);
-  animation: lighthouse-sweep 28s linear infinite;
-  animation-play-state: paused;
-  opacity: 0;
-  transition: opacity 600ms var(--ease);
-}
-
-body.scanning::before {
-  animation-play-state: running;
-  opacity: 1;
-}
-
 #app {
   position: relative;
   z-index: 1;
@@ -363,4 +345,3 @@ button:focus-visible, [tabindex]:focus-visible {
 .spin { animation: spin 1s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 @keyframes pulse { 50% { filter: brightness(1.25); } }
-@keyframes lighthouse-sweep { to { transform: rotate(360deg); } }

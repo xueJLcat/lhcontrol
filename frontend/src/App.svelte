@@ -113,11 +113,6 @@
   $: isBulkLoading = globalOperation === 'bulk-power';
   $: isStatusChecking = globalOperation === 'status-refresh';
   $: scanningActive = isLoading || externalScanning;
-  $: if (!disposed) {
-    // The lighthouse beam is a scanning indicator: it only sweeps while a
-    // scan is active, so its motion always means "scan in progress".
-    document.body.classList.toggle('scanning', scanningActive);
-  }
   $: anyDeviceOperation = operationLocks.anyDeviceOperation;
   $: scanLocked = operationLocks.scanLocked;
   $: bulkLocked = operationLocks.bulkLocked;
@@ -334,7 +329,6 @@
     listRevisions.dispose();
     apiRevisions.dispose();
     endScanTimer();
-    document.body.classList.remove('scanning');
     if (statusCheckInterval) clearInterval(statusCheckInterval);
     if (apiStatusInterval) clearInterval(apiStatusInterval);
     cancelExternalScanListener?.();
