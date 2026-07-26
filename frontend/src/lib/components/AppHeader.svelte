@@ -51,7 +51,6 @@
       {#if sleepCount > 0}<span class="fleet-chip"><span class="fleet-dot dot-sleep"></span>{sleepCount} Sleep</span>{/if}
     </div>
   {/if}
-  {#if scanning}<div class="scan-progress" aria-hidden="true"></div>{/if}
 </header>
 
 <style>
@@ -86,23 +85,4 @@
   .fleet-dot.dot-on { background: var(--color-on); box-shadow: 0 0 5px color-mix(in srgb, var(--color-on) 60%, transparent); }
   .fleet-dot.dot-standby { background: var(--color-standby); box-shadow: 0 0 5px color-mix(in srgb, var(--color-standby) 60%, transparent); }
   .fleet-dot.dot-sleep { background: var(--color-sleep); }
-  .scan-progress {
-    position: absolute;
-    left: 0; right: 0; bottom: -1px;
-    height: 2px;
-    overflow: hidden;
-  }
-  .scan-progress::after {
-    content: '';
-    position: absolute;
-    top: 0; bottom: 0;
-    width: 38%;
-    border-radius: var(--radius-pill);
-    background: linear-gradient(90deg, transparent, var(--color-primary), transparent);
-    animation: scan-slide 1.2s var(--ease) infinite;
-  }
-  @keyframes scan-slide {
-    from { left: -38%; }
-    to { left: 100%; }
-  }
 </style>
