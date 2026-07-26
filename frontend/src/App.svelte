@@ -50,6 +50,7 @@
   let selectedAddress: string | null = null;
   let channelEditorOpen = false;
   let channelError = '';
+  let channelWarning = false;
   let statusCheckInterval: ReturnType<typeof setInterval> | null = null;
   let apiStatusInterval: ReturnType<typeof setInterval> | null = null;
   let cancelExternalScanListener: (() => void) | null = null;
@@ -60,6 +61,7 @@
   let apiError = '';
   let externalScanning = false;
   let stoppingScan = false;
+  let stopRequestPending = false;
   let scanStartedAt: number | null = null;
   let scanElapsed = 0;
   let scanTimer: ReturnType<typeof setInterval> | null = null;
@@ -112,7 +114,12 @@
   $: isLoading = globalOperation === 'scanning';
   $: isBulkLoading = globalOperation === 'bulk-power';
   $: isStatusChecking = globalOperation === 'status-refresh';
-  $: scanningActive = isLoading || externalScanning;
+  $: scanningActive = isLoading || externalScanning || stoppingScan;
+  $: if (!disposed) {
+    // The lighthouse beam is a scanning indicator: it only sweeps while a
+    // scan is active, so its motion always means "scan in progress".
+    document.body.classList.toggle('scanning', scanningActive);
+  }
   $: anyDeviceOperation = operationLocks.anyDeviceOperation;
   $: scanLocked = operationLocks.scanLocked;
   $: bulkLocked = operationLocks.bulkLocked;
@@ -221,6 +228,7 @@
     cancelRename();
     channelEditorOpen = false;
     channelError = '';
+    channelWarning = false;
     // A started scan has already acquired the backend's exclusive operation
     // lock, so any older device/config request has finished server-side even
     // if its Wails promise has not settled in this renderer yet.
@@ -277,11 +285,12 @@
       const revision = listRevisions.next();
       prepareForScan();
       externalScanning = false;
-      stoppingScan = false;
+      if (globalOperation !== 'scanning') stoppingScan = false;
       maybeEndScanTimer();
+      const capturedStationRevisions = new Map(stationRevisions);
       const updated = await GetCurrentStationInfo().catch(() => null);
       if (!canCommitOperation(operationEpoch) || !listRevisions.isCurrent(revision)) return;
-      if (updated) applyStationList(updated, revision);
+      if (updated) applyStationList(updated, revision, capturedStationRevisions);
       statusMessage = `External scan failed: ${message}`;
       pushToast(`External scan failed: ${message}`);
     });
@@ -291,11 +300,12 @@
       const revision = listRevisions.next();
       prepareForScan();
       externalScanning = false;
-      stoppingScan = false;
+      if (globalOperation !== 'scanning') stoppingScan = false;
       maybeEndScanTimer();
+      const capturedStationRevisions = new Map(stationRevisions);
       const updated = await GetCurrentStationInfo().catch(() => null);
       if (!canCommitOperation(operationEpoch) || !listRevisions.isCurrent(revision)) return;
-      if (updated) applyStationList(updated, revision);
+      if (updated) applyStationList(updated, revision, capturedStationRevisions);
       statusMessage = 'Scan stopped.';
     });
     statusCheckInterval = setInterval(periodicStatusCheck, 15000);
@@ -329,6 +339,7 @@
     listRevisions.dispose();
     apiRevisions.dispose();
     endScanTimer();
+    document.body.classList.remove('scanning');
     if (statusCheckInterval) clearInterval(statusCheckInterval);
     if (apiStatusInterval) clearInterval(apiStatusInterval);
     cancelExternalScanListener?.();
@@ -338,7 +349,7 @@
   });
 
   async function periodicStatusCheck() {
-    if (isStatusChecking || isLoading || isBulkLoading || anyDeviceOperation) return;
+    if (isStatusChecking || isLoading || isBulkLoading || anyDeviceOperation || editingAddress !== null) return;
     globalOperation = 'status-refresh';
     const revision = listRevisions.next();
     const capturedStationRevisions = new Map(stationRevisions);
@@ -397,17 +408,15 @@
       const scanStatus = await GetScanStatus().catch(() => null);
       if (!canCommitOperation(operationEpoch) || !listRevisions.isCurrent(revision)) return;
       if (stoppingScan || scanStatus?.state === 'cancelled') {
-        stoppingScan = false;
+        if (!stopRequestPending) stoppingScan = false;
         statusMessage = 'Scan stopped.';
       } else {
         statusMessage = `Scan failed: ${error}`;
         pushToast(`Scan failed: ${error}`);
       }
     } finally {
-      if (!disposed && globalOperation === 'scanning') {
-        globalOperation = 'idle';
-        stoppingScan = false;
-      }
+      if (!disposed && globalOperation === 'scanning') globalOperation = 'idle';
+      if (!disposed && !stopRequestPending && !externalScanning) stoppingScan = false;
       maybeEndScanTimer();
     }
   }
@@ -415,19 +424,20 @@
   async function handleStopScan() {
     if (!scanningActive || stoppingScan) return;
     stoppingScan = true;
+    stopRequestPending = true;
     statusMessage = 'Stopping scan...';
     try {
       await StopScan();
+      stopRequestPending = false;
       // A terminal event may have completed the UI transition while the
       // backend completion barrier was resolving.
       if (!stoppingScan) return;
       externalScanning = false;
-      // A local scan owns globalOperation until its promise settles. Keep the
-      // button in Stopping state instead of briefly restoring an enabled Stop.
       if (globalOperation !== 'scanning') stoppingScan = false;
       statusMessage = 'Scan stopped.';
       maybeEndScanTimer();
     } catch (error) {
+      stopRequestPending = false;
       stoppingScan = false;
       statusMessage = `Unable to stop scan: ${error}`;
       pushToast(statusMessage);
@@ -454,7 +464,17 @@
     if (station) {
       stations = stations.map((current) => current.address === address ? station : current);
     }
-    return stations.find((current) => current.address === address) ?? station;
+    return station;
+  }
+
+  function powerReadbackLabel(station: StationInfo | null): string {
+    if (!station || station.powerState < 0) return 'unavailable';
+    return `${station.powerFresh ? 'actual' : 'last-known'} ${stateLabel(station)}`;
+  }
+
+  function channelReadbackLabel(station: StationInfo | null): string {
+    if (!station || station.channel <= 0) return 'unavailable';
+    return `${station.channelFresh ? 'actual' : 'last-known'} ${station.channel}`;
   }
 
   async function setPower(station: StationInfo, state: PowerTarget) {
@@ -491,10 +511,9 @@
       const errorText = String(error);
       const actual = await fetchStationUpdate(station.address, operationEpoch, operationRevision);
       if (!canCommitStationOperation(operationEpoch, station.address, operationRevision)) return;
-      const actualState = actual ? stateLabel(actual) : 'unknown';
       powerFeedbackByAddress = {
         ...powerFeedbackByAddress,
-        [station.address]: { kind: 'error', text: `Failed · actual ${actualState}` }
+        [station.address]: { kind: 'error', text: `Failed · ${powerReadbackLabel(actual)}` }
       };
       statusMessage = `Power change failed for ${station.name}: ${errorText}`;
       pushToast(`Power change failed for ${station.name}: ${errorText}`);
@@ -578,7 +597,6 @@
 
   async function saveRename(station: StationInfo, name: string) {
     if (stationBusy(station.address) || stationLocked) {
-      cancelRename();
       return;
     }
     cancelRename();
@@ -657,6 +675,7 @@
 
   function openChannelEditor(_station: StationInfo) {
     channelError = '';
+    channelWarning = false;
     channelEditorOpen = true;
   }
 
@@ -668,17 +687,29 @@
   async function saveChannel(targetChannel: number, allowUnknownConflictRisk: boolean) {
     if (!selectedStation || !selectedStation.scanFresh ||
       stationBusy(selectedStation.address) || gattLockedFor(selectedStation.address) ||
-      (selectedStation.channel > 0 && selectedStation.channel === targetChannel)) return;
+      (hasCurrentChannel(selectedStation) && selectedStation.channel === targetChannel)) return;
     const address = selectedStation.address;
     const operationEpoch = scanEpoch;
     const operationRevision = beginStationOperationRevision(address);
     setGattBusy(address, true);
     channelError = '';
+    channelWarning = false;
     try {
-      const result = await SetStationChannel(address, targetChannel, allowUnknownConflictRisk);
+      const result = await SetStationChannel(address, targetChannel, allowUnknownConflictRisk) as Awaited<ReturnType<typeof SetStationChannel>> & {
+        commandSent?: boolean;
+        confirmed?: boolean;
+        confirmationError?: string;
+      };
       if (!canCommitStationOperation(operationEpoch, address, operationRevision)) return;
-      await fetchStationUpdate(address, operationEpoch, operationRevision);
+      const actual = await fetchStationUpdate(address, operationEpoch, operationRevision);
       if (!canCommitStationOperation(operationEpoch, address, operationRevision)) return;
+      if (result.confirmed === false) {
+        const warning = result.confirmationError || 'Channel readback is unavailable.';
+        channelError = `Channel command sent but unconfirmed: ${warning} Readback: ${channelReadbackLabel(actual)}.`;
+        channelWarning = true;
+        statusMessage = `${selectedStation.name}: channel command sent, but confirmation failed. ${warning}`;
+        return;
+      }
       stations = stations.map((station) => station.address === address
         ? withStationChanges(station, { channel: result.channel, channelFresh: true, lastError: '' })
         : station);
@@ -686,10 +717,10 @@
       statusMessage = `Channel changed from ${result.previousChannel || 'unknown'} to ${result.channel}. ${result.warnings.join(' ')}`;
     } catch (error) {
       if (!canCommitStationOperation(operationEpoch, address, operationRevision)) return;
-      await fetchStationUpdate(address, operationEpoch, operationRevision);
+      const actual = await fetchStationUpdate(address, operationEpoch, operationRevision);
       if (!canCommitStationOperation(operationEpoch, address, operationRevision)) return;
-      const actual = stations.find((station) => station.address === address)?.channel ?? 0;
-      channelError = `${String(error)} Actual readback: ${actual || 'unknown'}.`;
+      channelError = `${String(error)} Readback: ${channelReadbackLabel(actual)}.`;
+      channelWarning = false;
       statusMessage = `Channel change failed: ${channelError}`;
       pushToast(statusMessage);
     } finally {
@@ -711,9 +742,9 @@
 
 <svelte:window on:keydown={handleGlobalKeydown} />
 
-<div class="app-container" class:background-refresh={isStatusChecking} inert={selectedStation !== null} aria-hidden={selectedStation ? 'true' : undefined}>
+<div class="app-container" inert={selectedStation !== null} aria-hidden={selectedStation ? 'true' : undefined}>
   <AppHeader
-    scanning={isLoading || externalScanning}
+    scanning={scanningActive}
     {isBulkLoading}
     {scanLocked}
     {bulkLocked}
@@ -814,6 +845,7 @@
       {occupiedChannels}
       {hasUnknownVisibleChannel}
       error={channelError}
+      warning={channelWarning}
       busy={gattOperations.has(selectedStation.address) || configOperations.has(selectedStation.address)}
       locked={stationLocked || (gattOperations.size >= 2 && !gattOperations.has(selectedStation.address))}
       onClose={closeChannelEditor}
@@ -827,9 +859,6 @@
 
 <style>
   .app-container { display: flex; flex-direction: column; height: 100vh; }
-  /* Background reads still lock commands, but should not make every control
-     visibly blink at the 15-second polling interval. */
-  .app-container.background-refresh :global(button:disabled) { opacity: 1; }
   main { flex: 1; padding: var(--spacing-md); overflow: auto; }
   .station-grid {
     display: grid;

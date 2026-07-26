@@ -188,12 +188,15 @@ func registerAPIRoutes(api *fiber.App, manager apiStationManager, events scanEve
 		result, err := manager.SetStationChannel(c.Params("address"), request.Channel, request.AllowUnknownConflictRisk)
 		if err != nil {
 			return c.Status(apiStatusForError(err)).JSON(fiber.Map{
-				"error":           err.Error(),
-				"address":         result.Address,
-				"previousChannel": result.PreviousChannel,
-				"expectedChannel": request.Channel,
-				"actualChannel":   result.Channel,
-				"warnings":        result.Warnings,
+				"error":             err.Error(),
+				"address":           result.Address,
+				"previousChannel":   result.PreviousChannel,
+				"expectedChannel":   request.Channel,
+				"actualChannel":     result.Channel,
+				"commandSent":       result.CommandSent,
+				"confirmed":         result.Confirmed,
+				"confirmationError": result.ConfirmationError,
+				"warnings":          result.Warnings,
 			})
 		}
 		return c.JSON(result)
@@ -424,7 +427,16 @@ func (a *App) RefreshStationCapabilities(address string) (station.StationInfo, e
 
 func (a *App) SetStationChannel(address string, channel int, allowUnknownConflictRisk bool) (station.ChannelChangeResult, error) {
 	log.Printf("Requesting channel %d for address %s", channel, address)
-	return a.stationManager.SetStationChannel(address, channel, allowUnknownConflictRisk)
+	result, err := a.stationManager.SetStationChannel(address, channel, allowUnknownConflictRisk)
+	return channelResultForWails(result, err)
+}
+
+func channelResultForWails(result station.ChannelChangeResult, err error) (station.ChannelChangeResult, error) {
+	if err != nil && result.CommandSent && !result.Confirmed {
+		// Wails discards structured return values when a Go error is returned.
+		return result, nil
+	}
+	return result, err
 }
 
 func (a *App) PowerOnAllStations() error {

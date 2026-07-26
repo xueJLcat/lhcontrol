@@ -53,7 +53,7 @@ type StationInfo struct {
 	StatusFresh         bool                     `json:"statusFresh"`
 	PowerFresh          bool                     `json:"powerFresh"`
 	ChannelFresh        bool                     `json:"channelFresh"`
-	MetadataLoaded      bool                     `json:"metadataLoaded"`
+	MetadataFresh       bool                     `json:"metadataFresh"`
 	ConnectionState     string                   `json:"connectionState"`
 	CapabilitiesKnown   bool                     `json:"capabilitiesKnown"`
 	Capabilities        bluetooth.Capabilities   `json:"capabilities"`
@@ -85,10 +85,13 @@ type BulkPowerResult struct {
 }
 
 type ChannelChangeResult struct {
-	Address         string   `json:"address"`
-	PreviousChannel int      `json:"previousChannel"`
-	Channel         int      `json:"channel"`
-	Warnings        []string `json:"warnings"`
+	Address           string   `json:"address"`
+	PreviousChannel   int      `json:"previousChannel"`
+	Channel           int      `json:"channel"`
+	CommandSent       bool     `json:"commandSent"`
+	Confirmed         bool     `json:"confirmed"`
+	ConfirmationError string   `json:"confirmationError"`
+	Warnings          []string `json:"warnings"`
 }
 
 type ScanStatus struct {
@@ -695,7 +698,7 @@ func (m *Manager) GetStationInfo() []StationInfo {
 			!snapshot.LastSeenAt.IsZero()
 		scanFresh := seenInLatestScan &&
 			isRecent(snapshot.LastSeenAt, now, channelScanFreshnessWindow)
-		metadataLoaded := !snapshot.MetadataReadAt.IsZero()
+		metadataFresh := !snapshot.MetadataReadAt.IsZero()
 		stationInfos = append(stationInfos, StationInfo{
 			Name:                name,
 			OriginalName:        snapshot.Name,
@@ -720,7 +723,7 @@ func (m *Manager) GetStationInfo() []StationInfo {
 			StatusFresh:       powerFresh || channelFresh,
 			PowerFresh:        powerFresh,
 			ChannelFresh:      channelFresh,
-			MetadataLoaded:    metadataLoaded,
+			MetadataFresh:     metadataFresh,
 			ConnectionState:   connectionState,
 			CapabilitiesKnown: snapshot.CapabilitiesKnown,
 			Capabilities:      snapshot.Capabilities,
@@ -1764,7 +1767,7 @@ func (m *Manager) SetStationChannel(address string, channel int, allowUnknownCon
 	defer m.channelOperationMutex.Unlock()
 	targetSnapshot := stationPtr.Snapshot()
 	result.Address = targetSnapshot.Address
-	if !targetSnapshot.Present || targetSnapshot.MissedScans > 0 {
+	if !targetSnapshot.Present || targetSnapshot.MissedScans > 0 || targetSnapshot.PresenceUncertain {
 		return result, fmt.Errorf("%w: station %s was not seen in the latest scan", ErrNotFound, address)
 	}
 	if !isRecent(targetSnapshot.LastSeenAt, time.Now(), channelScanFreshnessWindow) {
@@ -1797,7 +1800,7 @@ func (m *Manager) SetStationChannel(address string, channel int, allowUnknownCon
 		if !snapshot.Present {
 			continue
 		}
-		if snapshot.MissedScans > 0 ||
+		if snapshot.MissedScans > 0 || snapshot.PresenceUncertain ||
 			!isRecent(snapshot.LastSeenAt, conflictCheckTime, channelScanFreshnessWindow) ||
 			!isFresh(snapshot.LastChannelReadAt, conflictCheckTime) {
 			hasUnknown = true
@@ -1828,10 +1831,15 @@ func (m *Manager) SetStationChannel(address string, channel int, allowUnknownCon
 	})
 	result.PreviousChannel = writeResult.PreviousChannel
 	result.Channel = writeResult.Channel
+	result.CommandSent = writeResult.CommandSent
+	result.Confirmed = err == nil && writeResult.Channel == channel
 	if writeResult.WriteWarning != "" {
 		result.Warnings = append(result.Warnings, writeResult.WriteWarning)
 	}
 	if err != nil {
+		if writeResult.CommandSent {
+			result.ConfirmationError = err.Error()
+		}
 		m.observeStationBluetoothError(stationPtr, canonicalAddress, err)
 		if writeResult.CommandSent {
 			result.Warnings = append(result.Warnings, "The channel command was sent, but its result could not be confirmed.")

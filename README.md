@@ -70,16 +70,16 @@ Linux or macOS.
 
 ## Usage
 
-1.  Launch the application. An initial scan starts automatically unless a scan triggered through the HTTP API is already running.
-2.  Wait for discovery and initial state reads to finish. The application connects to discovered stations to read available power, channel, capability, and metadata information.
-3.  Click **Scan** whenever you want to refresh discovery and presence information.
-4.  Use the **Power** menu to select On, Standby, or Sleep for an individual station.
+1.  Launch the application.
+2.  Click **Scan** to discover nearby base stations.
+3.  The application will attempt to connect to discovered stations to determine their power state.
+4.  Use the **Power** menu to select On, Standby, or Sleep.
 5.  Open **Details** to inspect capabilities and metadata, identify a station, or safely change its channel.
-6.  Use the **All** controls to change all stations known during the current app session, including stations missed by the latest scan.
+6.  Use the **All** controls to change all stations discovered during the current app session, including stations missed by the latest scan.
 
 ## Troubleshooting
 
-*   **Scanning Issues:** If the automatic initial scan or a later manual scan fails, or interactions fail with errors such as "characteristic not found", try removing the base station(s) from the operating system's Bluetooth device list and restarting the computer. Do *not* re-pair them in the OS settings; the application discovers them directly through Bluetooth scanning.
+*   **Scanning Issues:** If scans fail after the first time, or interactions fail with errors like "characteristic not found", try removing the base station(s) from your operating system's Bluetooth device list and restarting your computer. Do *not* re-pair them in the OS settings; the application will find them via scanning.
 *   **Bluetooth unavailable:** Turn Bluetooth back on or reconnect the adapter, wait two seconds, and scan again. The running application retries adapter initialization without requiring a restart.
 *   **Bluetooth Drivers:** Ensure you have the latest drivers for your Bluetooth adapter.
 *   **Permissions:** The application might require specific permissions to access Bluetooth hardware.
@@ -96,18 +96,14 @@ This application also exposes a simple HTTP API on `http://127.0.0.1:7575` for b
 **Endpoints:**
 
 *   **`POST /allon`**
-    *   **Description:** Legacy convenience endpoint that attempts to turn On all base stations known during the current app session.
-    *   **Request Body:** None.
-    *   **Success Response:** `200 OK` when every station either succeeds or is skipped. A command that was sent but could not be confirmed may still result in `200 OK`.
-    *   **Failure Response:** Returns `500 Internal Server Error` if one or more stations fail without being classified as successfully commanded or skipped. The error response is aggregated and does not include successful per-station results. Returns `409 Conflict` if another mutually exclusive operation is active and `503 Service Unavailable` while the application is shutting down.
-    *   **Recommendation:** Use `POST /stations/power` when per-station success, skip, command-sent, confirmation, and error details are required.
+    *   **Description:** Attempts to turn ON all base stations known in the current app session.
+    *   **Request Body:** None
+    *   **Response:** `200 OK` when every command was sent or skipped. Use `POST /stations/power` when per-station confirmation details are required. Returns `409 Conflict` if another Bluetooth operation is active.
 
 *   **`POST /alloff`**
-    *   **Description:** Legacy convenience endpoint that attempts to put all base stations known during the current app session into Sleep.
-    *   **Request Body:** None.
-    *   **Success Response:** `200 OK` when every station either succeeds or is skipped. A command that was sent but could not be confirmed may still result in `200 OK`.
-    *   **Failure Response:** Returns `500 Internal Server Error` if one or more stations fail without being classified as successfully commanded or skipped. The error response is aggregated and does not include successful per-station results. Returns `409 Conflict` if another mutually exclusive operation is active and `503 Service Unavailable` while the application is shutting down.
-    *   **Recommendation:** Use `POST /stations/power` when per-station success, skip, command-sent, confirmation, and error details are required.
+    *   **Description:** Attempts to put all base stations known in the current app session into Sleep.
+    *   **Request Body:** None
+    *   **Response:** `200 OK` when every command was sent or skipped. Use `POST /stations/power` when per-station confirmation details are required. Returns `409 Conflict` if another Bluetooth operation is active.
 
 *   **`GET /status`**
     *   **Description:** Returns the current list of known base stations and their states.
@@ -147,11 +143,8 @@ This application also exposes a simple HTTP API on `http://127.0.0.1:7575` for b
     *   **Response:** `204 No Content`. The terminal scan status is `cancelled`.
 
 *   **`POST /stations/power`**
-    *   **Description:** Applies one target power state to every station known during the current app session.
     *   **Body:** `{"state":"on"}`, `{"state":"standby"}`, or `{"state":"sleep"}`.
-    *   **Response:** `200 OK` with one structured result per known station. Per-station failures are included in the response body instead of being converted into a top-level request failure.
-    *   **Result Fields:** Each station result indicates whether the station succeeded, was skipped, received a command, produced confirmed readback, or returned an error.
-    *   **Other Responses:** Returns `400 Bad Request` for an invalid state, `409 Conflict` when another mutually exclusive operation is active, and `503 Service Unavailable` while the application is shutting down.
+    *   **Response:** A structured result for every known station, including command-sent, success, confirmation, and error fields.
 
 *   **`POST /stations/:address/power`**
     *   **Body:** `{"state":"on"}`, `{"state":"standby"}`, or `{"state":"sleep"}`.
@@ -173,14 +166,10 @@ This application also exposes a simple HTTP API on `http://127.0.0.1:7575` for b
 # Get current status
 curl http://127.0.0.1:7575/status
 
-# Recommended: turn all known stations On and receive per-station results
-curl -X POST -H "Content-Type: application/json" -d "{\"state\":\"on\"}" http://127.0.0.1:7575/stations/power
-
-# Recommended: put all known stations into Sleep and receive per-station results
-curl -X POST -H "Content-Type: application/json" -d "{\"state\":\"sleep\"}" http://127.0.0.1:7575/stations/power
-
-# Legacy convenience endpoints
+# Turn all base stations ON
 curl -X POST http://127.0.0.1:7575/allon
+
+# Turn all base stations OFF
 curl -X POST http://127.0.0.1:7575/alloff
 ```
 

@@ -1305,14 +1305,7 @@ func writeCharacteristicValueInternal(characteristic characteristicIO, value byt
 		n, err = characteristic.WriteWithoutResponse([]byte{value})
 		if err != nil && properties.Write() && IsCapabilityUnsupported(err) {
 			n, err = characteristic.Write([]byte{value})
-		}
-	case properties.Write():
-		n, err = characteristic.Write([]byte{value})
-	default:
-		return unsupportedCapability("characteristic write", nil)
-	}
-	if err != nil {
-		if !isDefiniteWriteRejection(err) {
+		} else if err != nil && !isDefiniteWriteRejection(err) {
 			possiblySent, classified := possiblySentClassification(err)
 			if !classified {
 				err = &PossiblySentError{Err: err}
@@ -1320,11 +1313,20 @@ func writeCharacteristicValueInternal(characteristic characteristicIO, value byt
 				// A transport-provided definite classification preserves retry safety.
 			}
 		}
+	case properties.Write():
+		n, err = characteristic.Write([]byte{value})
+	default:
+		return unsupportedCapability("characteristic write", nil)
+	}
+	if err != nil {
 		return transportError("write characteristic", err)
 	}
 	if n != 1 {
 		shortWriteErr := fmt.Errorf("wrote %d bytes instead of 1", n)
-		return transportError("write characteristic", &PossiblySentError{Err: shortWriteErr})
+		if properties.WriteWithoutResponse() {
+			return transportError("write characteristic", &PossiblySentError{Err: shortWriteErr})
+		}
+		return transportError("write characteristic", shortWriteErr)
 	}
 	return nil
 }
@@ -1656,6 +1658,9 @@ func SetChannel(station *BaseStation, channel int) (ChannelWriteResult, error) {
 			station.LastError = writeErr.Error()
 			return result, unsupportedCapability("channel write", writeErr)
 		}
+		// Once the transport reports an ambiguous write, a failed readback
+		// cannot turn it back into a definitely-unsent command.
+		result.CommandSent = IsPossiblySent(writeErr)
 		if readErr := readChannelInternal(station); readErr == nil {
 			result.Channel = station.Channel
 			if station.Channel == channel {

@@ -427,7 +427,7 @@ func TestSetPowerStateConfirmsAmbiguousResponseWriteWithoutReplay(t *testing.T) 
 	power := &fakeCharacteristic{
 		value:                []byte{0x00},
 		properties:           uint32(tinybluetooth.CharacteristicReadPermission | tinybluetooth.CharacteristicWritePermission),
-		writeErr:             tinybluetooth.ErrGATTUnreachable,
+		writeErr:             &classifiedWriteError{possiblySent: true},
 		writeErrorAfterApply: true,
 		powerSemantics:       true,
 	}
@@ -681,7 +681,7 @@ func TestIdentifyDoesNotRetryAmbiguousWrite(t *testing.T) {
 func TestIdentifyDoesNotRetryAmbiguousResponseWrite(t *testing.T) {
 	identify := &fakeCharacteristic{
 		properties:           uint32(tinybluetooth.CharacteristicWritePermission),
-		writeWithResponseErr: errors.New("connection lost"),
+		writeWithResponseErr: &classifiedWriteError{possiblySent: true},
 	}
 	station := connectedFakeStation(&fakeCharacteristic{}, nil, identify, Capabilities{Identify: true})
 
@@ -856,6 +856,23 @@ func TestSetChannelWriteAndReadbackFailureInvalidatesConnection(t *testing.T) {
 	}
 	if station.Snapshot().Connected || !device.disconnected {
 		t.Fatal("write plus readback failure retained the invalid connection")
+	}
+}
+
+func TestSetChannelAmbiguousWriteAndFailedReadbackReportsCommandSent(t *testing.T) {
+	mode := &fakeCharacteristic{
+		value:             []byte{0x03},
+		writeErr:          &classifiedWriteError{possiblySent: true},
+		readErrAfterWrite: errors.New("readback transport failed"),
+	}
+	station := connectedFakeStation(&fakeCharacteristic{}, mode, nil, Capabilities{ChannelRead: true, ChannelWrite: true})
+
+	result, err := SetChannel(station, 5)
+	if err == nil {
+		t.Fatal("SetChannel() unexpectedly succeeded")
+	}
+	if !result.CommandSent || result.PreviousChannel != 3 {
+		t.Fatalf("result = %+v, want ambiguous command sent after channel 3", result)
 	}
 }
 

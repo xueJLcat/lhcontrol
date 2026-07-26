@@ -136,13 +136,38 @@ func TestInvalidConfigIsPreservedBeforeLaterSave(t *testing.T) {
 	}
 }
 
-func TestInvalidConfigBlocksSaveWhenItCannotBePreserved(t *testing.T) {
+func TestInvalidConfigBackupFailureBlocksSaveAndRollsBackMutation(t *testing.T) {
+	configRoot := t.TempDir()
+	t.Setenv("AppData", configRoot)
+	configDirectory := filepath.Join(configRoot, "lhcontrol")
+	if err := os.MkdirAll(configDirectory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(configDirectory, "config.json")
+	invalidContent := []byte(`{"renamedStations":`)
+	if err := os.WriteFile(configPath, invalidContent, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	originalRenamer := configFileRenamer
+	configFileRenamer = func(string, string) error { return errors.New("rename denied") }
+	t.Cleanup(func() { configFileRenamer = originalRenamer })
+
 	cfg := NewConfig()
-	cfg.persistenceBlockedErr = errors.New("rename denied")
+	if err := cfg.Load(); err == nil || !strings.Contains(err.Error(), "failed to preserve invalid file") {
+		t.Fatalf("Config.Load() error = %v, want backup failure", err)
+	}
 	if err := cfg.SetRenamedStation("LHB-OLD", "After"); err == nil || !strings.Contains(err.Error(), "save blocked") {
 		t.Fatalf("SetRenamedStation() error = %v, want blocked save", err)
 	}
 	if _, ok := cfg.GetRenamedStation("LHB-OLD"); ok {
 		t.Fatal("failed blocked save retained the in-memory rename")
+	}
+	content, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != string(invalidContent) {
+		t.Fatalf("invalid config content changed to %q", content)
 	}
 }

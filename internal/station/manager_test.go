@@ -740,6 +740,43 @@ func TestSetStationChannelPreservesPostWriteConfirmationError(t *testing.T) {
 	if len(result.Warnings) != 1 || !strings.Contains(result.Warnings[0], "command was sent") {
 		t.Fatalf("warnings = %v, want unconfirmed command warning", result.Warnings)
 	}
+	if !result.CommandSent || result.Confirmed || result.ConfirmationError == "" {
+		t.Fatalf("result = %+v, want sent but unconfirmed with confirmation error", result)
+	}
+}
+
+func TestSetStationChannelMapsConfirmedWriteResult(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	now := time.Now()
+	address := "AA:BB:CC:DD:EE:04"
+	manager.stations[address] = &internalbluetooth.BaseStation{
+		Address:           mustAddress(t, address),
+		Name:              "LHB-TARGET",
+		Channel:           3,
+		Present:           true,
+		LastSeenAt:        now,
+		LastChannelReadAt: now,
+		Capabilities: internalbluetooth.Capabilities{
+			ChannelRead: true, ChannelWrite: true,
+		},
+	}
+	manager.bluetoothOps.setChannel = func(*internalbluetooth.BaseStation, int) (internalbluetooth.ChannelWriteResult, error) {
+		return internalbluetooth.ChannelWriteResult{
+			PreviousChannel: 3,
+			Channel:         5,
+			CommandSent:     true,
+			WriteWarning:    "confirmed after retry",
+		}, nil
+	}
+
+	result, err := manager.SetStationChannel(address, 5, false)
+	if err != nil {
+		t.Fatalf("SetStationChannel() error = %v", err)
+	}
+	if result.PreviousChannel != 3 || result.Channel != 5 || !result.CommandSent || !result.Confirmed ||
+		result.ConfirmationError != "" || len(result.Warnings) != 1 {
+		t.Fatalf("confirmed channel result = %+v", result)
+	}
 }
 
 func TestSetStationChannelMapsPreWriteUnsupportedCapability(t *testing.T) {
@@ -789,6 +826,42 @@ func TestStationChannelRequiresRecentScan(t *testing.T) {
 	if !errors.Is(err, ErrScanRequired) {
 		t.Fatalf("SetStationChannel() error = %v, want ErrScanRequired", err)
 	}
+}
+
+func TestStationChannelRejectsUncertainPresence(t *testing.T) {
+	now := time.Now()
+	newStation := func(address string) *internalbluetooth.BaseStation {
+		station := &internalbluetooth.BaseStation{
+			Name: "LHB-" + address[len(address)-2:], Address: mustAddress(t, address),
+			Channel: 3, Present: true, LastSeenAt: now, LastChannelReadAt: now,
+			Capabilities: internalbluetooth.Capabilities{ChannelRead: true, ChannelWrite: true},
+		}
+		station.MarkPresenceUncertain()
+		return station
+	}
+
+	t.Run("target", func(t *testing.T) {
+		manager := NewManager(config.NewConfig())
+		address := "11:22:33:44:55:91"
+		manager.stations[address] = newStation(address)
+		if _, err := manager.SetStationChannel(address, 5, false); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("SetStationChannel() error = %v, want ErrNotFound", err)
+		}
+	})
+
+	t.Run("other station", func(t *testing.T) {
+		manager := NewManager(config.NewConfig())
+		targetAddress := "11:22:33:44:55:92"
+		manager.stations[targetAddress] = &internalbluetooth.BaseStation{
+			Name: "LHB-TARGET", Address: mustAddress(t, targetAddress), Channel: 3, Present: true,
+			LastSeenAt: now, LastChannelReadAt: now,
+			Capabilities: internalbluetooth.Capabilities{ChannelRead: true, ChannelWrite: true},
+		}
+		manager.stations["uncertain"] = newStation("11:22:33:44:55:93")
+		if _, err := manager.SetStationChannel(targetAddress, 5, false); !errors.Is(err, ErrScanRequired) {
+			t.Fatalf("SetStationChannel() error = %v, want ErrScanRequired", err)
+		}
+	})
 }
 
 func TestStationChannelRequiresUnknownRiskAcknowledgement(t *testing.T) {
@@ -1157,22 +1230,36 @@ func TestIsRecentRejectsFutureTimestamps(t *testing.T) {
 	}
 }
 
-func TestAbsentChannelRecoveryStopsAtRetryLimit(t *testing.T) {
+func TestAbsentRecoveryStopsExhaustedKindsIndependently(t *testing.T) {
 	manager := NewManager(config.NewConfig())
 	address := "11:22:33:44:55:65"
 	station := &internalbluetooth.BaseStation{Address: mustAddress(t, address), Present: false}
 	manager.statusRetries[address] = statusRetry{
-		channelFailures: statusAbsentRetryLimit,
+		failures:        statusAbsentRetryLimit,
+		channelFailures: statusAbsentRetryLimit - 1,
+		nextAt:          time.Now(),
 		channelNextAt:   time.Now(),
-		kinds:           statusRetryChannel,
+		kinds:           statusRetryConnection | statusRetryChannel,
 	}
 
 	manager.stopExhaustedAbsentRecovery(address, station)
 	manager.statusRetryMutex.Lock()
-	_, tracked := manager.statusRetries[address]
+	retry, tracked := manager.statusRetries[address]
+	manager.statusRetryMutex.Unlock()
+	if !tracked || effectiveStatusRetryKinds(retry) != statusRetryChannel || retry.channelFailures != statusAbsentRetryLimit-1 {
+		t.Fatalf("retry after connection exhaustion = %+v tracked=%v, want channel-only", retry, tracked)
+	}
+
+	manager.statusRetryMutex.Lock()
+	retry.channelFailures = statusAbsentRetryLimit
+	manager.statusRetries[address] = retry
+	manager.statusRetryMutex.Unlock()
+	manager.stopExhaustedAbsentRecovery(address, station)
+	manager.statusRetryMutex.Lock()
+	_, tracked = manager.statusRetries[address]
 	manager.statusRetryMutex.Unlock()
 	if tracked {
-		t.Fatal("exhausted channel-only recovery remained scheduled for an absent station")
+		t.Fatal("absent station remained scheduled after both retry kinds were exhausted")
 	}
 }
 

@@ -18,14 +18,16 @@ import (
 )
 
 type fakeAPIStationManager struct {
-	powerResult station.PowerActionResult
-	powerErr    error
-	bulkResult  station.BulkPowerResult
-	bulkErr     error
-	legacyErr   error
-	scanErr     error
-	stopScanErr error
-	stopCalls   int
+	powerResult   station.PowerActionResult
+	powerErr      error
+	bulkResult    station.BulkPowerResult
+	bulkErr       error
+	channelResult station.ChannelChangeResult
+	channelErr    error
+	legacyErr     error
+	scanErr       error
+	stopScanErr   error
+	stopCalls     int
 }
 
 func (f *fakeAPIStationManager) PowerOnAllStations() error  { return f.legacyErr }
@@ -117,6 +119,9 @@ func (f *fakeAPIStationManager) RefreshStationCapabilities(string) (station.Stat
 	return station.StationInfo{}, f.legacyErr
 }
 func (f *fakeAPIStationManager) SetStationChannel(string, int, bool) (station.ChannelChangeResult, error) {
+	if f.channelErr != nil || f.channelResult.Address != "" {
+		return f.channelResult, f.channelErr
+	}
 	return station.ChannelChangeResult{}, f.legacyErr
 }
 
@@ -342,6 +347,65 @@ func TestRegisteredPowerRoutePreservesConfirmationResult(t *testing.T) {
 	}
 	if !result.CommandSent || result.Confirmed || result.ConfirmationError == "" {
 		t.Fatalf("result = %+v", result)
+	}
+}
+
+func TestChannelResultForWailsPreservesSentUnconfirmedResult(t *testing.T) {
+	expected := station.ChannelChangeResult{
+		Address:           "AA",
+		PreviousChannel:   3,
+		Channel:           0,
+		CommandSent:       true,
+		Confirmed:         false,
+		ConfirmationError: "readback timed out",
+	}
+	result, err := channelResultForWails(expected, errors.New("readback timed out"))
+	if err != nil || result.Address != expected.Address || !result.CommandSent || result.Confirmed ||
+		result.ConfirmationError != expected.ConfirmationError {
+		t.Fatalf("channelResultForWails() = %+v, %v; want %+v, nil", result, err, expected)
+	}
+
+	preWriteErr := errors.New("write failed")
+	if _, err := channelResultForWails(station.ChannelChangeResult{}, preWriteErr); !errors.Is(err, preWriteErr) {
+		t.Fatalf("pre-write error = %v, want %v", err, preWriteErr)
+	}
+}
+
+func TestChannelAPIPreservesStructuredConfirmationError(t *testing.T) {
+	manager := &fakeAPIStationManager{
+		channelResult: station.ChannelChangeResult{
+			Address:           "AA",
+			PreviousChannel:   3,
+			Channel:           0,
+			CommandSent:       true,
+			Confirmed:         false,
+			ConfirmationError: "readback timed out",
+			Warnings:          []string{"command was sent"},
+		},
+		channelErr: errors.New("readback timed out"),
+	}
+	request := httptest.NewRequest(http.MethodPut, "/stations/AA/channel", strings.NewReader(`{"channel":5}`))
+	request.Header.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSON)
+	response, err := testAPI(manager).Test(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != fiber.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", response.StatusCode)
+	}
+	var body struct {
+		Error             string   `json:"error"`
+		CommandSent       bool     `json:"commandSent"`
+		Confirmed         bool     `json:"confirmed"`
+		ConfirmationError string   `json:"confirmationError"`
+		Warnings          []string `json:"warnings"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Error == "" || !body.CommandSent || body.Confirmed || body.ConfirmationError != "readback timed out" || len(body.Warnings) != 1 {
+		t.Fatalf("structured channel error = %+v", body)
 	}
 }
 

@@ -9,6 +9,7 @@
   export let occupiedChannels: Map<number, string>;
   export let hasUnknownVisibleChannel: boolean;
   export let error: string;
+  export let warning = false;
   export let busy: boolean;
   export let locked: boolean;
   export let onClose: () => void;
@@ -18,7 +19,8 @@
   let targetChannel = station.channel > 0 ? station.channel : 1;
   let confirmUnknownChannelRisk = false;
 
-  $: unchanged = station.channel > 0 && station.channel === targetChannel;
+  $: unchanged = station.isPresent && station.scanFresh && station.channelFresh &&
+    station.channel > 0 && station.channel === targetChannel;
   $: saveDisabled = !station.scanFresh || unchanged || occupiedChannels.has(targetChannel) ||
     (hasUnknownVisibleChannel && !confirmUnknownChannelRisk) || busy || locked;
 </script>
@@ -69,7 +71,7 @@
   {#if hasUnknownVisibleChannel}
     <label class="risk"><input type="checkbox" bind:checked={confirmUnknownChannelRisk} disabled={busy || locked} /> I understand that a visible station has an unknown channel, so a conflict cannot be fully ruled out.</label>
   {/if}
-  {#if error}<div class="alert danger">{error}</div>{/if}
+  {#if error}<div class="alert" class:danger={!warning} class:warning>{error}</div>{/if}
   <p class="hint">The value is only accepted after the base station reads back the requested channel. Failure will not trigger an automatic rollback.</p>
   <div class="modal-actions">
     <button class="btn" on:click={() => onIdentify(station)} disabled={busy || locked}><Eye size={15} /> Identify this station</button>
@@ -80,6 +82,9 @@
 <style>
   .modal {
     width: min(440px, 100%);
+    max-height: calc(100vh - 2rem);
+    overflow-y: auto;
+    box-sizing: border-box;
     background: var(--bg-surface-solid);
     border: 1px solid var(--color-border);
     border-radius: var(--radius-lg);

@@ -46,7 +46,7 @@ function station(overrides: Partial<StationInfo> = {}): StationInfo {
     statusFresh: true,
     powerFresh: true,
     channelFresh: true,
-    metadataLoaded: false,
+    metadataFresh: false,
     connectionState: 'connected',
     capabilitiesKnown: true,
     capabilities: {
@@ -79,6 +79,7 @@ function renderModal(overrides: Record<string, unknown> = {}) {
       occupiedChannels: new Map([[4, 'LHB-B']]),
       hasUnknownVisibleChannel: false,
       error: '',
+      warning: false,
       busy: false,
       locked: false,
       onClose: vi.fn(),
@@ -122,5 +123,13 @@ describe('ChannelModal channel grid', () => {
     renderModal();
     expect(screen.getByRole('button', { name: '3' })).toHaveAttribute('aria-pressed', 'true');
     expect(screen.getByRole('button', { name: 'Confirm change' })).toBeDisabled();
+  });
+
+  it('allows a stale current channel to be submitted for confirmation', async () => {
+    const onSave = renderModal({ station: station({ channelFresh: false }) });
+    const confirm = screen.getByRole('button', { name: 'Confirm change' });
+    expect(confirm).toBeEnabled();
+    await fireEvent.click(confirm);
+    expect(onSave).toHaveBeenCalledWith(3, false);
   });
 });

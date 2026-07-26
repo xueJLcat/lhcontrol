@@ -97,7 +97,7 @@ export namespace station {
 	    statusFresh: boolean;
 	    powerFresh: boolean;
 	    channelFresh: boolean;
-	    metadataLoaded: boolean;
+	    metadataFresh: boolean;
 	    connectionState: string;
 	    capabilitiesKnown: boolean;
 	    capabilities: bluetooth.Capabilities;
@@ -131,7 +131,7 @@ export namespace station {
 	        this.statusFresh = source["statusFresh"];
 	        this.powerFresh = source["powerFresh"];
 	        this.channelFresh = source["channelFresh"];
-	        this.metadataLoaded = source["metadataLoaded"];
+	        this.metadataFresh = source["metadataFresh"];
 	        this.connectionState = source["connectionState"];
 	        this.capabilitiesKnown = source["capabilitiesKnown"];
 	        this.capabilities = this.convertValues(source["capabilities"], bluetooth.Capabilities);
@@ -239,6 +239,9 @@ export namespace station {
 	    address: string;
 	    previousChannel: number;
 	    channel: number;
+	    commandSent: boolean;
+	    confirmed: boolean;
+	    confirmationError: string;
 	    warnings: string[];
 	
 	    static createFrom(source: any = {}) {
@@ -250,6 +253,9 @@ export namespace station {
 	        this.address = source["address"];
 	        this.previousChannel = source["previousChannel"];
 	        this.channel = source["channel"];
+	        this.commandSent = source["commandSent"];
+	        this.confirmed = source["confirmed"];
+	        this.confirmationError = source["confirmationError"];
 	        this.warnings = source["warnings"];
 	    }
 	}

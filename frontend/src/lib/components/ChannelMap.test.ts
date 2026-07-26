@@ -30,7 +30,7 @@ function station(overrides: Partial<StationInfo> = {}): StationInfo {
     statusFresh: true,
     powerFresh: true,
     channelFresh: true,
-    metadataLoaded: false,
+    metadataFresh: false,
     connectionState: 'connected',
     capabilitiesKnown: true,
     capabilities: {
@@ -88,7 +88,7 @@ describe('ChannelMap', () => {
     expect(screen.getByRole('button', { name: 'CH 3 — free' })).toBeDisabled();
   });
 
-  it('keeps stale and absent channel assignments visible as last known', () => {
+  it('shows stale and absent channel assignments as last-known without a hard conflict', () => {
     render(ChannelMap, {
       props: {
         stations: [
@@ -98,11 +98,28 @@ describe('ChannelMap', () => {
         onSelect: vi.fn()
       }
     });
-    const stale = screen.getByRole('button', { name: 'CH 3 — LHB-A · on · last known' });
-    const absent = screen.getByRole('button', { name: 'CH 4 — LHB-A · on · last known' });
+    const stale = screen.getByRole('button', { name: 'CH 3 — LHB-A · on · last-known' });
+    const absent = screen.getByRole('button', { name: 'CH 4 — LHB-A · on · last-known' });
     expect(stale).toBeEnabled();
     expect(stale).toHaveClass('stale');
+    expect(stale).not.toHaveClass('conflict');
     expect(absent).toBeEnabled();
     expect(absent).toHaveClass('stale');
+    expect(absent).not.toHaveClass('conflict');
+  });
+
+  it('does not count a last-known occupant as a hard conflict with a current occupant', () => {
+    render(ChannelMap, {
+      props: {
+        stations: [
+          station(),
+          station({ name: 'LHB-B', address: 'BB', channelFresh: false })
+        ],
+        onSelect: vi.fn()
+      }
+    });
+    expect(screen.getByRole('button', {
+      name: 'CH 3 — LHB-A · on, LHB-B · on · last-known'
+    })).not.toHaveClass('conflict');
   });
 });

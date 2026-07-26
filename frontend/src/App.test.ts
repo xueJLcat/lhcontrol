@@ -61,7 +61,7 @@ function createStation(overrides: Partial<StationInfo> = {}): StationInfo {
     statusFresh: true,
     powerFresh: true,
     channelFresh: true,
-    metadataLoaded: false,
+    metadataFresh: false,
     connectionState: 'connected',
     capabilitiesKnown: true,
     capabilities: {
@@ -165,6 +165,30 @@ describe('App asynchronous operations', () => {
     expect(screen.getByText('External scan in progress...')).toBeInTheDocument();
   });
 
+  it('preserves a station update started during an external failure refresh', async () => {
+    render(App);
+    await screen.findByText('LHB-TEST');
+    let resolveRefresh!: (stations: StationInfo[]) => void;
+    api.GetCurrentStationInfo.mockReturnValueOnce(new Promise((resolve) => {
+      resolveRefresh = resolve;
+    }));
+    api.SetStationPower.mockResolvedValue({
+      station: createStation({ powerState: 1, powerStateName: 'on' }),
+      commandSent: true,
+      confirmed: true,
+      confirmationError: ''
+    });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Scan' })).toBeEnabled());
+
+    runtime.handlers.get('external-scan-failed')?.('fixture failure');
+    await fireEvent.click(screen.getByRole('button', { name: 'Turn LHB-TEST on' }));
+    expect(await screen.findByText('On confirmed')).toBeInTheDocument();
+    resolveRefresh([createStation({ powerState: 0, powerStateName: 'sleep' })]);
+
+    await waitFor(() => expect(screen.getByText('On confirmed')).toBeInTheDocument());
+    expect(screen.getByRole('button', { name: 'Turn LHB-TEST on' })).toHaveAttribute('aria-pressed', 'true');
+  });
+
   it('does not run periodic status reads during an external scan', async () => {
     vi.useFakeTimers();
     api.IsScanning.mockResolvedValue(true);
@@ -235,6 +259,35 @@ describe('App asynchronous operations', () => {
 
     expect(screen.getByText('Scan stopped.')).toBeInTheDocument();
     expect(screen.queryByText('Scan stop requested...')).not.toBeInTheDocument();
+  });
+
+  it('keeps a local scan stopping until the StopScan promise settles', async () => {
+    let rejectScan!: (error: Error) => void;
+    let resolveStop!: () => void;
+    api.ScanAndFetchStations.mockReturnValue(new Promise((_, reject) => { rejectScan = reject; }));
+    api.StopScan.mockReturnValue(new Promise<void>((resolve) => { resolveStop = resolve; }));
+    api.GetScanStatus.mockResolvedValue({ state: 'cancelled', found: 0, warnings: [] });
+    render(App);
+    await fireEvent.click(await screen.findByRole('button', { name: 'Stop' }));
+    rejectScan(new Error('scan cancelled'));
+
+    expect(await screen.findByRole('button', { name: 'Stopping...' })).toBeDisabled();
+    resolveStop();
+    expect(await screen.findByRole('button', { name: 'Scan' })).toBeEnabled();
+  });
+
+  it('keeps a local scan stopping when StopScan settles before the scan promise', async () => {
+    let rejectScan!: (error: Error) => void;
+    api.ScanAndFetchStations.mockReturnValue(new Promise((_, reject) => { rejectScan = reject; }));
+    api.StopScan.mockResolvedValue(undefined);
+    api.GetScanStatus.mockResolvedValue({ state: 'cancelled', found: 0, warnings: [] });
+    render(App);
+
+    await fireEvent.click(await screen.findByRole('button', { name: 'Stop' }));
+    expect(await screen.findByRole('button', { name: 'Stopping...' })).toBeDisabled();
+
+    rejectScan(new Error('scan cancelled'));
+    expect(await screen.findByRole('button', { name: 'Scan' })).toBeEnabled();
   });
 
   it('treats a local scan cancellation as stopped instead of failed', async () => {
@@ -443,6 +496,27 @@ describe('App asynchronous operations', () => {
     expect(screen.queryByText('Switching to On…')).not.toBeInTheDocument();
   });
 
+  it('does not label cached power as actual when failed readback is unavailable', async () => {
+    api.SetStationPower.mockRejectedValue(new Error('connection lost'));
+    api.GetCurrentStationInfo.mockRejectedValue(new Error('readback failed'));
+    render(App);
+    await screen.findByText('LHB-TEST');
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Scan' })).toBeEnabled());
+    await fireEvent.click(screen.getByRole('button', { name: 'Turn LHB-TEST on' }));
+    expect(await screen.findByText('Failed · unavailable')).toBeInTheDocument();
+    expect(screen.queryByText('Failed · actual sleep')).not.toBeInTheDocument();
+  });
+
+  it('labels stale power readback as last-known after a failed command', async () => {
+    api.SetStationPower.mockRejectedValue(new Error('connection lost'));
+    api.GetCurrentStationInfo.mockResolvedValue([createStation({ powerFresh: false })]);
+    render(App);
+    await screen.findByText('LHB-TEST');
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Scan' })).toBeEnabled());
+    await fireEvent.click(screen.getByRole('button', { name: 'Turn LHB-TEST on' }));
+    expect(await screen.findByText('Failed · last-known sleep')).toBeInTheDocument();
+  });
+
   it('keeps GATT capacity available during rename but locks scan and bulk', async () => {
     const stationA = createStation({ name: 'LHB-A', address: 'AA' });
     const stationB = createStation({ name: 'LHB-B', address: 'BB' });
@@ -484,6 +558,37 @@ describe('App asynchronous operations', () => {
 
     await waitFor(() => expect(screen.queryByRole('textbox', { name: 'Station name' })).not.toBeInTheDocument());
     expect(screen.getByText('External scan in progress...')).toBeInTheDocument();
+  });
+
+  it('keeps a rename draft open while periodic refresh temporarily locks commands', async () => {
+    vi.useFakeTimers();
+    render(App);
+    await vi.waitFor(() => expect(screen.getByText('LHB-TEST')).toBeInTheDocument());
+    await fireEvent.click(screen.getByRole('button', { name: 'Rename LHB-TEST' }));
+    const input = screen.getByRole('textbox', { name: 'Station name' });
+    await fireEvent.input(input, { target: { value: 'Draft name' } });
+
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(screen.getByDisplayValue('Draft name')).toBeInTheDocument();
+    expect(api.CheckAllStationStatuses).not.toHaveBeenCalled();
+  });
+
+  it('saves and cancels rename through standard keyboard button activation without blur submission', async () => {
+    api.RenameStationByAddress.mockResolvedValue(undefined);
+    render(App);
+    await screen.findByText('LHB-TEST');
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Scan' })).toBeEnabled());
+    await fireEvent.click(screen.getByRole('button', { name: 'Rename LHB-TEST' }));
+    await fireEvent.input(screen.getByRole('textbox', { name: 'Station name' }), { target: { value: 'Keyboard name' } });
+    await fireEvent.keyDown(screen.getByTitle('Save name'), { key: 'Enter' });
+    await fireEvent.click(screen.getByTitle('Save name'));
+    await waitFor(() => expect(api.RenameStationByAddress).toHaveBeenCalledOnce());
+
+    await fireEvent.click(await screen.findByRole('button', { name: 'Rename Keyboard name' }));
+    await fireEvent.input(screen.getByRole('textbox', { name: 'Station name' }), { target: { value: 'Discard me' } });
+    await fireEvent.keyDown(screen.getByTitle('Cancel'), { key: ' ' });
+    await fireEvent.click(screen.getByTitle('Cancel'));
+    expect(api.RenameStationByAddress).toHaveBeenCalledOnce();
   });
 
   it('closes the channel editor and clears device feedback when an external scan starts', async () => {
@@ -532,6 +637,30 @@ describe('App asynchronous operations', () => {
 
     resolveChannel({ previousChannel: 3, channel: 4, warnings: [] });
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Change channel' })).not.toBeInTheDocument());
+  });
+
+  it('allows submitting the same last-known channel from App and keeps an unconfirmed result open', async () => {
+    api.ScanAndFetchStations.mockResolvedValue([createStation({ channelFresh: false })]);
+    api.SetStationChannel.mockResolvedValue({
+      previousChannel: 3,
+      channel: 3,
+      warnings: [],
+      commandSent: true,
+      confirmed: false,
+      confirmationError: 'readback timed out'
+    });
+    api.GetCurrentStationInfo.mockResolvedValue([createStation({ channelFresh: false })]);
+    render(App);
+    await screen.findByText('LHB-TEST');
+    await fireEvent.click(screen.getByRole('button', { name: 'Details for LHB-TEST' }));
+    await fireEvent.click(await screen.findByRole('button', { name: /Change Channel/ }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Confirm change' }));
+
+    await waitFor(() => expect(api.SetStationChannel).toHaveBeenCalledWith('11:22:33:44:55:66', 3, false));
+    expect(screen.getByRole('dialog', { name: 'Change channel' })).toBeInTheDocument();
+    const warning = await screen.findByText(/Channel command sent but unconfirmed: readback timed out/);
+    expect(warning).toHaveClass('warning');
+    expect(warning).toHaveTextContent('Readback: last-known 3');
   });
 
   it('does not let a pending device result overwrite a newer external scan', async () => {

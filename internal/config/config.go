@@ -22,7 +22,10 @@ type persistedConfig struct {
 	RenamedStationsByAddress map[string]string `json:"renamedStationsByAddress,omitempty"`
 }
 
-var configFileWriter = writeFileAtomically
+var (
+	configFileWriter  = writeFileAtomically
+	configFileRenamer = os.Rename
+)
 
 // NewConfig creates a new Config with defaults
 func NewConfig() *Config {
@@ -66,7 +69,7 @@ func (c *Config) Load() error {
 	err = json.Unmarshal(configFile, &loaded)
 	if err != nil {
 		invalidPath := fmt.Sprintf("%s.invalid-%s", configFilePath, time.Now().Format("20060102T150405.000000000"))
-		if renameErr := os.Rename(configFilePath, invalidPath); renameErr != nil {
+		if renameErr := configFileRenamer(configFilePath, invalidPath); renameErr != nil {
 			c.mutex.Lock()
 			c.persistenceBlockedErr = fmt.Errorf("invalid config could not be preserved: %w", renameErr)
 			c.mutex.Unlock()

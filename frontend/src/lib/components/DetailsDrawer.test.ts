@@ -46,7 +46,7 @@ function station(): StationInfo {
     statusFresh: true,
     powerFresh: true,
     channelFresh: true,
-    metadataLoaded: false,
+    metadataFresh: false,
     connectionState: 'connected',
     capabilitiesKnown: true,
     capabilities: {
