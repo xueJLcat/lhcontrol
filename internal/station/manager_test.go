@@ -52,6 +52,46 @@ func TestShutdownRejectsNewOperations(t *testing.T) {
 	}
 }
 
+func TestShutdownWaitsForActiveOperation(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	if err := manager.beginOperation(); err != nil {
+		t.Fatalf("beginOperation() error = %v", err)
+	}
+	shutdownDone := make(chan struct{})
+	go func() {
+		manager.Shutdown()
+		close(shutdownDone)
+	}()
+	select {
+	case <-shutdownDone:
+		t.Fatal("Shutdown returned while an operation was active")
+	case <-time.After(25 * time.Millisecond):
+	}
+	manager.endOperation()
+	select {
+	case <-shutdownDone:
+	case <-time.After(time.Second):
+		t.Fatal("Shutdown did not finish after the active operation ended")
+	}
+}
+
+func TestAdapterUnavailableForcesInitializationRetry(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	manager.observeBluetoothError(tinybluetooth.ErrRadioNotAvailable)
+	attempts := 0
+	manager.initializeBluetooth = func() error {
+		attempts++
+		return nil
+	}
+	manager.nextInitializeAt = time.Now().Add(-time.Second)
+	if err := manager.ensureReady(); err != nil {
+		t.Fatalf("ensureReady() error = %v", err)
+	}
+	if attempts != 1 {
+		t.Fatalf("initialization attempts = %d, want 1", attempts)
+	}
+}
+
 func TestOperationCoordinator(t *testing.T) {
 	manager := NewManager(config.NewConfig())
 
@@ -333,6 +373,53 @@ func TestBulkPowerIncludesAbsentKnownStations(t *testing.T) {
 	if len(result.Results) != 1 || result.Results[0].Address != "00:00:00:00:00:00" ||
 		!result.Results[0].Skipped || !result.Results[0].Success {
 		t.Fatalf("absent known station was excluded from bulk result: %+v", result.Results)
+	}
+}
+
+func TestBulkPowerResultsUseStableStationOrder(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	now := time.Now()
+	for key, station := range map[string]*internalbluetooth.BaseStation{
+		"unknown": {
+			Name: "Unknown", Address: mustAddress(t, "11:22:33:44:55:66"),
+			PowerState: internalbluetooth.PowerStateOn, RawPowerState: 0x0B, LastPowerReadAt: now,
+		},
+		"channel-two-z": {
+			Name: "Zulu", Address: mustAddress(t, "22:22:33:44:55:66"), Channel: 2,
+			PowerState: internalbluetooth.PowerStateOn, RawPowerState: 0x0B, LastPowerReadAt: now,
+		},
+		"channel-two-a": {
+			Name: "Alpha", Address: mustAddress(t, "33:22:33:44:55:66"), Channel: 2,
+			PowerState: internalbluetooth.PowerStateOn, RawPowerState: 0x0B, LastPowerReadAt: now,
+		},
+		"channel-one": {
+			Name: "Bravo", Address: mustAddress(t, "44:22:33:44:55:66"), Channel: 1,
+			PowerState: internalbluetooth.PowerStateOn, RawPowerState: 0x0B, LastPowerReadAt: now,
+		},
+	} {
+		manager.stations[key] = station
+	}
+
+	want := []string{
+		"44:22:33:44:55:66",
+		"33:22:33:44:55:66",
+		"22:22:33:44:55:66",
+		"11:22:33:44:55:66",
+	}
+	for iteration := 0; iteration < 20; iteration++ {
+		result, err := manager.SetAllStationsPowerDetailed("on")
+		if err != nil {
+			t.Fatalf("iteration %d: SetAllStationsPowerDetailed() error = %v", iteration, err)
+		}
+		got := make([]string, len(result.Results))
+		for index, stationResult := range result.Results {
+			got[index] = stationResult.Address
+		}
+		for index := range want {
+			if got[index] != want[index] {
+				t.Fatalf("iteration %d: result order = %v, want %v", iteration, got, want)
+			}
+		}
 	}
 }
 

@@ -83,6 +83,10 @@ Linux or macOS.
 *   **Bluetooth unavailable:** Turn Bluetooth back on or reconnect the adapter, wait two seconds, and scan again. The running application retries adapter initialization without requiring a restart.
 *   **Bluetooth Drivers:** Ensure you have the latest drivers for your Bluetooth adapter.
 *   **Permissions:** The application might require specific permissions to access Bluetooth hardware.
+
+### Windows hardware verification
+
+With the application running, execute `.\scripts\hardware-smoke.ps1` to run ten scan cycles and save a report under `build\verification`. Add `-ExercisePower` only when it is safe to test the On, Standby, and Sleep states on every known base station.
 *   **Diagnostic log:** `%APPDATA%\lhcontrol\lhcontrol.log` is capped at 5 MB. One previous segment is retained as `lhcontrol.log.1`.
 
 ## HTTP API (for External Integration)

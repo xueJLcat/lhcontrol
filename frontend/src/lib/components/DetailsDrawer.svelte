@@ -125,7 +125,23 @@
   dl { display: grid; grid-template-columns: 7.5rem minmax(0, 1fr); gap: 0.4rem; margin: 0.5rem 0; font-size: 0.78rem; }
   dt { color: var(--text-muted); }
   dd { margin: 0; color: var(--text-primary); overflow-wrap: anywhere; }
-  .drawer-actions { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.8rem; }
+  .drawer-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+    flex-wrap: nowrap;
+    margin-top: 0.8rem;
+  }
+  .drawer-actions .btn {
+    flex: 0 1 auto;
+    min-width: 0;
+    min-height: 30px;
+    gap: 0.25rem;
+    padding: 0.35rem 0.4rem;
+    font-size: 0.68rem;
+    white-space: nowrap;
+  }
+  .drawer-actions .btn :global(svg) { flex: 0 0 auto; }
   .hint { font-size: 0.72rem; color: var(--text-muted); line-height: 1.45; }
   .warning-text { color: var(--color-warning); }
   .capability-groups { display: flex; flex-direction: column; gap: 0.55rem; }

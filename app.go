@@ -75,7 +75,7 @@ type apiStationManager interface {
 	PowerOnAllStations() error
 	PowerOffAllStations() error
 	GetStationInfo() []station.StationInfo
-	StartScan(func([]station.StationInfo, error)) error
+	StartScan(station.ScanCallbacks) error
 	GetScanStatus() station.ScanStatus
 	SetAllStationsPowerDetailed(string) (station.BulkPowerResult, error)
 	SetStationPower(string, string) (station.PowerActionResult, error)
@@ -110,22 +110,17 @@ func registerAPIRoutes(api *fiber.App, manager apiStationManager, events scanEve
 		return c.JSON(status())
 	})
 	api.Post("/scan", func(c *fiber.Ctx) error {
-		err := manager.StartScan(func(stations []station.StationInfo, err error) {
-			if err != nil {
-				if events.failed != nil {
-					events.failed(err)
+		err := manager.StartScan(station.ScanCallbacks{
+			Started: events.started,
+			Completed: func(stations []station.StationInfo) {
+				if events.completed != nil {
+					events.completed(stations)
 				}
-				return
-			}
-			if events.completed != nil {
-				events.completed(stations)
-			}
+			},
+			Failed: events.failed,
 		})
 		if err != nil {
 			return sendAPIError(c, err)
-		}
-		if events.started != nil {
-			events.started()
 		}
 		return c.SendStatus(fiber.StatusAccepted)
 	})
@@ -201,7 +196,7 @@ func NewApp() *App {
 		api: fiber.New(fiber.Config{
 			BodyLimit:    16 * 1024,
 			ReadTimeout:  5 * time.Second,
-			WriteTimeout: 45 * time.Second,
+			WriteTimeout: 0,
 			IdleTimeout:  30 * time.Second,
 		}),
 		apiStatus: APIStatus{Address: "127.0.0.1:7575"},
@@ -381,6 +376,7 @@ func (a *App) SaveConfig() error {
 func (a *App) shutdown(ctx context.Context) {
 	a.shuttingDown.Store(true)
 	log.Println("App shutdown requested. Cleaning up...")
+	a.stationManager.BeginShutdown()
 	if a.api != nil {
 		log.Println("Shutting down API server...")
 		if err := a.api.Shutdown(); err != nil {

@@ -21,6 +21,7 @@ type fakeAPIStationManager struct {
 	bulkResult  station.BulkPowerResult
 	bulkErr     error
 	legacyErr   error
+	scanErr     error
 }
 
 func (f *fakeAPIStationManager) PowerOnAllStations() error  { return f.legacyErr }
@@ -28,11 +29,59 @@ func (f *fakeAPIStationManager) PowerOffAllStations() error { return f.legacyErr
 func (f *fakeAPIStationManager) GetStationInfo() []station.StationInfo {
 	return []station.StationInfo{}
 }
-func (f *fakeAPIStationManager) StartScan(callback func([]station.StationInfo, error)) error {
-	if f.legacyErr == nil {
-		callback([]station.StationInfo{}, nil)
+func (f *fakeAPIStationManager) StartScan(callbacks station.ScanCallbacks) error {
+	if f.legacyErr != nil {
+		return f.legacyErr
 	}
-	return f.legacyErr
+	if callbacks.Started != nil {
+		callbacks.Started()
+	}
+	if f.scanErr != nil {
+		if callbacks.Failed != nil {
+			callbacks.Failed(f.scanErr)
+		}
+		return nil
+	}
+	if callbacks.Completed != nil {
+		callbacks.Completed([]station.StationInfo{})
+	}
+	return nil
+}
+
+func TestScanEventsAreAlwaysStartedBeforeCompletion(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		scanErr    error
+		wantSecond string
+	}{
+		{name: "completed", wantSecond: "completed"},
+		{name: "failed", scanErr: errors.New("scan failed immediately"), wantSecond: "failed"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			manager := &fakeAPIStationManager{scanErr: test.scanErr}
+			order := []string{}
+			api := fiber.New()
+			registerAPIRoutes(api, manager, scanEventCallbacks{
+				started: func() { order = append(order, "started") },
+				completed: func([]station.StationInfo) {
+					order = append(order, "completed")
+				},
+				failed: func(error) { order = append(order, "failed") },
+			}, func() APIStatus { return APIStatus{Running: true} })
+
+			response, err := api.Test(httptest.NewRequest(http.MethodPost, "/scan", nil))
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = response.Body.Close()
+			if response.StatusCode != fiber.StatusAccepted {
+				t.Fatalf("status = %d, want 202", response.StatusCode)
+			}
+			if len(order) != 2 || order[0] != "started" || order[1] != test.wantSecond {
+				t.Fatalf("event order = %v, want [started %s]", order, test.wantSecond)
+			}
+		})
+	}
 }
 func (f *fakeAPIStationManager) GetScanStatus() station.ScanStatus {
 	return station.ScanStatus{State: "idle", Warnings: []string{}}
@@ -85,6 +134,9 @@ func TestNewAppReportsConfiguredAPIAddress(t *testing.T) {
 	status := app.GetAPIStatus()
 	if status.Running || status.Address != "127.0.0.1:7575" || status.Error != "" {
 		t.Fatalf("initial API status = %+v", status)
+	}
+	if timeout := app.api.Config().WriteTimeout; timeout != 0 {
+		t.Fatalf("WriteTimeout = %v, want no premature timeout for Bluetooth operations", timeout)
 	}
 }
 
@@ -181,6 +233,66 @@ func TestRegisteredRoutesKeepLegacyAliases(t *testing.T) {
 			t.Fatalf("%s status = %d, want 200", path, response.StatusCode)
 		}
 		_ = response.Body.Close()
+	}
+}
+
+func TestRegisteredRoutesMapFunctionalErrors(t *testing.T) {
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		body   string
+		err    error
+		want   int
+	}{
+		{"duplicate scan", http.MethodPost, "/scan", "", station.ErrOperationInProgress, fiber.StatusConflict},
+		{"identify unsupported", http.MethodPost, "/stations/AA/identify", "", station.ErrUnsupported, fiber.StatusUnprocessableEntity},
+		{"refresh missing", http.MethodPost, "/stations/AA/refresh", "", station.ErrNotFound, fiber.StatusNotFound},
+		{"channel conflict", http.MethodPut, "/stations/AA/channel", `{"channel":4}`, station.ErrChannelConflict, fiber.StatusConflict},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			manager := &fakeAPIStationManager{legacyErr: test.err}
+			request := httptest.NewRequest(test.method, test.path, strings.NewReader(test.body))
+			if test.body != "" {
+				request.Header.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSON)
+			}
+			response, err := testAPI(manager).Test(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer response.Body.Close()
+			if response.StatusCode != test.want {
+				t.Fatalf("status = %d, want %d", response.StatusCode, test.want)
+			}
+		})
+	}
+}
+
+func TestBulkRoutePreservesPartialResults(t *testing.T) {
+	manager := &fakeAPIStationManager{bulkResult: station.BulkPowerResult{
+		Target: "on",
+		Results: []station.BulkPowerStationResult{
+			{Address: "AA", Success: true, CommandSent: true, Confirmed: true},
+			{Address: "BB", Error: "connection failed"},
+		},
+	}}
+	request := httptest.NewRequest(http.MethodPost, "/stations/power", strings.NewReader(`{"state":"on"}`))
+	request.Header.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSON)
+	response, err := testAPI(manager).Test(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != fiber.StatusOK {
+		t.Fatalf("status = %d, want 200", response.StatusCode)
+	}
+	var result station.BulkPowerResult
+	if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Results) != 2 || !result.Results[0].Success || result.Results[1].Error == "" {
+		t.Fatalf("partial bulk result = %+v", result)
 	}
 }
 

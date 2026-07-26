@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -36,14 +37,16 @@ func (p *fakeAdvertisementPayload) ServiceData() []tinybluetooth.ServiceDataElem
 }
 
 type fakeBLEAdapter struct {
-	results   []tinybluetooth.ScanResult
-	scanErr   error
-	panicScan bool
-	panicStop bool
-	started   chan struct{}
-	stopped   chan struct{}
-	startOnce sync.Once
-	once      sync.Once
+	results     []tinybluetooth.ScanResult
+	scanErr     error
+	panicScan   bool
+	panicStop   bool
+	returnEarly bool
+	started     chan struct{}
+	stopped     chan struct{}
+	startOnce   sync.Once
+	once        sync.Once
+	stopCalls   atomic.Int32
 }
 
 func newFakeBLEAdapter(results ...tinybluetooth.ScanResult) *fakeBLEAdapter {
@@ -66,10 +69,14 @@ func (a *fakeBLEAdapter) Scan(callback func(*tinybluetooth.Adapter, tinybluetoot
 	if a.scanErr != nil {
 		return a.scanErr
 	}
+	if a.returnEarly {
+		return nil
+	}
 	<-a.stopped
 	return nil
 }
 func (a *fakeBLEAdapter) StopScan() error {
+	a.stopCalls.Add(1)
 	if a.panicStop {
 		panic("stop scan boundary")
 	}
@@ -597,10 +604,91 @@ func TestCancelScanStopsActiveScan(t *testing.T) {
 	}
 	select {
 	case err := <-result:
-		if err != nil {
-			t.Fatalf("ScanForDuration() after cancellation error = %v", err)
+		if !errors.Is(err, ErrScanCancelled) {
+			t.Fatalf("ScanForDuration() after cancellation error = %v, want ErrScanCancelled", err)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("active scan did not stop after cancellation")
+	}
+}
+
+func TestScanRejectsEarlyGracefulReturn(t *testing.T) {
+	originalAdapter := adapter
+	fake := newFakeBLEAdapter()
+	fake.returnEarly = true
+	adapter = fake
+	t.Cleanup(func() { adapter = originalAdapter })
+
+	if _, err := ScanForDuration(time.Hour); err == nil || !strings.Contains(err.Error(), "before the requested duration") {
+		t.Fatalf("ScanForDuration() error = %v, want early-stop error", err)
+	}
+	if got := fake.stopCalls.Load(); got != 0 {
+		t.Fatalf("StopScan calls = %d, want 0", got)
+	}
+}
+
+func TestScanTimerAndCancellationStopOnlyOnce(t *testing.T) {
+	originalAdapter := adapter
+	fake := newFakeBLEAdapter()
+	adapter = fake
+	t.Cleanup(func() { adapter = originalAdapter })
+
+	result := make(chan error, 1)
+	go func() {
+		_, err := ScanForDuration(10 * time.Millisecond)
+		result <- err
+	}()
+	<-fake.started
+	time.Sleep(10 * time.Millisecond)
+	_ = CancelScan()
+	<-result
+	if got := fake.stopCalls.Load(); got != 1 {
+		t.Fatalf("StopScan calls = %d, want 1", got)
+	}
+}
+
+func TestReadPowerStatePreservesConnectionOnChannelFailure(t *testing.T) {
+	power := &fakeCharacteristic{value: []byte{0x0B}}
+	channelErr := errors.New("channel unavailable")
+	channel := &fakeCharacteristic{readErr: channelErr}
+	station := connectedFakeStation(power, channel, nil, Capabilities{PowerRead: true, ChannelRead: true})
+
+	err := ReadPowerState(station)
+	var readErr *StatusReadError
+	if !errors.As(err, &readErr) || readErr.Power != nil || !errors.Is(readErr.Channel, channelErr) {
+		t.Fatalf("ReadPowerState() error = %#v, want channel-only StatusReadError", err)
+	}
+	if !station.IsConnected() || station.PowerState != PowerStateOn {
+		t.Fatalf("channel error discarded healthy power connection: %+v", station.Snapshot())
+	}
+}
+
+func TestInvalidateAllConnectionsDropsCachedHandles(t *testing.T) {
+	station := connectedFakeStation(
+		&fakeCharacteristic{value: []byte{0x0B}},
+		&fakeCharacteristic{value: []byte{3}},
+		&fakeCharacteristic{},
+		Capabilities{PowerRead: true, ChannelRead: true, Identify: true},
+	)
+	connectedStationsMutex.Lock()
+	previous := connectedStations
+	connectedStations = []*BaseStation{station}
+	connectedStationsMutex.Unlock()
+	t.Cleanup(func() {
+		connectedStationsMutex.Lock()
+		connectedStations = previous
+		connectedStationsMutex.Unlock()
+	})
+
+	InvalidateAllConnections()
+	snapshot := station.Snapshot()
+	if snapshot.Connected || !snapshot.LastPowerReadAt.IsZero() || !snapshot.LastChannelReadAt.IsZero() {
+		t.Fatalf("connection was not invalidated: %+v", snapshot)
+	}
+	connectedStationsMutex.Lock()
+	count := len(connectedStations)
+	connectedStationsMutex.Unlock()
+	if count != 0 {
+		t.Fatalf("tracked connection count = %d, want 0", count)
 	}
 }

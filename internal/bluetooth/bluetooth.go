@@ -43,6 +43,8 @@ var (
 	connectedStationsMutex sync.Mutex
 	uuidInitOnce           sync.Once
 	uuidInitErr            error
+	activeScanMutex        sync.Mutex
+	activeScan             *scanSession
 )
 
 const (
@@ -95,6 +97,41 @@ type BaseStation struct {
 type DiscoveredStation struct {
 	Name    string
 	Address bluetooth.Address
+}
+
+var ErrScanCancelled = errors.New("Bluetooth scan cancelled")
+
+type scanStopReason uint32
+
+const (
+	scanStopNone scanStopReason = iota
+	scanStopDuration
+	scanStopShutdown
+)
+
+type scanSession struct {
+	stopOnce sync.Once
+	reason   atomic.Uint32
+	stopDone chan struct{}
+	stopErr  error
+}
+
+func newScanSession() *scanSession {
+	return &scanSession{stopDone: make(chan struct{})}
+}
+
+func (s *scanSession) requestStop(reason scanStopReason) error {
+	s.stopOnce.Do(func() {
+		s.reason.Store(uint32(reason))
+		s.stopErr = stopScanSafely()
+		close(s.stopDone)
+	})
+	<-s.stopDone
+	return s.stopErr
+}
+
+func (s *scanSession) stopReason() scanStopReason {
+	return scanStopReason(s.reason.Load())
 }
 
 // IsConnected returns the current connection status safely.
@@ -296,9 +333,21 @@ func ScanForDuration(duration time.Duration) ([]DiscoveredStation, error) {
 	// log.Printf("[BT] ScanForDuration: Starting scan for %v...", duration)
 	localStations := make(map[string]DiscoveredStation)
 	var localMutex sync.Mutex
-	var scanErr error
-	var stopRequested atomic.Bool
-	stopResult := make(chan error, 1)
+	session := newScanSession()
+	activeScanMutex.Lock()
+	if activeScan != nil {
+		activeScanMutex.Unlock()
+		return nil, errors.New("Bluetooth scan is already active")
+	}
+	activeScan = session
+	activeScanMutex.Unlock()
+	defer func() {
+		activeScanMutex.Lock()
+		if activeScan == session {
+			activeScan = nil
+		}
+		activeScanMutex.Unlock()
+	}()
 
 	scanCallback := func(adapter *bluetooth.Adapter, result bluetooth.ScanResult) {
 		localName := result.LocalName()
@@ -324,24 +373,21 @@ func ScanForDuration(duration time.Duration) ([]DiscoveredStation, error) {
 
 	// Schedule StopScan using time.AfterFunc
 	stopTimer := time.AfterFunc(duration, func() {
-		stopRequested.Store(true)
 		log.Printf("[BT] ScanForDuration (AfterFunc): Duration %v elapsed. Calling StopScan...", duration)
-		err := stopScanSafely()
+		err := session.requestStop(scanStopDuration)
 		if err != nil {
 			log.Printf("[BT] ScanForDuration (AfterFunc): adapter.StopScan() error: %v", err)
 		}
-		stopResult <- err
 	})
 
 	// Start the blocking scan directly
 	log.Println("[BT] ScanForDuration (AfterFunc): Calling adapter.Scan()...")
-	scanErr = scanSafely(scanCallback) // This blocks until StopScan is called (by timer) or an error occurs
+	scanErr := scanSafely(scanCallback) // This blocks until StopScan is called (by timer) or an error occurs
 	timerStopped := stopTimer.Stop()
-	var stopErr error
 	if !timerStopped {
 		// The timer callback has started. Wait for it so a late StopScan cannot
 		// accidentally stop a subsequent scan.
-		stopErr = <-stopResult
+		<-session.stopDone
 	}
 
 	if scanErr != nil {
@@ -360,11 +406,23 @@ func ScanForDuration(duration time.Duration) ([]DiscoveredStation, error) {
 
 	log.Printf("[BT] ScanForDuration (AfterFunc): Finished. Found %d stations.", len(results))
 
+	reason := session.stopReason()
+	if scanErr != nil {
+		if err := scanCompletionError(scanErr); err != nil {
+			return nil, err
+		}
+	}
+	if reason == scanStopShutdown {
+		return nil, ErrScanCancelled
+	}
+	if reason != scanStopDuration {
+		return nil, errors.New("scan stopped before the requested duration completed")
+	}
+	if session.stopErr != nil {
+		return nil, fmt.Errorf("failed to stop Bluetooth scan safely: %w", session.stopErr)
+	}
 	if err := scanCompletionError(scanErr); err != nil {
 		return nil, err
-	}
-	if stopErr != nil {
-		return nil, fmt.Errorf("failed to stop Bluetooth scan safely: %w", stopErr)
 	}
 	return results, nil
 }
@@ -391,7 +449,13 @@ func stopScanSafely() (returnErr error) {
 // during application shutdown and retains the same panic boundary as the
 // duration timer.
 func CancelScan() error {
-	return stopScanSafely()
+	activeScanMutex.Lock()
+	session := activeScan
+	activeScanMutex.Unlock()
+	if session == nil {
+		return nil
+	}
+	return session.requestStop(scanStopShutdown)
 }
 
 func scanCompletionError(scanErr error) error {
@@ -499,29 +563,54 @@ func ReadPowerState(station *BaseStation) error {
 	if !station.isConnected || station.device == nil {
 		return fmt.Errorf("station %s is not connected", station.Name)
 	}
-	var readErrors []error
+	var powerReadErr error
+	var channelReadErr error
 	if station.Capabilities.PowerRead && station.characteristic != nil {
-		if err := readPowerStateInternal(station); err != nil {
-			readErrors = append(readErrors, err)
-		}
+		powerReadErr = readPowerStateInternal(station)
 	} else {
 		station.setPowerStateInternal(PowerStateUnknown, RawPowerStateUnknown)
 	}
 	if station.Capabilities.ChannelRead {
-		if err := readChannelInternal(station); err != nil {
-			readErrors = append(readErrors, err)
-		}
+		channelReadErr = readChannelInternal(station)
 	} else {
 		station.Channel = ChannelUnknown
 		station.LastChannelReadAt = time.Time{}
 	}
-	readErr := errors.Join(readErrors...)
-	if readErr != nil {
+	if powerReadErr != nil || channelReadErr != nil {
+		readErr := &StatusReadError{Power: powerReadErr, Channel: channelReadErr}
 		station.LastError = readErr.Error()
-	} else {
-		station.LastError = ""
+		return readErr
 	}
-	return readErr
+	station.LastError = ""
+	return nil
+}
+
+func invalidateStationConnection(station *BaseStation) {
+	if station == nil {
+		return
+	}
+	station.mutex.Lock()
+	station.isConnected = false
+	station.device = nil
+	station.characteristic = nil
+	station.modeCharacteristic = nil
+	station.identifyCharacteristic = nil
+	station.LastPowerReadAt = time.Time{}
+	station.LastChannelReadAt = time.Time{}
+	station.mutex.Unlock()
+}
+
+// InvalidateAllConnections drops cached WinRT/GATT handles without invoking
+// Disconnect. It is used after the Windows radio becomes unavailable, when
+// those handles can no longer be trusted and disconnect itself may fail.
+func InvalidateAllConnections() {
+	connectedStationsMutex.Lock()
+	stations := append([]*BaseStation(nil), connectedStations...)
+	connectedStations = nil
+	connectedStationsMutex.Unlock()
+	for _, station := range stations {
+		invalidateStationConnection(station)
+	}
 }
 
 func hasRead(properties uint32) bool {
@@ -777,6 +866,22 @@ func connectAndDiscoverInternal(station *BaseStation) error {
 type InitialReadError struct {
 	Power   error
 	Channel error
+}
+
+// StatusReadError identifies which independently readable station values
+// failed. Callers can preserve a healthy power connection when only the
+// optional channel read failed.
+type StatusReadError struct {
+	Power   error
+	Channel error
+}
+
+func (e *StatusReadError) Error() string {
+	return fmt.Sprintf("station status read was incomplete: %v", errors.Join(e.Power, e.Channel))
+}
+
+func (e *StatusReadError) Unwrap() error {
+	return errors.Join(e.Power, e.Channel)
 }
 
 func (e *InitialReadError) Error() string {
