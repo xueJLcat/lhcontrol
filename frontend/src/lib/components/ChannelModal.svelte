@@ -43,15 +43,29 @@
     <dt>Address</dt><dd class="mono">{station.address}</dd>
     <dt>Current channel</dt><dd class="mono">{station.channel || 'Unknown'}</dd>
   </dl>
-  <label class="field">Target channel
-    <select bind:value={targetChannel} disabled={busy || locked}>
+  <fieldset class="ch-field">
+    <legend>Target channel</legend>
+    <div class="ch-grid" role="group" aria-label="Target channel">
       {#each Array.from({ length: 16 }, (_, index) => index + 1) as channel}
-        <option value={channel} disabled={occupiedChannels.has(channel)}>
-          {channel}{occupiedChannels.has(channel) ? ` — ${occupiedChannels.get(channel)}` : ''}
-        </option>
+        <!-- Occupied cells stay focusable and keep their tooltip: Chromium
+             suppresses hover events and title tooltips on truly disabled
+             buttons, which would hide who occupies the channel. -->
+        <button
+          type="button"
+          class="ch-cell mono"
+          class:selected={targetChannel === channel}
+          class:current={station.channel > 0 && station.channel === channel}
+          class:occupied={occupiedChannels.has(channel)}
+          disabled={busy || locked}
+          aria-disabled={occupiedChannels.has(channel)}
+          title={occupiedChannels.has(channel) ? `Occupied by ${occupiedChannels.get(channel)}` : `Channel ${channel}`}
+          aria-pressed={targetChannel === channel}
+          on:click={() => { if (!occupiedChannels.has(channel)) targetChannel = channel; }}
+        >{channel}{#if station.channel > 0 && station.channel === channel}<span class="ch-dot" aria-hidden="true"></span>{/if}</button>
       {/each}
-    </select>
-  </label>
+    </div>
+    <p class="hint ch-hint">Struck-through channels are occupied by a visible station. The dot marks the current channel.</p>
+  </fieldset>
   {#if hasUnknownVisibleChannel}
     <label class="risk"><input type="checkbox" bind:checked={confirmUnknownChannelRisk} disabled={busy || locked} /> I understand that a visible station has an unknown channel, so a conflict cannot be fully ruled out.</label>
   {/if}
@@ -75,18 +89,75 @@
   .drawer-head { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; }
   .drawer-head small {
     color: var(--text-muted);
-    font-size: 0.66rem;
+    font-size: var(--fs-micro);
     font-weight: 800;
     text-transform: uppercase;
     letter-spacing: 0.08em;
   }
-  .drawer-head h2 { margin: 0.1rem 0 0; font-size: 1.05rem; font-weight: 800; color: var(--text-primary); overflow-wrap: anywhere; }
-  dl { display: grid; grid-template-columns: 7.5rem minmax(0, 1fr); gap: 0.4rem; margin: 0.8rem 0 0; font-size: 0.78rem; }
+  .drawer-head h2 { margin: 0.1rem 0 0; font-size: var(--fs-h2); font-weight: 800; color: var(--text-primary); overflow-wrap: anywhere; }
+  dl { display: grid; grid-template-columns: 7.5rem minmax(0, 1fr); gap: 0.4rem; margin: 0.8rem 0 0; font-size: var(--fs-sm); }
   dt { color: var(--text-muted); }
   dd { margin: 0; color: var(--text-primary); overflow-wrap: anywhere; }
-  .field { display: flex; flex-direction: column; gap: 0.35rem; margin-top: 0.9rem; font-size: 0.8rem; color: var(--text-secondary); }
+
+  .ch-field { border: 0; padding: 0; margin: 0.9rem 0 0; min-width: 0; }
+  .ch-field legend {
+    padding: 0;
+    margin-bottom: 0.45rem;
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+  }
+  .ch-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 0.4rem;
+  }
+  .ch-cell {
+    position: relative;
+    min-height: 38px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    background: var(--bg-input);
+    color: var(--text-primary);
+    font-size: 0.85rem;
+    font-weight: 700;
+    cursor: pointer;
+    transition: background-color var(--dur-1) var(--ease), border-color var(--dur-1) var(--ease),
+      color var(--dur-1) var(--ease), box-shadow var(--dur-1) var(--ease), transform 80ms var(--ease);
+  }
+  .ch-cell:hover:not(:disabled):not(.occupied) {
+    background: var(--bg-surface-hover);
+    border-color: var(--color-border-strong);
+  }
+  .ch-cell:active:not(:disabled):not(.occupied) { transform: translateY(1px); }
+  .ch-cell.selected {
+    border-color: var(--color-primary);
+    background: color-mix(in srgb, var(--color-primary) 20%, var(--bg-input));
+    color: #fff;
+    box-shadow: 0 0 12px color-mix(in srgb, var(--color-primary) 30%, transparent);
+  }
+  .ch-cell.current:not(.selected) { border-color: var(--color-border-strong); }
+  .ch-cell:disabled, .ch-cell.occupied {
+    cursor: not-allowed;
+    opacity: 0.35;
+    text-decoration: line-through;
+  }
+  .ch-dot {
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    width: 5px;
+    height: 5px;
+    border-radius: var(--radius-pill);
+    background: var(--color-primary);
+    box-shadow: 0 0 5px color-mix(in srgb, var(--color-primary) 70%, transparent);
+  }
+  .ch-hint { margin: 0.5rem 0 0; }
+
   .risk { display: flex; gap: 0.5rem; align-items: flex-start; margin-top: 0.8rem; font-size: 0.75rem; line-height: 1.4; color: var(--color-warning); }
   .risk input { margin-top: 0.15rem; }
-  .hint { font-size: 0.72rem; color: var(--text-muted); line-height: 1.45; }
+  .hint { font-size: var(--fs-sm); color: var(--text-muted); line-height: 1.45; }
   .modal-actions { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; justify-content: flex-end; margin-top: 0.8rem; }
 </style>

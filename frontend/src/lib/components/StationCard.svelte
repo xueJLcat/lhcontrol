@@ -1,11 +1,14 @@
 <script lang="ts">
+  import { onDestroy } from 'svelte';
   import {
-    Bluetooth, Check, ChevronRight, LoaderCircle, Moon, Pause,
-    SquarePen, TriangleAlert, X, Zap
+    Bluetooth, Check, ChevronRight, CircleCheck, CircleHelp, CircleX, History,
+    LoaderCircle, Moon, Pause, SquarePen, TriangleAlert, X, Zap
   } from 'lucide-svelte';
   import type { PowerFeedback, PowerTarget, StationInfo } from '../types';
   import { canSetPower, channelLabel, isCurrentPowerState, stateLabel } from '../station';
+  import { relativeTime } from '../relative-time';
   import { autofocus } from '../actions';
+  import StateBadge from './StateBadge.svelte';
 
   export let station: StationInfo;
   export let renaming: boolean;
@@ -23,11 +26,30 @@
 
   let localName = '';
   let wasRenaming = false;
+  let prevPowerState: number | null = null;
+  let flash = false;
+  let flashTimer: ReturnType<typeof setTimeout> | null = null;
 
   $: if (renaming !== wasRenaming) {
     if (renaming) localName = station.name;
     wasRenaming = renaming;
   }
+
+  $: if (station.powerState !== prevPowerState) {
+    if (prevPowerState !== null && station.powerState >= 0) {
+      flash = true;
+      if (flashTimer) clearTimeout(flashTimer);
+      flashTimer = setTimeout(() => {
+        flash = false;
+        flashTimer = null;
+      }, 1100);
+    }
+    prevPowerState = station.powerState;
+  }
+
+  onDestroy(() => {
+    if (flashTimer) clearTimeout(flashTimer);
+  });
 
   $: hasKnownPower = station.powerState >= 0;
   $: stalePower = hasKnownPower && !station.powerFresh;
@@ -53,6 +75,7 @@
   class:offline={!station.isPresent}
   class:conflict={station.channelConflict}
   class:renaming
+  class:flash
 >
   {#if renaming}
     <div class="rename-row">
@@ -70,7 +93,7 @@
     </div>
   {:else}
     <div class="card-top">
-      <span class="status-dot dot-{stateLabel(station)}" class:breathe={station.powerFresh && station.powerState === 3} aria-hidden="true"></span>
+      <span class="status-dot dot-{stateLabel(station)}" aria-hidden="true"></span>
       <h3 title={station.name}>{station.name}</h3>
       <button
         class="icon-btn rename-btn"
@@ -86,16 +109,21 @@
     <div class="card-sub">
       <Bluetooth size={12} />
       <span class="mono addr">{station.address}</span>
-      <span class="state-badge" class:unverified class:stale={stalePower} title={stalePower ? `Last known state; last successful read ${station.lastPowerReadAt || 'unknown'}` : ''}>
-        {#if station.powerFresh && station.powerState === 3}<LoaderCircle class="spin" size={10} />{/if}
-        {stateLabel(station)}{stalePower ? ' · stale' : unverified ? ' ?' : ''}
-      </span>
+      <StateBadge label={stateLabel(station)} {unverified} stale={stalePower} booting={station.powerFresh && station.powerState === 3} />
+      {#if stalePower}
+        <span class="fresh-icon stale" title={`Last known state; last successful read ${relativeTime(station.lastPowerReadAt) || 'unknown'}`}><History size={11} /></span>
+      {:else if unverified}
+        <span class="fresh-icon unverified" title="State reported by the station but not confirmed by readback"><CircleHelp size={11} /></span>
+      {/if}
       {#if !station.isPresent}<span class="muted-badge" title="Not detected in the latest scan; direct power control can still be attempted">not visible</span>{/if}
       {#if station.isPresent && !station.seenInLatestScan}<span class="muted-badge" title="Missed by one scan; retained until a second consecutive miss">scan stale</span>{/if}
     </div>
     {#if feedback}
       <div class="power-feedback {feedback.kind}">
-        {#if feedback.kind === 'pending'}<LoaderCircle class="spin" size={11} />{/if}
+        {#if feedback.kind === 'pending'}<LoaderCircle class="spin" size={11} />
+        {:else if feedback.kind === 'success'}<CircleCheck size={11} />
+        {:else if feedback.kind === 'warning'}<TriangleAlert size={11} />
+        {:else}<CircleX size={11} />{/if}
         {feedback.text}
       </div>
     {/if}
@@ -142,6 +170,7 @@
     background: var(--bg-surface);
     backdrop-filter: blur(12px);
     border: 1px solid var(--color-border);
+    border-left: 2px solid transparent;
     border-radius: var(--radius-lg);
     padding: 0.6rem 0.7rem;
     display: flex;
@@ -149,44 +178,60 @@
     gap: 0.4rem;
     box-shadow: var(--shadow-sm);
     transition: border-color var(--dur-2) var(--ease), background-color var(--dur-2) var(--ease),
-      box-shadow var(--dur-2) var(--ease);
+      box-shadow var(--dur-2) var(--ease), transform var(--dur-2) var(--ease);
   }
-  .station-card:hover { border-color: var(--color-border-strong); box-shadow: var(--shadow-md); }
-  .station-card.conflict { border-color: rgba(248, 113, 113, 0.55); }
-  .station-card.offline { border-style: dashed; }
+  .station-card:hover { border-color: var(--color-border-strong); box-shadow: var(--shadow-md); transform: translateY(-1px); }
+  .station-card.state-on { border-left-color: color-mix(in srgb, var(--color-on) 65%, transparent); --flash: var(--color-on); }
+  .station-card.state-standby { border-left-color: color-mix(in srgb, var(--color-standby) 65%, transparent); --flash: var(--color-standby); }
+  .station-card.state-sleep { border-left-color: color-mix(in srgb, var(--color-sleep) 55%, transparent); --flash: var(--color-sleep); }
+  .station-card.state-booting { border-left-color: color-mix(in srgb, var(--color-booting) 65%, transparent); --flash: var(--color-booting); }
+  .station-card.flash { animation: state-flash 1.1s var(--ease); }
+  @keyframes state-flash {
+    0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--flash, var(--color-primary)) 55%, transparent); }
+    100% { box-shadow: 0 0 0 14px transparent; }
+  }
+  .station-card.conflict { border-color: color-mix(in srgb, var(--color-danger) 55%, transparent); }
+  .station-card.conflict:hover { border-color: color-mix(in srgb, var(--color-danger) 70%, transparent); }
+  .station-card.offline { border-style: dashed; border-left-style: solid; border-left-color: color-mix(in srgb, var(--text-muted) 40%, transparent); }
   .station-card.offline .card-top, .station-card.offline .card-sub { opacity: 0.65; }
+  .station-card.offline .state-badge {
+    color: var(--text-muted);
+    border-color: var(--color-border);
+    background: transparent;
+  }
   .station-card.renaming { cursor: default; }
 
   .card-top { display: flex; align-items: center; gap: 0.4rem; min-width: 0; }
   .card-top h3 {
     margin: 0;
-    font-size: 0.95rem;
-    font-weight: 700;
+    font-size: var(--fs-title);
+    font-weight: 800;
     color: var(--text-primary);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
   .spacer { flex: 1; }
-  .rename-btn { min-width: 24px; min-height: 24px; padding: 0.2rem; opacity: 0; transition: opacity var(--dur-1) var(--ease), background-color var(--dur-1) var(--ease), color var(--dur-1) var(--ease); }
+  .rename-btn { min-width: 24px; min-height: 24px; padding: 0.2rem; opacity: 0.45; transition: opacity var(--dur-1) var(--ease), background-color var(--dur-1) var(--ease), color var(--dur-1) var(--ease); }
   .station-card:hover .rename-btn, .station-card:focus-within .rename-btn { opacity: 1; }
 
   .status-dot {
     width: 8px;
     height: 8px;
-    border-radius: 999px;
+    border-radius: var(--radius-pill);
     flex-shrink: 0;
     background: var(--text-muted);
+    transition: background-color var(--dur-2) var(--ease), box-shadow var(--dur-2) var(--ease);
   }
   .dot-on { background: var(--color-on); box-shadow: 0 0 8px color-mix(in srgb, var(--color-on) 60%, transparent); }
-  .dot-sleep { background: var(--color-sleep); box-shadow: 0 0 8px color-mix(in srgb, var(--color-sleep) 50%, transparent); }
+  .dot-sleep { background: var(--color-sleep); box-shadow: 0 0 8px color-mix(in srgb, var(--color-sleep) 45%, transparent); }
   .dot-standby { background: var(--color-standby); box-shadow: 0 0 8px color-mix(in srgb, var(--color-standby) 60%, transparent); }
   .dot-booting { background: var(--color-booting); box-shadow: 0 0 8px color-mix(in srgb, var(--color-booting) 60%, transparent); }
-  .dot-unknown { background: var(--text-muted); }
-  .status-dot.breathe { animation: dot-breathe 1.2s ease-in-out infinite; }
+  .dot-unknown { background: transparent; border: 1.5px solid var(--text-muted); box-sizing: border-box; }
+  .station-card.offline .status-dot { background: transparent; border: 1.5px solid var(--text-muted); box-shadow: none; box-sizing: border-box; }
 
   .channel-chip { color: var(--text-secondary); text-transform: none; letter-spacing: 0.02em; }
-  .channel-chip.warn { color: #fca5a5; border-color: rgba(248, 113, 113, 0.55); }
+  .channel-chip.warn { color: var(--fb-error); border-color: color-mix(in srgb, var(--color-danger) 55%, transparent); }
   .conflict-icon { color: var(--color-danger); flex-shrink: 0; }
 
   .card-sub {
@@ -195,23 +240,28 @@
     gap: 0.3rem;
     flex-wrap: wrap;
     color: var(--text-secondary);
-    font-size: 0.72rem;
+    font-size: var(--fs-sm);
   }
   .addr { font-size: 0.72rem; color: var(--text-muted); }
+
+  .fresh-icon { display: inline-flex; align-items: center; flex-shrink: 0; }
+  .fresh-icon.stale { color: var(--text-muted); }
+  .fresh-icon.unverified { color: var(--color-warning); }
 
   .power-feedback {
     display: flex;
     align-items: center;
     gap: 0.25rem;
-    font-size: 0.7rem;
+    font-size: var(--fs-micro);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  .power-feedback.pending { color: #93c5fd; }
-  .power-feedback.success { color: #86efac; }
-  .power-feedback.warning { color: var(--color-warning); }
-  .power-feedback.error { color: #fca5a5; }
+  .power-feedback > :global(svg) { flex-shrink: 0; }
+  .power-feedback.pending { color: var(--fb-pending); }
+  .power-feedback.success { color: var(--fb-success); }
+  .power-feedback.warning { color: var(--fb-warning); }
+  .power-feedback.error { color: var(--fb-error); }
 
   .card-actions { display: flex; align-items: center; gap: 0.4rem; }
   .power-segment { flex: 1; }

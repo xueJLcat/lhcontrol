@@ -8,7 +8,7 @@
 
 <footer>
   <Activity size={12} />
-  <span class="status-text" title={statusMessage}>{statusMessage}</span>
+  <span class="status-text" role="status" aria-live="polite" title={statusMessage}>{statusMessage}</span>
   <span class="api-status" class:ok={apiRunning} title={apiError || 'HTTP API 127.0.0.1:7575'}>
     <span class="api-dot" aria-hidden="true"></span>
     {apiRunning ? 'API ready' : 'API offline'}
@@ -24,7 +24,7 @@
     border-top: 1px solid var(--color-border);
     background: var(--bg-surface);
     backdrop-filter: blur(12px);
-    font-size: 0.72rem;
+    font-size: var(--fs-micro);
     color: var(--text-secondary);
     padding: 0.1rem 0.6rem;
   }
@@ -42,13 +42,13 @@
     align-items: center;
     gap: 0.3rem;
     font-weight: 700;
-    color: #fca5a5;
+    color: var(--fb-error);
   }
-  .api-status.ok { color: #86efac; }
+  .api-status.ok { color: var(--fb-success); }
   .api-dot {
     width: 6px;
     height: 6px;
-    border-radius: 999px;
+    border-radius: var(--radius-pill);
     background: var(--color-danger);
     box-shadow: 0 0 6px color-mix(in srgb, var(--color-danger) 60%, transparent);
   }

@@ -14,8 +14,13 @@
   export let allOn: boolean;
   export let allStandby: boolean;
   export let allSleep: boolean;
+  export let onCount = 0;
+  export let standbyCount = 0;
+  export let sleepCount = 0;
   export let onScan: () => void;
   export let onBulkPower: (state: PowerTarget) => void;
+
+  $: fleetTotal = onCount + standbyCount + sleepCount;
 </script>
 
 <header>
@@ -26,17 +31,22 @@
       <span>SteamVR base stations</span>
     </div>
   </div>
-  <div class="global-controls">
-    <button class="btn primary scan-btn" on:click={onScan} disabled={scanning || scanLocked}>
-      {#if scanning}<LoaderCircle class="spin" size={15} /> Scanning...{:else}<RefreshCw size={15} /> Scan{/if}
-    </button>
-    <div class="bulk-power" aria-label="Set all known stations">
-      <span class="bulk-label">{#if isBulkLoading}<LoaderCircle class="spin" size={12} />{:else}<Zap size={12} />{/if} All</span>
-      <button class="seg-on" class:pending={bulkTarget === 'on'} class:active={allOn} on:click={() => onBulkPower('on')} disabled={scanning || bulkLocked || !canOn} title={!canOn ? 'No actionable station' : bulkLocked ? 'Bluetooth operation in progress' : 'Turn all known stations on'}>On</button>
-      <button class="seg-standby" class:pending={bulkTarget === 'standby'} class:active={allStandby} on:click={() => onBulkPower('standby')} disabled={scanning || bulkLocked || !canStandby} title={!canStandby ? 'No actionable station' : bulkLocked ? 'Bluetooth operation in progress' : 'Set all known stations to standby'}>Standby</button>
-      <button class="seg-sleep" class:pending={bulkTarget === 'sleep'} class:active={allSleep} on:click={() => onBulkPower('sleep')} disabled={scanning || bulkLocked || !canSleep} title={!canSleep ? 'No actionable station' : bulkLocked ? 'Bluetooth operation in progress' : 'Put all known stations to sleep'}>Sleep</button>
-    </div>
+  <button class="btn primary scan-btn" on:click={onScan} disabled={scanning || scanLocked}>
+    {#if scanning}<LoaderCircle class="spin" size={15} /> Scanning...{:else}<RefreshCw size={15} /> Scan{/if}
+  </button>
+  <div class="bulk-power" aria-label="Set all known stations">
+    <span class="bulk-label">{#if isBulkLoading}<LoaderCircle class="spin" size={12} />{:else}<Zap size={12} />{/if} All</span>
+    <button class="seg-on" class:pending={bulkTarget === 'on'} class:active={allOn} on:click={() => onBulkPower('on')} disabled={scanning || bulkLocked || !canOn} title={!canOn ? 'No actionable station' : bulkLocked ? 'Bluetooth operation in progress' : 'Turn all known stations on'}>On</button>
+    <button class="seg-standby" class:pending={bulkTarget === 'standby'} class:active={allStandby} on:click={() => onBulkPower('standby')} disabled={scanning || bulkLocked || !canStandby} title={!canStandby ? 'No actionable station' : bulkLocked ? 'Bluetooth operation in progress' : 'Set all known stations to standby'}>Standby</button>
+    <button class="seg-sleep" class:pending={bulkTarget === 'sleep'} class:active={allSleep} on:click={() => onBulkPower('sleep')} disabled={scanning || bulkLocked || !canSleep} title={!canSleep ? 'No actionable station' : bulkLocked ? 'Bluetooth operation in progress' : 'Put all known stations to sleep'}>Sleep</button>
   </div>
+  {#if fleetTotal > 0}
+    <div class="fleet-summary" aria-label="Fleet power summary">
+      {#if onCount > 0}<span class="fleet-chip"><span class="fleet-dot dot-on"></span>{onCount} On</span>{/if}
+      {#if standbyCount > 0}<span class="fleet-chip"><span class="fleet-dot dot-standby"></span>{standbyCount} Standby</span>{/if}
+      {#if sleepCount > 0}<span class="fleet-chip"><span class="fleet-dot dot-sleep"></span>{sleepCount} Sleep</span>{/if}
+    </div>
+  {/if}
   {#if scanning}<div class="scan-progress" aria-hidden="true"></div>{/if}
 </header>
 
@@ -45,10 +55,8 @@
     position: relative;
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    gap: var(--spacing-sm);
     flex-wrap: wrap;
-    row-gap: var(--spacing-xs);
+    gap: 0.45rem 0.6rem;
     padding: 0.55rem var(--spacing-md);
     background: var(--bg-surface);
     backdrop-filter: blur(12px);
@@ -58,9 +66,22 @@
   .brand img { width: 26px; height: 26px; border-radius: var(--radius-sm); }
   .brand-text { display: flex; flex-direction: column; line-height: 1.15; }
   .brand-text h1 { margin: 0; font-size: 0.95rem; font-weight: 800; letter-spacing: 0.01em; color: var(--text-primary); }
-  .brand-text span { font-size: 0.66rem; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.08em; }
-  .global-controls { display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap; }
-  .scan-btn { min-width: 84px; }
+  .brand-text span { font-size: var(--fs-micro); font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.08em; }
+  .scan-btn { min-width: 84px; margin-left: auto; }
+  .fleet-summary {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: var(--fs-micro);
+    font-weight: 700;
+    color: var(--text-muted);
+    white-space: nowrap;
+  }
+  .fleet-chip { display: inline-flex; align-items: center; gap: 0.25rem; }
+  .fleet-dot { width: 6px; height: 6px; border-radius: var(--radius-pill); flex-shrink: 0; }
+  .fleet-dot.dot-on { background: var(--color-on); box-shadow: 0 0 5px color-mix(in srgb, var(--color-on) 60%, transparent); }
+  .fleet-dot.dot-standby { background: var(--color-standby); box-shadow: 0 0 5px color-mix(in srgb, var(--color-standby) 60%, transparent); }
+  .fleet-dot.dot-sleep { background: var(--color-sleep); }
   .scan-progress {
     position: absolute;
     left: 0; right: 0; bottom: -1px;
@@ -72,7 +93,7 @@
     position: absolute;
     top: 0; bottom: 0;
     width: 38%;
-    border-radius: 999px;
+    border-radius: var(--radius-pill);
     background: linear-gradient(90deg, transparent, var(--color-primary), transparent);
     animation: scan-slide 1.2s var(--ease) infinite;
   }

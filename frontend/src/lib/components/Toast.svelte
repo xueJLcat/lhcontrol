@@ -1,6 +1,6 @@
 <script lang="ts">
   import { fly } from 'svelte/transition';
-  import { CircleAlert, X } from 'lucide-svelte';
+  import { CircleAlert, CircleCheck, Info, X } from 'lucide-svelte';
   import { dismissToast, toasts } from '../toast';
 </script>
 
@@ -8,7 +8,9 @@
   <div class="toast-stack" aria-live="polite">
     {#each $toasts as toast (toast.id)}
       <div class="toast {toast.kind}" transition:fly={{ x: 24, duration: 220 }}>
-        <CircleAlert size={15} />
+        {#if toast.kind === 'success'}<CircleCheck size={15} />
+        {:else if toast.kind === 'info'}<Info size={15} />
+        {:else}<CircleAlert size={15} />{/if}
         <span class="toast-text">{toast.text}</span>
         <button class="icon-btn" title="Dismiss" on:click={() => dismissToast(toast.id)}><X size={14} /></button>
       </div>
@@ -34,12 +36,16 @@
     padding: 0.55rem 0.65rem;
     border-radius: var(--radius-md);
     background: var(--bg-surface-solid);
-    border: 1px solid rgba(248, 113, 113, 0.45);
+    border: 1px solid color-mix(in srgb, var(--color-danger) 45%, transparent);
     box-shadow: var(--shadow-lg);
-    font-size: 0.78rem;
-    color: #fca5a5;
+    font-size: var(--fs-sm);
+    color: var(--fb-error);
   }
   .toast.info { border-color: var(--color-border-strong); color: var(--text-secondary); }
+  .toast.success {
+    border-color: color-mix(in srgb, var(--color-on) 45%, transparent);
+    color: var(--fb-success);
+  }
   .toast > :global(svg) { flex-shrink: 0; margin-top: 0.1rem; }
   .toast-text { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 </style>

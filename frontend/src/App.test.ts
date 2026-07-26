@@ -446,7 +446,7 @@ describe('App asynchronous operations', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: 'Scan' })).not.toBeDisabled());
     await fireEvent.click(screen.getByRole('button', { name: 'Details for LHB-TEST' }));
     await fireEvent.click(await screen.findByRole('button', { name: /Change Channel/ }));
-    await fireEvent.change(screen.getByRole('combobox', { name: 'Target channel' }), { target: { value: '4' } });
+    await fireEvent.click(within(screen.getByRole('dialog', { name: 'Change channel' })).getByRole('button', { name: '4' }));
     await fireEvent.click(screen.getByRole('button', { name: 'Confirm change' }));
     await waitFor(() => expect(api.SetStationChannel).toHaveBeenCalledWith('11:22:33:44:55:66', 4, false));
 

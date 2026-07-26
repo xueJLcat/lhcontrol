@@ -19,16 +19,17 @@
   } from '../wailsjs/go/main/App';
   import { EventsOn } from '../wailsjs/runtime/runtime';
   import { station as stationModels } from '../wailsjs/go/models';
-  import { Activity, CircleAlert } from 'lucide-svelte';
+  import { Activity, CircleAlert, Radar } from 'lucide-svelte';
   import type { PowerFeedback, PowerTarget, StationInfo } from './lib/types';
   import {
-    canSetPower, isCurrentPowerState, maySetPower, powerTargetLabel, stateLabel
+    canSetPower, isCurrentPowerState, maySetPower, powerStateValue, powerTargetLabel, stateLabel
   } from './lib/station';
   import { pushToast } from './lib/toast';
   import { deriveOperationLocks, type GlobalOperation } from './lib/operation-state';
   import { RevisionGate } from './lib/revision-gate';
   import AppHeader from './lib/components/AppHeader.svelte';
   import StationCard from './lib/components/StationCard.svelte';
+  import ChannelMap from './lib/components/ChannelMap.svelte';
   import DetailsDrawer from './lib/components/DetailsDrawer.svelte';
   import ChannelModal from './lib/components/ChannelModal.svelte';
   import StatusFooter from './lib/components/StatusFooter.svelte';
@@ -54,6 +55,9 @@
   let apiRunning = false;
   let apiError = '';
   let externalScanning = false;
+  let scanStartedAt: number | null = null;
+  let scanElapsed = 0;
+  let scanTimer: ReturnType<typeof setInterval> | null = null;
   const listRevisions = new RevisionGate();
   const apiRevisions = new RevisionGate();
   let scanEpoch = 0;
@@ -68,6 +72,22 @@
   });
   $: selectedStation = stations.find((station) => station.address === selectedAddress) ?? null;
   $: conflictStations = stations.filter((station) => station.channelConflict);
+  $: conflictDetails = (() => {
+    const byChannel = new Map<number, string[]>();
+    for (const station of conflictStations) {
+      const key = station.channel > 0 ? station.channel : -1;
+      byChannel.set(key, [...(byChannel.get(key) ?? []), station.name]);
+    }
+    return [...byChannel.entries()]
+      .sort((a, b) => a[0] - b[0])
+      .map(([channel, names]) => channel > 0 ? `CH ${channel}: ${names.join(' + ')}` : names.join(' + '))
+      .join(' · ');
+  })();
+  // Fleet summary counts match what the cards actually display: fresh power
+  // data at a known state. Stale or unknown stations are not counted.
+  $: fleetOn = stations.filter((station) => station.powerFresh && station.powerState === powerStateValue('on')).length;
+  $: fleetStandby = stations.filter((station) => station.powerFresh && station.powerState === powerStateValue('standby')).length;
+  $: fleetSleep = stations.filter((station) => station.powerFresh && station.powerState === powerStateValue('sleep')).length;
   $: occupiedChannels = new Map(
     stations
       .filter((station) => station.isPresent && station.scanFresh && station.channelFresh &&
@@ -87,6 +107,12 @@
   $: isLoading = globalOperation === 'scanning';
   $: isBulkLoading = globalOperation === 'bulk-power';
   $: isStatusChecking = globalOperation === 'status-refresh';
+  $: scanningActive = isLoading || externalScanning;
+  $: if (!disposed) {
+    // The lighthouse beam is a scanning indicator: it only sweeps while a
+    // scan is active, so its motion always means "scan in progress".
+    document.body.classList.toggle('scanning', scanningActive);
+  }
   $: anyDeviceOperation = operationLocks.anyDeviceOperation;
   $: scanLocked = operationLocks.scanLocked;
   $: bulkLocked = operationLocks.bulkLocked;
@@ -95,6 +121,30 @@
 
   function stationBusy(address: string): boolean {
     return gattOperations.has(address) || configOperations.has(address);
+  }
+
+  function beginScanTimer() {
+    if (scanTimer) return;
+    scanStartedAt = Date.now();
+    scanElapsed = 0;
+    scanTimer = setInterval(() => {
+      if (scanStartedAt !== null) scanElapsed = Math.floor((Date.now() - scanStartedAt) / 1000);
+    }, 1000);
+  }
+
+  function endScanTimer() {
+    if (scanTimer) {
+      clearInterval(scanTimer);
+      scanTimer = null;
+    }
+    scanStartedAt = null;
+    scanElapsed = 0;
+  }
+
+  function maybeEndScanTimer() {
+    // A local scan and an external scan can overlap; the timer belongs to
+    // whichever is still running, so only stop when both have finished.
+    if (globalOperation !== 'scanning' && !externalScanning) endScanTimer();
   }
 
   function setGattBusy(address: string, busy: boolean) {
@@ -203,6 +253,7 @@
       listRevisions.next();
       prepareForScan();
       externalScanning = true;
+      beginScanTimer();
       statusMessage = 'External scan in progress...';
     });
     cancelExternalScanListener = EventsOn('external-scan-completed', async (updated: StationInfo[]) => {
@@ -211,6 +262,7 @@
       const revision = listRevisions.next();
       prepareForScan();
       externalScanning = false;
+      maybeEndScanTimer();
       stations = updated || [];
       const scanStatus = await GetScanStatus().catch(() => null);
       if (disposed || !listRevisions.isCurrent(revision)) return;
@@ -223,6 +275,7 @@
       const revision = listRevisions.next();
       prepareForScan();
       externalScanning = false;
+      maybeEndScanTimer();
       const updated = await GetCurrentStationInfo().catch(() => null);
       if (!canCommitOperation(operationEpoch) || !listRevisions.isCurrent(revision)) return;
       if (updated) applyStationList(updated, revision);
@@ -235,6 +288,7 @@
     if (disposed || !listRevisions.isCurrent(startupRevision)) return;
     externalScanning = startupScanning;
     if (externalScanning) {
+      beginScanTimer();
       statusMessage = 'External scan in progress...';
     } else {
       await handleScanClick();
@@ -258,6 +312,8 @@
     disposed = true;
     listRevisions.dispose();
     apiRevisions.dispose();
+    endScanTimer();
+    document.body.classList.remove('scanning');
     if (statusCheckInterval) clearInterval(statusCheckInterval);
     if (apiStatusInterval) clearInterval(apiStatusInterval);
     cancelExternalScanListener?.();
@@ -292,6 +348,7 @@
     if (isLoading || scanLocked) return;
     prepareForScan();
     globalOperation = 'scanning';
+    beginScanTimer();
     const operationEpoch = beginScanEpoch();
     const revision = listRevisions.next();
     statusMessage = 'Scanning for base stations...';
@@ -313,6 +370,7 @@
       pushToast(`Scan failed: ${error}`);
     } finally {
       if (!disposed && globalOperation === 'scanning') globalOperation = 'idle';
+      maybeEndScanTimer();
     }
   }
 
@@ -437,6 +495,7 @@
         ? `${confirmed} confirmed, ${unconfirmed} sent but unconfirmed, ${skipped.length} skipped, ${failed.length} failed: ${failed.map((item) => `${item.name || item.address}: ${item.error}`).join(' | ')}`
         : `${confirmed} confirmed; ${unconfirmed} sent but unconfirmed; ${skipped.length} skipped for ${targetLabel}.`;
       if (failed.length) pushToast(`Bulk ${targetLabel}: ${failed.length} station(s) failed. See status bar.`);
+      else pushToast(`Bulk ${targetLabel}: ${confirmed} confirmed, ${skipped.length} skipped.`, 'success');
     } catch (error) {
       if (!canCommitOperation(operationEpoch)) return;
       await fetchLatestList();
@@ -608,15 +667,19 @@
     allOn={allEligibleAtState('on')}
     allStandby={allEligibleAtState('standby')}
     allSleep={allEligibleAtState('sleep')}
+    onCount={fleetOn}
+    standbyCount={fleetStandby}
+    sleepCount={fleetSleep}
     onScan={handleScanClick}
     onBulkPower={handleBulkPower}
   />
 
   <main>
     {#if conflictStations.length}
-      <div class="alert danger"><CircleAlert size={18} /> Channel conflict detected on {conflictStations.length} visible station(s).</div>
+      <div class="alert danger" title={conflictDetails}><CircleAlert size={18} /> <span class="alert-text">Channel conflict: {conflictDetails}</span></div>
     {/if}
     {#if sortedStations.length}
+      <ChannelMap stations={sortedStations} onSelect={(address) => selectedAddress = address} />
       <div class="station-grid">
         {#each sortedStations as station, index (station.address)}
           <div
@@ -641,12 +704,18 @@
           </div>
         {/each}
       </div>
-    {:else if !isLoading}
+    {:else if isLoading || externalScanning}
+      <div class="empty" in:fade={{ duration: 180 }}>
+        <div class="empty-icon"><Radar size={40} /></div>
+        <p>{isLoading ? 'Scanning for base stations...' : 'External scan in progress...'} {Math.max(1, scanElapsed)}s</p>
+        <p class="scan-sub">{scanElapsed >= 6 ? 'Reading station states...' : 'Discovering nearby stations...'}</p>
+      </div>
+    {:else}
       <div class="empty">
         <div class="empty-icon"><Activity size={40} /></div>
         <p>No base stations found.</p>
         <button class="btn primary" disabled={scanLocked} on:click={handleScanClick}>
-          {externalScanning ? 'Scanning...' : 'Scan Now'}
+          Scan Now
         </button>
       </div>
     {/if}
@@ -701,8 +770,8 @@
   main { flex: 1; padding: var(--spacing-md); overflow: auto; }
   .station-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
-    gap: 0.6rem;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 0.75rem;
   }
   .scrim {
     position: fixed;
@@ -732,16 +801,31 @@
     color: var(--text-muted);
   }
   .empty-icon {
+    position: relative;
     width: 88px;
     height: 88px;
     display: flex;
     align-items: center;
     justify-content: center;
-    border-radius: 999px;
+    border-radius: var(--radius-pill);
     border: 1px solid var(--color-border);
     background: var(--bg-surface);
     color: var(--color-primary);
     box-shadow: 0 0 32px rgba(76, 141, 255, 0.15);
   }
+  .empty-icon::after {
+    content: '';
+    position: absolute;
+    inset: -1px;
+    border-radius: var(--radius-pill);
+    border: 1px solid color-mix(in srgb, var(--color-primary) 55%, transparent);
+    animation: ping-ring 2.2s var(--ease) infinite;
+  }
+  @keyframes ping-ring {
+    0% { transform: scale(0.9); opacity: 1; }
+    70% { transform: scale(1.35); opacity: 0; }
+    100% { transform: scale(1.35); opacity: 0; }
+  }
   .empty p { margin: 0; font-size: 0.85rem; }
+  .empty .scan-sub { font-size: var(--fs-sm); color: var(--text-muted); }
 </style>
