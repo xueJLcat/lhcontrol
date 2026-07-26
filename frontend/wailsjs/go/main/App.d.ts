@@ -11,8 +11,6 @@ export function GetCurrentStationInfo():Promise<Array<station.StationInfo>>;
 
 export function GetScanStatus():Promise<station.ScanStatus>;
 
-export function Greet(arg1:string):Promise<string>;
-
 export function IdentifyStation(arg1:string):Promise<void>;
 
 export function IsScanning():Promise<boolean>;

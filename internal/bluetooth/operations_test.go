@@ -2,6 +2,7 @@ package bluetooth
 
 import (
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -39,12 +40,14 @@ type fakeBLEAdapter struct {
 	scanErr   error
 	panicScan bool
 	panicStop bool
+	started   chan struct{}
 	stopped   chan struct{}
+	startOnce sync.Once
 	once      sync.Once
 }
 
 func newFakeBLEAdapter(results ...tinybluetooth.ScanResult) *fakeBLEAdapter {
-	return &fakeBLEAdapter{results: results, stopped: make(chan struct{})}
+	return &fakeBLEAdapter{results: results, started: make(chan struct{}), stopped: make(chan struct{})}
 }
 
 func (a *fakeBLEAdapter) Enable() error { return nil }
@@ -56,6 +59,7 @@ func (a *fakeBLEAdapter) Scan(callback func(*tinybluetooth.Adapter, tinybluetoot
 	if a.panicScan {
 		panic("scan callback boundary")
 	}
+	a.startOnce.Do(func() { close(a.started) })
 	for _, result := range a.results {
 		callback(nil, result)
 	}
@@ -390,6 +394,16 @@ func TestScanCompletionErrorRejectsEarlyFailure(t *testing.T) {
 	}
 }
 
+func TestScanCompletionErrorExplainsUnavailableRadio(t *testing.T) {
+	err := scanCompletionError(tinybluetooth.ErrRadioNotAvailable)
+	if !errors.Is(err, tinybluetooth.ErrRadioNotAvailable) {
+		t.Fatalf("scanCompletionError() = %v", err)
+	}
+	if !strings.Contains(err.Error(), "turn on Bluetooth") {
+		t.Fatalf("scanCompletionError() is not actionable: %v", err)
+	}
+}
+
 func TestFetchInitialPowerStateReportsPartialReadErrors(t *testing.T) {
 	powerErr := errors.New("power read failed")
 	channelErr := errors.New("channel read failed")
@@ -559,5 +573,34 @@ func TestScanForDurationRepeatedLifecycle(t *testing.T) {
 		if _, err := ScanForDuration(time.Millisecond); err != nil {
 			t.Fatalf("scan cycle %d error = %v", cycle+1, err)
 		}
+	}
+}
+
+func TestCancelScanStopsActiveScan(t *testing.T) {
+	originalAdapter := adapter
+	fake := newFakeBLEAdapter()
+	adapter = fake
+	t.Cleanup(func() { adapter = originalAdapter })
+
+	result := make(chan error, 1)
+	go func() {
+		_, err := ScanForDuration(time.Hour)
+		result <- err
+	}()
+	select {
+	case <-fake.started:
+	case <-time.After(time.Second):
+		t.Fatal("scan did not start")
+	}
+	if err := CancelScan(); err != nil {
+		t.Fatalf("CancelScan() error = %v", err)
+	}
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("ScanForDuration() after cancellation error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("active scan did not stop after cancellation")
 	}
 }

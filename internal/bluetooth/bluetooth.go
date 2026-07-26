@@ -41,6 +41,8 @@ var (
 	// Track connected stations for cleanup
 	connectedStations      []*BaseStation
 	connectedStationsMutex sync.Mutex
+	uuidInitOnce           sync.Once
+	uuidInitErr            error
 )
 
 const (
@@ -247,47 +249,44 @@ func (bs *BaseStation) UpdateName(name string) {
 
 // Initialize sets up the Bluetooth adapter and parses UUIDs.
 func Initialize() error {
-	// Re-initialize the tracking slice
-	connectedStations = make([]*BaseStation, 0)
-
-	err := adapter.Enable()
-	if err != nil {
+	if err := adapter.Enable(); err != nil {
 		return fmt.Errorf("could not enable Bluetooth adapter: %w", err)
 	}
 
-	var parseErr error
-	powerControlServiceUUID, parseErr = bluetooth.ParseUUID(powerControlServiceUUIDString)
-	if parseErr != nil {
-		return fmt.Errorf("could not parse power control service UUID: %w", parseErr)
-	}
-	modeCharacteristicUUID, parseErr = bluetooth.ParseUUID(modeCharacteristicUUIDString)
-	if parseErr != nil {
-		return fmt.Errorf("could not parse mode characteristic UUID: %w", parseErr)
-	}
-	powerControlCharacteristicUUID, parseErr = bluetooth.ParseUUID(powerControlCharacteristicUUIDString)
-	if parseErr != nil {
-		return fmt.Errorf("could not parse power control characteristic UUID: %w", parseErr)
-	}
-	parsedUUIDs := []struct {
-		name   string
-		value  string
-		target *bluetooth.UUID
-	}{
-		{"identify characteristic", identifyCharacteristicUUIDString, &identifyCharacteristicUUID},
-		{"device information service", deviceInformationServiceUUIDString, &deviceInformationServiceUUID},
-		{"manufacturer characteristic", manufacturerCharacteristicUUIDString, &manufacturerCharacteristicUUID},
-		{"model characteristic", modelCharacteristicUUIDString, &modelCharacteristicUUID},
-		{"serial characteristic", serialCharacteristicUUIDString, &serialCharacteristicUUID},
-		{"hardware characteristic", hardwareCharacteristicUUIDString, &hardwareCharacteristicUUID},
-		{"firmware characteristic", firmwareCharacteristicUUIDString, &firmwareCharacteristicUUID},
-	}
-	for _, item := range parsedUUIDs {
-		*item.target, parseErr = bluetooth.ParseUUID(item.value)
-		if parseErr != nil {
-			return fmt.Errorf("could not parse %s UUID: %w", item.name, parseErr)
+	uuidInitOnce.Do(func() {
+		parsedUUIDs := []struct {
+			name   string
+			value  string
+			target *bluetooth.UUID
+		}{
+			{"power control service", powerControlServiceUUIDString, &powerControlServiceUUID},
+			{"mode characteristic", modeCharacteristicUUIDString, &modeCharacteristicUUID},
+			{"power control characteristic", powerControlCharacteristicUUIDString, &powerControlCharacteristicUUID},
+			{"identify characteristic", identifyCharacteristicUUIDString, &identifyCharacteristicUUID},
+			{"device information service", deviceInformationServiceUUIDString, &deviceInformationServiceUUID},
+			{"manufacturer characteristic", manufacturerCharacteristicUUIDString, &manufacturerCharacteristicUUID},
+			{"model characteristic", modelCharacteristicUUIDString, &modelCharacteristicUUID},
+			{"serial characteristic", serialCharacteristicUUIDString, &serialCharacteristicUUID},
+			{"hardware characteristic", hardwareCharacteristicUUIDString, &hardwareCharacteristicUUID},
+			{"firmware characteristic", firmwareCharacteristicUUIDString, &firmwareCharacteristicUUID},
 		}
+		for _, item := range parsedUUIDs {
+			*item.target, uuidInitErr = bluetooth.ParseUUID(item.value)
+			if uuidInitErr != nil {
+				uuidInitErr = fmt.Errorf("could not parse %s UUID: %w", item.name, uuidInitErr)
+				return
+			}
+		}
+	})
+	if uuidInitErr != nil {
+		return uuidInitErr
 	}
 	return nil
+}
+
+func IsAdapterUnavailable(err error) bool {
+	return errors.Is(err, bluetooth.ErrRadioNotAvailable) ||
+		errors.Is(err, bluetooth.ErrDisabledByPolicy)
 }
 
 // ScanForDuration performs a blocking BLE scan for the specified duration
@@ -397,6 +396,9 @@ func CancelScan() error {
 
 func scanCompletionError(scanErr error) error {
 	if scanErr != nil {
+		if IsAdapterUnavailable(scanErr) {
+			return fmt.Errorf("Bluetooth is unavailable; turn on Bluetooth or check the adapter, then retry: %w", scanErr)
+		}
 		return fmt.Errorf("scan failed before the requested duration completed: %w", scanErr)
 	}
 	return nil
@@ -697,6 +699,13 @@ func connectAndDiscoverInternal(station *BaseStation) error {
 				capabilities.DeviceInformation = true
 				for characteristicIndex := range chars {
 					current := &chars[characteristicIndex]
+					switch current.UUID() {
+					case manufacturerCharacteristicUUID, modelCharacteristicUUID,
+						serialCharacteristicUUID, hardwareCharacteristicUUID,
+						firmwareCharacteristicUUID:
+					default:
+						continue
+					}
 					value, readErr := readMetadataValue(current)
 					if readErr != nil {
 						log.Printf("Bluetooth: Optional metadata read failed for %s (%s): %v", station.Name, current.UUID(), readErr)

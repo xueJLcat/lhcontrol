@@ -35,14 +35,6 @@
     if (!renaming) onOpenDetails(station);
   }
 
-  function handleCardKeydown(event: KeyboardEvent) {
-    if (event.target !== event.currentTarget) return;
-    if (event.key === 'Enter' || event.key === ' ') {
-      event.preventDefault();
-      openDetails();
-    }
-  }
-
   function handleRenameKeydown(event: KeyboardEvent) {
     if (event.key === 'Enter') {
       event.stopPropagation();
@@ -59,11 +51,6 @@
   class:offline={!station.isPresent}
   class:conflict={station.channelConflict}
   class:renaming
-  role="button"
-  tabindex="0"
-  aria-label={`Station ${station.name}`}
-  on:click={openDetails}
-  on:keydown={handleCardKeydown}
 >
   {#if renaming}
     <div class="rename-row">
@@ -149,7 +136,6 @@
     display: flex;
     flex-direction: column;
     gap: 0.4rem;
-    cursor: pointer;
     box-shadow: var(--shadow-sm);
     transition: border-color var(--dur-2) var(--ease), background-color var(--dur-2) var(--ease),
       box-shadow var(--dur-2) var(--ease);

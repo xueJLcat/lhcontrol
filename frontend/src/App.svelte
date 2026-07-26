@@ -24,6 +24,8 @@
     canSetPower, isCurrentPowerState, maySetPower, powerTargetLabel, stateLabel
   } from './lib/station';
   import { pushToast } from './lib/toast';
+  import { deriveOperationLocks, type GlobalOperation } from './lib/operation-state';
+  import { RevisionGate } from './lib/revision-gate';
   import AppHeader from './lib/components/AppHeader.svelte';
   import StationCard from './lib/components/StationCard.svelte';
   import DetailsDrawer from './lib/components/DetailsDrawer.svelte';
@@ -33,12 +35,10 @@
 
   let stations: StationInfo[] = [];
   let statusMessage = 'Ready to scan.';
-  let operationInProgress: Record<string, boolean> = {};
+  let deviceOperations = new Set<string>();
   let powerTargetByAddress: Record<string, PowerTarget | undefined> = {};
   let powerFeedbackByAddress: Record<string, PowerFeedback | undefined> = {};
-  let isLoading = false;
-  let isBulkLoading = false;
-  let isStatusChecking = false;
+  let globalOperation: GlobalOperation = 'idle';
   let bulkTarget: PowerTarget | null = null;
   let editingAddress: string | null = null;
   let selectedAddress: string | null = null;
@@ -52,6 +52,8 @@
   let apiRunning = false;
   let apiError = '';
   let externalScanning = false;
+  const listRevisions = new RevisionGate();
+  let disposed = false;
 
   $: sortedStations = [...stations].sort((a, b) => {
     const ac = a.channel > 0 ? a.channel : Number.MAX_SAFE_INTEGER;
@@ -70,38 +72,65 @@
     (station) => station.isPresent && station.address !== selectedAddress &&
       (!station.scanFresh || !station.channelFresh || station.channel === 0)
   );
-  $: anyDeviceOperation = Object.values(operationInProgress).some(Boolean) ||
-    Object.values(powerTargetByAddress).some(Boolean);
-  $: bluetoothControlBusy = anyDeviceOperation;
-  $: scanLocked = isBulkLoading || isStatusChecking || externalScanning || bluetoothControlBusy;
-  $: bulkLocked = isLoading || isBulkLoading || externalScanning || bluetoothControlBusy;
-  $: stationLocked = isLoading || isBulkLoading || isStatusChecking || externalScanning;
+  $: operationLocks = deriveOperationLocks({
+    global: globalOperation,
+    externalScanning,
+    deviceAddresses: deviceOperations
+  });
+  $: isLoading = globalOperation === 'scanning';
+  $: isBulkLoading = globalOperation === 'bulk-power';
+  $: isStatusChecking = globalOperation === 'status-refresh';
+  $: anyDeviceOperation = operationLocks.anyDeviceOperation;
+  $: scanLocked = operationLocks.scanLocked;
+  $: bulkLocked = operationLocks.bulkLocked;
+  $: stationLocked = operationLocks.stationLocked;
 
   function stationBusy(address: string): boolean {
-    return Boolean(operationInProgress[address] || powerTargetByAddress[address]);
+    return deviceOperations.has(address);
+  }
+
+  function setDeviceBusy(address: string, busy: boolean) {
+    const next = new Set(deviceOperations);
+    if (busy) next.add(address);
+    else next.delete(address);
+    deviceOperations = next;
+  }
+
+  function applyStationList(updated: StationInfo[] | null | undefined, revision: number): boolean {
+    if (disposed || !listRevisions.isCurrent(revision)) return false;
+    stations = updated || [];
+    return true;
   }
 
   onMount(async () => {
     refreshAPIStatus();
     apiStatusInterval = setInterval(refreshAPIStatus, 15000);
     cancelExternalScanStartedListener = EventsOn('external-scan-started', () => {
+      if (disposed) return;
+      listRevisions.next();
       externalScanning = true;
       statusMessage = 'External scan in progress...';
     });
     cancelExternalScanListener = EventsOn('external-scan-completed', async (updated: StationInfo[]) => {
+      if (disposed) return;
+      const revision = listRevisions.next();
       externalScanning = false;
       stations = updated || [];
       const scanStatus = await GetScanStatus().catch(() => null);
+      if (disposed || !listRevisions.isCurrent(revision)) return;
       const found = scanStatus?.found ?? stations.filter((station) => station.seenInLatestScan).length;
       statusMessage = `External scan completed: found ${found}; ${stations.length} known station(s).`;
     });
     cancelExternalScanFailureListener = EventsOn('external-scan-failed', (message: string) => {
+      if (disposed) return;
+      listRevisions.next();
       externalScanning = false;
       statusMessage = `External scan failed: ${message}`;
       pushToast(`External scan failed: ${message}`);
     });
     statusCheckInterval = setInterval(periodicStatusCheck, 15000);
     externalScanning = await IsScanning().catch(() => false);
+    if (disposed) return;
     if (externalScanning) {
       statusMessage = 'External scan in progress...';
     } else {
@@ -111,15 +140,19 @@
 
   function refreshAPIStatus() {
     GetAPIStatus().then((status) => {
+      if (disposed) return;
       apiRunning = status.running;
       apiError = status.error;
     }).catch((error) => {
+      if (disposed) return;
       apiRunning = false;
       apiError = String(error);
     });
   }
 
   onDestroy(() => {
+    disposed = true;
+    listRevisions.dispose();
     if (statusCheckInterval) clearInterval(statusCheckInterval);
     if (apiStatusInterval) clearInterval(apiStatusInterval);
     cancelExternalScanListener?.();
@@ -129,50 +162,57 @@
 
   async function periodicStatusCheck() {
     if (isStatusChecking || isLoading || isBulkLoading || anyDeviceOperation) return;
-    isStatusChecking = true;
+    globalOperation = 'status-refresh';
+    const revision = listRevisions.next();
     try {
       const scanning = await IsScanning();
       externalScanning = scanning && !isLoading;
       if (!scanning) {
-        stations = (await CheckAllStationStatuses()) || [];
+        if (!applyStationList(await CheckAllStationStatuses(), revision)) return;
       }
     } catch (error) {
+      if (disposed || !listRevisions.isCurrent(revision)) return;
       console.error('Periodic status check failed:', error);
-      stations = (await GetCurrentStationInfo().catch(() => stations)) || stations;
+      applyStationList(await GetCurrentStationInfo().catch(() => stations), revision);
       statusMessage = `Status refresh incomplete: ${error}`;
     } finally {
-      isStatusChecking = false;
+      if (!disposed && globalOperation === 'status-refresh') globalOperation = 'idle';
     }
   }
 
   async function handleScanClick() {
     if (isLoading || scanLocked) return;
-    isLoading = true;
-    operationInProgress = {};
+    globalOperation = 'scanning';
+    deviceOperations = new Set();
     powerTargetByAddress = {};
     powerFeedbackByAddress = {};
+    const revision = listRevisions.next();
     statusMessage = 'Scanning for base stations...';
     try {
-      stations = (await ScanAndFetchStations()) || [];
+      if (!applyStationList(await ScanAndFetchStations(), revision)) return;
       const scanStatus = await GetScanStatus().catch(() => null);
+      if (disposed || !listRevisions.isCurrent(revision)) return;
       const warning = scanStatus?.warnings?.join(' ');
       const found = scanStatus?.found ?? stations.filter((station) => station.seenInLatestScan).length;
       statusMessage = warning
         ? `Found ${found}; ${stations.length} known station(s). ${warning}`
         : found ? `Found ${found}; ${stations.length} known station(s).` : 'No stations found in this scan.';
     } catch (error) {
+      if (disposed || !listRevisions.isCurrent(revision)) return;
       statusMessage = `Scan failed: ${error}`;
       pushToast(`Scan failed: ${error}`);
     } finally {
-      isLoading = false;
+      if (!disposed && globalOperation === 'scanning') globalOperation = 'idle';
     }
   }
 
   async function fetchLatestList() {
     cancelRename();
+    const revision = listRevisions.next();
     try {
-      stations = (await GetCurrentStationInfo()) || [];
+      applyStationList(await GetCurrentStationInfo(), revision);
     } catch (error) {
+      if (disposed || !listRevisions.isCurrent(revision)) return;
       statusMessage = `Error refreshing list: ${error}`;
     }
   }
@@ -180,6 +220,7 @@
   async function setPower(station: StationInfo, state: PowerTarget) {
     if (!canSetPower(station, state) || stationBusy(station.address) || stationLocked) return;
     const targetLabel = powerTargetLabel(state);
+    setDeviceBusy(station.address, true);
     powerTargetByAddress = { ...powerTargetByAddress, [station.address]: state };
     powerFeedbackByAddress = {
       ...powerFeedbackByAddress,
@@ -188,6 +229,7 @@
     statusMessage = `Setting ${station.name} to ${targetLabel}…`;
     try {
       const result = await SetStationPower(station.address, state);
+      listRevisions.next();
       stations = stations.map((current) => current.address === station.address ? result.station : current);
       powerFeedbackByAddress = {
         ...powerFeedbackByAddress,
@@ -215,17 +257,15 @@
       pushToast(`Power change failed for ${station.name}: ${errorText}`);
     } finally {
       powerTargetByAddress = { ...powerTargetByAddress, [station.address]: undefined };
+      setDeviceBusy(station.address, false);
     }
   }
 
   function eligiblePowerStations(state: PowerTarget): StationInfo[] {
-    return stations.filter((station) =>
-      station.isPresent && maySetPower(station, state)
-    );
-  }
-
-  function hasEligiblePowerStations(state: PowerTarget): boolean {
-    return eligiblePowerStations(state).some((station) => !isCurrentPowerState(station, state));
+    // A Lighthouse often stops advertising while connected or sleeping. Keep
+    // bulk power aligned with individual controls by including every station
+    // discovered during this app session, even if the latest scan missed it.
+    return stations.filter((station) => maySetPower(station, state));
   }
 
   function allEligibleAtState(state: PowerTarget): boolean {
@@ -234,8 +274,11 @@
   }
 
   async function handleBulkPower(state: PowerTarget) {
-    if (bulkLocked || !hasEligiblePowerStations(state)) return;
-    isBulkLoading = true;
+    // Do not duplicate backend capability/state decisions here. Cached
+    // frontend data can be stale after scanning, while the backend refreshes
+    // capabilities and returns a result for every known station.
+    if (bulkLocked || stations.length === 0) return;
+    globalOperation = 'bulk-power';
     bulkTarget = state;
     const targetLabel = powerTargetLabel(state);
     statusMessage = `Setting all available stations to ${targetLabel}…`;
@@ -255,13 +298,13 @@
       statusMessage = `Bulk ${targetLabel} operation partially failed: ${error}`;
       pushToast(`Bulk ${targetLabel} operation partially failed: ${error}`);
     } finally {
-      isBulkLoading = false;
+      if (!disposed && globalOperation === 'bulk-power') globalOperation = 'idle';
       bulkTarget = null;
     }
   }
 
   function startRename(station: StationInfo) {
-    if (operationInProgress[station.address]) return;
+    if (deviceOperations.has(station.address)) return;
     editingAddress = station.address;
   }
 
@@ -284,7 +327,7 @@
 
   async function identify(station: StationInfo) {
     if (stationBusy(station.address) || stationLocked) return;
-    operationInProgress = { ...operationInProgress, [station.address]: true };
+    setDeviceBusy(station.address, true);
     try {
       await IdentifyStation(station.address);
       await fetchLatestList();
@@ -294,13 +337,13 @@
       statusMessage = `Identify failed for ${station.name}: ${error}`;
       pushToast(`Identify failed for ${station.name}: ${error}`);
     } finally {
-      operationInProgress = { ...operationInProgress, [station.address]: false };
+      setDeviceBusy(station.address, false);
     }
   }
 
   async function refreshCapabilities(station: StationInfo) {
     if (stationBusy(station.address) || stationLocked) return;
-    operationInProgress = { ...operationInProgress, [station.address]: true };
+    setDeviceBusy(station.address, true);
     try {
       const updated = await RefreshStationCapabilities(station.address);
       stations = stations.map((current) => current.address === station.address ? updated : current);
@@ -310,7 +353,7 @@
       statusMessage = `Capability refresh failed for ${station.name}: ${error}`;
       pushToast(`Capability refresh failed for ${station.name}: ${error}`);
     } finally {
-      operationInProgress = { ...operationInProgress, [station.address]: false };
+      setDeviceBusy(station.address, false);
     }
   }
 
@@ -324,7 +367,7 @@
       stationBusy(selectedStation.address) || stationLocked ||
       (selectedStation.channel > 0 && selectedStation.channel === targetChannel)) return;
     const address = selectedStation.address;
-    operationInProgress = { ...operationInProgress, [address]: true };
+    setDeviceBusy(address, true);
     channelError = '';
     try {
       const result = await SetStationChannel(address, targetChannel, allowUnknownConflictRisk);
@@ -336,7 +379,7 @@
       const actual = stations.find((station) => station.address === address)?.channel ?? 0;
       channelError = `${String(error)} Actual readback: ${actual || 'unknown'}.`;
     } finally {
-      operationInProgress = { ...operationInProgress, [address]: false };
+      setDeviceBusy(address, false);
     }
   }
 
@@ -359,9 +402,9 @@
     {scanLocked}
     {bulkLocked}
     {bulkTarget}
-    canOn={hasEligiblePowerStations('on')}
-    canStandby={hasEligiblePowerStations('standby')}
-    canSleep={hasEligiblePowerStations('sleep')}
+    canOn={stations.length > 0}
+    canStandby={stations.length > 0}
+    canSleep={stations.length > 0}
     allOn={allEligibleAtState('on')}
     allStandby={allEligibleAtState('standby')}
     allSleep={allEligibleAtState('sleep')}

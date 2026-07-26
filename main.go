@@ -2,14 +2,14 @@ package main
 
 import (
 	"embed"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"os"
 	"path/filepath"
-	"strings"
+	"sync"
 
 	"lhcontrol/internal/platform"
 
@@ -21,15 +21,185 @@ import (
 //go:embed all:frontend/dist
 var assets embed.FS
 
-const lockPort = "34115"     // Port used for single instance check
-const appTitle = "lhcontrol" // Define app title constant
+const appTitle = "lhcontrol"
+const instanceMutexName = `Local\FlameInTheDark.LighthouseControl`
 
 const maxLogSize = 5 * 1024 * 1024
 
+type rotatingLogFile struct {
+	mutex      sync.Mutex
+	path       string
+	backupPath string
+	maxSize    int64
+	file       *os.File
+	size       int64
+}
+
+func openRotatingLogFile(path string, maxSize int64) (*rotatingLogFile, error) {
+	if maxSize <= 0 {
+		return nil, fmt.Errorf("maximum log size must be positive")
+	}
+	writer := &rotatingLogFile{
+		path:       path,
+		backupPath: path + ".1",
+		maxSize:    maxSize,
+	}
+	info, err := os.Stat(path)
+	if err != nil && !os.IsNotExist(err) {
+		return nil, err
+	}
+	if err == nil && info.Size() >= maxSize {
+		if err := writer.rotateClosedFile(); err != nil {
+			return nil, err
+		}
+	}
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+	if err != nil {
+		return nil, err
+	}
+	writer.file = file
+	if info, err = file.Stat(); err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	writer.size = info.Size()
+	return writer, nil
+}
+
+func (writer *rotatingLogFile) rotateClosedFile() error {
+	info, err := os.Stat(writer.path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	source, err := os.Open(writer.path)
+	if err != nil {
+		return err
+	}
+	if info.Size() > writer.maxSize {
+		if _, err := source.Seek(-writer.maxSize, io.SeekEnd); err != nil {
+			_ = source.Close()
+			return err
+		}
+	}
+	temp, err := os.CreateTemp(filepath.Dir(writer.backupPath), filepath.Base(writer.backupPath)+".tmp-*")
+	if err != nil {
+		_ = source.Close()
+		return err
+	}
+	tempPath := temp.Name()
+	defer os.Remove(tempPath)
+	if err := temp.Chmod(0600); err != nil {
+		_ = source.Close()
+		_ = temp.Close()
+		return err
+	}
+	if _, err := io.Copy(temp, source); err != nil {
+		_ = source.Close()
+		_ = temp.Close()
+		return err
+	}
+	if err := source.Close(); err != nil {
+		_ = temp.Close()
+		return err
+	}
+	if err := temp.Sync(); err != nil {
+		_ = temp.Close()
+		return err
+	}
+	if err := temp.Close(); err != nil {
+		return err
+	}
+	if err := os.Remove(writer.backupPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove previous log backup: %w", err)
+	}
+	if err := os.Rename(tempPath, writer.backupPath); err != nil {
+		return fmt.Errorf("publish diagnostic log backup: %w", err)
+	}
+	return os.Remove(writer.path)
+}
+
+func (writer *rotatingLogFile) rotateLocked() error {
+	if writer.file != nil {
+		if err := writer.file.Close(); err != nil {
+			return err
+		}
+		writer.file = nil
+	}
+	if err := writer.rotateClosedFile(); err != nil {
+		file, reopenErr := os.OpenFile(writer.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+		if reopenErr == nil {
+			writer.file = file
+			if info, statErr := file.Stat(); statErr == nil {
+				writer.size = info.Size()
+			}
+		}
+		if reopenErr != nil {
+			return errors.Join(err, fmt.Errorf("reopen diagnostic log after rotation failure: %w", reopenErr))
+		}
+		return err
+	}
+	file, err := os.OpenFile(writer.path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
+	if err != nil {
+		return err
+	}
+	writer.file = file
+	writer.size = 0
+	return nil
+}
+
+func (writer *rotatingLogFile) Write(value []byte) (int, error) {
+	writer.mutex.Lock()
+	defer writer.mutex.Unlock()
+	if writer.file == nil {
+		return 0, os.ErrClosed
+	}
+	originalLength := len(value)
+	if int64(len(value)) > writer.maxSize {
+		value = value[len(value)-int(writer.maxSize):]
+	}
+	if writer.size > 0 && writer.size+int64(len(value)) > writer.maxSize {
+		if err := writer.rotateLocked(); err != nil {
+			return 0, err
+		}
+	}
+	written, err := writer.file.Write(value)
+	writer.size += int64(written)
+	if err != nil {
+		return written, err
+	}
+	if written != len(value) {
+		return written, io.ErrShortWrite
+	}
+	return originalLength, nil
+}
+
+func (writer *rotatingLogFile) Sync() error {
+	writer.mutex.Lock()
+	defer writer.mutex.Unlock()
+	if writer.file == nil {
+		return os.ErrClosed
+	}
+	return writer.file.Sync()
+}
+
+func (writer *rotatingLogFile) Close() error {
+	writer.mutex.Lock()
+	defer writer.mutex.Unlock()
+	if writer.file == nil {
+		return nil
+	}
+	err := writer.file.Close()
+	writer.file = nil
+	return err
+}
+
 // setupLogging always keeps a bounded diagnostic log in the user config
-// directory. Production GUI builds have no reliable console, so opt-in file
-// logging loses the evidence needed to diagnose an intermittent crash.
-func setupLogging(mirrorConsole bool) (*os.File, error) {
+// directory. Production GUI builds have no reliable console, so file logging
+// preserves the evidence needed to diagnose an intermittent crash.
+func setupLogging(mirrorConsole bool) (*rotatingLogFile, error) {
 	configDir, err := os.UserConfigDir()
 	if err != nil {
 		return nil, err
@@ -40,11 +210,7 @@ func setupLogging(mirrorConsole bool) (*os.File, error) {
 	}
 	logFilePath := filepath.Join(logDir, "lhcontrol.log")
 
-	openFlags := os.O_APPEND | os.O_CREATE | os.O_WRONLY
-	if info, statErr := os.Stat(logFilePath); statErr == nil && info.Size() >= maxLogSize {
-		openFlags = os.O_TRUNC | os.O_CREATE | os.O_WRONLY
-	}
-	logFile, err := os.OpenFile(logFilePath, openFlags, 0600)
+	logFile, err := openRotatingLogFile(logFilePath, maxLogSize)
 	if err != nil {
 		return nil, err
 	}
@@ -82,33 +248,30 @@ func main() {
 		}()
 	}
 
-	// Attempt to acquire the instance lock
-	lockAddr := fmt.Sprintf("127.0.0.1:%s", lockPort)
-	listener, err := net.Listen("tcp", lockAddr)
+	releaseInstance, alreadyRunning, err := platform.AcquireSingleInstance(instanceMutexName)
 	if err != nil {
-		if strings.Contains(err.Error(), "address already in use") || strings.Contains(err.Error(), "bind: address already in use") || strings.Contains(err.Error(), "bind: Only one usage of each socket address") {
-			log.Println("Application is already running. Bringing existing window to front...")
-			if !platform.BringWindowToFront(appTitle) {
-				log.Printf("FATAL: port %s is occupied, but no lhcontrol window was found", lockPort)
-				if logFile != nil {
-					_ = logFile.Sync()
-				}
-				os.Exit(1)
+		log.Printf("FATAL: Failed to acquire the Windows instance mutex: %v", err)
+		if logFile != nil {
+			_ = logFile.Sync()
+		}
+		os.Exit(1)
+	}
+	if alreadyRunning {
+		log.Println("Application is already running. Bringing existing window to front...")
+		if !platform.BringWindowToFront(appTitle) {
+			log.Printf("Existing lhcontrol process was detected, but its window was not found")
+			if logFile != nil {
+				_ = logFile.Sync()
 			}
-			if logFile != nil {
-				logFile.Sync()
-			} // Sync before exit, only if file exists
-			os.Exit(0)
-		} else {
-			log.Printf("FATAL: Failed to acquire instance lock on port %s: %v", lockPort, err)
-			if logFile != nil {
-				logFile.Sync()
-			} // Sync before exit, only if file exists
 			os.Exit(1)
 		}
+		if logFile != nil {
+			_ = logFile.Sync()
+		}
+		return
 	}
-	defer listener.Close()
-	log.Printf("Acquired instance lock on port %s", lockPort)
+	defer releaseInstance()
+	log.Printf("Acquired Windows instance mutex %s", instanceMutexName)
 
 	// Create app
 	app := NewApp()

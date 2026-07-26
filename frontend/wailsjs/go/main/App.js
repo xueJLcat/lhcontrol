@@ -18,10 +18,6 @@ export function GetScanStatus() {
   return window['go']['main']['App']['GetScanStatus']();
 }
 
-export function Greet(arg1) {
-  return window['go']['main']['App']['Greet'](arg1);
-}
-
 export function IdentifyStation(arg1) {
   return window['go']['main']['App']['IdentifyStation'](arg1);
 }

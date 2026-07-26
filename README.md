@@ -6,6 +6,10 @@
 
 A simple application to control Valve Lighthouse (SteamVR) base stations v2.0 power state via Bluetooth LE.
 
+lhcontrol is a Windows-only application. Its bundled Bluetooth dependency
+contains Windows WinRT stability patches and is not intended to compile on
+Linux or macOS.
+
 ## Features
 
 *   Scan for nearby Lighthouse base stations.
@@ -15,7 +19,7 @@ A simple application to control Valve Lighthouse (SteamVR) base stations v2.0 po
 *   Identify a physical station by flashing its LED when supported.
 *   Detect channel conflicts and safely change a channel with mandatory readback.
 *   Display firmware, hardware, model, serial-number, manufacturer, and BLE capabilities.
-*   Power On/Off all known base stations simultaneously.
+*   Power On/Off all base stations discovered during the current app session.
 *   Rename base stations (locally) for easier identification.
 *   Persistent list of discovered stations across scans (within a single app session).
 
@@ -28,11 +32,12 @@ A simple application to control Valve Lighthouse (SteamVR) base stations v2.0 po
 
 ## Prerequisites
 
-*   **Bluetooth Adapter:** You MUST have a working Bluetooth adapter compatible with your OS that supports **Bluetooth Low Energy (BLE)**. Many built-in adapters work, but dedicated USB adapters can sometimes offer better performance/compatibility.
-*   **Go:** Version 1.18 or higher.
-*   **Node.js & npm:** Required by Wails for frontend dependencies.
-*   **Wails CLI:** Install via `go install github.com/wailsapp/wails/v2/cmd/wails@latest`.
-*   **TinyGo:** While the main build uses the standard Go compiler, the `tinygo/bluetooth` library is used. Ensure required system dependencies for BLE development are met (e.g., build-essential, libbluetooth-dev on Debian/Ubuntu).
+*   **Operating system:** Windows 10 or Windows 11, x64.
+*   **Bluetooth Adapter:** A Windows-compatible Bluetooth Low Energy adapter with current drivers.
+*   **Go:** Version 1.25.12.
+*   **Node.js:** Version 22.14 or newer in the Node 22 release line.
+*   **Wails CLI:** Install the project version with `go install github.com/wailsapp/wails/v2/cmd/wails@v2.13.0`.
+*   **NSIS:** Version 3.12 is required only when building the Windows installer with `wails build -nsis`.
 
 ## Setup
 
@@ -45,7 +50,7 @@ A simple application to control Valve Lighthouse (SteamVR) base stations v2.0 po
     Wails typically handles this automatically during the build, but you can run it manually if needed:
     ```bash
     cd frontend
-    npm install
+    npm ci
     cd ..
     ```
 
@@ -59,8 +64,9 @@ A simple application to control Valve Lighthouse (SteamVR) base stations v2.0 po
     ```bash
     wails build
     ```
-    This will create an executable in the `build/bin` directory.
-    Alternatively, for Windows users, a pre-built installer (`lhcontrol-amd64-installer.exe`) may be available in the project's releases.
+    This creates a Windows executable in the `build/bin` directory. A pre-built
+    installer (`lhcontrol-amd64-installer.exe`) may also be available in the
+    project's releases.
 
 ## Usage
 
@@ -69,13 +75,15 @@ A simple application to control Valve Lighthouse (SteamVR) base stations v2.0 po
 3.  The application will attempt to connect to discovered stations to determine their power state.
 4.  Use the **Power** menu to select On, Standby, or Sleep.
 5.  Open **Details** to inspect capabilities and metadata, identify a station, or safely change its channel.
-6.  Use the **All** controls to change all stations retained as visible by the latest reliable scans.
+6.  Use the **All** controls to change all stations discovered during the current app session, including stations missed by the latest scan.
 
 ## Troubleshooting
 
 *   **Scanning Issues:** If scans fail after the first time, or interactions fail with errors like "characteristic not found", try removing the base station(s) from your operating system's Bluetooth device list and restarting your computer. Do *not* re-pair them in the OS settings; the application will find them via scanning.
+*   **Bluetooth unavailable:** Turn Bluetooth back on or reconnect the adapter, wait two seconds, and scan again. The running application retries adapter initialization without requiring a restart.
 *   **Bluetooth Drivers:** Ensure you have the latest drivers for your Bluetooth adapter.
 *   **Permissions:** The application might require specific permissions to access Bluetooth hardware.
+*   **Diagnostic log:** `%APPDATA%\lhcontrol\lhcontrol.log` is capped at 5 MB. One previous segment is retained as `lhcontrol.log.1`.
 
 ## HTTP API (for External Integration)
 
@@ -84,14 +92,14 @@ This application also exposes a simple HTTP API on `http://127.0.0.1:7575` for b
 **Endpoints:**
 
 *   **`POST /allon`**
-    *   **Description:** Attempts to turn ON all known base stations.
+    *   **Description:** Attempts to turn ON all base stations known in the current app session.
     *   **Request Body:** None
-    *   **Response:** `200 OK` after all stations confirm the ON state; `409 Conflict` if another Bluetooth operation is active.
+    *   **Response:** `200 OK` when every command was sent or skipped. Use `POST /stations/power` when per-station confirmation details are required. Returns `409 Conflict` if another Bluetooth operation is active.
 
 *   **`POST /alloff`**
-    *   **Description:** Attempts to turn OFF all known base stations.
+    *   **Description:** Attempts to put all base stations known in the current app session into Sleep.
     *   **Request Body:** None
-    *   **Response:** `200 OK` after all stations confirm the OFF state; `409 Conflict` if another Bluetooth operation is active.
+    *   **Response:** `200 OK` when every command was sent or skipped. Use `POST /stations/power` when per-station confirmation details are required. Returns `409 Conflict` if another Bluetooth operation is active.
 
 *   **`GET /status`**
     *   **Description:** Returns the current list of known base stations and their states.
@@ -128,11 +136,11 @@ This application also exposes a simple HTTP API on `http://127.0.0.1:7575` for b
 
 *   **`POST /stations/power`**
     *   **Body:** `{"state":"on"}`, `{"state":"standby"}`, or `{"state":"sleep"}`.
-    *   **Response:** A structured result for every attempted visible station, including command-sent, success, confirmation, and error fields.
+    *   **Response:** A structured result for every known station, including command-sent, success, confirmation, and error fields.
 
 *   **`POST /stations/:address/power`**
     *   **Body:** `{"state":"on"}`, `{"state":"standby"}`, or `{"state":"sleep"}`.
-    *   **Response:** The updated station plus a `confirmed` flag. A writable-only firmware returns `confirmed: false`.
+    *   **Response:** `200 OK` with the updated station, `commandSent`, `confirmed`, and `confirmationError`. A command that was sent but could not be confirmed is represented by `confirmed: false`; failures before the write retain their normal 4xx/5xx status.
 
 *   **`POST /stations/:address/identify`**
     *   **Description:** Flashes the selected physical station when Identify is supported.
@@ -156,3 +164,14 @@ curl -X POST http://127.0.0.1:7575/allon
 # Turn all base stations OFF
 curl -X POST http://127.0.0.1:7575/alloff
 ```
+
+## Release Hardware Checklist
+
+Automated tests cannot emulate Windows WinRT or a physical Lighthouse. Before
+publishing a release on a Bluetooth-enabled Windows machine:
+
+1. Run at least 10 consecutive scans and verify the process remains stable.
+2. Exit during a scan and confirm shutdown completes without a crash.
+3. Exercise On, Standby, and Sleep for one station and for all known stations.
+4. Verify command readback, channel conflict rejection, and a successful channel change.
+5. Disable and re-enable Bluetooth, then verify scanning and device controls recover.

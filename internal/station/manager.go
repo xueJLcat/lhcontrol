@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"runtime/debug"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -20,6 +21,7 @@ var ErrInvalidArgument = errors.New("invalid argument")
 var ErrUnsupported = errors.New("operation is not supported")
 var ErrChannelConflict = errors.New("channel conflicts with another visible station")
 var ErrScanRequired = errors.New("a recent successful scan is required")
+var ErrShuttingDown = errors.New("application is shutting down")
 
 const (
 	statusFreshnessWindow      = 45 * time.Second
@@ -110,11 +112,17 @@ type Manager struct {
 	isScanning             atomic.Bool
 	scanStatusMutex        sync.RWMutex
 	scanStatus             ScanStatus
+	initializeMutex        sync.Mutex
 	initializeErr          error
+	nextInitializeAt       time.Time
+	initializeBluetooth    func() error
 	asyncScanWg            sync.WaitGroup
 	statusRetryMutex       sync.Mutex
 	statusRetries          map[string]statusRetry
 	statusRecoveryRunning  atomic.Bool
+	shuttingDown           atomic.Bool
+	shutdownOnce           sync.Once
+	shutdownCh             chan struct{}
 }
 
 type statusRetry struct {
@@ -130,6 +138,8 @@ func NewManager(cfg *config.Config) *Manager {
 		deviceOperationSlots:   make(chan struct{}, 2),
 		statusRetries:          make(map[string]statusRetry),
 		scanStatus:             ScanStatus{State: "idle", Warnings: []string{}},
+		initializeBluetooth:    bluetooth.Initialize,
+		shutdownCh:             make(chan struct{}),
 	}
 }
 
@@ -157,18 +167,52 @@ func (m *Manager) clearStatusFailure(address string) {
 
 // Initialize should be called at app startup
 func (m *Manager) Initialize() error {
-	m.initializeErr = bluetooth.Initialize()
+	m.initializeMutex.Lock()
+	defer m.initializeMutex.Unlock()
+	m.initializeErr = m.initializeBluetooth()
+	if m.initializeErr != nil {
+		m.nextInitializeAt = time.Now().Add(2 * time.Second)
+	} else {
+		m.nextInitializeAt = time.Time{}
+	}
 	return m.initializeErr
 }
 
 func (m *Manager) ensureReady() error {
-	if m.initializeErr != nil {
-		return fmt.Errorf("Bluetooth is unavailable: %w", m.initializeErr)
+	if m.shuttingDown.Load() {
+		return ErrShuttingDown
 	}
+	m.initializeMutex.Lock()
+	defer m.initializeMutex.Unlock()
+	if m.initializeErr == nil {
+		return nil
+	}
+	if time.Now().Before(m.nextInitializeAt) {
+		return fmt.Errorf("Bluetooth is unavailable; turn on Bluetooth or check the adapter, then retry: %w", m.initializeErr)
+	}
+	m.initializeErr = m.initializeBluetooth()
+	if m.initializeErr != nil {
+		m.nextInitializeAt = time.Now().Add(2 * time.Second)
+		return fmt.Errorf("Bluetooth is unavailable; turn on Bluetooth or check the adapter, then retry: %w", m.initializeErr)
+	}
+	m.nextInitializeAt = time.Time{}
 	return nil
 }
 
+func (m *Manager) markBluetoothUnavailable(err error) {
+	if !bluetooth.IsAdapterUnavailable(err) {
+		return
+	}
+	m.initializeMutex.Lock()
+	m.initializeErr = err
+	m.nextInitializeAt = time.Now().Add(2 * time.Second)
+	m.initializeMutex.Unlock()
+}
+
 func (m *Manager) beginOperation() error {
+	if m.shuttingDown.Load() {
+		return ErrShuttingDown
+	}
 	if !m.operationMutex.TryLock() {
 		return ErrOperationInProgress
 	}
@@ -183,6 +227,9 @@ func (m *Manager) endOperation() {
 // and caps independent GATT work at two devices. It never waits while holding
 // the global read lock, so a request flood cannot starve a scan.
 func (m *Manager) beginStationOperation(address string) error {
+	if m.shuttingDown.Load() {
+		return ErrShuttingDown
+	}
 	if !m.operationMutex.TryRLock() {
 		return ErrOperationInProgress
 	}
@@ -293,6 +340,25 @@ func (m *Manager) GetStationInfo() []StationInfo {
 			Metadata:          snapshot.Metadata,
 		})
 	}
+	sort.Slice(stationInfos, func(i, j int) bool {
+		leftChannel := stationInfos[i].Channel
+		rightChannel := stationInfos[j].Channel
+		if leftChannel <= bluetooth.ChannelUnknown {
+			leftChannel = int(^uint(0) >> 1)
+		}
+		if rightChannel <= bluetooth.ChannelUnknown {
+			rightChannel = int(^uint(0) >> 1)
+		}
+		if leftChannel != rightChannel {
+			return leftChannel < rightChannel
+		}
+		leftName := strings.ToLower(stationInfos[i].Name)
+		rightName := strings.ToLower(stationInfos[j].Name)
+		if leftName != rightName {
+			return leftName < rightName
+		}
+		return strings.ToLower(stationInfos[i].Address) < strings.ToLower(stationInfos[j].Address)
+	})
 	return stationInfos
 }
 
@@ -384,6 +450,7 @@ func (m *Manager) scanAndFetchStations() ([]StationInfo, int, error) {
 
 	discoveredValues, err := bluetooth.ScanForDuration(scanDuration)
 	if err != nil {
+		m.markBluetoothUnavailable(err)
 		return m.GetStationInfo(), 0, fmt.Errorf("bluetooth scan failed: %w", err)
 	}
 
@@ -576,16 +643,7 @@ func (m *Manager) CheckAllStationStatuses() ([]StationInfo, error) {
 			defer wg.Done()
 			for ptr := range work {
 				address := ptr.Snapshot().Address
-				for {
-					if err := m.beginStationOperation(address); err == nil {
-						break
-					}
-					if m.isScanning.Load() {
-						break
-					}
-					time.Sleep(25 * time.Millisecond)
-				}
-				if m.isScanning.Load() {
+				if err := m.beginStationOperation(address); err != nil {
 					continue
 				}
 				workerErr := runSafely("station status worker", func() error {
@@ -627,7 +685,12 @@ func (m *Manager) scheduleStatusRecovery() {
 	}
 	go func() {
 		defer m.statusRecoveryRunning.Store(false)
-		if m.isScanning.Load() || m.IsBusy() {
+		select {
+		case <-m.shutdownCh:
+			return
+		default:
+		}
+		if m.shuttingDown.Load() || m.isScanning.Load() || m.IsBusy() {
 			return
 		}
 		now := time.Now()
@@ -942,21 +1005,21 @@ func (m *Manager) SetStationChannel(address string, channel int, allowUnknownCon
 }
 
 func (m *Manager) PowerOnAllStations() error {
-	return m.setAllStationsPower("on", true)
+	return m.setAllStationsPower("on")
 }
 
 func (m *Manager) PowerOffAllStations() error {
-	return m.setAllStationsPower("sleep", true)
+	return m.setAllStationsPower("sleep")
 }
 
-// SetAllStationsPower applies one stable target to visible, writable stations.
+// SetAllStationsPower applies one stable target to known, writable stations.
 // Stations already at the target and stations currently booting are skipped.
 func (m *Manager) SetAllStationsPower(state string) error {
-	return m.setAllStationsPower(state, true)
+	return m.setAllStationsPower(state)
 }
 
-func (m *Manager) setAllStationsPower(state string, visibleOnly bool) error {
-	result, err := m.setAllStationsPowerDetailed(state, visibleOnly)
+func (m *Manager) setAllStationsPower(state string) error {
+	result, err := m.setAllStationsPowerDetailed(state)
 	if err != nil {
 		return err
 	}
@@ -972,14 +1035,14 @@ func (m *Manager) setAllStationsPower(state string, visibleOnly bool) error {
 	return nil
 }
 
-// SetAllStationsPowerDetailed returns one result per attempted visible station.
+// SetAllStationsPowerDetailed returns one result per known station.
 // Per-device failures are data, not a top-level error, so Wails callers retain
 // successful results when only part of a batch fails.
 func (m *Manager) SetAllStationsPowerDetailed(state string) (BulkPowerResult, error) {
-	return m.setAllStationsPowerDetailed(state, true)
+	return m.setAllStationsPowerDetailed(state)
 }
 
-func (m *Manager) setAllStationsPowerDetailed(state string, visibleOnly bool) (BulkPowerResult, error) {
+func (m *Manager) setAllStationsPowerDetailed(state string) (BulkPowerResult, error) {
 	target, err := bluetooth.ParsePowerTarget(state)
 	result := BulkPowerResult{Target: target.String(), Results: []BulkPowerStationResult{}}
 	if err != nil {
@@ -1004,9 +1067,6 @@ func (m *Manager) setAllStationsPowerDetailed(state string, visibleOnly bool) (B
 			continue
 		}
 		snapshot := stationPtr.Snapshot()
-		if visibleOnly && !snapshot.Present {
-			continue
-		}
 		name := snapshot.Name
 		if renamedName, ok := m.config.GetStationDisplayName(snapshot.Address, snapshot.Name); ok {
 			name = renamedName
@@ -1140,6 +1200,10 @@ func (m *Manager) RenameStationByAddress(address, newName string) error {
 }
 
 func (m *Manager) Shutdown() {
+	m.shutdownOnce.Do(func() {
+		m.shuttingDown.Store(true)
+		close(m.shutdownCh)
+	})
 	if m.isScanning.Load() {
 		if err := bluetooth.CancelScan(); err != nil {
 			log.Printf("Unable to stop active Bluetooth scan during shutdown: %v", err)

@@ -4,6 +4,7 @@ package platform
 
 import (
 	"log"
+	"sync"
 	"syscall"
 	"unsafe"
 )
@@ -14,7 +15,34 @@ var (
 	procSetForegroundWindow = user32.NewProc("SetForegroundWindow")
 	procShowWindow          = user32.NewProc("ShowWindow")
 	procFlashWindowEx       = user32.NewProc("FlashWindowEx")
+	kernel32                = syscall.NewLazyDLL("kernel32.dll")
+	procCreateMutexW        = kernel32.NewProc("CreateMutexW")
+	procCloseHandle         = kernel32.NewProc("CloseHandle")
 )
+
+// AcquireSingleInstance owns a named Windows mutex until the returned release
+// function is called. Unlike a TCP port lock it cannot collide with unrelated
+// local services or depend on localized socket error strings.
+func AcquireSingleInstance(name string) (release func(), alreadyRunning bool, err error) {
+	namePtr, err := syscall.UTF16PtrFromString(name)
+	if err != nil {
+		return nil, false, err
+	}
+	handle, _, callErr := procCreateMutexW.Call(0, 0, uintptr(unsafe.Pointer(namePtr)))
+	if handle == 0 {
+		return nil, false, callErr
+	}
+	if errno, ok := callErr.(syscall.Errno); ok && errno == syscall.ERROR_ALREADY_EXISTS {
+		procCloseHandle.Call(handle)
+		return func() {}, true, nil
+	}
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			procCloseHandle.Call(handle)
+		})
+	}, false, nil
+}
 
 // Windows API constants (from winuser.h)
 const (

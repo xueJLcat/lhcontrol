@@ -2,7 +2,7 @@
   "$schema": "https://wails.io/schemas/config.v2.json",
   "name": "lhcontrol",
   "outputfilename": "lhcontrol",
-  "frontend:install": "npm install",
+  "frontend:install": "npm ci",
   "frontend:build": "npm run build",
   "frontend:dev:watcher": "npm run dev",
   "frontend:dev:serverUrl": "auto",
@@ -13,8 +13,8 @@
   "info": {
     "companyName": "FlameInTheDark",
     "productName": "Lighthouse Control",
-    "productVersion": "1.0.0",
-    "copyright": "Copyright © 2024 FlameInTheDark",
+    "productVersion": "1.4.0",
+    "copyright": "Copyright (c) 2024-2026 FlameInTheDark",
     "comments": "Control Valve Lighthouse base stations v2.0 power state"
   }
 }

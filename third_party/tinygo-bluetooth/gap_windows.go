@@ -29,6 +29,21 @@ type Advertisement struct {
 	publisher     *advertisement.BluetoothLEAdvertisementPublisher
 }
 
+func scanStoppedError(code bluetooth.BluetoothError) error {
+	switch code {
+	case bluetooth.BluetoothErrorSuccess:
+		return nil
+	case bluetooth.BluetoothErrorRadioNotAvailable:
+		return fmt.Errorf("%w (WinRT error code %d)", ErrRadioNotAvailable, code)
+	case bluetooth.BluetoothErrorResourceInUse:
+		return fmt.Errorf("%w (WinRT error code %d)", ErrResourceInUse, code)
+	case bluetooth.BluetoothErrorDisabledByPolicy:
+		return fmt.Errorf("%w (WinRT error code %d)", ErrDisabledByPolicy, code)
+	default:
+		return fmt.Errorf("Bluetooth scan stopped with WinRT error code %d", code)
+	}
+}
+
 // DefaultAdvertisement returns the default advertisement instance but does not
 // configure it.
 func (a *Adapter) DefaultAdvertisement() *Advertisement {
@@ -233,10 +248,8 @@ func (a *Adapter) Scan(callback func(*Adapter, ScanResult)) (err error) {
 				// Got an error while getting the error value, that shouldn't
 				// happen.
 				stoppingChan <- fmt.Errorf("failed to get stopping error value: %w", err)
-			} else if errCode != bluetooth.BluetoothErrorSuccess {
-				// Could not stop the scan? I'm not sure when this would actually
-				// happen.
-				stoppingChan <- fmt.Errorf("failed to stop scanning (error code %d)", errCode)
+			} else if stopErr := scanStoppedError(errCode); stopErr != nil {
+				stoppingChan <- stopErr
 			}
 			close(stoppingChan)
 		})

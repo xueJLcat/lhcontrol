@@ -7,7 +7,50 @@ import (
 
 	internalbluetooth "lhcontrol/internal/bluetooth"
 	"lhcontrol/internal/config"
+	tinybluetooth "tinygo.org/x/bluetooth"
 )
+
+func mustAddress(t *testing.T, value string) tinybluetooth.Address {
+	t.Helper()
+	mac, err := tinybluetooth.ParseMAC(value)
+	if err != nil {
+		t.Fatalf("ParseMAC(%q) error = %v", value, err)
+	}
+	return tinybluetooth.Address{MACAddress: tinybluetooth.MACAddress{MAC: mac}}
+}
+
+func TestBluetoothInitializationRecoversAfterRetry(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	attempts := 0
+	manager.initializeBluetooth = func() error {
+		attempts++
+		if attempts == 1 {
+			return errors.New("radio unavailable")
+		}
+		return nil
+	}
+	if err := manager.Initialize(); err == nil {
+		t.Fatal("first initialization unexpectedly succeeded")
+	}
+	manager.nextInitializeAt = time.Now().Add(-time.Second)
+	if err := manager.ensureReady(); err != nil {
+		t.Fatalf("retry did not recover: %v", err)
+	}
+	if attempts != 2 {
+		t.Fatalf("initialization attempts = %d, want 2", attempts)
+	}
+}
+
+func TestShutdownRejectsNewOperations(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	manager.Shutdown()
+	if err := manager.beginOperation(); !errors.Is(err, ErrShuttingDown) {
+		t.Fatalf("beginOperation() = %v, want ErrShuttingDown", err)
+	}
+	if err := manager.beginStationOperation("AA"); !errors.Is(err, ErrShuttingDown) {
+		t.Fatalf("beginStationOperation() = %v, want ErrShuttingDown", err)
+	}
+}
 
 func TestOperationCoordinator(t *testing.T) {
 	manager := NewManager(config.NewConfig())
@@ -75,6 +118,36 @@ func TestVisibleStationsOnlyParticipateInChannelConflicts(t *testing.T) {
 	}
 	if conflicts["LHB-C"] || conflicts["LHB-D"] {
 		t.Fatalf("station absent from latest scan affected conflict detection: %v", conflicts)
+	}
+}
+
+func TestStationInfoIsSortedByChannelNameAndAddress(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	manager.stations["unknown"] = &internalbluetooth.BaseStation{Name: "Unknown", Address: mustAddress(t, "11:22:33:44:55:66")}
+	manager.stations["channel-two-z"] = &internalbluetooth.BaseStation{Name: "Zulu", Address: mustAddress(t, "22:22:33:44:55:66"), Channel: 2}
+	manager.stations["channel-two-a2"] = &internalbluetooth.BaseStation{Name: "alpha", Address: mustAddress(t, "44:22:33:44:55:66"), Channel: 2}
+	manager.stations["channel-two-a1"] = &internalbluetooth.BaseStation{Name: "Alpha", Address: mustAddress(t, "33:22:33:44:55:66"), Channel: 2}
+	manager.stations["channel-one"] = &internalbluetooth.BaseStation{Name: "Bravo", Address: mustAddress(t, "55:22:33:44:55:66"), Channel: 1}
+
+	infos := manager.GetStationInfo()
+	got := make([]string, 0, len(infos))
+	for _, info := range infos {
+		got = append(got, info.Address)
+	}
+	want := []string{
+		"55:22:33:44:55:66",
+		"33:22:33:44:55:66",
+		"44:22:33:44:55:66",
+		"22:22:33:44:55:66",
+		"11:22:33:44:55:66",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("sorted station count = %d, want %d", len(got), len(want))
+	}
+	for index := range want {
+		if got[index] != want[index] {
+			t.Fatalf("sorted addresses = %v, want %v", got, want)
+		}
 	}
 }
 
@@ -208,8 +281,9 @@ func TestSetAllStationsPowerSkipsIneligibleStations(t *testing.T) {
 		Capabilities: internalbluetooth.Capabilities{PowerWrite: true}, CapabilitiesKnown: true, LastPowerReadAt: time.Now(),
 	}
 	manager.stations["not-visible"] = &internalbluetooth.BaseStation{
-		Name: "LHB-OFFLINE", Present: false, PowerState: internalbluetooth.PowerStateSleep,
-		Capabilities: internalbluetooth.Capabilities{PowerWrite: true},
+		Name: "LHB-OFFLINE", Present: false, PowerState: internalbluetooth.PowerStateOn, RawPowerState: 0x0B,
+		Capabilities: internalbluetooth.Capabilities{PowerWrite: true, Standby: false}, CapabilitiesKnown: true,
+		LastPowerReadAt: time.Now(),
 	}
 
 	if err := manager.SetAllStationsPower("on"); err != nil {
@@ -227,8 +301,8 @@ func TestSetAllStationsPowerSkipsIneligibleStations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SetAllStationsPowerDetailed() error = %v", err)
 	}
-	if len(result.Results) != 3 {
-		t.Fatalf("detailed result count = %d, want all three visible stations", len(result.Results))
+	if len(result.Results) != 4 {
+		t.Fatalf("detailed result count = %d, want all four known stations", len(result.Results))
 	}
 	for _, stationResult := range result.Results {
 		if !stationResult.Skipped || stationResult.Reason == "" {
@@ -240,20 +314,25 @@ func TestSetAllStationsPowerSkipsIneligibleStations(t *testing.T) {
 	}
 }
 
-func TestLegacyBulkPowerExcludesAbsentStations(t *testing.T) {
+func TestBulkPowerIncludesAbsentKnownStations(t *testing.T) {
 	manager := NewManager(config.NewConfig())
 	manager.stations["offline"] = &internalbluetooth.BaseStation{
-		Name:         "LHB-OFFLINE",
-		Present:      false,
-		PowerState:   internalbluetooth.PowerStateUnknown,
-		Capabilities: internalbluetooth.Capabilities{PowerWrite: true},
+		Name:              "LHB-OFFLINE",
+		Present:           false,
+		PowerState:        internalbluetooth.PowerStateOn,
+		RawPowerState:     0x0B,
+		LastPowerReadAt:   time.Now(),
+		Capabilities:      internalbluetooth.Capabilities{PowerWrite: true},
+		CapabilitiesKnown: true,
 	}
 
-	if err := manager.PowerOnAllStations(); err != nil {
-		t.Fatalf("PowerOnAllStations() attempted an absent station: %v", err)
+	result, err := manager.SetAllStationsPowerDetailed("on")
+	if err != nil {
+		t.Fatalf("SetAllStationsPowerDetailed() error = %v", err)
 	}
-	if err := manager.PowerOffAllStations(); err != nil {
-		t.Fatalf("PowerOffAllStations() attempted an absent station: %v", err)
+	if len(result.Results) != 1 || result.Results[0].Address != "00:00:00:00:00:00" ||
+		!result.Results[0].Skipped || !result.Results[0].Success {
+		t.Fatalf("absent known station was excluded from bulk result: %+v", result.Results)
 	}
 }
 
