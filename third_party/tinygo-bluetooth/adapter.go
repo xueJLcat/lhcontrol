@@ -13,5 +13,7 @@ type BLEAdapter interface {
 // or disconnects. You must call this before you call adapter.Connect() for centrals
 // or advertisement.Start() for peripherals in order for it to work.
 func (a *Adapter) SetConnectHandler(c func(device Device, connected bool)) {
+	a.connectHandlerMutex.Lock()
 	a.connectHandler = c
+	a.connectHandlerMutex.Unlock()
 }

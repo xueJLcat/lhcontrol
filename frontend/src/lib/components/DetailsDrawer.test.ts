@@ -77,6 +77,7 @@ describe('DetailsDrawer actions', () => {
         station: station(),
         busy: false,
         locked: false,
+        inactive: false,
         onClose: vi.fn(),
         onRefresh: vi.fn(),
         onIdentify: vi.fn(),
@@ -101,6 +102,7 @@ describe('DetailsDrawer actions', () => {
         station: station(),
         busy: false,
         locked: true,
+        inactive: false,
         onClose: vi.fn(),
         onRefresh,
         onIdentify,
@@ -115,6 +117,7 @@ describe('DetailsDrawer actions', () => {
       station: station(),
       busy: false,
       locked: false,
+      inactive: false,
       onClose: vi.fn(),
       onRefresh,
       onIdentify,
@@ -140,6 +143,7 @@ describe('DetailsDrawer actions', () => {
         station: unknownCapabilities,
         busy: false,
         locked: false,
+        inactive: false,
         onClose: vi.fn(),
         onRefresh: vi.fn(),
         onIdentify: vi.fn(),
@@ -149,5 +153,25 @@ describe('DetailsDrawer actions', () => {
 
     expect(screen.getByRole('button', { name: /Identify/i })).toBeEnabled();
     expect(screen.getByRole('button', { name: /Change Channel/i })).toBeEnabled();
+  });
+
+  it('uses modal semantics and becomes inert under a child modal', async () => {
+    const view = render(DetailsDrawer, {
+      props: {
+        station: station(), busy: false, locked: false, inactive: false,
+        onClose: vi.fn(), onRefresh: vi.fn(), onIdentify: vi.fn(), onOpenChannelEditor: vi.fn()
+      }
+    });
+    const drawer = screen.getByRole('dialog', { name: 'Station details' });
+    expect(drawer).toHaveAttribute('aria-modal', 'true');
+
+    await view.rerender({
+      station: station(), busy: false, locked: false, inactive: true,
+      onClose: vi.fn(), onRefresh: vi.fn(), onIdentify: vi.fn(), onOpenChannelEditor: vi.fn()
+    });
+    const hiddenDrawer = document.querySelector('.drawer');
+    expect(hiddenDrawer).toHaveProperty('inert', true);
+    expect(hiddenDrawer).toHaveAttribute('aria-hidden', 'true');
+    expect(hiddenDrawer).not.toHaveAttribute('aria-modal');
   });
 });

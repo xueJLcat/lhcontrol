@@ -1,6 +1,7 @@
 package bluetooth
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -38,17 +39,18 @@ func (p *fakeAdvertisementPayload) ServiceData() []tinybluetooth.ServiceDataElem
 }
 
 type fakeBLEAdapter struct {
-	results     []tinybluetooth.ScanResult
-	scanErr     error
-	panicScan   bool
-	panicStop   bool
-	returnEarly bool
-	started     chan struct{}
-	stopped     chan struct{}
-	startOnce   sync.Once
-	once        sync.Once
-	stopCalls   atomic.Int32
-	startDelay  chan struct{}
+	results        []tinybluetooth.ScanResult
+	scanErr        error
+	panicScan      bool
+	panicStop      bool
+	returnEarly    bool
+	started        chan struct{}
+	stopped        chan struct{}
+	startOnce      sync.Once
+	once           sync.Once
+	stopCalls      atomic.Int32
+	startDelay     chan struct{}
+	connectHandler func(tinybluetooth.Device, bool)
 }
 
 func newFakeBLEAdapter(results ...tinybluetooth.ScanResult) *fakeBLEAdapter {
@@ -59,7 +61,15 @@ func (a *fakeBLEAdapter) Enable() error { return nil }
 func (a *fakeBLEAdapter) Connect(tinybluetooth.Address, tinybluetooth.ConnectionParams) (tinybluetooth.Device, error) {
 	return tinybluetooth.Device{}, errors.New("fake connect is not configured")
 }
-func (a *fakeBLEAdapter) SetConnectHandler(func(tinybluetooth.Device, bool)) {}
+func (a *fakeBLEAdapter) SetConnectHandler(handler func(tinybluetooth.Device, bool)) {
+	a.connectHandler = handler
+}
+
+func (a *fakeBLEAdapter) emitConnection(device tinybluetooth.Device, connected bool) {
+	if a.connectHandler != nil {
+		a.connectHandler(device, connected)
+	}
+}
 func (a *fakeBLEAdapter) Scan(callback func(*tinybluetooth.Adapter, tinybluetooth.ScanResult)) error {
 	return a.ScanWithStart(callback, nil)
 }
@@ -104,6 +114,7 @@ type fakeCharacteristic struct {
 	writeErr                     error
 	writeWithResponseErr         error
 	writeWithoutResponseErr      error
+	writeWithoutResponseErrors   []error
 	writeErrorAfterApply         bool
 	readErrAfterWrite            error
 	ignoreWrite                  bool
@@ -112,7 +123,15 @@ type fakeCharacteristic struct {
 	writeWithResponseAttempts    int
 	writeWithoutResponseAttempts int
 	writes                       [][]byte
+	writeErrors                  []error
 }
+
+type classifiedWriteError struct {
+	possiblySent bool
+}
+
+func (e *classifiedWriteError) Error() string      { return "classified write failure" }
+func (e *classifiedWriteError) PossiblySent() bool { return e.possiblySent }
 
 type fakeConnectedDevice struct{}
 
@@ -221,8 +240,12 @@ func (f *fakeCharacteristic) Write(value []byte) (int, error) {
 
 func (f *fakeCharacteristic) WriteWithoutResponse(value []byte) (int, error) {
 	f.writeWithoutResponseAttempts++
-	if f.writeWithoutResponseErr != nil {
-		return 0, f.writeWithoutResponseErr
+	writeErr := f.writeWithoutResponseErr
+	if len(f.writeWithoutResponseErrors) >= f.writeWithoutResponseAttempts {
+		writeErr = f.writeWithoutResponseErrors[f.writeWithoutResponseAttempts-1]
+	}
+	if writeErr != nil {
+		return 0, writeErr
 	}
 	return f.write(value)
 }
@@ -233,8 +256,12 @@ func (f *fakeCharacteristic) Properties() uint32 {
 
 func (f *fakeCharacteristic) write(value []byte) (int, error) {
 	f.writeAttempts++
-	if f.writeErr != nil && !f.writeErrorAfterApply {
-		return 0, f.writeErr
+	writeErr := f.writeErr
+	if len(f.writeErrors) >= f.writeAttempts {
+		writeErr = f.writeErrors[f.writeAttempts-1]
+	}
+	if writeErr != nil && !f.writeErrorAfterApply {
+		return 0, writeErr
 	}
 	f.writes = append(f.writes, append([]byte(nil), value...))
 	if !f.ignoreWrite && len(value) == 1 {
@@ -244,8 +271,8 @@ func (f *fakeCharacteristic) write(value []byte) (int, error) {
 		}
 		f.value = []byte{raw}
 	}
-	if f.writeErr != nil {
-		return 0, f.writeErr
+	if writeErr != nil {
+		return 0, writeErr
 	}
 	return len(value), nil
 }
@@ -350,12 +377,140 @@ func TestWriteCharacteristicDoesNotRetryAmbiguousTransportFailure(t *testing.T) 
 	if !errors.Is(err, tinybluetooth.ErrGATTUnreachable) {
 		t.Fatalf("writeCharacteristicValueInternal() error = %v", err)
 	}
+	if !IsPossiblySent(err) {
+		t.Fatalf("writeCharacteristicValueInternal() error = %v, want possibly-sent classification", err)
+	}
 	if characteristic.writeWithoutResponseAttempts != 1 || characteristic.writeWithResponseAttempts != 0 {
 		t.Fatalf(
 			"write attempts without-response=%d with-response=%d, want 1 and 0",
 			characteristic.writeWithoutResponseAttempts,
 			characteristic.writeWithResponseAttempts,
 		)
+	}
+}
+
+func TestSetPowerStateConfirmsAmbiguousWriteWithoutReplay(t *testing.T) {
+	power := &fakeCharacteristic{
+		value:                   []byte{0x0B},
+		writeWithoutResponseErr: tinybluetooth.ErrGATTUnreachable,
+	}
+	station := connectedFakeStation(power, nil, nil, Capabilities{PowerRead: true, PowerWrite: true})
+
+	result, err := SetPowerState(station, PowerStateOn)
+	if err != nil || !result.Confirmed {
+		t.Fatalf("SetPowerState() result=%+v error=%v, want confirmed ambiguous command", result, err)
+	}
+	if power.writeWithoutResponseAttempts != 1 {
+		t.Fatalf("write attempts = %d, want 1", power.writeWithoutResponseAttempts)
+	}
+}
+
+func TestSetPowerStateReportsUnconfirmedAmbiguousWriteWithoutReplay(t *testing.T) {
+	power := &fakeCharacteristic{
+		value:                   []byte{0x00},
+		writeWithoutResponseErr: tinybluetooth.ErrGATTUnreachable,
+		readErrAfterWrite:       tinybluetooth.ErrGATTUnreachable,
+	}
+	station := connectedFakeStation(power, nil, nil, Capabilities{PowerRead: true, PowerWrite: true})
+
+	result, err := SetPowerState(station, PowerStateOn)
+	var confirmationErr *PowerConfirmationError
+	if !errors.As(err, &confirmationErr) || result.Confirmed || !IsPossiblySent(err) {
+		t.Fatalf("SetPowerState() result=%+v error=%v, want possibly-sent confirmation error", result, err)
+	}
+	if power.writeWithoutResponseAttempts != 1 {
+		t.Fatalf("write attempts = %d, want 1", power.writeWithoutResponseAttempts)
+	}
+}
+
+func TestSleepDoesNotContinueAfterAmbiguousPrepareWrite(t *testing.T) {
+	power := &fakeCharacteristic{
+		value:                   []byte{0x00},
+		writeWithoutResponseErr: tinybluetooth.ErrGATTUnreachable,
+	}
+	station := connectedFakeStation(power, nil, nil, Capabilities{PowerRead: true, PowerWrite: true})
+
+	result, err := SetPowerState(station, PowerStateSleep)
+	var confirmationErr *PowerConfirmationError
+	if !errors.As(err, &confirmationErr) || result.Confirmed {
+		t.Fatalf("SetPowerState() result=%+v error=%v, want unconfirmed prepare write", result, err)
+	}
+	if power.writeWithoutResponseAttempts != 1 {
+		t.Fatalf("sleep write attempts = %d, want prepare only", power.writeWithoutResponseAttempts)
+	}
+}
+
+func TestSleepDoesNotReplayAfterAmbiguousFinalWrite(t *testing.T) {
+	power := &fakeCharacteristic{
+		value:                      []byte{0x00},
+		writeWithoutResponseErrors: []error{nil, tinybluetooth.ErrGATTUnreachable},
+		readErrAfterWrite:          tinybluetooth.ErrAttReadNotPermitted,
+	}
+	station := connectedFakeStation(power, nil, nil, Capabilities{PowerRead: true, PowerWrite: true})
+
+	result, err := SetPowerState(station, PowerStateSleep)
+	var confirmationErr *PowerConfirmationError
+	if !errors.As(err, &confirmationErr) || result.Confirmed {
+		t.Fatalf("SetPowerState() result=%+v error=%v, want unconfirmed final write", result, err)
+	}
+	if power.writeWithoutResponseAttempts != 2 {
+		t.Fatalf("sleep write attempts = %d, want exactly 2", power.writeWithoutResponseAttempts)
+	}
+}
+
+func TestAdapterDisconnectAsynchronouslyInvalidatesMatchingDevice(t *testing.T) {
+	originalAdapter := adapter
+	fake := newFakeBLEAdapter()
+	adapter = fake
+	t.Cleanup(func() { adapter = originalAdapter })
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+
+	mac, err := tinybluetooth.ParseMAC("11:22:33:44:55:66")
+	if err != nil {
+		t.Fatalf("ParseMAC() error = %v", err)
+	}
+	address := tinybluetooth.Address{MACAddress: tinybluetooth.MACAddress{MAC: mac}}
+	device := tinybluetooth.Device{Address: address}
+	station := connectedFakeStation(&fakeCharacteristic{}, &fakeCharacteristic{}, &fakeCharacteristic{}, Capabilities{PowerRead: true})
+	station.Address = address
+	station.device = device
+	connectedStationsMutex.Lock()
+	previous := connectedStations
+	connectedStations = []*BaseStation{station}
+	connectedStationsMutex.Unlock()
+	t.Cleanup(func() {
+		connectedStationsMutex.Lock()
+		connectedStations = previous
+		connectedStationsMutex.Unlock()
+	})
+
+	fake.emitConnection(device, false)
+	deadline := time.Now().Add(time.Second)
+	for station.Snapshot().Connected && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if station.Snapshot().Connected || station.characteristic != nil || station.modeCharacteristic != nil || station.identifyCharacteristic != nil {
+		t.Fatalf("disconnect callback retained cached handles: %+v", station.Snapshot())
+	}
+}
+
+func TestStaleAdapterDisconnectDoesNotInvalidateReplacementDevice(t *testing.T) {
+	mac, err := tinybluetooth.ParseMAC("11:22:33:44:55:66")
+	if err != nil {
+		t.Fatalf("ParseMAC() error = %v", err)
+	}
+	address := tinybluetooth.Address{MACAddress: tinybluetooth.MACAddress{MAC: mac}}
+	oldDevice := tinybluetooth.Device{Address: address}
+	replacement := fakeConnectedDevice{}
+	station := connectedFakeStation(&fakeCharacteristic{}, nil, nil, Capabilities{PowerWrite: true})
+	station.Address = address
+	station.device = replacement
+
+	invalidateDisconnectedDevice(station, oldDevice)
+	if !station.Snapshot().Connected || station.device != replacement || station.characteristic == nil {
+		t.Fatal("stale disconnect callback invalidated the replacement connection")
 	}
 }
 
@@ -375,6 +530,19 @@ func TestWriteCharacteristicFallsBackOnlyForUnsupportedWriteMode(t *testing.T) {
 			characteristic.writeWithoutResponseAttempts,
 			characteristic.writeWithResponseAttempts,
 		)
+	}
+}
+
+func TestWriteCharacteristicPreservesDefinitelyNotSentClassification(t *testing.T) {
+	writeErr := &classifiedWriteError{possiblySent: false}
+	characteristic := &fakeCharacteristic{
+		properties:              uint32(tinybluetooth.CharacteristicWriteWithoutResponsePermission),
+		writeWithoutResponseErr: writeErr,
+	}
+
+	err := writeCharacteristicValueInternal(characteristic, 0x01)
+	if !errors.Is(err, writeErr) || IsPossiblySent(err) {
+		t.Fatalf("writeCharacteristicValueInternal() error = %v, want definitely-not-sent classification", err)
 	}
 }
 
@@ -478,8 +646,24 @@ func TestIdentifyWritesOne(t *testing.T) {
 	}
 }
 
+func TestIdentifyDoesNotRetryAmbiguousWrite(t *testing.T) {
+	identify := &fakeCharacteristic{writeWithoutResponseErr: tinybluetooth.ErrGATTUnreachable}
+	station := connectedFakeStation(&fakeCharacteristic{}, nil, identify, Capabilities{Identify: true})
+
+	err := Identify(station)
+	if !IsPossiblySent(err) {
+		t.Fatalf("Identify() error = %v, want possibly-sent classification", err)
+	}
+	if identify.writeWithoutResponseAttempts != 1 {
+		t.Fatalf("identify write attempts = %d, want 1", identify.writeWithoutResponseAttempts)
+	}
+}
+
 func TestIdentifyFinalWriteFailureInvalidatesConnection(t *testing.T) {
-	identify := &fakeCharacteristic{writeErr: errors.New("connection lost")}
+	identify := &fakeCharacteristic{
+		properties:           uint32(tinybluetooth.CharacteristicWritePermission),
+		writeWithResponseErr: errors.New("connection lost"),
+	}
 	station := connectedFakeStation(&fakeCharacteristic{}, nil, identify, Capabilities{Identify: true})
 
 	if err := Identify(station); err == nil {
@@ -1067,6 +1251,30 @@ func TestCancelScanStopsActiveScan(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("active scan did not stop after cancellation")
+	}
+}
+
+func TestScanForDurationContextStopsActiveScan(t *testing.T) {
+	originalAdapter := adapter
+	fake := newFakeBLEAdapter()
+	adapter = fake
+	t.Cleanup(func() { adapter = originalAdapter })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		_, err := ScanForDurationContext(ctx, time.Hour)
+		result <- err
+	}()
+	<-fake.started
+	cancel()
+	select {
+	case err := <-result:
+		if !errors.Is(err, ErrScanCancelled) {
+			t.Fatalf("ScanForDurationContext() error = %v, want ErrScanCancelled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("context cancellation did not stop active scan")
 	}
 }
 

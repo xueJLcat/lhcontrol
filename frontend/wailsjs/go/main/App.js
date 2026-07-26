@@ -77,3 +77,7 @@ export function SetStationChannel(arg1, arg2, arg3) {
 export function SetStationPower(arg1, arg2) {
   return window['go']['main']['App']['SetStationPower'](arg1, arg2);
 }
+
+export function StopScan() {
+  return window['go']['main']['App']['StopScan']();
+}

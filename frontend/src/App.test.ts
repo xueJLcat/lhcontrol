@@ -2,6 +2,7 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { StationInfo } from './lib/types';
+import { pushToast } from './lib/toast';
 
 const api = vi.hoisted(() => ({
   CheckAllStationStatuses: vi.fn(),
@@ -15,7 +16,8 @@ const api = vi.hoisted(() => ({
   ScanAndFetchStations: vi.fn(),
   SetAllStationsPowerDetailed: vi.fn(),
   SetStationChannel: vi.fn(),
-  SetStationPower: vi.fn()
+  SetStationPower: vi.fn(),
+  StopScan: vi.fn()
 }));
 
 const runtime = vi.hoisted(() => ({
@@ -106,6 +108,7 @@ beforeEach(() => {
   api.GetScanStatus.mockResolvedValue({ state: 'completed', found: 1, warnings: [] });
   api.GetCurrentStationInfo.mockResolvedValue([createStation()]);
   api.CheckAllStationStatuses.mockResolvedValue([createStation()]);
+  api.StopScan.mockResolvedValue(undefined);
 });
 
 afterEach(() => {
@@ -169,6 +172,78 @@ describe('App asynchronous operations', () => {
     await vi.waitFor(() => expect(api.IsScanning).toHaveBeenCalled());
     await vi.advanceTimersByTimeAsync(30_000);
     expect(api.CheckAllStationStatuses).not.toHaveBeenCalled();
+  });
+
+  it('self-recovers when polling observes an external scan has ended without an event', async () => {
+    vi.useFakeTimers();
+    api.IsScanning.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+    api.GetCurrentStationInfo.mockResolvedValue([createStation({ name: 'LHB-RECOVERED' })]);
+    api.GetScanStatus.mockResolvedValue({ state: 'completed', found: 1, warnings: ['partial metadata'] });
+    render(App);
+    await vi.waitFor(() => expect(screen.getByRole('button', { name: 'Stop' })).toBeEnabled());
+
+    await vi.advanceTimersByTimeAsync(15_000);
+
+    expect(await screen.findByText('LHB-RECOVERED')).toBeInTheDocument();
+    expect(screen.getByText('External scan completed: found 1; 1 known station(s). partial metadata')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Scan' })).toBeEnabled();
+  });
+
+  it('self-recovers a cancelled external scan without reporting completion', async () => {
+    vi.useFakeTimers();
+    api.IsScanning.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+    api.GetScanStatus.mockResolvedValue({ state: 'cancelled', found: 0, warnings: [] });
+    render(App);
+    await vi.waitFor(() => expect(screen.getByRole('button', { name: 'Stop' })).toBeEnabled());
+
+    await vi.advanceTimersByTimeAsync(15_000);
+
+    expect(await screen.findByText('Scan stopped.')).toBeInTheDocument();
+    expect(screen.queryByText(/External scan completed/)).not.toBeInTheDocument();
+  });
+
+  it('stops an active scan and handles its cancellation event', async () => {
+    let resolveStop!: () => void;
+    api.IsScanning.mockResolvedValue(true);
+    api.StopScan.mockReturnValue(new Promise<void>((resolve) => {
+      resolveStop = resolve;
+    }));
+    render(App);
+    const stop = await screen.findByRole('button', { name: 'Stop' });
+    await fireEvent.click(stop);
+    expect(api.StopScan).toHaveBeenCalledOnce();
+    expect(await screen.findByRole('button', { name: 'Stopping...' })).toBeDisabled();
+
+    runtime.handlers.get('external-scan-cancelled')?.();
+    expect(await screen.findByText('Scan stopped.')).toBeInTheDocument();
+    resolveStop();
+  });
+
+  it('does not let the stop promise overwrite a cancellation event', async () => {
+    let resolveStop!: () => void;
+    api.IsScanning.mockResolvedValue(true);
+    api.StopScan.mockReturnValue(new Promise<void>((resolve) => {
+      resolveStop = resolve;
+    }));
+    render(App);
+    await fireEvent.click(await screen.findByRole('button', { name: 'Stop' }));
+
+    runtime.handlers.get('external-scan-cancelled')?.();
+    expect(await screen.findByText('Scan stopped.')).toBeInTheDocument();
+    resolveStop();
+    await Promise.resolve();
+
+    expect(screen.getByText('Scan stopped.')).toBeInTheDocument();
+    expect(screen.queryByText('Scan stop requested...')).not.toBeInTheDocument();
+  });
+
+  it('treats a local scan cancellation as stopped instead of failed', async () => {
+    api.GetScanStatus.mockResolvedValue({ state: 'cancelled', found: 0, warnings: [] });
+    api.ScanAndFetchStations.mockRejectedValue(new Error('scan cancelled'));
+    render(App);
+
+    expect(await screen.findByText('Scan stopped.')).toBeInTheDocument();
+    expect(pushToast).not.toHaveBeenCalledWith(expect.stringContaining('Scan failed'));
   });
 
   it('does not commit a pending scan result after unmount', async () => {
@@ -472,7 +547,7 @@ describe('App asynchronous operations', () => {
     await waitFor(() => expect(api.SetStationPower).toHaveBeenCalledOnce());
 
     runtime.handlers.get('external-scan-started')?.();
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Scanning...' })).toBeDisabled());
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Stop' })).toBeEnabled());
     expect(screen.getByText('External scan in progress...')).toBeInTheDocument();
 
     resolvePower({
@@ -567,6 +642,40 @@ describe('App asynchronous operations', () => {
     expect(await screen.findByText('On sent · readback timed out')).toBeInTheDocument();
   });
 
+  it('reports complete bulk counts with warning severity for incomplete outcomes', async () => {
+    const stationA = createStation({ name: 'LHB-A', address: 'AA' });
+    const stationB = createStation({ name: 'LHB-B', address: 'BB' });
+    const stationC = createStation({ name: 'LHB-C', address: 'CC' });
+    api.ScanAndFetchStations.mockResolvedValue([stationA, stationB, stationC]);
+    api.GetCurrentStationInfo.mockResolvedValue([stationA, stationB, stationC]);
+    api.SetAllStationsPowerDetailed.mockResolvedValue({
+      target: 'on',
+      results: [
+        { address: 'AA', name: 'LHB-A', skipped: false, reason: '', commandSent: true, success: true, confirmed: true, error: '', station: stationA },
+        { address: 'BB', name: 'LHB-B', skipped: false, reason: '', commandSent: true, success: true, confirmed: false, error: 'readback timed out', station: stationB },
+        { address: 'CC', name: 'LHB-C', skipped: true, reason: 'already at target', commandSent: false, success: true, confirmed: true, error: '', station: stationC }
+      ]
+    });
+    render(App);
+    await screen.findByText('LHB-C');
+    await fireEvent.click(await screen.findByTitle('Turn all known stations on'));
+
+    await waitFor(() => expect(pushToast).toHaveBeenCalledWith(
+      'Bulk On: 1 confirmed; 1 sent but unconfirmed; 1 skipped for On.', 'warning'
+    ));
+  });
+
+  it('excludes unverified power states from fleet counts', async () => {
+    api.ScanAndFetchStations.mockResolvedValue([
+      createStation({ name: 'VERIFIED', address: 'AA', powerState: 1, powerStateName: 'on' }),
+      createStation({ name: 'UNVERIFIED', address: 'BB', powerState: 1, powerStateName: 'on', powerStateConfirmed: false })
+    ]);
+    render(App);
+    await screen.findByText('UNVERIFIED');
+    expect(screen.getByText('1 On')).toBeInTheDocument();
+    expect(screen.queryByText('2 On')).not.toBeInTheDocument();
+  });
+
   it('locks the empty-state scan button while an external scan is running', async () => {
     api.ScanAndFetchStations.mockResolvedValue([]);
     api.GetScanStatus.mockResolvedValue({ state: 'completed', found: 0, warnings: [] });
@@ -575,9 +684,9 @@ describe('App asynchronous operations', () => {
     expect(await screen.findByRole('button', { name: 'Scan Now' })).not.toBeDisabled();
     runtime.handlers.get('external-scan-started')?.();
 
-    const scanningButtons = await screen.findAllByRole('button', { name: 'Scanning...' });
+    const scanningButtons = await screen.findAllByRole('button', { name: 'Stop' });
     expect(scanningButtons.length).toBeGreaterThan(0);
-    for (const button of scanningButtons) expect(button).toBeDisabled();
+    for (const button of scanningButtons) expect(button).toBeEnabled();
   });
 
   it('does not let an older API status response overwrite a newer poll', async () => {

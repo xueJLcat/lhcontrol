@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { StationInfo } from '../types';
-  import { stateLabel } from '../station';
+  import { hasCurrentChannel, stateLabel } from '../station';
 
   export let stations: StationInfo[];
   export let onSelect: (address: string) => void;
@@ -12,7 +12,7 @@
   }
 
   $: byChannel = stations.reduce((map, station) => {
-    if (station.channel > 0) {
+    if (hasCurrentChannel(station)) {
       const list = map.get(station.channel) ?? [];
       list.push({ name: station.name, state: stateLabel(station), address: station.address });
       map.set(station.channel, list);
@@ -21,7 +21,7 @@
   }, new Map<number, Occupant[]>());
 
   $: conflictChannels = new Set(
-    stations.filter((station) => station.channelConflict && station.channel > 0)
+    stations.filter((station) => station.channelConflict && hasCurrentChannel(station))
       .map((station) => station.channel)
   );
 

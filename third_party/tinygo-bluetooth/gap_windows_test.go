@@ -3,13 +3,17 @@
 package bluetooth
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	winbluetooth "github.com/saltosystems/winrt-go/windows/devices/bluetooth"
+	"github.com/saltosystems/winrt-go/windows/devices/bluetooth/advertisement"
+	"github.com/saltosystems/winrt-go/windows/foundation"
 )
 
 func TestScanStoppedErrorMapping(t *testing.T) {
@@ -30,6 +34,140 @@ func TestScanStoppedErrorMapping(t *testing.T) {
 		if test.want != nil && !errors.Is(err, test.want) {
 			t.Fatalf("code %d returned %v, want %v", test.code, err, test.want)
 		}
+	}
+}
+
+func TestWaitForAsyncCompletionHasBoundedCancellationGrace(t *testing.T) {
+	originalGrace := asyncCancellationGrace
+	originalPoll := asyncStatusPollInterval
+	asyncCancellationGrace = 30 * time.Millisecond
+	asyncStatusPollInterval = time.Millisecond
+	t.Cleanup(func() {
+		asyncCancellationGrace = originalGrace
+		asyncStatusPollInterval = originalPoll
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	cancelCalled := make(chan struct{}, 1)
+	started := time.Now()
+	_, err := waitForAsyncCompletion(ctx, make(chan foundation.AsyncStatus), func() error {
+		cancelCalled <- struct{}{}
+		return nil
+	}, func() (foundation.AsyncStatus, error) {
+		return foundation.AsyncStatusStarted, nil
+	})
+	var timeoutErr *AsyncOperationTimeoutError
+	if !errors.As(err, &timeoutErr) || !errors.Is(err, context.Canceled) {
+		t.Fatalf("waitForAsyncCompletion() error = %v, want typed context timeout", err)
+	}
+	if time.Since(started) > 250*time.Millisecond {
+		t.Fatalf("cancellation grace was not bounded: %v", time.Since(started))
+	}
+	select {
+	case <-cancelCalled:
+	default:
+		t.Fatal("WinRT cancellation hook was not called")
+	}
+}
+
+func TestWaitForAsyncCompletionAcceptsPolledTerminalStatus(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	status, err := waitForAsyncCompletion(ctx, make(chan foundation.AsyncStatus), func() error { return nil }, func() (foundation.AsyncStatus, error) {
+		return foundation.AsyncStatusCanceled, nil
+	})
+	if err != nil || status != foundation.AsyncStatusCanceled {
+		t.Fatalf("waitForAsyncCompletion() = (%d, %v), want canceled status", status, err)
+	}
+}
+
+func TestWaitForScanStopReturnsStopErrorWithoutStoppedEvent(t *testing.T) {
+	originalTimeout := scanStopTimeout
+	originalPoll := scanStopPollInterval
+	scanStopTimeout = 100 * time.Millisecond
+	scanStopPollInterval = time.Millisecond
+	t.Cleanup(func() {
+		scanStopTimeout = originalTimeout
+		scanStopPollInterval = originalPoll
+	})
+
+	stopErr := errors.New("stop failed")
+	stopRequests := make(chan error, 1)
+	stopRequests <- stopErr
+	var calls atomic.Int32
+	err := waitForScanStop(make(chan error), stopRequests, func() error {
+		calls.Add(1)
+		return nil
+	}, func() (advertisement.BluetoothLEAdvertisementWatcherStatus, error) {
+		return advertisement.BluetoothLEAdvertisementWatcherStatusStopped, nil
+	})
+	if !errors.Is(err, stopErr) {
+		t.Fatalf("waitForScanStop() error = %v, want original stop error", err)
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("stop retries = %d, want 0 after terminal status", calls.Load())
+	}
+}
+
+func TestWaitForScanStopTimesOutAndPreservesStopError(t *testing.T) {
+	originalTimeout := scanStopTimeout
+	originalPoll := scanStopPollInterval
+	scanStopTimeout = 30 * time.Millisecond
+	scanStopPollInterval = time.Millisecond
+	t.Cleanup(func() {
+		scanStopTimeout = originalTimeout
+		scanStopPollInterval = originalPoll
+	})
+
+	stopErr := errors.New("stop failed")
+	stopRequests := make(chan error, 1)
+	stopRequests <- stopErr
+	err := waitForScanStop(make(chan error), stopRequests, func() error { return stopErr }, func() (advertisement.BluetoothLEAdvertisementWatcherStatus, error) {
+		return advertisement.BluetoothLEAdvertisementWatcherStatusStopping, nil
+	})
+	var timeoutErr *ScanStopTimeoutError
+	if !errors.Is(err, stopErr) || !errors.As(err, &timeoutErr) {
+		t.Fatalf("waitForScanStop() error = %v, want stop error and typed timeout", err)
+	}
+}
+
+func TestStopScanCommunicatesWinRTInitializationFailure(t *testing.T) {
+	originalEnter := enterWinRTThread
+	threadErr := errors.New("apartment unavailable")
+	enterWinRTThread = func() (func(), error) { return nil, threadErr }
+	t.Cleanup(func() { enterWinRTThread = originalEnter })
+
+	control := &scanControl{stopRequests: make(chan error, 1)}
+	adapter := &Adapter{scan: control}
+	if err := adapter.StopScan(); !errors.Is(err, threadErr) {
+		t.Fatalf("StopScan() error = %v, want %v", err, threadErr)
+	}
+	select {
+	case err := <-control.stopRequests:
+		if !errors.Is(err, threadErr) {
+			t.Fatalf("communicated error = %v, want %v", err, threadErr)
+		}
+	default:
+		t.Fatal("StopScan did not communicate initialization failure")
+	}
+}
+
+func TestConnectHandlerAccessIsSynchronized(t *testing.T) {
+	adapter := &Adapter{}
+	handler := func(Device, bool) {}
+	for i := 0; i < 100; i++ {
+		var group sync.WaitGroup
+		group.Add(2)
+		go func() {
+			defer group.Done()
+			adapter.SetConnectHandler(handler)
+		}()
+		go func() {
+			defer group.Done()
+			_ = adapter.connectionHandler()
+		}()
+		group.Wait()
 	}
 }
 

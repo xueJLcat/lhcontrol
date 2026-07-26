@@ -1,6 +1,7 @@
 package station
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -296,7 +297,7 @@ func TestShutdownWaitsForInitializationAndPreventsLateScan(t *testing.T) {
 		return nil
 	}
 	var scanCalls atomic.Int32
-	manager.bluetoothOps.scanForDuration = func(time.Duration) ([]internalbluetooth.DiscoveredStation, error) {
+	manager.bluetoothOps.scanForDurationContext = func(context.Context, time.Duration) ([]internalbluetooth.DiscoveredStation, error) {
 		scanCalls.Add(1)
 		return nil, nil
 	}
@@ -337,7 +338,7 @@ func TestAsyncScanEventsCannotOvertakePreviousCompletion(t *testing.T) {
 	firstCompletionEntered := make(chan struct{})
 	firstCompletionRelease := make(chan struct{})
 	var scanCalls atomic.Int32
-	manager.bluetoothOps.scanForDuration = func(time.Duration) ([]internalbluetooth.DiscoveredStation, error) {
+	manager.bluetoothOps.scanForDurationContext = func(context.Context, time.Duration) ([]internalbluetooth.DiscoveredStation, error) {
 		if scanCalls.Add(1) == 1 {
 			<-firstScanRelease
 		}
@@ -406,6 +407,79 @@ func TestAsyncScanEventsCannotOvertakePreviousCompletion(t *testing.T) {
 	}
 }
 
+func TestStopScanAllowsCancelledCallbackReentryAndIsIdempotent(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	scanStarted := make(chan struct{})
+	callbackEntered := make(chan struct{})
+	callbackRelease := make(chan struct{})
+	callbackStopDone := make(chan error, 1)
+	manager.bluetoothOps.scanForDurationContext = func(ctx context.Context, _ time.Duration) ([]internalbluetooth.DiscoveredStation, error) {
+		close(scanStarted)
+		<-ctx.Done()
+		return nil, internalbluetooth.ErrScanCancelled
+	}
+	if err := manager.StartScan(ScanCallbacks{Cancelled: func() {
+		close(callbackEntered)
+		callbackStopDone <- manager.StopScan()
+		<-callbackRelease
+	}}); err != nil {
+		t.Fatalf("StartScan() error = %v", err)
+	}
+	<-scanStarted
+
+	stopDone := make(chan error, 1)
+	go func() { stopDone <- manager.StopScan() }()
+	<-callbackEntered
+	select {
+	case err := <-callbackStopDone:
+		if err != nil {
+			t.Fatalf("callback StopScan() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("callback StopScan deadlocked")
+	}
+	if err := <-stopDone; err != nil {
+		t.Fatalf("StopScan() error = %v", err)
+	}
+	close(callbackRelease)
+	if err := manager.StopScan(); err != nil {
+		t.Fatalf("second StopScan() error = %v", err)
+	}
+	status := manager.GetScanStatus()
+	if status.State != "cancelled" || status.CompletedAt == "" || status.Error != "" {
+		t.Fatalf("cancelled scan status = %+v", status)
+	}
+}
+
+func TestScanCancellationSkipsPostScanInitialization(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	scanReturned := make(chan struct{})
+	var initialReads atomic.Int32
+	manager.bluetoothOps.scanForDurationContext = func(ctx context.Context, _ time.Duration) ([]internalbluetooth.DiscoveredStation, error) {
+		close(scanReturned)
+		<-ctx.Done()
+		return []internalbluetooth.DiscoveredStation{{
+			Name: "LHB-TEST", Address: mustAddress(t, "11:22:33:44:55:66"),
+		}}, nil
+	}
+	manager.bluetoothOps.fetchInitialPowerState = func(*internalbluetooth.BaseStation) error {
+		initialReads.Add(1)
+		return nil
+	}
+	go func() {
+		<-scanReturned
+		_ = manager.StopScan()
+	}()
+
+	_, err := manager.ScanAndFetchStations()
+	if !errors.Is(err, internalbluetooth.ErrScanCancelled) {
+		t.Fatalf("ScanAndFetchStations() error = %v, want ErrScanCancelled", err)
+	}
+	if initialReads.Load() != 0 {
+		t.Fatalf("initial station reads after cancellation = %d, want 0", initialReads.Load())
+	}
+}
+
 func TestScanInitialReadClassifiesPartialFailures(t *testing.T) {
 	for _, test := range []struct {
 		name            string
@@ -436,7 +510,7 @@ func TestScanInitialReadClassifiesPartialFailures(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			manager := NewManager(config.NewConfig())
 			address := "11:22:33:44:55:66"
-			manager.bluetoothOps.scanForDuration = func(time.Duration) ([]internalbluetooth.DiscoveredStation, error) {
+			manager.bluetoothOps.scanForDurationContext = func(context.Context, time.Duration) ([]internalbluetooth.DiscoveredStation, error) {
 				return []internalbluetooth.DiscoveredStation{{
 					Name: "LHB-TEST", Address: mustAddress(t, address),
 				}}, nil
@@ -886,7 +960,7 @@ func TestScanContinuesAndReportsConnectionReleaseWarnings(t *testing.T) {
 		return releaseErr
 	}
 	var scans atomic.Int32
-	manager.bluetoothOps.scanForDuration = func(time.Duration) ([]internalbluetooth.DiscoveredStation, error) {
+	manager.bluetoothOps.scanForDurationContext = func(context.Context, time.Duration) ([]internalbluetooth.DiscoveredStation, error) {
 		scans.Add(1)
 		return nil, nil
 	}
@@ -925,7 +999,7 @@ func TestScanResumesPresenceTrackingAfterConnectionReleaseRecovers(t *testing.T)
 		}
 		return nil
 	}
-	manager.bluetoothOps.scanForDuration = func(time.Duration) ([]internalbluetooth.DiscoveredStation, error) {
+	manager.bluetoothOps.scanForDurationContext = func(context.Context, time.Duration) ([]internalbluetooth.DiscoveredStation, error) {
 		return nil, nil
 	}
 
@@ -957,7 +1031,7 @@ func TestDiscoveryClearsUncertainPresenceFromReleaseFailure(t *testing.T) {
 	manager.bluetoothOps.releaseStationForScan = func(*internalbluetooth.BaseStation) error {
 		return errors.New("session is still in use")
 	}
-	manager.bluetoothOps.scanForDuration = func(time.Duration) ([]internalbluetooth.DiscoveredStation, error) {
+	manager.bluetoothOps.scanForDurationContext = func(context.Context, time.Duration) ([]internalbluetooth.DiscoveredStation, error) {
 		return []internalbluetooth.DiscoveredStation{{
 			Name:    "LHB-RELEASE-DISCOVERED",
 			Address: parsedAddress,
@@ -1562,7 +1636,7 @@ func TestShutdownCannotMissScanAfterReadinessCheck(t *testing.T) {
 		<-release
 	}
 	var scanCalls atomic.Int32
-	manager.bluetoothOps.scanForDuration = func(time.Duration) ([]internalbluetooth.DiscoveredStation, error) {
+	manager.bluetoothOps.scanForDurationContext = func(context.Context, time.Duration) ([]internalbluetooth.DiscoveredStation, error) {
 		scanCalls.Add(1)
 		return nil, nil
 	}

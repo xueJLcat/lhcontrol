@@ -462,31 +462,88 @@ func (c DeviceCharacteristic) write(p []byte, mode genericattributeprofile.GattW
 	}
 	defer value.Release()
 
-	// IAsyncOperation<GattCommunicationStatus>
-	asyncOp, err := c.characteristic.WriteValueWithOptionAsync(value, mode)
+	asyncOp, resultWrite, err := writeValueWithResultAndOptionAsync(c.characteristic, value, mode)
 	if err != nil {
 		return 0, err
 	}
 	defer asyncOp.Release()
 
-	if err := awaitAsyncOperation(asyncOp, genericattributeprofile.SignatureGattCommunicationStatus); err != nil {
-		return 0, err
+	signature := genericattributeprofile.SignatureGattCommunicationStatus
+	if resultWrite {
+		signature = signatureGattWriteResult
+	}
+	if err := awaitAsyncOperation(asyncOp, signature); err != nil {
+		return 0, classifyWriteFailure(mode, true, false, err)
 	}
 
 	res, err := asyncOp.GetResults()
 	if err != nil {
-		return 0, err
+		return 0, classifyWriteFailure(mode, true, false, err)
 	}
 
-	status := genericattributeprofile.GattCommunicationStatus(uintptr(res))
+	if !resultWrite {
+		status := genericattributeprofile.GattCommunicationStatus(uintptr(res))
+		if status != genericattributeprofile.GattCommunicationStatusSuccess {
+			err := errors.Join(errWriteFailed, gattCommunicationStatusError("Bluetooth write failed", int32(status)))
+			return 0, classifyWriteFailure(mode, true, status == genericattributeprofile.GattCommunicationStatusProtocolError, err)
+		}
+		return len(p), nil
+	}
 
-	// Is the status success?
-	if status != genericattributeprofile.GattCommunicationStatusSuccess {
+	result := (*gattWriteResult)(res)
+	if result == nil {
+		return 0, classifyWriteFailure(mode, true, false, errors.New("bluetooth: write returned nil result"))
+	}
+	defer result.Release()
+	status, err := result.status()
+	if err != nil {
+		return 0, classifyWriteFailure(mode, true, false, err)
+	}
+	if status == genericattributeprofile.GattCommunicationStatusSuccess {
+		return len(p), nil
+	}
+	if status == genericattributeprofile.GattCommunicationStatusProtocolError {
+		protocolErr := result.protocolError()
+		if protocolErr != nil {
+			return 0, errors.Join(errWriteFailed, protocolErr)
+		}
 		return 0, errors.Join(errWriteFailed, gattCommunicationStatusError("Bluetooth write failed", int32(status)))
 	}
+	err = errors.Join(errWriteFailed, gattCommunicationStatusError("Bluetooth write failed", int32(status)))
+	return 0, classifyWriteFailure(mode, true, false, err)
+}
 
-	// Success
-	return len(p), nil
+// WritePossiblySentError reports that a write command failed after WinRT
+// created its asynchronous operation, so the peer may have received it.
+type WritePossiblySentError struct {
+	Err error
+}
+
+func (e *WritePossiblySentError) Error() string {
+	return fmt.Sprintf("bluetooth: write may have been sent: %v", e.Err)
+}
+
+func (e *WritePossiblySentError) Unwrap() error {
+	return e.Err
+}
+
+func (e *WritePossiblySentError) PossiblySent() bool {
+	return true
+}
+
+func (e *WritePossiblySentError) MayHaveBeenSent() bool {
+	return true
+}
+
+func classifyWriteFailure(mode genericattributeprofile.GattWriteOption, operationCreated, explicitProtocolRejection bool, err error) error {
+	if err == nil || mode != genericattributeprofile.GattWriteOptionWriteWithoutResponse || !operationCreated || explicitProtocolRejection {
+		return err
+	}
+	var protocolErr AttributeProtocolError
+	if errors.As(err, &protocolErr) {
+		return err
+	}
+	return &WritePossiblySentError{Err: err}
 }
 
 // Read reads the current characteristic value.

@@ -40,3 +40,5 @@ export function SetAllStationsPowerDetailed(arg1:string):Promise<station.BulkPow
 export function SetStationChannel(arg1:string,arg2:number,arg3:boolean):Promise<station.ChannelChangeResult>;
 
 export function SetStationPower(arg1:string,arg2:string):Promise<station.PowerActionResult>;
+
+export function StopScan():Promise<void>;

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { LoaderCircle, RefreshCw, Zap } from 'lucide-svelte';
+  import { LoaderCircle, RefreshCw, Square, Zap } from 'lucide-svelte';
   import type { PowerTarget } from '../types';
   import logo from '../../assets/images/logo-universal.png';
 
@@ -18,6 +18,8 @@
   export let standbyCount = 0;
   export let sleepCount = 0;
   export let onScan: () => void;
+  export let onStop: () => void;
+  export let stopping = false;
   export let onBulkPower: (state: PowerTarget) => void;
 
   $: fleetTotal = onCount + standbyCount + sleepCount;
@@ -31,8 +33,10 @@
       <span>SteamVR base stations</span>
     </div>
   </div>
-  <button class="btn primary scan-btn" on:click={onScan} disabled={scanning || scanLocked}>
-    {#if scanning}<LoaderCircle class="spin" size={15} /> Scanning...{:else}<RefreshCw size={15} /> Scan{/if}
+  <button class="btn primary scan-btn" on:click={scanning ? onStop : onScan} disabled={scanning ? stopping : scanLocked}>
+    {#if stopping}<LoaderCircle class="spin" size={15} /> Stopping...
+    {:else if scanning}<Square size={13} /> Stop
+    {:else}<RefreshCw size={15} /> Scan{/if}
   </button>
   <div class="bulk-power" aria-label="Set all known stations">
     <span class="bulk-label">{#if isBulkLoading}<LoaderCircle class="spin" size={12} />{:else}<Zap size={12} />{/if} All</span>

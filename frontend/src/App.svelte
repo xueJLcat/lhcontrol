@@ -15,15 +15,18 @@
     ScanAndFetchStations,
     SetAllStationsPowerDetailed,
     SetStationChannel,
-    SetStationPower
+    SetStationPower,
+    StopScan
   } from '../wailsjs/go/main/App';
   import { EventsOn } from '../wailsjs/runtime/runtime';
   import { station as stationModels } from '../wailsjs/go/models';
   import { Activity, CircleAlert, Radar } from 'lucide-svelte';
   import type { PowerFeedback, PowerTarget, StationInfo } from './lib/types';
   import {
-    canSetPower, isCurrentPowerState, maySetPower, powerStateValue, powerTargetLabel, stateLabel
+    canSetPower, hasCurrentChannel, hasVerifiedPowerState, isCurrentPowerState, maySetPower,
+    powerTargetLabel, stateLabel
   } from './lib/station';
+  import { formatBulkResult, formatScanResult, summarizeBulkResult } from './lib/result-format';
   import { pushToast } from './lib/toast';
   import { deriveOperationLocks, type GlobalOperation } from './lib/operation-state';
   import { RevisionGate } from './lib/revision-gate';
@@ -52,9 +55,11 @@
   let cancelExternalScanListener: (() => void) | null = null;
   let cancelExternalScanFailureListener: (() => void) | null = null;
   let cancelExternalScanStartedListener: (() => void) | null = null;
+  let cancelExternalScanCancelledListener: (() => void) | null = null;
   let apiRunning = false;
   let apiError = '';
   let externalScanning = false;
+  let stoppingScan = false;
   let scanStartedAt: number | null = null;
   let scanElapsed = 0;
   let scanTimer: ReturnType<typeof setInterval> | null = null;
@@ -83,15 +88,15 @@
       .map(([channel, names]) => channel > 0 ? `CH ${channel}: ${names.join(' + ')}` : names.join(' + '))
       .join(' · ');
   })();
-  // Fleet summary counts match what the cards actually display: fresh power
-  // data at a known state. Stale or unknown stations are not counted.
-  $: fleetOn = stations.filter((station) => station.powerFresh && station.powerState === powerStateValue('on')).length;
-  $: fleetStandby = stations.filter((station) => station.powerFresh && station.powerState === powerStateValue('standby')).length;
-  $: fleetSleep = stations.filter((station) => station.powerFresh && station.powerState === powerStateValue('sleep')).length;
+  $: fleetOn = stations.filter((station) => hasVerifiedPowerState(station, 'on')).length;
+  $: fleetStandby = stations.filter((station) => hasVerifiedPowerState(station, 'standby')).length;
+  $: fleetSleep = stations.filter((station) => hasVerifiedPowerState(station, 'sleep')).length;
+  $: eligibleOn = stations.filter((station) => maySetPower(station, 'on'));
+  $: eligibleStandby = stations.filter((station) => maySetPower(station, 'standby'));
+  $: eligibleSleep = stations.filter((station) => maySetPower(station, 'sleep'));
   $: occupiedChannels = new Map(
     stations
-      .filter((station) => station.isPresent && station.scanFresh && station.channelFresh &&
-        station.address !== selectedAddress && station.channel > 0)
+      .filter((station) => hasCurrentChannel(station) && station.address !== selectedAddress)
       .map((station) => [station.channel, station.name])
   );
   $: hasUnknownVisibleChannel = stations.some(
@@ -253,6 +258,7 @@
       listRevisions.next();
       prepareForScan();
       externalScanning = true;
+      stoppingScan = false;
       beginScanTimer();
       statusMessage = 'External scan in progress...';
     });
@@ -262,12 +268,13 @@
       const revision = listRevisions.next();
       prepareForScan();
       externalScanning = false;
+      stoppingScan = false;
       maybeEndScanTimer();
       stations = updated || [];
       const scanStatus = await GetScanStatus().catch(() => null);
       if (disposed || !listRevisions.isCurrent(revision)) return;
       const found = scanStatus?.found ?? stations.filter((station) => station.seenInLatestScan).length;
-      statusMessage = `External scan completed: found ${found}; ${stations.length} known station(s).`;
+      statusMessage = formatScanResult({ found, warnings: scanStatus?.warnings }, stations.length, true);
     });
     cancelExternalScanFailureListener = EventsOn('external-scan-failed', async (message: string) => {
       if (disposed) return;
@@ -275,12 +282,26 @@
       const revision = listRevisions.next();
       prepareForScan();
       externalScanning = false;
+      stoppingScan = false;
       maybeEndScanTimer();
       const updated = await GetCurrentStationInfo().catch(() => null);
       if (!canCommitOperation(operationEpoch) || !listRevisions.isCurrent(revision)) return;
       if (updated) applyStationList(updated, revision);
       statusMessage = `External scan failed: ${message}`;
       pushToast(`External scan failed: ${message}`);
+    });
+    cancelExternalScanCancelledListener = EventsOn('external-scan-cancelled', async () => {
+      if (disposed) return;
+      const operationEpoch = beginScanEpoch();
+      const revision = listRevisions.next();
+      prepareForScan();
+      externalScanning = false;
+      stoppingScan = false;
+      maybeEndScanTimer();
+      const updated = await GetCurrentStationInfo().catch(() => null);
+      if (!canCommitOperation(operationEpoch) || !listRevisions.isCurrent(revision)) return;
+      if (updated) applyStationList(updated, revision);
+      statusMessage = 'Scan stopped.';
     });
     statusCheckInterval = setInterval(periodicStatusCheck, 15000);
     const startupRevision = listRevisions.next();
@@ -319,19 +340,33 @@
     cancelExternalScanListener?.();
     cancelExternalScanFailureListener?.();
     cancelExternalScanStartedListener?.();
+    cancelExternalScanCancelledListener?.();
   });
 
   async function periodicStatusCheck() {
-    if (externalScanning || isStatusChecking || isLoading || isBulkLoading || anyDeviceOperation) return;
+    if (isStatusChecking || isLoading || isBulkLoading || anyDeviceOperation) return;
     globalOperation = 'status-refresh';
     const revision = listRevisions.next();
     const capturedStationRevisions = new Map(stationRevisions);
     try {
       const scanning = await IsScanning();
       if (disposed || !listRevisions.isCurrent(revision)) return;
+      const wasExternalScanning = externalScanning;
       externalScanning = scanning && !isLoading;
       if (!scanning) {
-        if (!applyStationList(await CheckAllStationStatuses(), revision, capturedStationRevisions)) return;
+        stoppingScan = false;
+        if (wasExternalScanning) {
+          if (!applyStationList(await GetCurrentStationInfo(), revision, capturedStationRevisions)) return;
+          const scanStatus = await GetScanStatus().catch(() => null);
+          if (disposed || !listRevisions.isCurrent(revision)) return;
+          const found = scanStatus?.found ?? stations.filter((station) => station.seenInLatestScan).length;
+          statusMessage = scanStatus?.state === 'cancelled'
+            ? 'Scan stopped.'
+            : formatScanResult({ found, warnings: scanStatus?.warnings }, stations.length, true);
+        } else if (!applyStationList(await CheckAllStationStatuses(), revision, capturedStationRevisions)) return;
+        maybeEndScanTimer();
+      } else {
+        beginScanTimer();
       }
     } catch (error) {
       if (disposed || !listRevisions.isCurrent(revision)) return;
@@ -356,21 +391,47 @@
       if (!applyStationList(await ScanAndFetchStations(), revision)) return;
       const scanStatus = await GetScanStatus().catch(() => null);
       if (!canCommitOperation(operationEpoch) || !listRevisions.isCurrent(revision)) return;
-      const warning = scanStatus?.warnings?.join(' ');
       const found = scanStatus?.found ?? stations.filter((station) => station.seenInLatestScan).length;
-      statusMessage = warning
-        ? `Found ${found}; ${stations.length} known station(s). ${warning}`
-        : found ? `Found ${found}; ${stations.length} known station(s).` : 'No stations found in this scan.';
+      statusMessage = scanStatus?.state === 'cancelled'
+        ? 'Scan stopped.'
+        : formatScanResult({ found, warnings: scanStatus?.warnings }, stations.length);
     } catch (error) {
       if (!canCommitOperation(operationEpoch) || !listRevisions.isCurrent(revision)) return;
       const updated = await GetCurrentStationInfo().catch(() => null);
       if (!canCommitOperation(operationEpoch) || !listRevisions.isCurrent(revision)) return;
       if (updated) applyStationList(updated, revision);
-      statusMessage = `Scan failed: ${error}`;
-      pushToast(`Scan failed: ${error}`);
+      const scanStatus = await GetScanStatus().catch(() => null);
+      if (!canCommitOperation(operationEpoch) || !listRevisions.isCurrent(revision)) return;
+      if (stoppingScan || scanStatus?.state === 'cancelled') {
+        stoppingScan = false;
+        statusMessage = 'Scan stopped.';
+      } else {
+        statusMessage = `Scan failed: ${error}`;
+        pushToast(`Scan failed: ${error}`);
+      }
     } finally {
       if (!disposed && globalOperation === 'scanning') globalOperation = 'idle';
       maybeEndScanTimer();
+    }
+  }
+
+  async function handleStopScan() {
+    if (!scanningActive || stoppingScan) return;
+    stoppingScan = true;
+    statusMessage = 'Stopping scan...';
+    try {
+      await StopScan();
+      // A terminal event may have completed the UI transition while the
+      // backend completion barrier was resolving.
+      if (!stoppingScan) return;
+      stoppingScan = false;
+      externalScanning = false;
+      statusMessage = 'Scan stopped.';
+      maybeEndScanTimer();
+    } catch (error) {
+      stoppingScan = false;
+      statusMessage = `Unable to stop scan: ${error}`;
+      pushToast(statusMessage);
     }
   }
 
@@ -462,7 +523,7 @@
     // Do not duplicate backend capability/state decisions here. Cached
     // frontend data can be stale after scanning, while the backend refreshes
     // capabilities and returns a result for every known station.
-    if (bulkLocked || stations.length === 0) return;
+    if (bulkLocked || eligiblePowerStations(state).length === 0) return;
     globalOperation = 'bulk-power';
     bulkTarget = state;
     const targetLabel = powerTargetLabel(state);
@@ -487,15 +548,12 @@
               : { kind: 'error', text: item.error || `Failed to set ${targetLabel}` };
       }
       powerFeedbackByAddress = feedback;
-      const confirmed = result.results.filter((item) => item.success && !item.skipped && item.confirmed).length;
-      const unconfirmed = result.results.filter((item) => item.success && !item.skipped && !item.confirmed).length;
-      const skipped = result.results.filter((item) => item.skipped);
-      const failed = result.results.filter((item) => !item.success && !item.skipped && !item.commandSent);
-      statusMessage = failed.length
-        ? `${confirmed} confirmed, ${unconfirmed} sent but unconfirmed, ${skipped.length} skipped, ${failed.length} failed: ${failed.map((item) => `${item.name || item.address}: ${item.error}`).join(' | ')}`
-        : `${confirmed} confirmed; ${unconfirmed} sent but unconfirmed; ${skipped.length} skipped for ${targetLabel}.`;
-      if (failed.length) pushToast(`Bulk ${targetLabel}: ${failed.length} station(s) failed. See status bar.`);
-      else pushToast(`Bulk ${targetLabel}: ${confirmed} confirmed, ${skipped.length} skipped.`, 'success');
+      const summary = summarizeBulkResult(result.results);
+      statusMessage = formatBulkResult(targetLabel, summary);
+      const toastKind = summary.failed.length ? 'error'
+        : summary.unconfirmed || summary.skipped ? 'warning'
+          : 'success';
+      pushToast(`Bulk ${targetLabel}: ${formatBulkResult(targetLabel, summary)}`, toastKind);
     } catch (error) {
       if (!canCommitOperation(operationEpoch)) return;
       await fetchLatestList();
@@ -654,16 +712,16 @@
 
 <svelte:window on:keydown={handleGlobalKeydown} />
 
-<div class="app-container">
+<div class="app-container" inert={selectedStation !== null} aria-hidden={selectedStation ? 'true' : undefined}>
   <AppHeader
     scanning={isLoading || externalScanning}
     {isBulkLoading}
     {scanLocked}
     {bulkLocked}
     {bulkTarget}
-    canOn={stations.length > 0}
-    canStandby={stations.length > 0}
-    canSleep={stations.length > 0}
+    canOn={eligibleOn.length > 0}
+    canStandby={eligibleStandby.length > 0}
+    canSleep={eligibleSleep.length > 0}
     allOn={allEligibleAtState('on')}
     allStandby={allEligibleAtState('standby')}
     allSleep={allEligibleAtState('sleep')}
@@ -671,6 +729,8 @@
     standbyCount={fleetStandby}
     sleepCount={fleetSleep}
     onScan={handleScanClick}
+    onStop={handleStopScan}
+    stopping={stoppingScan}
     onBulkPower={handleBulkPower}
   />
 
@@ -735,6 +795,7 @@
     station={selectedStation}
     busy={stationBusy(selectedStation.address)}
     locked={stationLocked || (gattOperations.size >= 2 && !gattOperations.has(selectedStation.address))}
+    inactive={channelEditorOpen}
     onClose={() => selectedAddress = null}
     onRefresh={refreshCapabilities}
     onIdentify={identify}

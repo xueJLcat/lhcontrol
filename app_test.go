@@ -24,6 +24,8 @@ type fakeAPIStationManager struct {
 	bulkErr     error
 	legacyErr   error
 	scanErr     error
+	stopScanErr error
+	stopCalls   int
 }
 
 func (f *fakeAPIStationManager) PowerOnAllStations() error  { return f.legacyErr }
@@ -48,6 +50,10 @@ func (f *fakeAPIStationManager) StartScan(callbacks station.ScanCallbacks) error
 		callbacks.Completed([]station.StationInfo{})
 	}
 	return nil
+}
+func (f *fakeAPIStationManager) StopScan() error {
+	f.stopCalls++
+	return f.stopScanErr
 }
 
 func TestScanEventsAreAlwaysStartedBeforeCompletion(t *testing.T) {
@@ -83,6 +89,18 @@ func TestScanEventsAreAlwaysStartedBeforeCompletion(t *testing.T) {
 				t.Fatalf("event order = %v, want [started %s]", order, test.wantSecond)
 			}
 		})
+	}
+}
+
+func TestStopScanAPI(t *testing.T) {
+	manager := &fakeAPIStationManager{}
+	response, err := testAPI(manager).Test(httptest.NewRequest(http.MethodPost, "/scan/stop", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != fiber.StatusNoContent || manager.stopCalls != 1 {
+		t.Fatalf("stop response status=%d calls=%d, want 204 and 1", response.StatusCode, manager.stopCalls)
 	}
 }
 func (f *fakeAPIStationManager) GetScanStatus() station.ScanStatus {

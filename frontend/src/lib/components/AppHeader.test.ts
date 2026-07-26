@@ -21,6 +21,7 @@ function renderHeader(overrides: Record<string, unknown> = {}) {
       allStandby: false,
       allSleep: false,
       onScan: vi.fn(),
+      onStop: vi.fn(),
       onBulkPower,
       ...overrides
     }
@@ -57,7 +58,7 @@ describe('AppHeader bulk controls', () => {
 
   it('shows scan progress for an external scan as well as a local scan', () => {
     renderHeader({ scanning: true, scanLocked: true });
-    expect(screen.getByRole('button', { name: 'Scanning...' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Stop' })).toBeEnabled();
     expect(document.querySelector('.scan-progress')).toBeInTheDocument();
   });
 });

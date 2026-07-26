@@ -12,6 +12,14 @@ export function isCurrentPowerState(station: StationInfo, state: PowerTarget): b
   return station.powerStateConfirmed && station.powerState === powerStateValue(state);
 }
 
+export function hasCurrentChannel(station: StationInfo): boolean {
+  return station.isPresent && station.scanFresh && station.channelFresh && station.channel > 0;
+}
+
+export function hasVerifiedPowerState(station: StationInfo, state: PowerTarget): boolean {
+  return station.powerFresh && station.powerStateConfirmed && station.powerState === powerStateValue(state);
+}
+
 export function maySetPower(station: StationInfo, state: PowerTarget): boolean {
   // Capability data is cached from the last GATT discovery and can become
   // incomplete after a rescan. The backend refreshes missing capabilities

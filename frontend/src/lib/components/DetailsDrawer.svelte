@@ -12,6 +12,7 @@
   export let station: StationInfo;
   export let busy: boolean;
   export let locked: boolean;
+  export let inactive = false;
   export let onClose: () => void;
   export let onRefresh: (station: StationInfo) => void;
   export let onIdentify: (station: StationInfo) => void;
@@ -33,9 +34,14 @@
   ];
 </script>
 
-<aside
+<div
   class="drawer"
+  role="dialog"
+  aria-modal={inactive ? undefined : 'true'}
+  aria-hidden={inactive ? 'true' : undefined}
+  inert={inactive}
   aria-label="Station details"
+  tabindex="-1"
   use:focusTrap
   in:fly={{ x: 64, duration: 280, easing: cubicOut }}
   out:fly={{ x: 64, duration: 180 }}
@@ -116,7 +122,7 @@
       {/each}
     </div>
   </section>
-</aside>
+</div>
 
 <style>
   .drawer {

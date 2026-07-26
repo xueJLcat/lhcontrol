@@ -42,6 +42,10 @@
     color: var(--fb-error);
   }
   .toast.info { border-color: var(--color-border-strong); color: var(--text-secondary); }
+  .toast.warning {
+    border-color: color-mix(in srgb, var(--color-warning) 50%, transparent);
+    color: var(--fb-warning);
+  }
   .toast.success {
     border-color: color-mix(in srgb, var(--color-on) 45%, transparent);
     color: var(--fb-success);

@@ -1,6 +1,7 @@
 package bluetooth
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -94,6 +95,43 @@ type BaseStation struct {
 	presenceUncertain bool
 }
 
+// PossiblySentError reports that a write failed after the transport may have
+// accepted the command. Such commands must be confirmed, never replayed.
+type PossiblySentError struct {
+	Err error
+}
+
+func (e *PossiblySentError) Error() string {
+	return fmt.Sprintf("command may have been sent: %v", e.Err)
+}
+
+func (e *PossiblySentError) Unwrap() error {
+	return e.Err
+}
+
+func (e *PossiblySentError) PossiblySent() bool {
+	return true
+}
+
+// IsPossiblySent accepts the application marker and compatible transport
+// markers if tinygo-bluetooth adds its own typed error.
+func IsPossiblySent(err error) bool {
+	possiblySent, classified := possiblySentClassification(err)
+	return classified && possiblySent
+}
+
+func possiblySentClassification(err error) (possiblySent, classified bool) {
+	var marker interface{ PossiblySent() bool }
+	if errors.As(err, &marker) {
+		return marker.PossiblySent(), true
+	}
+	var alternate interface{ MayHaveBeenSent() bool }
+	if errors.As(err, &alternate) {
+		return alternate.MayHaveBeenSent(), true
+	}
+	return false, false
+}
+
 // DiscoveredStation contains only immutable scan data. Keeping the mutex-bearing
 // BaseStation out of scan results avoids copying a sync.RWMutex.
 type DiscoveredStation struct {
@@ -108,7 +146,7 @@ type scanStopReason uint32
 const (
 	scanStopNone scanStopReason = iota
 	scanStopDuration
-	scanStopShutdown
+	scanStopCancelled
 )
 
 type scanSession struct {
@@ -137,7 +175,7 @@ func (s *scanSession) requestStop(reason scanStopReason) error {
 func (s *scanSession) requestStopAsync(reason scanStopReason) {
 	s.mutex.Lock()
 	currentReason := scanStopReason(s.reason.Load())
-	if currentReason == scanStopNone || reason == scanStopShutdown {
+	if currentReason == scanStopNone || reason == scanStopCancelled {
 		s.reason.Store(uint32(reason))
 	}
 	shouldStop := s.started && !s.finished
@@ -346,6 +384,7 @@ func Initialize() error {
 	if err := adapter.Enable(); err != nil {
 		return fmt.Errorf("could not enable Bluetooth adapter: %w", err)
 	}
+	adapter.SetConnectHandler(handleAdapterConnectionChange)
 
 	uuidInitOnce.Do(func() {
 		parsedUUIDs := []struct {
@@ -376,6 +415,49 @@ func Initialize() error {
 		return uuidInitErr
 	}
 	return nil
+}
+
+func handleAdapterConnectionChange(device bluetooth.Device, connected bool) {
+	if connected {
+		return
+	}
+	connectedStationsMutex.Lock()
+	stations := append([]*BaseStation(nil), connectedStations...)
+	connectedStationsMutex.Unlock()
+	for _, station := range stations {
+		if station.Address != device.Address {
+			continue
+		}
+		go invalidateDisconnectedDevice(station, device)
+	}
+}
+
+func invalidateDisconnectedDevice(station *BaseStation, disconnected bluetooth.Device) {
+	station.mutex.Lock()
+	current, ok := station.device.(bluetooth.Device)
+	if !ok || current != disconnected {
+		station.mutex.Unlock()
+		return
+	}
+	station.isConnected = false
+	station.device = nil
+	station.characteristic = nil
+	station.modeCharacteristic = nil
+	station.identifyCharacteristic = nil
+	station.LastPowerReadAt = time.Time{}
+	station.LastChannelReadAt = time.Time{}
+	station.LastError = "Bluetooth device disconnected"
+	station.mutex.Unlock()
+
+	connectedStationsMutex.Lock()
+	remaining := connectedStations[:0]
+	for _, tracked := range connectedStations {
+		if tracked != station {
+			remaining = append(remaining, tracked)
+		}
+	}
+	connectedStations = remaining
+	connectedStationsMutex.Unlock()
 }
 
 func IsAdapterUnavailable(err error) bool {
@@ -499,6 +581,15 @@ func IsGATTCommunicationFailure(err error) bool {
 // and returns a list of discovered base stations.
 // Uses time.AfterFunc to stop the scan.
 func ScanForDuration(duration time.Duration) ([]DiscoveredStation, error) {
+	return ScanForDurationContext(context.Background(), duration)
+}
+
+// ScanForDurationContext performs a blocking BLE scan using the same guarded
+// platform scan session as ScanForDuration and stops it when ctx is cancelled.
+func ScanForDurationContext(ctx context.Context, duration time.Duration) ([]DiscoveredStation, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	// log.Printf("[BT] ScanForDuration: Starting scan for %v...", duration)
 	localStations := make(map[string]DiscoveredStation)
 	var localMutex sync.Mutex
@@ -510,7 +601,16 @@ func ScanForDuration(duration time.Duration) ([]DiscoveredStation, error) {
 	}
 	activeScan = session
 	activeScanMutex.Unlock()
+	contextWatcherDone := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			session.requestStopAsync(scanStopCancelled)
+		case <-contextWatcherDone:
+		}
+	}()
 	defer func() {
+		close(contextWatcherDone)
 		activeScanMutex.Lock()
 		if activeScan == session {
 			activeScan = nil
@@ -586,7 +686,7 @@ func ScanForDuration(duration time.Duration) ([]DiscoveredStation, error) {
 			return nil, err
 		}
 	}
-	if reason == scanStopShutdown {
+	if reason == scanStopCancelled || ctx.Err() != nil {
 		return nil, ErrScanCancelled
 	}
 	if reason != scanStopDuration {
@@ -635,7 +735,7 @@ func CancelScan() error {
 	if session == nil {
 		return nil
 	}
-	return session.requestStop(scanStopShutdown)
+	return session.requestStop(scanStopCancelled)
 }
 
 // RequestScanCancellation records shutdown cancellation and starts StopScan
@@ -645,7 +745,7 @@ func RequestScanCancellation() {
 	session := activeScan
 	activeScanMutex.Unlock()
 	if session != nil {
-		session.requestStopAsync(scanStopShutdown)
+		session.requestStopAsync(scanStopCancelled)
 	}
 }
 
@@ -1205,6 +1305,13 @@ func writeCharacteristicValueInternal(characteristic characteristicIO, value byt
 		n, err = characteristic.WriteWithoutResponse([]byte{value})
 		if err != nil && properties.Write() && IsCapabilityUnsupported(err) {
 			n, err = characteristic.Write([]byte{value})
+		} else if err != nil && !isDefiniteWriteRejection(err) {
+			possiblySent, classified := possiblySentClassification(err)
+			if !classified {
+				err = &PossiblySentError{Err: err}
+			} else if !possiblySent {
+				// A transport-provided definite classification preserves retry safety.
+			}
 		}
 	case properties.Write():
 		n, err = characteristic.Write([]byte{value})
@@ -1215,9 +1322,18 @@ func writeCharacteristicValueInternal(characteristic characteristicIO, value byt
 		return transportError("write characteristic", err)
 	}
 	if n != 1 {
-		return transportError("write characteristic", fmt.Errorf("wrote %d bytes instead of 1", n))
+		shortWriteErr := fmt.Errorf("wrote %d bytes instead of 1", n)
+		if properties.WriteWithoutResponse() {
+			return transportError("write characteristic", &PossiblySentError{Err: shortWriteErr})
+		}
+		return transportError("write characteristic", shortWriteErr)
 	}
 	return nil
+}
+
+func isDefiniteWriteRejection(err error) bool {
+	var protocolErr bluetooth.AttributeProtocolError
+	return errors.As(err, &protocolErr)
 }
 
 func writePowerValueInternal(station *BaseStation, value byte) error {
@@ -1331,6 +1447,8 @@ func SetPowerState(station *BaseStation, target PowerState) (PowerControlResult,
 
 	const maxRetries = 2
 	var err error
+	var ambiguousWrite error
+	ambiguousSleepPrepare := false
 	command := byte(0x00)
 	switch target {
 	case PowerStateOn:
@@ -1342,6 +1460,7 @@ func SetPowerState(station *BaseStation, target PowerState) (PowerControlResult,
 	}
 
 	for i := 0; i < maxRetries; i++ {
+		sleepFinalAttempted := false
 		if err = connectAndDiscoverInternal(station); err != nil {
 			log.Printf("Bluetooth: connect/discover failed during power attempt %d/%d for %s: %v", i+1, maxRetries, station.Name, err)
 			if i == maxRetries-1 {
@@ -1361,12 +1480,23 @@ func SetPowerState(station *BaseStation, target PowerState) (PowerControlResult,
 			err = writePowerValueInternal(station, 0x01)
 			if err == nil {
 				time.Sleep(50 * time.Millisecond)
+				sleepFinalAttempted = true
 				err = writePowerValueInternal(station, command)
 			}
 		} else {
 			err = writePowerValueInternal(station, command)
 		}
 		if err == nil {
+			break
+		}
+		if IsPossiblySent(err) {
+			ambiguousWrite = err
+			ambiguousSleepPrepare = target == PowerStateSleep && !sleepFinalAttempted
+			if ambiguousSleepPrepare {
+				// The final sleep command was not attempted, so observing the old
+				// sleeping state cannot confirm completion of the sequence.
+				_ = readPowerStateInternal(station)
+			}
 			break
 		}
 		var protocolErr bluetooth.AttributeProtocolError
@@ -1391,6 +1521,27 @@ func SetPowerState(station *BaseStation, target PowerState) (PowerControlResult,
 	}
 
 	if err != nil {
+		if ambiguousWrite != nil {
+			if station.Capabilities.PowerRead && !ambiguousSleepPrepare {
+				if confirmationErr := confirmPowerStateInternal(station, target); confirmationErr == nil {
+					station.LastError = ""
+					return PowerControlResult{State: target, Confirmed: true}, nil
+				} else {
+					err = errors.Join(ambiguousWrite, confirmationErr)
+				}
+			} else if !station.Capabilities.PowerRead {
+				err = errors.Join(ambiguousWrite, unsupportedCapability("power confirmation read", nil))
+			} else {
+				err = errors.Join(ambiguousWrite, fmt.Errorf("sleep prepare write was ambiguous before the final sleep command"))
+			}
+			station.LastError = err.Error()
+			return PowerControlResult{State: station.PowerState, Confirmed: false}, &PowerConfirmationError{
+				Target: target,
+				Actual: station.PowerState,
+				Raw:    station.RawPowerState,
+				Err:    fmt.Errorf("possibly-sent command could not be confirmed for %s: %w", station.Name, err),
+			}
+		}
 		station.LastError = err.Error()
 		return PowerControlResult{}, fmt.Errorf("failed to write %s command after %d retries: %w", target, maxRetries, err)
 	}
@@ -1444,6 +1595,10 @@ func Identify(station *BaseStation) error {
 				return unsupportedCapability("identify", err)
 			}
 			lastErr = err
+			if IsPossiblySent(err) {
+				station.LastError = err.Error()
+				return fmt.Errorf("identify command for %s may have been sent and will not be retried: %w", station.Name, err)
+			}
 		} else {
 			station.LastError = ""
 			return nil

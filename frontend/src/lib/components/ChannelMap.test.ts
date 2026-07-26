@@ -87,4 +87,18 @@ describe('ChannelMap', () => {
     render(ChannelMap, { props: { stations: [station({ channel: 0 })], onSelect: vi.fn() } });
     expect(screen.getByRole('button', { name: 'CH 3 — free' })).toBeDisabled();
   });
+
+  it('ignores stale and absent channel assignments', () => {
+    render(ChannelMap, {
+      props: {
+        stations: [
+          station({ channel: 3, channelFresh: false }),
+          station({ channel: 4, isPresent: false })
+        ],
+        onSelect: vi.fn()
+      }
+    });
+    expect(screen.getByRole('button', { name: 'CH 3 — free' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'CH 4 — free' })).toBeDisabled();
+  });
 });

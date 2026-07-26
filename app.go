@@ -81,6 +81,7 @@ type apiStationManager interface {
 	PowerOffAllStations() error
 	GetStationInfo() []station.StationInfo
 	StartScan(station.ScanCallbacks) error
+	StopScan() error
 	GetScanStatus() station.ScanStatus
 	SetAllStationsPowerDetailed(string) (station.BulkPowerResult, error)
 	SetStationPower(string, string) (station.PowerActionResult, error)
@@ -93,6 +94,7 @@ type scanEventCallbacks struct {
 	started   func()
 	completed func([]station.StationInfo)
 	failed    func(error)
+	cancelled func()
 }
 
 func registerAPIRoutes(api *fiber.App, manager apiStationManager, events scanEventCallbacks, status func() APIStatus) {
@@ -122,7 +124,8 @@ func registerAPIRoutes(api *fiber.App, manager apiStationManager, events scanEve
 					events.completed(stations)
 				}
 			},
-			Failed: events.failed,
+			Failed:    events.failed,
+			Cancelled: events.cancelled,
 		})
 		if err != nil {
 			return sendAPIError(c, err)
@@ -131,6 +134,12 @@ func registerAPIRoutes(api *fiber.App, manager apiStationManager, events scanEve
 	})
 	api.Get("/scan/status", func(c *fiber.Ctx) error {
 		return c.JSON(manager.GetScanStatus())
+	})
+	api.Post("/scan/stop", func(c *fiber.Ctx) error {
+		if err := manager.StopScan(); err != nil {
+			return sendAPIError(c, err)
+		}
+		return c.SendStatus(fiber.StatusNoContent)
 	})
 	api.Post("/stations/power", func(c *fiber.Ctx) error {
 		var request struct {
@@ -245,6 +254,11 @@ func (a *App) startup(ctx context.Context) {
 				runtime.EventsEmit(a.ctx, "external-scan-failed", err.Error())
 			}
 		},
+		cancelled: func() {
+			if a.ctx != nil && !a.shuttingDown.Load() {
+				runtime.EventsEmit(a.ctx, "external-scan-cancelled")
+			}
+		},
 	}, a.GetAPIStatus)
 	a.startAPIServer()
 
@@ -345,6 +359,10 @@ func (a *App) IsScanning() bool {
 
 func (a *App) GetScanStatus() station.ScanStatus {
 	return a.stationManager.GetScanStatus()
+}
+
+func (a *App) StopScan() error {
+	return a.stationManager.StopScan()
 }
 
 func (a *App) CheckAllStationStatuses() ([]station.StationInfo, error) {

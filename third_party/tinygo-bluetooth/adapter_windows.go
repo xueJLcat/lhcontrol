@@ -1,6 +1,7 @@
 package bluetooth
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"runtime"
@@ -41,10 +42,32 @@ func enterWinRTThreadReal() (func(), error) {
 type Adapter struct {
 	watcher      *advertisement.BluetoothLEAdvertisementWatcher
 	watcherMutex sync.RWMutex
+	scan         *scanControl
 
-	connectHandler func(device Device, connected bool)
+	connectHandlerMutex sync.RWMutex
+	connectHandler      func(device Device, connected bool)
 
 	defaultAdvertisement *Advertisement
+}
+
+var (
+	asyncOperationTimeout   = 15 * time.Second
+	asyncCancellationGrace  = 2 * time.Second
+	asyncStatusPollInterval = 100 * time.Millisecond
+)
+
+// AsyncOperationTimeoutError reports an operation that did not reach a
+// terminal WinRT state before its deadline and cancellation grace elapsed.
+type AsyncOperationTimeoutError struct {
+	Cause error
+}
+
+func (e *AsyncOperationTimeoutError) Error() string {
+	return "WinRT async operation timed out"
+}
+
+func (e *AsyncOperationTimeoutError) Unwrap() error {
+	return e.Cause
 }
 
 // DefaultAdapter is the default adapter on the system.
@@ -68,10 +91,15 @@ func (a *Adapter) Enable() error {
 }
 
 func awaitAsyncOperation(asyncOperation *foundation.IAsyncOperation, genericParamSignature string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), asyncOperationTimeout)
+	defer cancel()
+	return awaitAsyncOperationContext(ctx, asyncOperation, genericParamSignature)
+}
+
+func awaitAsyncOperationContext(ctx context.Context, asyncOperation *foundation.IAsyncOperation, genericParamSignature string) error {
 	if asyncOperation == nil {
 		return errors.New("async operation is nil")
 	}
-	var status foundation.AsyncStatus
 
 	// We need to obtain the GUID of the AsyncOperationCompletedHandler, but its a generic delegate
 	// so we also need the generic parameter type's signature:
@@ -79,12 +107,11 @@ func awaitAsyncOperation(asyncOperation *foundation.IAsyncOperation, genericPara
 	iid := winrt.ParameterizedInstanceGUID(foundation.GUIDAsyncOperationCompletedHandler, genericParamSignature)
 
 	// Wait until the async operation completes.
-	waitChan := make(chan struct{})
+	completed := make(chan foundation.AsyncStatus, 1)
 	var completedOnce sync.Once
 	handler := foundation.NewAsyncOperationCompletedHandler(ole.NewGUID(iid), func(instance *foundation.AsyncOperationCompletedHandler, asyncInfo *foundation.IAsyncOperation, asyncStatus foundation.AsyncStatus) {
 		completedOnce.Do(func() {
-			status = asyncStatus
-			close(waitChan)
+			completed <- asyncStatus
 		})
 	})
 	defer handler.Release()
@@ -93,43 +120,56 @@ func awaitAsyncOperation(asyncOperation *foundation.IAsyncOperation, genericPara
 		return fmt.Errorf("set async completion handler: %w", err)
 	}
 
-	// A timeout is only a cancellation request threshold. WinRT cancellation is
-	// cooperative, so the operation and its callback must stay alive until the
-	// runtime reports a real terminal state.
-	select {
-	case <-waitChan:
-	case <-time.After(15 * time.Second):
-		asyncInfo, queryErr := queryAsyncInfo(asyncOperation)
-		if queryErr != nil {
-			// Without IAsyncInfo there is no safe way to prove cancellation.
-			// Keep the handler alive and wait for its completion callback.
-			<-waitChan
-			break
-		}
-		_ = asyncInfo.Cancel()
-		ticker := time.NewTicker(100 * time.Millisecond)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-waitChan:
-				asyncInfo.Release()
-				goto operationFinished
-			case <-ticker.C:
-				current, statusErr := asyncInfo.GetStatus()
-				if statusErr != nil || current == foundation.AsyncStatusStarted {
-					continue
-				}
-				completedOnce.Do(func() {
-					status = current
-					close(waitChan)
-				})
-				asyncInfo.Release()
-				goto operationFinished
-			}
+	asyncInfo, queryErr := queryAsyncInfo(asyncOperation)
+	if queryErr != nil {
+		select {
+		case status := <-completed:
+			return asyncCompletionError(asyncOperation, status)
+		case <-ctx.Done():
+			_ = asyncOperation.SetCompleted(nil)
+			return &AsyncOperationTimeoutError{Cause: ctx.Err()}
 		}
 	}
+	defer asyncInfo.Release()
 
-operationFinished:
+	status, err := waitForAsyncCompletion(ctx, completed, asyncInfo.Cancel, asyncInfo.GetStatus)
+	if err != nil {
+		// Detaching is best-effort. If WinRT rejects it, the operation retains
+		// its COM reference until the caller releases the operation.
+		_ = asyncOperation.SetCompleted(nil)
+		return err
+	}
+	return asyncCompletionError(asyncOperation, status)
+}
+
+func waitForAsyncCompletion(ctx context.Context, completed <-chan foundation.AsyncStatus, cancel func() error, getStatus func() (foundation.AsyncStatus, error)) (foundation.AsyncStatus, error) {
+	select {
+	case status := <-completed:
+		return status, nil
+	case <-ctx.Done():
+	}
+
+	_ = cancel()
+	grace := time.NewTimer(asyncCancellationGrace)
+	defer grace.Stop()
+	ticker := time.NewTicker(asyncStatusPollInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case status := <-completed:
+			return status, nil
+		case <-ticker.C:
+			status, err := getStatus()
+			if err == nil && status != foundation.AsyncStatusStarted {
+				return status, nil
+			}
+		case <-grace.C:
+			return foundation.AsyncStatusStarted, &AsyncOperationTimeoutError{Cause: ctx.Err()}
+		}
+	}
+}
+
+func asyncCompletionError(asyncOperation *foundation.IAsyncOperation, status foundation.AsyncStatus) error {
 	if status != foundation.AsyncStatusCompleted {
 		if err := getAsyncError(asyncOperation); err != nil {
 			return fmt.Errorf("async operation failed with status %d: %w", status, err)
@@ -137,6 +177,13 @@ operationFinished:
 		return fmt.Errorf("async operation failed with status %d", status)
 	}
 	return nil
+}
+
+func (a *Adapter) connectionHandler() func(Device, bool) {
+	a.connectHandlerMutex.RLock()
+	handler := a.connectHandler
+	a.connectHandlerMutex.RUnlock()
+	return handler
 }
 
 func queryAsyncInfo(asyncOperation *foundation.IAsyncOperation) (*foundation.IAsyncInfo, error) {

@@ -1,6 +1,7 @@
 package station
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -103,10 +104,11 @@ type ScanCallbacks struct {
 	Started   func()
 	Completed func([]StationInfo)
 	Failed    func(error)
+	Cancelled func()
 }
 
 type bluetoothOperations struct {
-	scanForDuration        func(time.Duration) ([]bluetooth.DiscoveredStation, error)
+	scanForDurationContext func(context.Context, time.Duration) ([]bluetooth.DiscoveredStation, error)
 	readPowerState         func(*bluetooth.BaseStation) error
 	fetchInitialPowerState func(*bluetooth.BaseStation) error
 	ensureCapabilities     func(*bluetooth.BaseStation) (bluetooth.Capabilities, error)
@@ -138,6 +140,10 @@ type Manager struct {
 	isScanning             atomic.Bool
 	scanStatusMutex        sync.RWMutex
 	scanStatus             ScanStatus
+	scanLifecycleMutex     sync.Mutex
+	scanContext            context.Context
+	scanCancel             context.CancelFunc
+	scanDone               chan struct{}
 	initializeMutex        sync.Mutex
 	initializeErr          error
 	nextInitializeAt       time.Time
@@ -197,7 +203,7 @@ func NewManager(cfg *config.Config) *Manager {
 		initializeBluetooth:    bluetooth.Initialize,
 		shutdownCh:             make(chan struct{}),
 		bluetoothOps: bluetoothOperations{
-			scanForDuration:        bluetooth.ScanForDuration,
+			scanForDurationContext: bluetooth.ScanForDurationContext,
 			readPowerState:         bluetooth.ReadPowerState,
 			fetchInitialPowerState: bluetooth.FetchInitialPowerState,
 			ensureCapabilities:     bluetooth.EnsureCapabilities,
@@ -751,7 +757,7 @@ func runSafely(scope string, operation func() error) (returnErr error) {
 	return operation()
 }
 
-func (m *Manager) scanAndFetchStationsSafely() (stations []StationInfo, found int, returnErr error) {
+func (m *Manager) scanAndFetchStationsSafely(ctx context.Context) (stations []StationInfo, found int, returnErr error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			returnErr = fmt.Errorf("scan workflow panicked: %v\n%s", recovered, debug.Stack())
@@ -759,14 +765,15 @@ func (m *Manager) scanAndFetchStationsSafely() (stations []StationInfo, found in
 			log.Printf("Recovered panic: %v", returnErr)
 		}
 	}()
-	return m.scanAndFetchStations()
+	return m.scanAndFetchStations(ctx)
 }
 
 func (m *Manager) ScanAndFetchStations() ([]StationInfo, error) {
 	if err := m.beginScan(ScanCallbacks{}); err != nil {
 		return m.GetStationInfo(), err
 	}
-	stations, found, err := m.scanAndFetchStationsSafely()
+	ctx := m.currentScanContext()
+	stations, found, err := m.scanAndFetchStationsSafely(ctx)
 	m.finishScan(stations, found, err, ScanCallbacks{})
 	return stations, err
 }
@@ -793,6 +800,12 @@ func (m *Manager) beginScan(callbacks ScanCallbacks) error {
 		m.endOperation()
 		return ErrShuttingDown
 	}
+	ctx, cancel := context.WithCancel(context.Background())
+	m.scanLifecycleMutex.Lock()
+	m.scanContext = ctx
+	m.scanCancel = cancel
+	m.scanDone = make(chan struct{})
+	m.scanLifecycleMutex.Unlock()
 	m.isScanning.Store(true)
 	m.lifecycleMutex.Unlock()
 	m.markScanStarted()
@@ -813,6 +826,20 @@ func (m *Manager) finishScan(stations []StationInfo, found int, err error, callb
 	m.isScanning.Store(false)
 	m.endOperation()
 	m.markScanFinished(stations, found, err)
+	// Publish terminal lifecycle state before callbacks so a callback can safely
+	// make an idempotent StopScan call without waiting for itself.
+	m.completeScanLifecycle()
+	if errors.Is(err, bluetooth.ErrScanCancelled) || errors.Is(err, context.Canceled) {
+		if callbacks.Cancelled != nil {
+			if callbackErr := runSafely("scan cancelled callback", func() error {
+				callbacks.Cancelled()
+				return nil
+			}); callbackErr != nil {
+				log.Printf("Scan cancelled callback failed: %v", callbackErr)
+			}
+		}
+		return
+	}
 	if err != nil {
 		if callbacks.Failed != nil {
 			if callbackErr := runSafely("scan failure callback", func() error {
@@ -842,8 +869,11 @@ func fallbackStationName(address string) string {
 	return "LHB-" + strings.ToUpper(compact)
 }
 
-func (m *Manager) scanAndFetchStations() ([]StationInfo, int, error) {
+func (m *Manager) scanAndFetchStations(ctx context.Context) ([]StationInfo, int, error) {
 	scanDuration := 5 * time.Second
+	if err := scanContextError(ctx); err != nil {
+		return m.GetStationInfo(), 0, err
+	}
 
 	// A Lighthouse commonly stops advertising while a GATT connection is
 	// active. Release our cached connections before a fresh scan so previously
@@ -860,6 +890,9 @@ func (m *Manager) scanAndFetchStations() ([]StationInfo, int, error) {
 	releaseErrors := make([]error, 0)
 	unreliablePresence := make(map[string]struct{})
 	for _, stationPtr := range connectedStations {
+		if err := scanContextError(ctx); err != nil {
+			return m.GetStationInfo(), 0, err
+		}
 		address := stationPtr.Snapshot().Address
 		if releaseErr := m.bluetoothOps.releaseStationForScan(stationPtr); releaseErr != nil {
 			m.observeBluetoothError(releaseErr)
@@ -875,10 +908,15 @@ func (m *Manager) scanAndFetchStations() ([]StationInfo, int, error) {
 		))
 	}
 
-	discoveredValues, err := m.bluetoothOps.scanForDuration(scanDuration)
-	if err != nil {
+	discoveredValues, err := m.bluetoothOps.scanForDurationContext(ctx, scanDuration)
+	if errors.Is(err, bluetooth.ErrScanCancelled) || errors.Is(err, context.Canceled) {
+		return m.GetStationInfo(), 0, bluetooth.ErrScanCancelled
+	} else if err != nil {
 		m.observeBluetoothError(err)
 		return m.GetStationInfo(), 0, fmt.Errorf("bluetooth scan failed: %w", err)
+	}
+	if err := scanContextError(ctx); err != nil {
+		return m.GetStationInfo(), 0, err
 	}
 
 	stationsToFetch := make([]*bluetooth.BaseStation, 0)
@@ -936,8 +974,17 @@ func (m *Manager) scanAndFetchStations() ([]StationInfo, int, error) {
 			wg.Add(1)
 			go func(resultIndex int, ptr *bluetooth.BaseStation) {
 				defer wg.Done()
-				semaphore <- struct{}{}
+				select {
+				case semaphore <- struct{}{}:
+				case <-ctx.Done():
+					readResults[resultIndex].err = bluetooth.ErrScanCancelled
+					return
+				}
 				defer func() { <-semaphore }()
+				if err := scanContextError(ctx); err != nil {
+					readResults[resultIndex].err = err
+					return
+				}
 				readResults[resultIndex] = initialReadResult{
 					address: ptr.Snapshot().Address,
 					station: ptr,
@@ -948,6 +995,9 @@ func (m *Manager) scanAndFetchStations() ([]StationInfo, int, error) {
 			}(index, stationToFetch)
 		}
 		wg.Wait()
+		if err := scanContextError(ctx); err != nil {
+			return m.GetStationInfo(), 0, err
+		}
 		sort.Slice(readResults, func(i, j int) bool {
 			return strings.ToLower(readResults[i].address) < strings.ToLower(readResults[j].address)
 		})
@@ -978,6 +1028,49 @@ func (m *Manager) scanAndFetchStations() ([]StationInfo, int, error) {
 	return m.GetStationInfo(), len(discoveredValues), nil
 }
 
+func scanContextError(ctx context.Context) error {
+	if ctx != nil && ctx.Err() != nil {
+		return bluetooth.ErrScanCancelled
+	}
+	return nil
+}
+
+func (m *Manager) currentScanContext() context.Context {
+	m.scanLifecycleMutex.Lock()
+	defer m.scanLifecycleMutex.Unlock()
+	if m.scanContext == nil {
+		return context.Background()
+	}
+	return m.scanContext
+}
+
+func (m *Manager) completeScanLifecycle() {
+	m.scanLifecycleMutex.Lock()
+	done := m.scanDone
+	m.scanContext = nil
+	m.scanCancel = nil
+	m.scanDone = nil
+	if done != nil {
+		close(done)
+	}
+	m.scanLifecycleMutex.Unlock()
+}
+
+// StopScan cancels the active scan and waits until all scan processing and its
+// terminal callback have finished. Repeated and no-op calls are safe.
+func (m *Manager) StopScan() error {
+	m.scanLifecycleMutex.Lock()
+	cancel := m.scanCancel
+	done := m.scanDone
+	m.scanLifecycleMutex.Unlock()
+	if cancel == nil || done == nil {
+		return nil
+	}
+	cancel()
+	<-done
+	return nil
+}
+
 func (m *Manager) IsScanning() bool {
 	return m.isScanning.Load()
 }
@@ -1002,7 +1095,10 @@ func (m *Manager) markScanFinished(stations []StationInfo, found int, err error)
 	m.scanStatusMutex.Lock()
 	m.scanStatus.CompletedAt = time.Now().Format(time.RFC3339Nano)
 	m.scanStatus.Found = found
-	if err != nil {
+	if errors.Is(err, bluetooth.ErrScanCancelled) || errors.Is(err, context.Canceled) {
+		m.scanStatus.State = "cancelled"
+		m.scanStatus.Error = ""
+	} else if err != nil {
 		m.scanStatus.State = "failed"
 		m.scanStatus.Error = err.Error()
 	} else {
@@ -1030,7 +1126,8 @@ func (m *Manager) StartScan(callbacks ScanCallbacks) error {
 	m.asyncScanWg.Add(1)
 	go func() {
 		defer m.asyncScanWg.Done()
-		stations, found, err := m.scanAndFetchStationsSafely()
+		ctx := m.currentScanContext()
+		stations, found, err := m.scanAndFetchStationsSafely(ctx)
 		m.finishScan(stations, found, err, callbacks)
 	}()
 	return nil
@@ -1976,13 +2073,19 @@ func (m *Manager) BeginShutdown() {
 		close(m.shutdownCh)
 		m.lifecycleMutex.Unlock()
 	})
-	if m.isScanning.Load() {
-		bluetooth.RequestScanCancellation()
+	m.scanLifecycleMutex.Lock()
+	cancelScan := m.scanCancel
+	m.scanLifecycleMutex.Unlock()
+	if cancelScan != nil {
+		cancelScan()
 	}
 }
 
 func (m *Manager) Shutdown() {
 	m.BeginShutdown()
+	if err := m.StopScan(); err != nil {
+		log.Printf("Bluetooth scan cancellation was incomplete: %v", err)
+	}
 	m.statusRecoveryWg.Wait()
 	m.lifecycleMutex.Lock()
 	for m.activeOperations > 0 {

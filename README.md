@@ -138,6 +138,10 @@ This application also exposes a simple HTTP API on `http://127.0.0.1:7575` for b
 *   **`GET /scan/status`**
     *   **Description:** Returns scan state, timestamps, warnings, and the number actually seen in the most recent scan.
 
+*   **`POST /scan/stop`**
+    *   **Description:** Cancels an active scan and waits for its workflow to finish. Safe to call when no scan is active.
+    *   **Response:** `204 No Content`. The terminal scan status is `cancelled`.
+
 *   **`POST /stations/power`**
     *   **Body:** `{"state":"on"}`, `{"state":"standby"}`, or `{"state":"sleep"}`.
     *   **Response:** A structured result for every known station, including command-sent, success, confirmation, and error fields.

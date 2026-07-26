@@ -7,6 +7,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"github.com/go-ole/go-ole"
@@ -24,6 +25,25 @@ type callbackGate struct {
 	cond   *sync.Cond
 	closed bool
 	active int
+}
+
+var (
+	scanStopTimeout      = 2 * time.Second
+	scanStopPollInterval = 50 * time.Millisecond
+)
+
+type scanControl struct {
+	watcher      *advertisement.BluetoothLEAdvertisementWatcher
+	stopRequests chan error
+	stopOnce     sync.Once
+}
+
+// ScanStopTimeoutError reports a watcher that did not reach a terminal state
+// after StopScan was requested.
+type ScanStopTimeoutError struct{}
+
+func (*ScanStopTimeoutError) Error() string {
+	return "Bluetooth scan did not stop before the cleanup deadline"
 }
 
 func newCallbackGate() *callbackGate {
@@ -215,12 +235,15 @@ func (a *Adapter) ScanWithStart(callback func(*Adapter, ScanResult), started fun
 		a.watcherMutex.Unlock()
 		return err
 	}
+	control := &scanControl{watcher: watcher, stopRequests: make(chan error, 1)}
 	a.watcher = watcher
+	a.scan = control
 	a.watcherMutex.Unlock()
 	defer func() {
 		a.watcherMutex.Lock()
 		if a.watcher == watcher {
 			a.watcher = nil
+			a.scan = nil
 		}
 		_ = watcher.Release()
 		a.watcherMutex.Unlock()
@@ -349,8 +372,67 @@ func (a *Adapter) ScanWithStart(callback func(*Adapter, ScanResult), started fun
 		started()
 	}
 
-	// Wait until advertisement has stopped, and finish.
-	return <-stoppingChan
+	// Wait until advertisement has stopped, and finish. Once StopScan is
+	// requested, status polling and retries bound cleanup even if WinRT omits
+	// the Stopped event.
+	return waitForScanStop(stoppingChan, control.stopRequests, watcher.Stop, watcher.GetStatus)
+}
+
+func waitForScanStop(stopped <-chan error, stopRequests <-chan error, stop func() error, getStatus func() (advertisement.BluetoothLEAdvertisementWatcherStatus, error)) error {
+	var originalErr error
+	select {
+	case err := <-stopped:
+		return err
+	case originalErr = <-stopRequests:
+	}
+
+	deadline := time.NewTimer(scanStopTimeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(scanStopPollInterval)
+	defer ticker.Stop()
+	for {
+		status, statusErr := getStatus()
+		if statusErr == nil && (status == advertisement.BluetoothLEAdvertisementWatcherStatusStopped || status == advertisement.BluetoothLEAdvertisementWatcherStatusAborted) {
+			select {
+			case eventErr := <-stopped:
+				if eventErr != nil {
+					if originalErr != nil {
+						return errors.Join(originalErr, eventErr)
+					}
+					return eventErr
+				}
+			default:
+			}
+			if originalErr != nil {
+				return originalErr
+			}
+			if status == advertisement.BluetoothLEAdvertisementWatcherStatusAborted {
+				return errors.New("Bluetooth scan watcher aborted without a Stopped event")
+			}
+			return nil
+		}
+
+		select {
+		case eventErr := <-stopped:
+			if eventErr != nil {
+				if originalErr != nil {
+					return errors.Join(originalErr, eventErr)
+				}
+				return eventErr
+			}
+			return originalErr
+		case <-ticker.C:
+			if retryErr := stop(); originalErr == nil && retryErr != nil {
+				originalErr = retryErr
+			}
+		case <-deadline.C:
+			timeoutErr := error(&ScanStopTimeoutError{})
+			if originalErr != nil {
+				return errors.Join(originalErr, timeoutErr)
+			}
+			return timeoutErr
+		}
+	}
 }
 
 func getScanResultFromArgs(args *advertisement.BluetoothLEAdvertisementReceivedEventArgs) (ScanResult, error) {
@@ -510,16 +592,26 @@ func GUIDToUUID(guid syscall.GUID) UUID {
 func (a *Adapter) StopScan() error {
 	leaveThread, err := enterWinRTThread()
 	if err != nil {
+		a.watcherMutex.RLock()
+		control := a.scan
+		if control != nil {
+			control.stopOnce.Do(func() { control.stopRequests <- err })
+		}
+		a.watcherMutex.RUnlock()
 		return err
 	}
 	defer leaveThread()
 
 	a.watcherMutex.RLock()
-	defer a.watcherMutex.RUnlock()
-	if a.watcher == nil {
+	control := a.scan
+	if control == nil || control.watcher == nil {
+		a.watcherMutex.RUnlock()
 		return errNotScanning
 	}
-	return a.watcher.Stop()
+	err = control.watcher.Stop()
+	control.stopOnce.Do(func() { control.stopRequests <- err })
+	a.watcherMutex.RUnlock()
+	return err
 }
 
 var _ GAPDevice = Device{}
@@ -768,26 +860,26 @@ func (a *Adapter) Connect(address Address, params ConnectionParams) (Device, err
 		if !allowed {
 			return
 		}
-		invokeConnectionCallbackSafely(func() {
-			operationState, operationErr := device.beginOperation()
-			if operationErr != nil {
-				return
-			}
-			defer device.endOperation()
-			status, err := operationState.device.GetConnectionStatus()
-			if err != nil {
-				return
-			}
-			if status == bluetooth.BluetoothConnectionStatusDisconnected {
-				// Do not release the currently executing handler on its own
-				// callback stack. Disconnect is idempotent across Device copies.
-				go func() { _ = device.Disconnect() }()
-			}
-
-			if a.connectHandler != nil {
-				a.connectHandler(device, status == bluetooth.BluetoothConnectionStatusConnected)
-			}
-		})
+		operationState, operationErr := device.beginOperation()
+		if operationErr != nil {
+			return
+		}
+		status, statusErr := operationState.device.GetConnectionStatus()
+		device.endOperation()
+		if statusErr != nil {
+			return
+		}
+		if status == bluetooth.BluetoothConnectionStatusDisconnected {
+			// Never tear down the handler on its own callback stack.
+			go func() { _ = device.Disconnect() }()
+		}
+		if connectHandler := a.connectionHandler(); connectHandler != nil {
+			// Dispatch after leaving both the operation lock and WinRT callback
+			// stack so handlers may safely re-enter Device methods.
+			go invokeConnectionCallbackSafely(func() {
+				connectHandler(device, status == bluetooth.BluetoothConnectionStatusConnected)
+			})
+		}
 	})
 
 	// Serialize registration with teardown. The callback may run as soon as
@@ -795,21 +887,21 @@ func (a *Adapter) Connect(address Address, params ConnectionParams) (Device, err
 	// before allowing it to inspect or disconnect the shared state.
 	state.operationMutex.Lock()
 	state.connectionStatusListener = handler
+	// From this point deviceState is the sole owner, including all failure
+	// paths. This prevents registration failure from also running the outer
+	// deferred releases for the same COM objects.
+	cleanupSession = false
+	cleanupDevice = false
 	token, err := state.device.AddConnectionStatusChanged(handler)
 
 	if err != nil {
-		state.connectionStatusListener = nil
 		state.operationMutex.Unlock()
-		handler.Release()
 		_ = device.Disconnect()
 		return Device{}, err
 	}
 	state.connectionStatusListenerToken = token
 	state.connectionStatusListenerAdded = true
 	state.operationMutex.Unlock()
-	cleanupSession = false
-	cleanupDevice = false
-
 	return device, nil
 }
 
