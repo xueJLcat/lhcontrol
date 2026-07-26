@@ -74,8 +74,8 @@ export function SetAllStationsPowerDetailed(arg1) {
   return window['go']['main']['App']['SetAllStationsPowerDetailed'](arg1);
 }
 
-export function SetStationChannel(arg1, arg2) {
-  return window['go']['main']['App']['SetStationChannel'](arg1, arg2);
+export function SetStationChannel(arg1, arg2, arg3) {
+  return window['go']['main']['App']['SetStationChannel'](arg1, arg2, arg3);
 }
 
 export function SetStationPower(arg1, arg2) {

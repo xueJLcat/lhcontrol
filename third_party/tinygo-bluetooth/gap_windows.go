@@ -15,6 +15,7 @@ import (
 	"github.com/saltosystems/winrt-go/windows/devices/bluetooth/advertisement"
 	"github.com/saltosystems/winrt-go/windows/devices/bluetooth/genericattributeprofile"
 	"github.com/saltosystems/winrt-go/windows/foundation"
+	"github.com/saltosystems/winrt-go/windows/foundation/collections"
 	"github.com/saltosystems/winrt-go/windows/storage/streams"
 )
 
@@ -128,6 +129,12 @@ func (a *Advertisement) Stop() error {
 // Scan starts a BLE scan. It is stopped by a call to StopScan. A common pattern
 // is to cancel the scan when a particular device has been found.
 func (a *Adapter) Scan(callback func(*Adapter, ScanResult)) (err error) {
+	leaveThread, err := enterWinRTThread()
+	if err != nil {
+		return err
+	}
+	defer leaveThread()
+
 	a.watcherMutex.Lock()
 	if a.watcher != nil {
 		a.watcherMutex.Unlock()
@@ -322,26 +329,11 @@ func getScanResultFromArgs(args *advertisement.BluetoothLEAdvertisementReceivedE
 			size = 0
 		}
 		for i := uint32(0); i < size; i++ {
-			element, elementErr := vector.GetAt(i)
-			if elementErr != nil || element == nil {
+			guid, guidErr := vectorGUIDAt(vector, i)
+			if guidErr != nil {
 				continue
 			}
-			// GetAt on an IVectorView<Guid> returns a pointer into memory
-			// that is owned by the WinRT projection layer and may not
-			// survive beyond the call boundary. Directly dereferencing
-			// element as *syscall.GUID can trigger an access violation
-			// when the backing storage has already been released.
-			//
-			// Instead we interpret the unsafe.Pointer value itself (which
-			// lives on the Go stack) as a syscall.GUID.  On 64-bit
-			// systems this reads 8 bytes of pointer data plus 8 bytes of
-			// adjacent stack memory; the resulting UUID bytes will not
-			// match the on-wire advertisement, so HasServiceUUID
-			// filtering against parsed UUIDs is unreliable.  Base station
-			// detection therefore relies on the LHB- name prefix which
-			// all Valve Lighthouse 2.0 units advertise.
-			serviceGUID := (*syscall.GUID)(unsafe.Pointer(&element))
-			uuid := GUIDToUUID(*serviceGUID)
+			uuid := GUIDToUUID(guid)
 			serviceUUIDs = append(serviceUUIDs, uuid)
 		}
 	}
@@ -357,6 +349,20 @@ func getScanResultFromArgs(args *advertisement.BluetoothLEAdvertisementReceivedE
 	}
 
 	return result, nil
+}
+
+func vectorGUIDAt(vector *collections.IVector, index uint32) (syscall.GUID, error) {
+	var guid syscall.GUID
+	hr, _, _ := syscall.SyscallN(
+		vector.VTable().GetAt,
+		uintptr(unsafe.Pointer(vector)),
+		uintptr(index),
+		uintptr(unsafe.Pointer(&guid)),
+	)
+	if hr != 0 {
+		return syscall.GUID{}, ole.NewError(hr)
+	}
+	return guid, nil
 }
 
 func bufferToSliceSafe(buffer *streams.IBuffer) []byte {
@@ -407,6 +413,12 @@ func GUIDToUUID(guid syscall.GUID) UUID {
 // callback to stop the current scan. If no scan is in progress, an error will
 // be returned.
 func (a *Adapter) StopScan() error {
+	leaveThread, err := enterWinRTThread()
+	if err != nil {
+		return err
+	}
+	defer leaveThread()
+
 	a.watcherMutex.RLock()
 	defer a.watcherMutex.RUnlock()
 	if a.watcher == nil {
@@ -428,11 +440,14 @@ type Device struct {
 // value throughout the public API, so mutable ownership must live behind a
 // shared pointer.
 type deviceState struct {
-	operationMutex sync.Mutex
-	disconnectOnce sync.Once
-	closed         atomic.Bool
-	cleanupErr     error
-	cancel         context.CancelFunc
+	operationMutex  sync.Mutex
+	cleanupMutex    sync.Mutex
+	closed          atomic.Bool
+	cleanupStarted  bool
+	cleanupComplete bool
+	cleanupErr      error
+	leaveThread     func()
+	cancel          context.CancelFunc
 
 	device                        *bluetooth.BluetoothLEDevice
 	session                       *genericattributeprofile.GattSession
@@ -441,6 +456,43 @@ type deviceState struct {
 	connectionStatusListenerAdded bool
 	services                      []*genericattributeprofile.GattDeviceService
 	characteristics               []*genericattributeprofile.GattCharacteristic
+	notifications                 []notificationRegistration
+	callbackMutex                 sync.Mutex
+	callbacksClosed               bool
+	activeCallbacks               int
+	callbacksCond                 *sync.Cond
+}
+
+type notificationRegistration struct {
+	characteristic *genericattributeprofile.GattCharacteristic
+	token          foundation.EventRegistrationToken
+	handler        *foundation.TypedEventHandler
+}
+
+func (s *deviceState) beginCallback() bool {
+	s.callbackMutex.Lock()
+	s.activeCallbacks++
+	allowed := !s.callbacksClosed
+	s.callbackMutex.Unlock()
+	return allowed
+}
+
+func (s *deviceState) endCallback() {
+	s.callbackMutex.Lock()
+	s.activeCallbacks--
+	if s.callbacksClosed && s.activeCallbacks == 0 && s.callbacksCond != nil {
+		s.callbacksCond.Broadcast()
+	}
+	s.callbackMutex.Unlock()
+}
+
+func (s *deviceState) closeCallbacks() {
+	s.callbackMutex.Lock()
+	s.callbacksClosed = true
+	for s.activeCallbacks > 0 {
+		s.callbacksCond.Wait()
+	}
+	s.callbackMutex.Unlock()
 }
 
 func (d Device) beginOperation() (*deviceState, error) {
@@ -452,11 +504,21 @@ func (d Device) beginOperation() (*deviceState, error) {
 		d.state.operationMutex.Unlock()
 		return nil, errors.New("bluetooth: device is disconnected")
 	}
+	leaveThread, err := enterWinRTThread()
+	if err != nil {
+		d.state.operationMutex.Unlock()
+		return nil, err
+	}
+	d.state.leaveThread = leaveThread
 	return d.state, nil
 }
 
 func (d Device) endOperation() {
 	if d.state != nil {
+		if d.state.leaveThread != nil {
+			d.state.leaveThread()
+			d.state.leaveThread = nil
+		}
 		d.state.operationMutex.Unlock()
 	}
 }
@@ -477,10 +539,24 @@ func (d Device) registerCharacteristic(characteristic *genericattributeprofile.G
 	return nil
 }
 
+func (d Device) registerNotification(registration notificationRegistration) error {
+	if d.state == nil || d.state.closed.Load() {
+		return errors.New("bluetooth: device is disconnected")
+	}
+	d.state.notifications = append(d.state.notifications, registration)
+	return nil
+}
+
 // Connect starts a connection attempt to the given peripheral device address.
 //
 // On Linux and Windows, the IsRandom part of the address is ignored.
 func (a *Adapter) Connect(address Address, params ConnectionParams) (Device, error) {
+	leaveThread, threadErr := enterWinRTThread()
+	if threadErr != nil {
+		return Device{}, threadErr
+	}
+	defer leaveThread()
+
 	var winAddr uint64
 	for i := range address.MAC {
 		winAddr += uint64(address.MAC[i]) << (8 * i)
@@ -491,6 +567,7 @@ func (a *Adapter) Connect(address Address, params ConnectionParams) (Device, err
 	if err != nil {
 		return Device{}, err
 	}
+	defer bleDeviceOp.Release()
 
 	// We need to pass the signature of the parameter returned by the async operation:
 	// IAsyncOperation<BluetoothLEDevice>
@@ -509,6 +586,13 @@ func (a *Adapter) Connect(address Address, params ConnectionParams) (Device, err
 	}
 
 	bleDevice := (*bluetooth.BluetoothLEDevice)(res)
+	cleanupDevice := true
+	defer func() {
+		if cleanupDevice && bleDevice != nil {
+			_ = bleDevice.Close()
+			bleDevice.Release()
+		}
+	}()
 
 	// Creating a BluetoothLEDevice object by calling this method alone doesn't (necessarily) initiate a connection.
 	// To initiate a connection, we need to set GattSession.MaintainConnection to true.
@@ -516,6 +600,7 @@ func (a *Adapter) Connect(address Address, params ConnectionParams) (Device, err
 	if err != nil {
 		return Device{}, err
 	}
+	defer dID.Release()
 
 	// Windows does not support explicitly connecting to a device.
 	// Instead it has the concept of a GATT session that is owned
@@ -524,6 +609,7 @@ func (a *Adapter) Connect(address Address, params ConnectionParams) (Device, err
 	if err != nil {
 		return Device{}, err
 	}
+	defer gattSessionOp.Release()
 
 	if err := awaitAsyncOperation(gattSessionOp, genericattributeprofile.SignatureGattSession); err != nil {
 		return Device{}, fmt.Errorf("error getting gatt session: %w", err)
@@ -534,6 +620,16 @@ func (a *Adapter) Connect(address Address, params ConnectionParams) (Device, err
 		return Device{}, err
 	}
 	newSession := (*genericattributeprofile.GattSession)(gattRes)
+	if newSession == nil {
+		return Device{}, errors.New("Bluetooth GATT session result is nil")
+	}
+	cleanupSession := true
+	defer func() {
+		if cleanupSession {
+			_ = newSession.Close()
+			newSession.Release()
+		}
+	}()
 	// This keeps the device connected until we set maintain_connection = False.
 	if err := newSession.SetMaintainConnection(true); err != nil {
 		return Device{}, err
@@ -545,6 +641,7 @@ func (a *Adapter) Connect(address Address, params ConnectionParams) (Device, err
 		device:  bleDevice,
 		session: newSession,
 	}
+	state.callbacksCond = sync.NewCond(&state.callbackMutex)
 
 	device := Device{
 		Address: address,
@@ -561,16 +658,17 @@ func (a *Adapter) Connect(address Address, params ConnectionParams) (Device, err
 	)
 
 	handler := foundation.NewTypedEventHandler(ole.NewGUID(connectionStatusChangedGUID), func(instance *foundation.TypedEventHandler, sender, arg unsafe.Pointer) {
-		if state.closed.Load() {
+		allowed := state.beginCallback()
+		defer state.endCallback()
+		if !allowed {
 			return
 		}
-		state.operationMutex.Lock()
-		if state.closed.Load() {
-			state.operationMutex.Unlock()
+		operationState, operationErr := device.beginOperation()
+		if operationErr != nil {
 			return
 		}
-		status, err := state.device.GetConnectionStatus()
-		state.operationMutex.Unlock()
+		status, err := operationState.device.GetConnectionStatus()
+		device.endOperation()
 		if err != nil {
 			return
 		}
@@ -597,11 +695,13 @@ func (a *Adapter) Connect(address Address, params ConnectionParams) (Device, err
 		state.operationMutex.Unlock()
 		handler.Release()
 		_ = device.Disconnect()
-		return device, err
+		return Device{}, err
 	}
 	state.connectionStatusListenerToken = token
 	state.connectionStatusListenerAdded = true
 	state.operationMutex.Unlock()
+	cleanupSession = false
+	cleanupDevice = false
 
 	return device, nil
 }
@@ -614,58 +714,97 @@ func (d Device) Disconnect() error {
 	}
 
 	state := d.state
-	state.disconnectOnce.Do(func() {
-		state.closed.Store(true)
-		state.operationMutex.Lock()
-		defer state.operationMutex.Unlock()
+	state.cleanupMutex.Lock()
+	if state.cleanupComplete {
+		err := state.cleanupErr
+		state.cleanupMutex.Unlock()
+		return err
+	}
+	if state.cleanupStarted {
+		state.cleanupMutex.Unlock()
+		return nil
+	}
+	state.cleanupStarted = true
+	state.closed.Store(true)
+	state.cleanupMutex.Unlock()
+	go d.cleanup()
+	return nil
+}
 
-		if state.cancel != nil {
-			state.cancel()
+func (d Device) cleanup() {
+	state := d.state
+	state.closeCallbacks()
+	state.operationMutex.Lock()
+	defer state.operationMutex.Unlock()
+	leaveThread, err := enterWinRTThread()
+	if err != nil {
+		state.cleanupMutex.Lock()
+		state.cleanupErr = err
+		state.cleanupComplete = true
+		state.cleanupMutex.Unlock()
+		return
+	}
+	defer leaveThread()
+
+	if state.cancel != nil {
+		state.cancel()
+	}
+	if state.device != nil && state.connectionStatusListenerAdded {
+		_ = state.device.RemoveConnectionStatusChanged(state.connectionStatusListenerToken)
+	}
+	for _, notification := range state.notifications {
+		if notification.characteristic != nil {
+			_ = notification.characteristic.RemoveValueChanged(notification.token)
 		}
-		if state.device != nil && state.connectionStatusListenerAdded {
-			_ = state.device.RemoveConnectionStatusChanged(state.connectionStatusListenerToken)
+	}
+	if state.connectionStatusListener != nil {
+		state.connectionStatusListener.Release()
+		state.connectionStatusListener = nil
+	}
+	for _, notification := range state.notifications {
+		if notification.handler != nil {
+			notification.handler.Release()
 		}
-		if state.connectionStatusListener != nil {
-			state.connectionStatusListener.Release()
-			state.connectionStatusListener = nil
+	}
+	state.notifications = nil
+	for _, characteristic := range state.characteristics {
+		if characteristic != nil {
+			characteristic.Release()
 		}
-		for _, characteristic := range state.characteristics {
-			if characteristic != nil {
-				characteristic.Release()
-			}
+	}
+	state.characteristics = nil
+	for _, service := range state.services {
+		if service != nil {
+			_ = service.Close()
+			service.Release()
 		}
-		state.characteristics = nil
-		for _, service := range state.services {
-			if service != nil {
-				_ = service.Close()
-				service.Release()
-			}
+	}
+	state.services = nil
+	if state.session != nil {
+		_ = state.session.SetMaintainConnection(false)
+		if err := state.session.Close(); err != nil {
+			state.cleanupErr = err
 		}
-		state.services = nil
-		if state.session != nil {
-			_ = state.session.SetMaintainConnection(false)
-			if err := state.session.Close(); err != nil {
-				state.cleanupErr = err
-			}
-			state.session.Release()
-			state.session = nil
+		state.session.Release()
+		state.session = nil
+	}
+	if state.device != nil {
+		if err := state.device.Close(); err != nil && state.cleanupErr == nil {
+			state.cleanupErr = err
 		}
-		if state.device != nil {
-			if err := state.device.Close(); err != nil && state.cleanupErr == nil {
-				state.cleanupErr = err
-			}
-			state.device.Release()
-			state.device = nil
-		}
-	})
-	return state.cleanupErr
+		state.device.Release()
+		state.device = nil
+	}
+	state.cleanupMutex.Lock()
+	state.cleanupComplete = true
+	state.cleanupMutex.Unlock()
 }
 
 // Connected returns whether the device is currently connected.
 func (d Device) Connected() (bool, error) {
 	state, err := d.beginOperation()
 	if err != nil {
-		return false, nil
+		return false, err
 	}
 	defer d.endOperation()
 	status, err := state.device.GetConnectionStatus()

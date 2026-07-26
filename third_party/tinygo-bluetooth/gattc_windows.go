@@ -58,6 +58,7 @@ func (d Device) DiscoverServices(filterUUIDs []UUID) ([]DeviceService, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer getServicesOperation.Release()
 
 	if err := awaitAsyncOperation(getServicesOperation, genericattributeprofile.SignatureGattDeviceServicesResult); err != nil {
 		return nil, err
@@ -69,6 +70,10 @@ func (d Device) DiscoverServices(filterUUIDs []UUID) ([]DeviceService, error) {
 	}
 
 	servicesResult := (*genericattributeprofile.GattDeviceServicesResult)(res)
+	if servicesResult == nil {
+		return nil, errors.New("bluetooth: service discovery returned nil result")
+	}
+	defer servicesResult.Release()
 
 	status, err := servicesResult.GetStatus()
 	if err != nil {
@@ -82,6 +87,10 @@ func (d Device) DiscoverServices(filterUUIDs []UUID) ([]DeviceService, error) {
 	if err != nil {
 		return nil, err
 	}
+	if servicesVector == nil {
+		return nil, errors.New("bluetooth: service discovery returned nil vector")
+	}
+	defer servicesVector.Release()
 
 	// Convert services vector to array
 	servicesSize, err := servicesVector.GetSize()
@@ -115,9 +124,17 @@ func (d Device) DiscoverServices(filterUUIDs []UUID) ([]DeviceService, error) {
 		// only include services that are included in the input filter
 		if len(filterUUIDs) > 0 {
 			for j, uuid := range filterUUIDs {
+				if services[j] != (DeviceService{}) {
+					continue
+				}
 				if serviceUuid.String() == uuid.String() {
 					// One of the services we're looking for.
 					services[j] = makeService(serviceUuid, srv, d)
+					if err := d.registerService(srv); err != nil {
+						_ = srv.Close()
+						srv.Release()
+						return nil, err
+					}
 					matched = true
 					break
 				}
@@ -215,6 +232,7 @@ func (s DeviceService) DiscoverCharacteristics(filterUUIDs []UUID) ([]DeviceChar
 	if err != nil {
 		return nil, err
 	}
+	defer getCharacteristicsOp.Release()
 
 	// IAsyncOperation<GattCharacteristicsResult>
 	if err := awaitAsyncOperation(getCharacteristicsOp, genericattributeprofile.SignatureGattCharacteristicsResult); err != nil {
@@ -227,12 +245,27 @@ func (s DeviceService) DiscoverCharacteristics(filterUUIDs []UUID) ([]DeviceChar
 	}
 
 	gattCharResult := (*genericattributeprofile.GattCharacteristicsResult)(res)
+	if gattCharResult == nil {
+		return nil, errors.New("bluetooth: characteristic discovery returned nil result")
+	}
+	defer gattCharResult.Release()
+	status, err := gattCharResult.GetStatus()
+	if err != nil {
+		return nil, err
+	}
+	if status != genericattributeprofile.GattCommunicationStatusSuccess {
+		return nil, fmt.Errorf("could not retrieve characteristics, operation failed with code %d", status)
+	}
 
 	// IVectorView<GattCharacteristic>
 	charVector, err := gattCharResult.GetCharacteristics()
 	if err != nil {
 		return nil, err
 	}
+	if charVector == nil {
+		return nil, errors.New("bluetooth: characteristic discovery returned nil vector")
+	}
+	defer charVector.Release()
 
 	// Convert characteristics vector to array
 	characteristicsSize, err := charVector.GetSize()
@@ -281,6 +314,10 @@ func (s DeviceService) DiscoverCharacteristics(filterUUIDs []UUID) ([]DeviceChar
 				if characteristicUUID.String() == uuid.String() {
 					// One of the characteristics we're looking for.
 					characteristics[j] = s.makeCharacteristic(characteristicUUID, characteristic, properties)
+					if err := s.device.registerCharacteristic(characteristic); err != nil {
+						characteristic.Release()
+						return nil, err
+					}
 					matched = true
 					break
 				}
@@ -395,12 +432,14 @@ func (c DeviceCharacteristic) write(p []byte, mode genericattributeprofile.GattW
 	if err != nil {
 		return 0, err
 	}
+	defer value.Release()
 
 	// IAsyncOperation<GattCommunicationStatus>
 	asyncOp, err := c.characteristic.WriteValueWithOptionAsync(value, mode)
 	if err != nil {
 		return 0, err
 	}
+	defer asyncOp.Release()
 
 	if err := awaitAsyncOperation(asyncOp, genericattributeprofile.SignatureGattCommunicationStatus); err != nil {
 		return 0, err
@@ -437,6 +476,7 @@ func (c DeviceCharacteristic) Read(data []byte) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	defer readOp.Release()
 
 	// IAsyncOperation<GattReadResult>
 	if err := awaitAsyncOperation(readOp, genericattributeprofile.SignatureGattReadResult); err != nil {
@@ -449,16 +489,35 @@ func (c DeviceCharacteristic) Read(data []byte) (int, error) {
 	}
 
 	result := (*genericattributeprofile.GattReadResult)(res)
+	if result == nil {
+		return 0, errors.New("bluetooth: read returned nil result")
+	}
+	defer result.Release()
+	status, err := result.GetStatus()
+	if err != nil {
+		return 0, err
+	}
+	if status != genericattributeprofile.GattCommunicationStatusSuccess {
+		return 0, fmt.Errorf("Bluetooth read failed with status %d", status)
+	}
 
 	buffer, err := result.GetValue()
 	if err != nil {
 		return 0, err
 	}
+	if buffer == nil {
+		return 0, errors.New("bluetooth: read returned nil buffer")
+	}
+	defer buffer.Release()
 
 	datareader, err := streams.DataReaderFromBuffer(buffer)
 	if err != nil {
 		return 0, err
 	}
+	if datareader == nil {
+		return 0, errors.New("bluetooth: read returned nil data reader")
+	}
+	defer datareader.Release()
 
 	bufferlen, err := buffer.GetLength()
 	if err != nil {
@@ -468,6 +527,9 @@ func (c DeviceCharacteristic) Read(data []byte) (int, error) {
 	readBuffer, err := datareader.ReadBytes(bufferlen)
 	if err != nil {
 		return 0, err
+	}
+	if len(readBuffer) > len(data) {
+		return 0, fmt.Errorf("bluetooth: read value is %d bytes, buffer holds %d", len(readBuffer), len(data))
 	}
 
 	return copy(data, readBuffer), nil
@@ -496,6 +558,11 @@ func (c DeviceCharacteristic) EnableNotifications(callback func(buf []byte)) err
 // notification with a new value every time the value of the characteristic
 // changes. And you can select the notify/indicate mode as you need.
 func (c DeviceCharacteristic) EnableNotificationsWithMode(mode NotificationMode, callback func(buf []byte)) error {
+	if _, err := c.service.device.beginOperation(); err != nil {
+		return err
+	}
+	defer c.service.device.endOperation()
+
 	configValue := genericattributeprofile.GattClientCharacteristicConfigurationDescriptorValueNone
 	if mode == NotificationModeIndicate {
 		if c.properties&genericattributeprofile.GattCharacteristicPropertiesIndicate == 0 {
@@ -517,12 +584,28 @@ func (c DeviceCharacteristic) EnableNotificationsWithMode(mode NotificationMode,
 	// TypedEventHandler<GattCharacteristic,GattValueChangedEventArgs>
 	guid := winrt.ParameterizedInstanceGUID(foundation.GUIDTypedEventHandler, genericattributeprofile.SignatureGattCharacteristic, genericattributeprofile.SignatureGattValueChangedEventArgs)
 	valueChangedEventHandler := foundation.NewTypedEventHandler(ole.NewGUID(guid), func(instance *foundation.TypedEventHandler, sender, args unsafe.Pointer) {
+		defer func() { _ = recover() }()
+		if c.service.device.state == nil {
+			return
+		}
+		allowed := c.service.device.state.beginCallback()
+		defer c.service.device.state.endCallback()
+		if !allowed {
+			return
+		}
+		if args == nil {
+			return
+		}
 		valueChangedEvent := (*genericattributeprofile.GattValueChangedEventArgs)(args)
 
 		buf, err := valueChangedEvent.GetCharacteristicValue()
 		if err != nil {
 			return
 		}
+		if buf == nil {
+			return
+		}
+		defer buf.Release()
 
 		reader, err := streams.DataReaderFromBuffer(buf)
 		if err != nil {
@@ -542,15 +625,24 @@ func (c DeviceCharacteristic) EnableNotificationsWithMode(mode NotificationMode,
 
 		callback(data)
 	})
-	_, err := c.characteristic.AddValueChanged(valueChangedEventHandler)
+	token, err := c.characteristic.AddValueChanged(valueChangedEventHandler)
 	if err != nil {
+		valueChangedEventHandler.Release()
 		return err
 	}
+	registered := false
+	defer func() {
+		if !registered {
+			_ = c.characteristic.RemoveValueChanged(token)
+			valueChangedEventHandler.Release()
+		}
+	}()
 
 	writeOp, err := c.characteristic.WriteClientCharacteristicConfigurationDescriptorAsync(configValue)
 	if err != nil {
 		return err
 	}
+	defer writeOp.Release()
 
 	// IAsyncOperation<GattCommunicationStatus>
 	if err := awaitAsyncOperation(writeOp, genericattributeprofile.SignatureGattCommunicationStatus); err != nil {
@@ -567,6 +659,14 @@ func (c DeviceCharacteristic) EnableNotificationsWithMode(mode NotificationMode,
 	if result != genericattributeprofile.GattCommunicationStatusSuccess {
 		return errEnableNotificationsFailed
 	}
+	if err := c.service.device.registerNotification(notificationRegistration{
+		characteristic: c.characteristic,
+		token:          token,
+		handler:        valueChangedEventHandler,
+	}); err != nil {
+		return err
+	}
+	registered = true
 
 	return nil
 }

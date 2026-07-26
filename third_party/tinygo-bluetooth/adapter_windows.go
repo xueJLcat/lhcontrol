@@ -3,8 +3,10 @@ package bluetooth
 import (
 	"errors"
 	"fmt"
+	"runtime"
 	"sync"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"github.com/go-ole/go-ole"
@@ -14,6 +16,25 @@ import (
 )
 
 var _ BLEAdapter = (*Adapter)(nil)
+
+var (
+	combaseDLL         = syscall.NewLazyDLL("combase.dll")
+	procRoInitialize   = combaseDLL.NewProc("RoInitialize")
+	procRoUninitialize = combaseDLL.NewProc("RoUninitialize")
+)
+
+func enterWinRTThread() (func(), error) {
+	runtime.LockOSThread()
+	hr, _, _ := procRoInitialize.Call(1) // RO_INIT_MULTITHREADED
+	if hr != 0 && hr != 1 {              // S_OK and S_FALSE are both success.
+		runtime.UnlockOSThread()
+		return nil, fmt.Errorf("RoInitialize failed: HRESULT 0x%08X", uint32(hr))
+	}
+	return func() {
+		procRoUninitialize.Call()
+		runtime.UnlockOSThread()
+	}, nil
+}
 
 type Adapter struct {
 	watcher      *advertisement.BluetoothLEAdvertisementWatcher
@@ -36,10 +57,18 @@ var DefaultAdapter = &Adapter{
 // Enable configures the BLE stack. It must be called before any
 // Bluetooth-related calls (unless otherwise indicated).
 func (a *Adapter) Enable() error {
-	return ole.RoInitialize(1) // initialize with multithreading enabled
+	leave, err := enterWinRTThread()
+	if err != nil {
+		return err
+	}
+	leave()
+	return nil
 }
 
 func awaitAsyncOperation(asyncOperation *foundation.IAsyncOperation, genericParamSignature string) error {
+	if asyncOperation == nil {
+		return errors.New("async operation is nil")
+	}
 	var status foundation.AsyncStatus
 
 	// We need to obtain the GUID of the AsyncOperationCompletedHandler, but its a generic delegate
@@ -49,16 +78,46 @@ func awaitAsyncOperation(asyncOperation *foundation.IAsyncOperation, genericPara
 
 	// Wait until the async operation completes.
 	waitChan := make(chan struct{})
+	var completedOnce sync.Once
 	handler := foundation.NewAsyncOperationCompletedHandler(ole.NewGUID(iid), func(instance *foundation.AsyncOperationCompletedHandler, asyncInfo *foundation.IAsyncOperation, asyncStatus foundation.AsyncStatus) {
 		status = asyncStatus
-		close(waitChan)
+		completedOnce.Do(func() { close(waitChan) })
 	})
 	defer handler.Release()
 
-	asyncOperation.SetCompleted(handler)
+	if err := asyncOperation.SetCompleted(handler); err != nil {
+		return fmt.Errorf("set async completion handler: %w", err)
+	}
 
 	// Wait until async operation has stopped, and finish.
-	<-waitChan
+	select {
+	case <-waitChan:
+	case <-time.After(15 * time.Second):
+		if asyncInfo, err := queryAsyncInfo(asyncOperation); err == nil {
+			_ = asyncInfo.Cancel()
+			terminal := false
+			deadline := time.Now().Add(3 * time.Second)
+			for time.Now().Before(deadline) {
+				current, statusErr := asyncInfo.GetStatus()
+				if statusErr != nil {
+					break
+				}
+				if current != foundation.AsyncStatusStarted {
+					terminal = true
+					break
+				}
+				time.Sleep(25 * time.Millisecond)
+			}
+			if terminal {
+				_ = asyncInfo.Close()
+			}
+			asyncInfo.Release()
+			if !terminal {
+				return errors.New("WinRT async operation timed out and did not cancel within 3s")
+			}
+		}
+		return errors.New("WinRT async operation timed out after 15s")
+	}
 
 	if status != foundation.AsyncStatusCompleted {
 		if err := getAsyncError(asyncOperation); err != nil {
@@ -69,12 +128,8 @@ func awaitAsyncOperation(asyncOperation *foundation.IAsyncOperation, genericPara
 	return nil
 }
 
-// getAsyncError queries IAsyncInfo from an IAsyncOperation to retrieve
-// the error code of a failed async operation. If the HRESULT corresponds
-// to a Bluetooth ATT error (facility 0x65), it returns an AttributeProtocolError.
-func getAsyncError(asyncOperation *foundation.IAsyncOperation) error {
+func queryAsyncInfo(asyncOperation *foundation.IAsyncOperation) (*foundation.IAsyncInfo, error) {
 	iid := ole.NewGUID(foundation.GUIDIAsyncInfo)
-
 	var asyncInfo *foundation.IAsyncInfo
 	hr, _, _ := syscall.SyscallN(
 		asyncOperation.VTable().QueryInterface,
@@ -83,7 +138,18 @@ func getAsyncError(asyncOperation *foundation.IAsyncOperation) error {
 		uintptr(unsafe.Pointer(&asyncInfo)),
 	)
 	if hr != 0 {
-		return fmt.Errorf("QueryInterface(IAsyncInfo) failed: HRESULT 0x%08X", uint32(hr))
+		return nil, fmt.Errorf("QueryInterface(IAsyncInfo) failed: HRESULT 0x%08X", uint32(hr))
+	}
+	return asyncInfo, nil
+}
+
+// getAsyncError queries IAsyncInfo from an IAsyncOperation to retrieve
+// the error code of a failed async operation. If the HRESULT corresponds
+// to a Bluetooth ATT error (facility 0x65), it returns an AttributeProtocolError.
+func getAsyncError(asyncOperation *foundation.IAsyncOperation) error {
+	asyncInfo, err := queryAsyncInfo(asyncOperation)
+	if err != nil {
+		return err
 	}
 	defer asyncInfo.Release()
 

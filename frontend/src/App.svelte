@@ -48,8 +48,10 @@
   let apiStatusInterval: ReturnType<typeof setInterval> | null = null;
   let cancelExternalScanListener: (() => void) | null = null;
   let cancelExternalScanFailureListener: (() => void) | null = null;
+  let cancelExternalScanStartedListener: (() => void) | null = null;
   let apiRunning = false;
   let apiError = '';
+  let externalScanning = false;
 
   $: sortedStations = [...stations].sort((a, b) => {
     const ac = a.channel > 0 ? a.channel : Number.MAX_SAFE_INTEGER;
@@ -71,27 +73,40 @@
   $: anyDeviceOperation = Object.values(operationInProgress).some(Boolean) ||
     Object.values(powerTargetByAddress).some(Boolean);
   $: bluetoothControlBusy = anyDeviceOperation;
-  $: globalLocked = isLoading || isBulkLoading;
+  $: scanLocked = isBulkLoading || isStatusChecking || externalScanning || bluetoothControlBusy;
+  $: bulkLocked = isLoading || isBulkLoading || externalScanning || bluetoothControlBusy;
+  $: stationLocked = isLoading || isBulkLoading || isStatusChecking || externalScanning;
 
   function stationBusy(address: string): boolean {
     return Boolean(operationInProgress[address] || powerTargetByAddress[address]);
   }
 
-  onMount(() => {
+  onMount(async () => {
     refreshAPIStatus();
     apiStatusInterval = setInterval(refreshAPIStatus, 15000);
+    cancelExternalScanStartedListener = EventsOn('external-scan-started', () => {
+      externalScanning = true;
+      statusMessage = 'External scan in progress...';
+    });
     cancelExternalScanListener = EventsOn('external-scan-completed', async (updated: StationInfo[]) => {
+      externalScanning = false;
       stations = updated || [];
       const scanStatus = await GetScanStatus().catch(() => null);
       const found = scanStatus?.found ?? stations.filter((station) => station.seenInLatestScan).length;
       statusMessage = `External scan completed: found ${found}; ${stations.length} known station(s).`;
     });
     cancelExternalScanFailureListener = EventsOn('external-scan-failed', (message: string) => {
+      externalScanning = false;
       statusMessage = `External scan failed: ${message}`;
       pushToast(`External scan failed: ${message}`);
     });
     statusCheckInterval = setInterval(periodicStatusCheck, 15000);
-    handleScanClick();
+    externalScanning = await IsScanning().catch(() => false);
+    if (externalScanning) {
+      statusMessage = 'External scan in progress...';
+    } else {
+      await handleScanClick();
+    }
   });
 
   function refreshAPIStatus() {
@@ -109,13 +124,16 @@
     if (apiStatusInterval) clearInterval(apiStatusInterval);
     cancelExternalScanListener?.();
     cancelExternalScanFailureListener?.();
+    cancelExternalScanStartedListener?.();
   });
 
   async function periodicStatusCheck() {
     if (isStatusChecking || isLoading || isBulkLoading || anyDeviceOperation) return;
     isStatusChecking = true;
     try {
-      if (!(await IsScanning())) {
+      const scanning = await IsScanning();
+      externalScanning = scanning && !isLoading;
+      if (!scanning) {
         stations = (await CheckAllStationStatuses()) || [];
       }
     } catch (error) {
@@ -128,7 +146,7 @@
   }
 
   async function handleScanClick() {
-    if (isLoading || isBulkLoading || isStatusChecking || bluetoothControlBusy) return;
+    if (isLoading || scanLocked) return;
     isLoading = true;
     operationInProgress = {};
     powerTargetByAddress = {};
@@ -160,7 +178,7 @@
   }
 
   async function setPower(station: StationInfo, state: PowerTarget) {
-    if (!canSetPower(station, state) || stationBusy(station.address) || globalLocked) return;
+    if (!canSetPower(station, state) || stationBusy(station.address) || stationLocked) return;
     const targetLabel = powerTargetLabel(state);
     powerTargetByAddress = { ...powerTargetByAddress, [station.address]: state };
     powerFeedbackByAddress = {
@@ -216,7 +234,7 @@
   }
 
   async function handleBulkPower(state: PowerTarget) {
-    if (isLoading || isBulkLoading || stations.length === 0) return;
+    if (bulkLocked || !hasEligiblePowerStations(state)) return;
     isBulkLoading = true;
     bulkTarget = state;
     const targetLabel = powerTargetLabel(state);
@@ -227,7 +245,7 @@
       const confirmed = result.results.filter((item) => item.success && !item.skipped && item.confirmed).length;
       const unconfirmed = result.results.filter((item) => item.success && !item.skipped && !item.confirmed).length;
       const skipped = result.results.filter((item) => item.skipped);
-      const failed = result.results.filter((item) => !item.success && !item.skipped);
+      const failed = result.results.filter((item) => !item.success && !item.skipped && !item.commandSent);
       statusMessage = failed.length
         ? `${confirmed} confirmed, ${unconfirmed} sent but unconfirmed, ${skipped.length} skipped, ${failed.length} failed: ${failed.map((item) => `${item.name || item.address}: ${item.error}`).join(' | ')}`
         : `${confirmed} confirmed; ${unconfirmed} sent but unconfirmed; ${skipped.length} skipped for ${targetLabel}.`;
@@ -265,7 +283,7 @@
   }
 
   async function identify(station: StationInfo) {
-    if (stationBusy(station.address) || globalLocked) return;
+    if (stationBusy(station.address) || stationLocked) return;
     operationInProgress = { ...operationInProgress, [station.address]: true };
     try {
       await IdentifyStation(station.address);
@@ -281,7 +299,7 @@
   }
 
   async function refreshCapabilities(station: StationInfo) {
-    if (stationBusy(station.address) || globalLocked) return;
+    if (stationBusy(station.address) || stationLocked) return;
     operationInProgress = { ...operationInProgress, [station.address]: true };
     try {
       const updated = await RefreshStationCapabilities(station.address);
@@ -301,15 +319,15 @@
     channelEditorOpen = true;
   }
 
-  async function saveChannel(targetChannel: number) {
+  async function saveChannel(targetChannel: number, allowUnknownConflictRisk: boolean) {
     if (!selectedStation || !selectedStation.scanFresh ||
-      stationBusy(selectedStation.address) || globalLocked ||
+      stationBusy(selectedStation.address) || stationLocked ||
       (selectedStation.channel > 0 && selectedStation.channel === targetChannel)) return;
     const address = selectedStation.address;
     operationInProgress = { ...operationInProgress, [address]: true };
     channelError = '';
     try {
-      const result = await SetStationChannel(address, targetChannel);
+      const result = await SetStationChannel(address, targetChannel, allowUnknownConflictRisk);
       await fetchLatestList();
       channelEditorOpen = false;
       statusMessage = `Channel changed from ${result.previousChannel || 'unknown'} to ${result.channel}. ${result.warnings.join(' ')}`;
@@ -338,11 +356,12 @@
   <AppHeader
     {isLoading}
     {isBulkLoading}
-    locked={isLoading || isBulkLoading}
+    {scanLocked}
+    {bulkLocked}
     {bulkTarget}
-    canOn={stations.length > 0}
-    canStandby={stations.length > 0}
-    canSleep={stations.length > 0}
+    canOn={hasEligiblePowerStations('on')}
+    canStandby={hasEligiblePowerStations('standby')}
+    canSleep={hasEligiblePowerStations('sleep')}
     allOn={allEligibleAtState('on')}
     allStandby={allEligibleAtState('standby')}
     allSleep={allEligibleAtState('sleep')}
@@ -367,7 +386,7 @@
               feedback={powerFeedbackByAddress[station.address]}
               pendingTarget={powerTargetByAddress[station.address]}
               busy={stationBusy(station.address)}
-              locked={globalLocked}
+              locked={stationLocked}
               onPower={setPower}
               onOpenDetails={(s) => selectedAddress = s.address}
               onStartRename={startRename}
@@ -399,7 +418,7 @@
   <DetailsDrawer
     station={selectedStation}
     busy={stationBusy(selectedStation.address)}
-    locked={globalLocked}
+    locked={stationLocked}
     onClose={() => selectedAddress = null}
     onRefresh={refreshCapabilities}
     onIdentify={identify}
@@ -420,7 +439,7 @@
       {hasUnknownVisibleChannel}
       error={channelError}
       busy={stationBusy(selectedStation.address)}
-      locked={globalLocked}
+      locked={stationLocked}
       onClose={() => channelEditorOpen = false}
       onSave={saveChannel}
       onIdentify={identify}

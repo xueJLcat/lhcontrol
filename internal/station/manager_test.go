@@ -111,7 +111,7 @@ func TestSetStationChannelRejectsVisibleConflictBeforeWrite(t *testing.T) {
 		Name: "LHB-OTHER", Channel: 5, Present: true, LastSeenAt: now, LastChannelReadAt: now,
 	}
 
-	_, err := manager.SetStationChannel("target", 5)
+	_, err := manager.SetStationChannel("target", 5, false)
 	if !errors.Is(err, ErrChannelConflict) {
 		t.Fatalf("SetStationChannel() error = %v, want ErrChannelConflict", err)
 	}
@@ -129,7 +129,24 @@ func TestStationChannelRequiresRecentScan(t *testing.T) {
 		},
 	}
 
-	_, err := manager.SetStationChannel("target", 5)
+	_, err := manager.SetStationChannel("target", 5, false)
+	if !errors.Is(err, ErrScanRequired) {
+		t.Fatalf("SetStationChannel() error = %v, want ErrScanRequired", err)
+	}
+}
+
+func TestStationChannelRequiresUnknownRiskAcknowledgement(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	now := time.Now()
+	manager.stations["target"] = &internalbluetooth.BaseStation{
+		Name: "LHB-TARGET", Channel: 3, Present: true, LastSeenAt: now,
+		Capabilities: internalbluetooth.Capabilities{ChannelRead: true, ChannelWrite: true},
+	}
+	manager.stations["unknown"] = &internalbluetooth.BaseStation{
+		Name: "LHB-UNKNOWN", Present: true, LastSeenAt: now,
+	}
+
+	_, err := manager.SetStationChannel("target", 5, false)
 	if !errors.Is(err, ErrScanRequired) {
 		t.Fatalf("SetStationChannel() error = %v, want ErrScanRequired", err)
 	}
@@ -167,7 +184,7 @@ func TestStationLookupIsCaseInsensitive(t *testing.T) {
 func TestSetStationChannelValidatesRange(t *testing.T) {
 	manager := NewManager(config.NewConfig())
 	for _, channel := range []int{0, 17} {
-		if _, err := manager.SetStationChannel("missing", channel); !errors.Is(err, ErrInvalidArgument) {
+		if _, err := manager.SetStationChannel("missing", channel, false); !errors.Is(err, ErrInvalidArgument) {
 			t.Fatalf("channel %d error = %v, want ErrInvalidArgument", channel, err)
 		}
 	}
@@ -188,7 +205,7 @@ func TestSetAllStationsPowerSkipsIneligibleStations(t *testing.T) {
 	}
 	manager.stations["booting"] = &internalbluetooth.BaseStation{
 		Name: "LHB-BOOTING", Present: true, PowerState: internalbluetooth.PowerStateBooting,
-		Capabilities: internalbluetooth.Capabilities{PowerWrite: true}, CapabilitiesKnown: true,
+		Capabilities: internalbluetooth.Capabilities{PowerWrite: true}, CapabilitiesKnown: true, LastPowerReadAt: time.Now(),
 	}
 	manager.stations["not-visible"] = &internalbluetooth.BaseStation{
 		Name: "LHB-OFFLINE", Present: false, PowerState: internalbluetooth.PowerStateSleep,
@@ -283,7 +300,23 @@ func TestStalePowerStateIsNotConfirmed(t *testing.T) {
 	}
 }
 
-func TestStatusCheckDoesNotReconnectDisconnectedStation(t *testing.T) {
+func TestStaleBootingStationIsNotSkippedByBulkSelection(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	manager.stations["booting"] = &internalbluetooth.BaseStation{
+		Name: "LHB-BOOTING", Present: true, PowerState: internalbluetooth.PowerStateBooting,
+		Capabilities: internalbluetooth.Capabilities{PowerWrite: false}, CapabilitiesKnown: true,
+	}
+
+	result, err := manager.SetAllStationsPowerDetailed("on")
+	if err != nil {
+		t.Fatalf("SetAllStationsPowerDetailed() error = %v", err)
+	}
+	if len(result.Results) != 1 || result.Results[0].Skipped {
+		t.Fatalf("stale booting station was skipped: %+v", result.Results)
+	}
+}
+
+func TestStatusCheckSchedulesInitialRecoveryForDisconnectedStation(t *testing.T) {
 	manager := NewManager(config.NewConfig())
 	manager.stations["disconnected"] = &internalbluetooth.BaseStation{
 		Name:          "LHB-DISCONNECTED",
@@ -297,6 +330,17 @@ func TestStatusCheckDoesNotReconnectDisconnectedStation(t *testing.T) {
 		t.Fatalf("CheckAllStationStatuses() error = %v", err)
 	}
 	if len(infos) != 1 || infos[0].PowerState != int(internalbluetooth.PowerStateSleep) || infos[0].ConnectionState != "disconnected" {
-		t.Fatalf("passive status check changed disconnected station: %+v", infos)
+		t.Fatalf("failed recovery did not preserve stale station state: %+v", infos)
 	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		manager.statusRetryMutex.Lock()
+		_, tracked := manager.statusRetries[infos[0].Address]
+		manager.statusRetryMutex.Unlock()
+		if tracked {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("background recovery did not create a retry backoff")
 }

@@ -12,7 +12,7 @@
   export let busy: boolean;
   export let locked: boolean;
   export let onClose: () => void;
-  export let onSave: (channel: number) => void;
+  export let onSave: (channel: number, allowUnknownConflictRisk: boolean) => void;
   export let onIdentify: (station: StationInfo) => void;
 
   let targetChannel = station.channel > 0 ? station.channel : 1;
@@ -61,7 +61,7 @@
     {#if station.capabilities.identify}
       <button class="btn" on:click={() => onIdentify(station)} disabled={busy || locked}><Eye size={15} /> Identify this station</button>
     {/if}
-    <button class="btn primary" on:click={() => onSave(targetChannel)} disabled={saveDisabled}>Confirm change</button>
+    <button class="btn primary" on:click={() => onSave(targetChannel, confirmUnknownChannelRisk)} disabled={saveDisabled}>Confirm change</button>
   </div>
 </div>
 

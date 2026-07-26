@@ -97,9 +97,39 @@ type DiscoveredStation struct {
 
 // IsConnected returns the current connection status safely.
 func (bs *BaseStation) IsConnected() bool {
-	bs.mutex.RLock()
-	defer bs.mutex.RUnlock()
-	return bs.isConnected && bs.device != nil
+	bs.mutex.Lock()
+	if !bs.isConnected || bs.device == nil {
+		bs.mutex.Unlock()
+		return false
+	}
+	device := bs.device
+	connected, err := device.Connected()
+	if err == nil && connected {
+		bs.mutex.Unlock()
+		return true
+	}
+	bs.isConnected = false
+	bs.device = nil
+	bs.characteristic = nil
+	bs.modeCharacteristic = nil
+	bs.identifyCharacteristic = nil
+	bs.LastPowerReadAt = time.Time{}
+	bs.LastChannelReadAt = time.Time{}
+	if err != nil {
+		bs.LastError = err.Error()
+	}
+	bs.mutex.Unlock()
+	_ = device.Disconnect()
+	connectedStationsMutex.Lock()
+	remaining := connectedStations[:0]
+	for _, station := range connectedStations {
+		if station != bs {
+			remaining = append(remaining, station)
+		}
+	}
+	connectedStations = remaining
+	connectedStationsMutex.Unlock()
+	return false
 }
 
 // setPowerStateInternal updates the power state and timestamp safely.
@@ -331,7 +361,7 @@ func ScanForDuration(duration time.Duration) ([]DiscoveredStation, error) {
 
 	log.Printf("[BT] ScanForDuration (AfterFunc): Finished. Found %d stations.", len(results))
 
-	if err := scanCompletionError(scanErr, stopRequested.Load()); err != nil {
+	if err := scanCompletionError(scanErr); err != nil {
 		return nil, err
 	}
 	if stopErr != nil {
@@ -365,8 +395,8 @@ func CancelScan() error {
 	return stopScanSafely()
 }
 
-func scanCompletionError(scanErr error, stopRequested bool) error {
-	if scanErr != nil && !stopRequested {
+func scanCompletionError(scanErr error) error {
+	if scanErr != nil {
 		return fmt.Errorf("scan failed before the requested duration completed: %w", scanErr)
 	}
 	return nil
@@ -539,7 +569,11 @@ func mergeMetadata(previous, discovered DeviceMetadata) DeviceMetadata {
 // Assumes caller holds the write lock (station.mutex.Lock()).
 func connectAndDiscoverInternal(station *BaseStation) error {
 	if station.isConnected && station.device != nil && station.characteristic != nil {
-		return nil // Already good
+		connected, err := station.device.Connected()
+		if err == nil && connected {
+			return nil // Already good
+		}
+		disconnectInternal(station)
 	}
 
 	if !station.isConnected || station.device == nil {
@@ -768,9 +802,7 @@ func RefreshCapabilities(station *BaseStation) (Capabilities, error) {
 	}
 	station.mutex.Lock()
 	defer station.mutex.Unlock()
-	station.characteristic = nil
-	station.modeCharacteristic = nil
-	station.identifyCharacteristic = nil
+	disconnectInternal(station)
 	station.CapabilitiesKnown = false
 	if err := connectAndDiscoverInternal(station); err != nil {
 		return Capabilities{}, err

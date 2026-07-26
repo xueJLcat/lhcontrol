@@ -18,7 +18,8 @@ export function maySetPower(station: StationInfo, state: PowerTarget): boolean {
   // before every power operation, so the frontend must not block that recovery
   // path. It will return a structured unsupported error if the refreshed
   // device genuinely cannot perform the target operation.
-  return station.powerState !== 3;
+  if (station.powerFresh && station.powerState === 3) return false;
+  return true;
 }
 
 export function canSetPower(station: StationInfo, state: PowerTarget): boolean {

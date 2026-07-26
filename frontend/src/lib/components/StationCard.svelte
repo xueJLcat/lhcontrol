@@ -27,7 +27,7 @@
     wasRenaming = renaming;
   }
 
-  $: hasKnownPower = station.powerState >= 0 && station.powerState !== 3;
+  $: hasKnownPower = station.powerState >= 0;
   $: stalePower = hasKnownPower && !station.powerFresh;
   $: unverified = hasKnownPower && station.powerFresh && !station.powerStateConfirmed;
 
@@ -81,7 +81,7 @@
     </div>
   {:else}
     <div class="card-top">
-      <span class="status-dot dot-{stateLabel(station)}" class:breathe={station.powerState === 3} aria-hidden="true"></span>
+      <span class="status-dot dot-{stateLabel(station)}" class:breathe={station.powerFresh && station.powerState === 3} aria-hidden="true"></span>
       <h3 title={station.name}>{station.name}</h3>
       <button class="icon-btn rename-btn" title="Rename" aria-label={`Rename ${station.name}`} on:click|stopPropagation={() => onStartRename(station)}><SquarePen size={13} /></button>
       <span class="spacer"></span>
@@ -92,7 +92,7 @@
       <Bluetooth size={12} />
       <span class="mono addr">{station.address}</span>
       <span class="state-badge" class:unverified class:stale={stalePower} title={stalePower ? `Last known state; last successful read ${station.lastPowerReadAt || 'unknown'}` : ''}>
-        {#if station.powerState === 3}<LoaderCircle class="spin" size={10} />{/if}
+        {#if station.powerFresh && station.powerState === 3}<LoaderCircle class="spin" size={10} />{/if}
         {stateLabel(station)}{stalePower ? ' · stale' : unverified ? ' ?' : ''}
       </span>
       {#if !station.isPresent}<span class="muted-badge" title="Not detected in the latest scan; direct power control can still be attempted">not visible</span>{/if}

@@ -132,6 +132,9 @@ func (a *App) startup(ctx context.Context) {
 		if err != nil {
 			return sendAPIError(c, err)
 		}
+		if a.ctx != nil && !a.shuttingDown.Load() {
+			runtime.EventsEmit(a.ctx, "external-scan-started")
+		}
 		return c.SendStatus(fiber.StatusAccepted)
 	})
 	a.api.Get("/scan/status", func(c *fiber.Ctx) error {
@@ -190,12 +193,13 @@ func (a *App) startup(ctx context.Context) {
 	})
 	a.api.Put("/stations/:address/channel", func(c *fiber.Ctx) error {
 		var request struct {
-			Channel int `json:"channel"`
+			Channel                  int  `json:"channel"`
+			AllowUnknownConflictRisk bool `json:"allowUnknownConflictRisk"`
 		}
 		if err := c.BodyParser(&request); err != nil {
 			return sendAPIError(c, fmt.Errorf("%w: invalid JSON body", station.ErrInvalidArgument))
 		}
-		result, err := a.stationManager.SetStationChannel(c.Params("address"), request.Channel)
+		result, err := a.stationManager.SetStationChannel(c.Params("address"), request.Channel, request.AllowUnknownConflictRisk)
 		if err != nil {
 			return c.Status(apiStatusForError(err)).JSON(fiber.Map{
 				"error":           err.Error(),
@@ -304,9 +308,9 @@ func (a *App) RefreshStationCapabilities(address string) (station.StationInfo, e
 	return a.stationManager.RefreshStationCapabilities(address)
 }
 
-func (a *App) SetStationChannel(address string, channel int) (station.ChannelChangeResult, error) {
+func (a *App) SetStationChannel(address string, channel int, allowUnknownConflictRisk bool) (station.ChannelChangeResult, error) {
 	log.Printf("Requesting channel %d for address %s", channel, address)
-	return a.stationManager.SetStationChannel(address, channel)
+	return a.stationManager.SetStationChannel(address, channel, allowUnknownConflictRisk)
 }
 
 func (a *App) PowerOnAllStations() error {

@@ -84,6 +84,15 @@ type fakeCharacteristic struct {
 	writes               [][]byte
 }
 
+type fakeConnectedDevice struct{}
+
+func (fakeConnectedDevice) Disconnect() error        { return nil }
+func (fakeConnectedDevice) Connected() (bool, error) { return true, nil }
+func (fakeConnectedDevice) DiscoverServices([]tinybluetooth.UUID) ([]tinybluetooth.DeviceService, error) {
+	return nil, errors.New("fake discovery is not configured")
+}
+func (fakeConnectedDevice) RequestConnectionParams(tinybluetooth.ConnectionParams) error { return nil }
+
 func (f *fakeCharacteristic) Read(destination []byte) (int, error) {
 	if f.readErr != nil {
 		return 0, f.readErr
@@ -124,7 +133,7 @@ func (f *fakeCharacteristic) write(value []byte) (int, error) {
 func connectedFakeStation(power, mode, identify characteristicIO, capabilities Capabilities) *BaseStation {
 	return &BaseStation{
 		Name:                   "LHB-TEST",
-		device:                 &tinybluetooth.Device{},
+		device:                 fakeConnectedDevice{},
 		characteristic:         power,
 		modeCharacteristic:     mode,
 		identifyCharacteristic: identify,
@@ -373,13 +382,10 @@ func TestReleaseStationForScanPreservesLastKnownState(t *testing.T) {
 
 func TestScanCompletionErrorRejectsEarlyFailure(t *testing.T) {
 	adapterErr := errors.New("adapter stopped unexpectedly")
-	if err := scanCompletionError(adapterErr, false); !errors.Is(err, adapterErr) {
+	if err := scanCompletionError(adapterErr); !errors.Is(err, adapterErr) {
 		t.Fatalf("scanCompletionError() = %v, want wrapped adapter error", err)
 	}
-	if err := scanCompletionError(adapterErr, true); err != nil {
-		t.Fatalf("timer-requested stop should be successful, got %v", err)
-	}
-	if err := scanCompletionError(nil, false); err != nil {
+	if err := scanCompletionError(nil); err != nil {
 		t.Fatalf("nil scan error should be successful, got %v", err)
 	}
 }

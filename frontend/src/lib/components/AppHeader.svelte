@@ -5,7 +5,8 @@
 
   export let isLoading: boolean;
   export let isBulkLoading: boolean;
-  export let locked: boolean;
+  export let scanLocked: boolean;
+  export let bulkLocked: boolean;
   export let bulkTarget: PowerTarget | null;
   export let canOn: boolean;
   export let canStandby: boolean;
@@ -26,14 +27,14 @@
     </div>
   </div>
   <div class="global-controls">
-    <button class="btn primary scan-btn" on:click={onScan} disabled={isLoading || locked}>
+    <button class="btn primary scan-btn" on:click={onScan} disabled={isLoading || scanLocked}>
       {#if isLoading}<LoaderCircle class="spin" size={15} /> Scanning...{:else}<RefreshCw size={15} /> Scan{/if}
     </button>
     <div class="bulk-power" aria-label="Set all visible stations">
       <span class="bulk-label">{#if isBulkLoading}<LoaderCircle class="spin" size={12} />{:else}<Zap size={12} />{/if} All</span>
-      <button class="seg-on" class:pending={bulkTarget === 'on'} class:active={allOn} on:click={() => onBulkPower('on')} disabled={isLoading || locked || !canOn}>On</button>
-      <button class="seg-standby" class:pending={bulkTarget === 'standby'} class:active={allStandby} on:click={() => onBulkPower('standby')} disabled={isLoading || locked || !canStandby}>Standby</button>
-      <button class="seg-sleep" class:pending={bulkTarget === 'sleep'} class:active={allSleep} on:click={() => onBulkPower('sleep')} disabled={isLoading || locked || !canSleep}>Sleep</button>
+      <button class="seg-on" class:pending={bulkTarget === 'on'} class:active={allOn} on:click={() => onBulkPower('on')} disabled={isLoading || bulkLocked || !canOn} title={!canOn ? 'No actionable station' : bulkLocked ? 'Bluetooth operation in progress' : 'Turn all visible stations on'}>On</button>
+      <button class="seg-standby" class:pending={bulkTarget === 'standby'} class:active={allStandby} on:click={() => onBulkPower('standby')} disabled={isLoading || bulkLocked || !canStandby} title={!canStandby ? 'No actionable station' : bulkLocked ? 'Bluetooth operation in progress' : 'Set all visible stations to standby'}>Standby</button>
+      <button class="seg-sleep" class:pending={bulkTarget === 'sleep'} class:active={allSleep} on:click={() => onBulkPower('sleep')} disabled={isLoading || bulkLocked || !canSleep} title={!canSleep ? 'No actionable station' : bulkLocked ? 'Bluetooth operation in progress' : 'Put all visible stations to sleep'}>Sleep</button>
     </div>
   </div>
   {#if isLoading}<div class="scan-progress" aria-hidden="true"></div>{/if}

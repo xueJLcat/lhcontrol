@@ -112,6 +112,14 @@ type Manager struct {
 	scanStatus             ScanStatus
 	initializeErr          error
 	asyncScanWg            sync.WaitGroup
+	statusRetryMutex       sync.Mutex
+	statusRetries          map[string]statusRetry
+	statusRecoveryRunning  atomic.Bool
+}
+
+type statusRetry struct {
+	failures int
+	nextAt   time.Time
 }
 
 func NewManager(cfg *config.Config) *Manager {
@@ -120,8 +128,31 @@ func NewManager(cfg *config.Config) *Manager {
 		config:                 cfg,
 		activeDeviceOperations: make(map[string]struct{}),
 		deviceOperationSlots:   make(chan struct{}, 2),
+		statusRetries:          make(map[string]statusRetry),
 		scanStatus:             ScanStatus{State: "idle", Warnings: []string{}},
 	}
+}
+
+func (m *Manager) noteStatusFailure(address string) {
+	m.statusRetryMutex.Lock()
+	retry := m.statusRetries[address]
+	retry.failures++
+	delay := 30 * time.Second
+	for attempt := 1; attempt < retry.failures && delay < 5*time.Minute; attempt++ {
+		delay *= 2
+	}
+	if delay > 5*time.Minute {
+		delay = 5 * time.Minute
+	}
+	retry.nextAt = time.Now().Add(delay)
+	m.statusRetries[address] = retry
+	m.statusRetryMutex.Unlock()
+}
+
+func (m *Manager) clearStatusFailure(address string) {
+	m.statusRetryMutex.Lock()
+	delete(m.statusRetries, address)
+	m.statusRetryMutex.Unlock()
 }
 
 // Initialize should be called at app startup
@@ -411,6 +442,8 @@ func (m *Manager) scanAndFetchStations() ([]StationInfo, int, error) {
 					readErrorsMutex.Lock()
 					readErrors = append(readErrors, fmt.Errorf("%s: %w", ptr.Address.String(), err))
 					readErrorsMutex.Unlock()
+				} else {
+					m.clearStatusFailure(ptr.Snapshot().Address)
 				}
 			}(stationToFetch)
 		}
@@ -509,12 +542,7 @@ func (m *Manager) CheckAllStationStatuses() ([]StationInfo, error) {
 		return m.GetStationInfo(), nil
 	}
 	defer m.statusOperationMutex.Unlock()
-	if m.isScanning.Load() {
-		return m.GetStationInfo(), nil
-	}
-
 	stationsToRead := make([]*bluetooth.BaseStation, 0)
-
 	m.stationsMutex.RLock()
 	for _, stationPtr := range m.stations {
 		if stationPtr == nil {
@@ -530,42 +558,121 @@ func (m *Manager) CheckAllStationStatuses() ([]StationInfo, error) {
 	m.stationsMutex.RUnlock()
 
 	if len(stationsToRead) == 0 {
+		m.scheduleStatusRecovery()
 		return m.GetStationInfo(), nil
 	}
 
-	var wg sync.WaitGroup
-	semaphore := make(chan struct{}, 2)
 	var statusErrors []error
-	var statusErrorsMutex sync.Mutex
-
-	for _, stationToRead := range stationsToRead {
-		wg.Add(1)
-		go func(ptr *bluetooth.BaseStation) {
-			defer wg.Done()
-			semaphore <- struct{}{}
-			defer func() { <-semaphore }()
-			workerErr := runSafely("station status worker", func() error {
-				if err := bluetooth.ReadPowerState(ptr); err != nil {
-					bluetooth.DisconnectStation(ptr)
-					return err
-				}
-				return nil
-			})
-			if workerErr != nil {
-				statusErrorsMutex.Lock()
-				statusErrors = append(statusErrors, fmt.Errorf("%s: %w", ptr.Address.String(), workerErr))
-				statusErrorsMutex.Unlock()
-			}
-		}(stationToRead)
+	work := make(chan *bluetooth.BaseStation)
+	workerCount := 2
+	if len(stationsToRead) < workerCount {
+		workerCount = len(stationsToRead)
 	}
-
+	var wg sync.WaitGroup
+	var statusErrorsMutex sync.Mutex
+	for worker := 0; worker < workerCount; worker++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for ptr := range work {
+				address := ptr.Snapshot().Address
+				for {
+					if err := m.beginStationOperation(address); err == nil {
+						break
+					}
+					if m.isScanning.Load() {
+						break
+					}
+					time.Sleep(25 * time.Millisecond)
+				}
+				if m.isScanning.Load() {
+					continue
+				}
+				workerErr := runSafely("station status worker", func() error {
+					if err := bluetooth.ReadPowerState(ptr); err != nil {
+						bluetooth.DisconnectStation(ptr)
+						return err
+					}
+					return nil
+				})
+				m.endStationOperation(address)
+				if workerErr != nil {
+					m.noteStatusFailure(address)
+					statusErrorsMutex.Lock()
+					statusErrors = append(statusErrors, fmt.Errorf("%s: %w", ptr.Address.String(), workerErr))
+					statusErrorsMutex.Unlock()
+				} else {
+					m.clearStatusFailure(address)
+				}
+			}
+		}()
+	}
+	for _, station := range stationsToRead {
+		work <- station
+	}
+	close(work)
 	wg.Wait()
+	m.scheduleStatusRecovery()
 
 	statusInfos := m.GetStationInfo()
 	if len(statusErrors) > 0 {
 		return statusInfos, fmt.Errorf("one or more station status reads failed: %w", errors.Join(statusErrors...))
 	}
 	return statusInfos, nil
+}
+
+func (m *Manager) scheduleStatusRecovery() {
+	if !m.statusRecoveryRunning.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		defer m.statusRecoveryRunning.Store(false)
+		if m.isScanning.Load() || m.IsBusy() {
+			return
+		}
+		now := time.Now()
+		var candidate *bluetooth.BaseStation
+		m.stationsMutex.RLock()
+		for _, station := range m.stations {
+			if station == nil {
+				continue
+			}
+			snapshot := station.Snapshot()
+			if !snapshot.Present || station.IsConnected() {
+				continue
+			}
+			m.statusRetryMutex.Lock()
+			retry, tracked := m.statusRetries[snapshot.Address]
+			m.statusRetryMutex.Unlock()
+			if !tracked || !now.Before(retry.nextAt) {
+				candidate = station
+				break
+			}
+		}
+		m.stationsMutex.RUnlock()
+		if candidate == nil {
+			return
+		}
+		address := candidate.Snapshot().Address
+		if err := m.beginStationOperation(address); err != nil {
+			return
+		}
+		defer m.endStationOperation(address)
+		err := runSafely("station status recovery", func() error {
+			return bluetooth.FetchInitialPowerState(candidate)
+		})
+		var initialErr *bluetooth.InitialReadError
+		if errors.As(err, &initialErr) && initialErr.Power == nil {
+			m.clearStatusFailure(address)
+			return
+		}
+		if err != nil {
+			bluetooth.DisconnectStation(candidate)
+			m.noteStatusFailure(address)
+			return
+		}
+		m.clearStatusFailure(address)
+	}()
 }
 
 func (m *Manager) PowerOnStation(address string) error {
@@ -671,6 +778,7 @@ func (m *Manager) SetStationPower(address, state string) (PowerActionResult, err
 	if err != nil {
 		return PowerActionResult{}, err
 	}
+	m.clearStatusFailure(canonicalAddress)
 	return PowerActionResult{Station: info, CommandSent: true, Confirmed: controlResult.Confirmed}, nil
 }
 
@@ -733,10 +841,11 @@ func (m *Manager) RefreshStationCapabilities(address string) (StationInfo, error
 			return StationInfo{}, err
 		}
 	}
+	m.clearStatusFailure(canonicalAddress)
 	return m.stationInfoByAddress(address)
 }
 
-func (m *Manager) SetStationChannel(address string, channel int) (ChannelChangeResult, error) {
+func (m *Manager) SetStationChannel(address string, channel int, allowUnknownConflictRisk bool) (ChannelChangeResult, error) {
 	result := ChannelChangeResult{Address: address, Warnings: []string{}}
 	if channel < 1 || channel > 16 {
 		return result, fmt.Errorf("%w: channel must be between 1 and 16", ErrInvalidArgument)
@@ -809,6 +918,9 @@ func (m *Manager) SetStationChannel(address string, channel int) (ChannelChangeR
 	m.stationsMutex.RUnlock()
 	if hasUnknown {
 		result.Warnings = append(result.Warnings, "One or more visible stations have an unknown channel; conflicts cannot be fully verified.")
+		if !allowUnknownConflictRisk {
+			return result, fmt.Errorf("%w: one or more visible stations have an unknown channel", ErrScanRequired)
+		}
 	}
 
 	var writeResult bluetooth.ChannelWriteResult
@@ -825,6 +937,7 @@ func (m *Manager) SetStationChannel(address string, channel int) (ChannelChangeR
 	if err != nil {
 		return result, err
 	}
+	m.clearStatusFailure(canonicalAddress)
 	return result, nil
 }
 
@@ -900,7 +1013,7 @@ func (m *Manager) setAllStationsPowerDetailed(state string, visibleOnly bool) (B
 		}
 		stationResult := BulkPowerStationResult{Address: snapshot.Address, Name: name}
 		switch {
-		case snapshot.PowerState == bluetooth.PowerStateBooting:
+		case snapshot.PowerState == bluetooth.PowerStateBooting && isFresh(snapshot.LastPowerReadAt, time.Now()):
 			stationResult.Skipped = true
 			stationResult.Reason = "station is booting"
 		case snapshot.CapabilitiesKnown && target == bluetooth.PowerStateStandby &&
@@ -980,12 +1093,18 @@ func (m *Manager) setAllStationsPowerDetailed(state string, visibleOnly bool) (B
 			})
 			if workerErr != nil {
 				var confirmationErr *bluetooth.PowerConfirmationError
-				stationResult.CommandSent = stationResult.CommandSent || errors.As(workerErr, &confirmationErr)
+				if errors.As(workerErr, &confirmationErr) {
+					stationResult.CommandSent = true
+					stationResult.Success = true
+				}
 				stationResult.Error = workerErr.Error()
 			}
 			if info, infoErr := m.stationInfoByAddress(stationResult.Address); infoErr == nil {
 				stationResult.Station = info
 				stationResult.Name = info.Name
+			}
+			if stationResult.Success {
+				m.clearStatusFailure(stationResult.Address)
 			}
 			result.Results[resultIndex] = stationResult
 		}(item.resultIndex, item.station)
