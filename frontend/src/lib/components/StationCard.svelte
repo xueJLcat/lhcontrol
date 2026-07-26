@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { onDestroy } from 'svelte';
   import {
     Bluetooth, Check, ChevronRight, CircleCheck, CircleHelp, CircleX, History,
     LoaderCircle, Moon, Pause, SquarePen, TriangleAlert, X, Zap
@@ -26,30 +25,11 @@
 
   let localName = '';
   let wasRenaming = false;
-  let prevPowerState: number | null = null;
-  let flash = false;
-  let flashTimer: ReturnType<typeof setTimeout> | null = null;
 
   $: if (renaming !== wasRenaming) {
     if (renaming) localName = station.name;
     wasRenaming = renaming;
   }
-
-  $: if (station.powerState !== prevPowerState) {
-    if (prevPowerState !== null && station.powerState >= 0) {
-      flash = true;
-      if (flashTimer) clearTimeout(flashTimer);
-      flashTimer = setTimeout(() => {
-        flash = false;
-        flashTimer = null;
-      }, 1100);
-    }
-    prevPowerState = station.powerState;
-  }
-
-  onDestroy(() => {
-    if (flashTimer) clearTimeout(flashTimer);
-  });
 
   $: hasKnownPower = station.powerState >= 0;
   $: stalePower = hasKnownPower && !station.powerFresh;
@@ -75,7 +55,6 @@
   class:offline={!station.isPresent}
   class:conflict={station.channelConflict}
   class:renaming
-  class:flash
 >
   {#if renaming}
     <div class="rename-row">
@@ -185,11 +164,6 @@
   .station-card.state-standby { border-left-color: color-mix(in srgb, var(--color-standby) 65%, transparent); --flash: var(--color-standby); }
   .station-card.state-sleep { border-left-color: color-mix(in srgb, var(--color-sleep) 55%, transparent); --flash: var(--color-sleep); }
   .station-card.state-booting { border-left-color: color-mix(in srgb, var(--color-booting) 65%, transparent); --flash: var(--color-booting); }
-  .station-card.flash { animation: state-flash 1.1s var(--ease); }
-  @keyframes state-flash {
-    0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--flash, var(--color-primary)) 55%, transparent); }
-    100% { box-shadow: 0 0 0 14px transparent; }
-  }
   .station-card.conflict { border-color: color-mix(in srgb, var(--color-danger) 55%, transparent); }
   .station-card.conflict:hover { border-color: color-mix(in srgb, var(--color-danger) 70%, transparent); }
   .station-card.offline { border-style: dashed; border-left-style: solid; border-left-color: color-mix(in srgb, var(--text-muted) 40%, transparent); }

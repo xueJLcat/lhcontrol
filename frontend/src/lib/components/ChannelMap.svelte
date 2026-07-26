@@ -9,12 +9,20 @@
     name: string;
     state: string;
     address: string;
+    current: boolean;
   }
 
   $: byChannel = stations.reduce((map, station) => {
-    if (hasCurrentChannel(station)) {
+    // Keep last-known assignments visible after scan freshness expires. Safety-
+    // critical channel changes still use hasCurrentChannel in App.svelte.
+    if (station.channel > 0) {
       const list = map.get(station.channel) ?? [];
-      list.push({ name: station.name, state: stateLabel(station), address: station.address });
+      list.push({
+        name: station.name,
+        state: stateLabel(station),
+        address: station.address,
+        current: hasCurrentChannel(station)
+      });
       map.set(station.channel, list);
     }
     return map;
@@ -27,7 +35,9 @@
 
   function cellLabel(channel: number, occupants: Occupant[]): string {
     if (!occupants.length) return `CH ${channel} — free`;
-    const names = occupants.map((occupant) => `${occupant.name} · ${occupant.state}`).join(', ');
+    const names = occupants.map((occupant) =>
+      `${occupant.name} · ${occupant.state}${occupant.current ? '' : ' · last known'}`
+    ).join(', ');
     return `CH ${channel} — ${names}`;
   }
 </script>
@@ -39,6 +49,7 @@
       type="button"
       class="cm-cell"
       class:occupied={occupants.length > 0}
+      class:stale={occupants.length > 0 && occupants.every((occupant) => !occupant.current)}
       class:conflict={occupants.length > 1 || conflictChannels.has(channel)}
       style:--cm={occupants.length ? `var(--color-${occupants[0].state}, var(--text-muted))` : null}
       disabled={occupants.length === 0}
@@ -79,6 +90,12 @@
     background: color-mix(in srgb, var(--cm, var(--text-muted)) 28%, transparent);
     border-color: color-mix(in srgb, var(--cm, var(--text-muted)) 55%, transparent);
     color: #fff;
+  }
+  .cm-cell.occupied.stale {
+    background: color-mix(in srgb, var(--cm, var(--text-muted)) 14%, transparent);
+    border-style: dashed;
+    border-color: color-mix(in srgb, var(--cm, var(--text-muted)) 35%, transparent);
+    color: var(--text-secondary);
   }
   .cm-cell.conflict {
     background: color-mix(in srgb, var(--color-danger) 18%, transparent);

@@ -410,7 +410,10 @@
         pushToast(`Scan failed: ${error}`);
       }
     } finally {
-      if (!disposed && globalOperation === 'scanning') globalOperation = 'idle';
+      if (!disposed && globalOperation === 'scanning') {
+        globalOperation = 'idle';
+        stoppingScan = false;
+      }
       maybeEndScanTimer();
     }
   }
@@ -424,8 +427,10 @@
       // A terminal event may have completed the UI transition while the
       // backend completion barrier was resolving.
       if (!stoppingScan) return;
-      stoppingScan = false;
       externalScanning = false;
+      // A local scan owns globalOperation until its promise settles. Keep the
+      // button in Stopping state instead of briefly restoring an enabled Stop.
+      if (globalOperation !== 'scanning') stoppingScan = false;
       statusMessage = 'Scan stopped.';
       maybeEndScanTimer();
     } catch (error) {
@@ -712,7 +717,7 @@
 
 <svelte:window on:keydown={handleGlobalKeydown} />
 
-<div class="app-container" inert={selectedStation !== null} aria-hidden={selectedStation ? 'true' : undefined}>
+<div class="app-container" class:background-refresh={isStatusChecking} inert={selectedStation !== null} aria-hidden={selectedStation ? 'true' : undefined}>
   <AppHeader
     scanning={isLoading || externalScanning}
     {isBulkLoading}
@@ -828,6 +833,9 @@
 
 <style>
   .app-container { display: flex; flex-direction: column; height: 100vh; }
+  /* Background reads still lock commands, but should not make every control
+     visibly blink at the 15-second polling interval. */
+  .app-container.background-refresh :global(button:disabled) { opacity: 1; }
   main { flex: 1; padding: var(--spacing-md); overflow: auto; }
   .station-grid {
     display: grid;
