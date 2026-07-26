@@ -79,7 +79,7 @@ func (d Device) DiscoverServices(filterUUIDs []UUID) ([]DeviceService, error) {
 	if err != nil {
 		return nil, err
 	} else if status != genericattributeprofile.GattCommunicationStatusSuccess {
-		return nil, fmt.Errorf("could not retrieve device services, operation failed with code %d", status)
+		return nil, gattCommunicationStatusError("could not retrieve device services", int32(status))
 	}
 
 	// IVectorView<GattDeviceService>
@@ -254,7 +254,7 @@ func (s DeviceService) DiscoverCharacteristics(filterUUIDs []UUID) ([]DeviceChar
 		return nil, err
 	}
 	if status != genericattributeprofile.GattCommunicationStatusSuccess {
-		return nil, fmt.Errorf("could not retrieve characteristics, operation failed with code %d", status)
+		return nil, gattCommunicationStatusError("could not retrieve characteristics", int32(status))
 	}
 
 	// IVectorView<GattCharacteristic>
@@ -454,7 +454,7 @@ func (c DeviceCharacteristic) write(p []byte, mode genericattributeprofile.GattW
 
 	// Is the status success?
 	if status != genericattributeprofile.GattCommunicationStatusSuccess {
-		return 0, errWriteFailed
+		return 0, errors.Join(errWriteFailed, gattCommunicationStatusError("Bluetooth write failed", int32(status)))
 	}
 
 	// Success
@@ -498,7 +498,7 @@ func (c DeviceCharacteristic) Read(data []byte) (int, error) {
 		return 0, err
 	}
 	if status != genericattributeprofile.GattCommunicationStatusSuccess {
-		return 0, fmt.Errorf("Bluetooth read failed with status %d", status)
+		return 0, gattCommunicationStatusError("Bluetooth read failed", int32(status))
 	}
 
 	buffer, err := result.GetValue()
@@ -657,7 +657,10 @@ func (c DeviceCharacteristic) EnableNotificationsWithMode(mode NotificationMode,
 	result := genericattributeprofile.GattCommunicationStatus(uintptr(res))
 
 	if result != genericattributeprofile.GattCommunicationStatusSuccess {
-		return errEnableNotificationsFailed
+		return errors.Join(
+			errEnableNotificationsFailed,
+			gattCommunicationStatusError("Bluetooth notification setup failed", int32(result)),
+		)
 	}
 	if err := c.service.device.registerNotification(notificationRegistration{
 		characteristic: c.characteristic,

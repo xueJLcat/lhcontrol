@@ -9,7 +9,7 @@ function renderHeader(overrides: Record<string, unknown> = {}) {
   const onBulkPower = vi.fn();
   render(AppHeader, {
     props: {
-      isLoading: false,
+      scanning: false,
       isBulkLoading: false,
       scanLocked: false,
       bulkLocked: false,
@@ -53,5 +53,11 @@ describe('AppHeader bulk controls', () => {
     const onBulkPower = renderHeader();
     await fireEvent.click(screen.getByRole('button', { name: 'Standby' }));
     expect(onBulkPower).toHaveBeenCalledWith('standby');
+  });
+
+  it('shows scan progress for an external scan as well as a local scan', () => {
+    renderHeader({ scanning: true, scanLocked: true });
+    expect(screen.getByRole('button', { name: 'Scanning...' })).toBeDisabled();
+    expect(document.querySelector('.scan-progress')).toBeInTheDocument();
   });
 });

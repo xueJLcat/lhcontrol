@@ -88,6 +88,8 @@ type fakeCharacteristic struct {
 	value                []byte
 	properties           uint32
 	readErr              error
+	readValues           [][]byte
+	readIndex            int
 	writeErr             error
 	writeErrorAfterApply bool
 	ignoreWrite          bool
@@ -104,9 +106,30 @@ func (fakeConnectedDevice) DiscoverServices([]tinybluetooth.UUID) ([]tinybluetoo
 }
 func (fakeConnectedDevice) RequestConnectionParams(tinybluetooth.ConnectionParams) error { return nil }
 
+type trackingConnectedDevice struct {
+	disconnected bool
+}
+
+func (device *trackingConnectedDevice) Disconnect() error {
+	device.disconnected = true
+	return nil
+}
+func (*trackingConnectedDevice) Connected() (bool, error) { return true, nil }
+func (*trackingConnectedDevice) DiscoverServices([]tinybluetooth.UUID) ([]tinybluetooth.DeviceService, error) {
+	return nil, errors.New("fake discovery is not configured")
+}
+func (*trackingConnectedDevice) RequestConnectionParams(tinybluetooth.ConnectionParams) error {
+	return nil
+}
+
 func (f *fakeCharacteristic) Read(destination []byte) (int, error) {
 	if f.readErr != nil {
 		return 0, f.readErr
+	}
+	if f.readIndex < len(f.readValues) {
+		value := f.readValues[f.readIndex]
+		f.readIndex++
+		return copy(destination, value), nil
 	}
 	return copy(destination, f.value), nil
 }
@@ -152,6 +175,22 @@ func connectedFakeStation(power, mode, identify characteristicIO, capabilities C
 		Capabilities:           capabilities,
 		RawPowerState:          RawPowerStateUnknown,
 		Channel:                ChannelUnknown,
+	}
+}
+
+func TestIsGATTCommunicationFailure(t *testing.T) {
+	for _, target := range []error{
+		tinybluetooth.ErrGATTUnreachable,
+		tinybluetooth.ErrGATTProtocol,
+		tinybluetooth.ErrGATTAccessDenied,
+		tinybluetooth.ErrGATTCommunication,
+	} {
+		if !IsGATTCommunicationFailure(errors.Join(errors.New("operation failed"), target)) {
+			t.Fatalf("IsGATTCommunicationFailure() = false for %v", target)
+		}
+	}
+	if IsGATTCommunicationFailure(errors.New("state confirmation mismatch")) {
+		t.Fatal("state confirmation mismatch was classified as a GATT communication failure")
 	}
 }
 
@@ -372,6 +411,30 @@ func TestSetChannelReportsMismatchedFinalReadback(t *testing.T) {
 	}
 	if !station.Snapshot().Connected {
 		t.Fatal("confirmed mismatched readback discarded a working connection")
+	}
+}
+
+func TestSetChannelAcceptsTargetOnFinalReadback(t *testing.T) {
+	mode := &fakeCharacteristic{
+		value:       []byte{0x05},
+		ignoreWrite: true,
+		readValues: [][]byte{
+			{0x03},
+			{0x03}, {0x03}, {0x03}, {0x03}, {0x03},
+			{0x05},
+		},
+	}
+	station := connectedFakeStation(&fakeCharacteristic{}, mode, nil, Capabilities{ChannelRead: true, ChannelWrite: true})
+
+	result, err := SetChannel(station, 5)
+	if err != nil {
+		t.Fatalf("SetChannel() error = %v", err)
+	}
+	if result.PreviousChannel != 3 || result.Channel != 5 || result.WriteWarning == "" {
+		t.Fatalf("result = %+v, want delayed confirmed channel", result)
+	}
+	if station.LastError != "" {
+		t.Fatalf("confirmed final readback retained error %q", station.LastError)
 	}
 }
 
@@ -702,6 +765,10 @@ func TestInvalidateAllConnectionsDropsCachedHandles(t *testing.T) {
 		&fakeCharacteristic{},
 		Capabilities{PowerRead: true, ChannelRead: true, Identify: true},
 	)
+	device := &trackingConnectedDevice{}
+	station.mutex.Lock()
+	station.device = device
+	station.mutex.Unlock()
 	connectedStationsMutex.Lock()
 	previous := connectedStations
 	connectedStations = []*BaseStation{station}
@@ -722,5 +789,8 @@ func TestInvalidateAllConnectionsDropsCachedHandles(t *testing.T) {
 	connectedStationsMutex.Unlock()
 	if count != 0 {
 		t.Fatalf("tracked connection count = %d, want 0", count)
+	}
+	if !device.disconnected {
+		t.Fatal("detached device was not cleaned up")
 	}
 }

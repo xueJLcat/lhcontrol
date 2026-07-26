@@ -80,8 +80,10 @@ func awaitAsyncOperation(asyncOperation *foundation.IAsyncOperation, genericPara
 	waitChan := make(chan struct{})
 	var completedOnce sync.Once
 	handler := foundation.NewAsyncOperationCompletedHandler(ole.NewGUID(iid), func(instance *foundation.AsyncOperationCompletedHandler, asyncInfo *foundation.IAsyncOperation, asyncStatus foundation.AsyncStatus) {
-		status = asyncStatus
-		completedOnce.Do(func() { close(waitChan) })
+		completedOnce.Do(func() {
+			status = asyncStatus
+			close(waitChan)
+		})
 	})
 	defer handler.Release()
 
@@ -89,36 +91,43 @@ func awaitAsyncOperation(asyncOperation *foundation.IAsyncOperation, genericPara
 		return fmt.Errorf("set async completion handler: %w", err)
 	}
 
-	// Wait until async operation has stopped, and finish.
+	// A timeout is only a cancellation request threshold. WinRT cancellation is
+	// cooperative, so the operation and its callback must stay alive until the
+	// runtime reports a real terminal state.
 	select {
 	case <-waitChan:
 	case <-time.After(15 * time.Second):
-		if asyncInfo, err := queryAsyncInfo(asyncOperation); err == nil {
-			_ = asyncInfo.Cancel()
-			terminal := false
-			deadline := time.Now().Add(3 * time.Second)
-			for time.Now().Before(deadline) {
+		asyncInfo, queryErr := queryAsyncInfo(asyncOperation)
+		if queryErr != nil {
+			// Without IAsyncInfo there is no safe way to prove cancellation.
+			// Keep the handler alive and wait for its completion callback.
+			<-waitChan
+			break
+		}
+		_ = asyncInfo.Cancel()
+		ticker := time.NewTicker(100 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-waitChan:
+				asyncInfo.Release()
+				goto operationFinished
+			case <-ticker.C:
 				current, statusErr := asyncInfo.GetStatus()
-				if statusErr != nil {
-					break
+				if statusErr != nil || current == foundation.AsyncStatusStarted {
+					continue
 				}
-				if current != foundation.AsyncStatusStarted {
-					terminal = true
-					break
-				}
-				time.Sleep(25 * time.Millisecond)
-			}
-			if terminal {
-				_ = asyncInfo.Close()
-			}
-			asyncInfo.Release()
-			if !terminal {
-				return errors.New("WinRT async operation timed out and did not cancel within 3s")
+				completedOnce.Do(func() {
+					status = current
+					close(waitChan)
+				})
+				asyncInfo.Release()
+				goto operationFinished
 			}
 		}
-		return errors.New("WinRT async operation timed out after 15s")
 	}
 
+operationFinished:
 	if status != foundation.AsyncStatusCompleted {
 		if err := getAsyncError(asyncOperation); err != nil {
 			return fmt.Errorf("async operation failed with status %d: %w", status, err)

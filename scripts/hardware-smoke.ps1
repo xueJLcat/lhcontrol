@@ -31,6 +31,17 @@ function Get-VisibleStations {
     return @($Stations | Where-Object { [bool]$_.seenInLatestScan })
 }
 
+function Set-ScanRecordSnapshot {
+    param($Record, $Scan, [object[]]$Stations)
+    $visible = @(Get-VisibleStations $Stations)
+    $Record.status = $Scan
+    $Record.state = [string]$Scan.state
+    $Record.found = [int]$Scan.found
+    $Record.warnings = @($Scan.warnings)
+    $Record.addresses = @($visible | ForEach-Object { $_.address })
+    $Record.stations = @($Stations)
+}
+
 function Assert-ScanSnapshot {
     param($Scan, [object[]]$Stations, [int]$Minimum, [string[]]$Expected)
     Assert-StableOrder $Stations
@@ -120,6 +131,22 @@ function Invoke-SelfTest {
     )
     Assert-ScanSnapshot ([pscustomobject]@{ found = 1 }) $visible 1 @("AA")
 
+    $failedScanRecord = [ordered]@{
+        state = "running"; found = 0; warnings = @(); addresses = @(); stations = @(); status = $null
+    }
+    $failedScan = [pscustomobject]@{ state = "failed"; found = 1; warnings = @("fixture warning"); error = "fixture scan failure" }
+    Set-ScanRecordSnapshot $failedScanRecord $failedScan $visible
+    try {
+        throw "Scan failed: $($failedScan.error)"
+    }
+    catch {
+        $failedScanRecord.error = $_.Exception.Message
+    }
+    if ($failedScanRecord.state -ne "failed" -or $failedScanRecord.found -ne 1 -or
+        $failedScanRecord.addresses.Count -ne 1 -or $null -eq $failedScanRecord.status) {
+        throw "Self-test failed: failed scan evidence was not retained"
+    }
+
     $failedBulk = [pscustomobject]@{
         results = @([pscustomobject]@{
             address = "AA"; name = "Visible"; skipped = $false; reason = ""
@@ -136,6 +163,12 @@ function Invoke-SelfTest {
     }
     if ($null -eq $bulkRecord.result -or [string]::IsNullOrWhiteSpace($bulkRecord.validationError)) {
         throw "Self-test failed: failed bulk evidence was not retained"
+    }
+    $requestFailureRecord = [ordered]@{
+        target = "sleep"; result = $null; requestError = "fixture request failure"; validationError = ""
+    }
+    if ([string]::IsNullOrWhiteSpace($requestFailureRecord.requestError) -or $null -ne $requestFailureRecord.result) {
+        throw "Self-test failed: failed bulk request evidence was not retained"
     }
     if ((Get-VerificationExitCode $true $true) -ne 1) {
         throw "Self-test failed: a restore failure did not produce a failing exit code"
@@ -168,7 +201,7 @@ function Wait-Scan {
             return $status
         }
         if ($status.state -eq "failed") {
-            throw "Scan failed: $($status.error)"
+            return $status
         }
         Start-Sleep -Milliseconds 500
     }
@@ -199,6 +232,7 @@ try {
             durationMs = 0
             state = "running"
             error = ""
+            status = $null
             found = 0
             warnings = @()
             addresses = @()
@@ -208,13 +242,11 @@ try {
             Invoke-RestMethod -Method Post -Uri "$ApiBase/scan" | Out-Null
             $scan = Wait-Scan
             $stations = Get-Stations
+            Set-ScanRecordSnapshot $scanRecord $scan $stations
+            if ($scan.state -eq "failed") {
+                throw "Scan failed: $($scan.error)"
+            }
             Assert-ScanSnapshot $scan $stations $MinimumStations $ExpectedAddresses
-            $visible = @(Get-VisibleStations $stations)
-            $scanRecord.state = [string]$scan.state
-            $scanRecord.found = [int]$scan.found
-            $scanRecord.warnings = @($scan.warnings)
-            $scanRecord.addresses = @($visible | ForEach-Object { $_.address })
-            $scanRecord.stations = $stations
             Write-Host "Scan $cycle/$ScanCycles completed: $($scan.found) found, $($stations.Count) known"
         }
         catch {
@@ -242,23 +274,37 @@ try {
         $powerStarted = $true
         foreach ($target in @("on", "standby", "sleep")) {
             $body = @{ state = $target } | ConvertTo-Json
-            $result = Invoke-RestMethod -Method Post -Uri "$ApiBase/stations/power" -ContentType "application/json" -Body $body
+            $powerStartedAt = Get-Date
             $powerRecord = [ordered]@{
                 target = $target
-                result = $result
+                durationMs = 0
+                result = $null
                 readback = $null
+                requestError = ""
                 validationError = ""
             }
             $results.power += $powerRecord
+            $phase = "request"
             try {
+                $result = Invoke-RestMethod -Method Post -Uri "$ApiBase/stations/power" -ContentType "application/json" -Body $body
+                $powerRecord.result = $result
+                $phase = "validation"
                 Assert-BulkResult $result $target $snapshotAddresses
                 $readback = Get-Stations
                 $powerRecord.readback = $readback
                 Assert-PowerReadback $result $readback $target
             }
             catch {
-                $powerRecord.validationError = $_.Exception.Message
+                if ($phase -eq "request") {
+                    $powerRecord.requestError = $_.Exception.Message
+                }
+                else {
+                    $powerRecord.validationError = $_.Exception.Message
+                }
                 throw
+            }
+            finally {
+                $powerRecord.durationMs = [math]::Round(((Get-Date) - $powerStartedAt).TotalMilliseconds)
             }
             Write-Host "Bulk $target completed and validated: $(@($result.results).Count) result(s)"
         }
@@ -308,6 +354,9 @@ finally {
                 Write-Warning "Failed to restore $($entry.Key): $($_.Exception.Message)"
             }
         }
+    }
+    if ($restoreFailed -and [string]::IsNullOrWhiteSpace([string]$results.error)) {
+        $results.error = "One or more stations could not be restored to their initial power state"
     }
     $results.completedAt = (Get-Date).ToString("o")
     $results | ConvertTo-Json -Depth 16 | Set-Content -LiteralPath $outputPath -Encoding utf8

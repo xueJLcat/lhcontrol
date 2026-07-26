@@ -19,6 +19,50 @@ import (
 	"github.com/saltosystems/winrt-go/windows/storage/streams"
 )
 
+type callbackGate struct {
+	mutex  sync.Mutex
+	cond   *sync.Cond
+	closed bool
+	active int
+}
+
+func newCallbackGate() *callbackGate {
+	gate := &callbackGate{}
+	gate.cond = sync.NewCond(&gate.mutex)
+	return gate
+}
+
+func (gate *callbackGate) begin() bool {
+	gate.mutex.Lock()
+	gate.active++
+	allowed := !gate.closed
+	gate.mutex.Unlock()
+	return allowed
+}
+
+func (gate *callbackGate) end() {
+	gate.mutex.Lock()
+	gate.active--
+	if gate.closed && gate.active == 0 {
+		gate.cond.Broadcast()
+	}
+	gate.mutex.Unlock()
+}
+
+func (gate *callbackGate) close() {
+	gate.mutex.Lock()
+	gate.closed = true
+	gate.mutex.Unlock()
+}
+
+func (gate *callbackGate) wait() {
+	gate.mutex.Lock()
+	for gate.active > 0 {
+		gate.cond.Wait()
+	}
+	gate.mutex.Unlock()
+}
+
 // Address contains a Bluetooth MAC address.
 type Address struct {
 	MACAddress
@@ -190,7 +234,13 @@ func (a *Adapter) Scan(callback func(*Adapter, ScanResult)) (err error) {
 		advertisement.SignatureBluetoothLEAdvertisementWatcher,
 		advertisement.SignatureBluetoothLEAdvertisementReceivedEventArgs,
 	)
+	callbacks := newCallbackGate()
 	handler := foundation.NewTypedEventHandler(ole.NewGUID(eventReceivedGuid), func(instance *foundation.TypedEventHandler, sender, arg unsafe.Pointer) {
+		allowed := callbacks.begin()
+		defer callbacks.end()
+		if !allowed {
+			return
+		}
 		defer func() {
 			// WinRT occasionally supplies incomplete advertisement objects.
 			// Never allow a malformed packet or COM wrapper panic to terminate
@@ -206,13 +256,30 @@ func (a *Adapter) Scan(callback func(*Adapter, ScanResult)) (err error) {
 			callback(a, result)
 		}
 	})
-	defer handler.Release()
 
-	token, err := watcher.AddReceived(handler)
+	receivedToken, err := watcher.AddReceived(handler)
 	if err != nil {
+		handler.Release()
 		return
 	}
-	defer watcher.RemoveReceived(token)
+	var stoppedHandler *foundation.TypedEventHandler
+	var stoppedToken foundation.EventRegistrationToken
+	stoppedAdded := false
+	defer func() {
+		// Prevent callback bodies from starting before unregistering both
+		// events. Remove the registrations first, then wait for callbacks that
+		// were already dispatched before releasing handlers or the watcher.
+		callbacks.close()
+		_ = watcher.RemoveReceived(receivedToken)
+		if stoppedAdded {
+			_ = watcher.RemoveStopped(stoppedToken)
+		}
+		callbacks.wait()
+		if stoppedHandler != nil {
+			stoppedHandler.Release()
+		}
+		handler.Release()
+	}()
 
 	// Wait for when advertisement has stopped by a call to StopScan().
 	// Advertisement doesn't seem to stop right away, there is an
@@ -225,7 +292,12 @@ func (a *Adapter) Scan(callback func(*Adapter, ScanResult)) (err error) {
 		advertisement.SignatureBluetoothLEAdvertisementWatcher,
 		advertisement.SignatureBluetoothLEAdvertisementWatcherStoppedEventArgs,
 	)
-	stoppedHandler := foundation.NewTypedEventHandler(ole.NewGUID(eventStoppedGuid), func(_ *foundation.TypedEventHandler, _, arg unsafe.Pointer) {
+	stoppedHandler = foundation.NewTypedEventHandler(ole.NewGUID(eventStoppedGuid), func(_ *foundation.TypedEventHandler, _, arg unsafe.Pointer) {
+		allowed := callbacks.begin()
+		defer callbacks.end()
+		if !allowed {
+			return
+		}
 		defer func() {
 			if recovered := recover(); recovered != nil {
 				stoppingOnce.Do(func() {
@@ -254,13 +326,12 @@ func (a *Adapter) Scan(callback func(*Adapter, ScanResult)) (err error) {
 			close(stoppingChan)
 		})
 	})
-	defer stoppedHandler.Release()
 
-	token, err = watcher.AddStopped(stoppedHandler)
+	stoppedToken, err = watcher.AddStopped(stoppedHandler)
 	if err != nil {
 		return
 	}
-	defer watcher.RemoveStopped(token)
+	stoppedAdded = true
 
 	err = watcher.Start()
 	if err != nil {
@@ -459,6 +530,7 @@ type deviceState struct {
 	cleanupStarted  bool
 	cleanupComplete bool
 	cleanupErr      error
+	cleanupDone     chan struct{}
 	leaveThread     func()
 	cancel          context.CancelFunc
 
@@ -470,10 +542,7 @@ type deviceState struct {
 	services                      []*genericattributeprofile.GattDeviceService
 	characteristics               []*genericattributeprofile.GattCharacteristic
 	notifications                 []notificationRegistration
-	callbackMutex                 sync.Mutex
-	callbacksClosed               bool
-	activeCallbacks               int
-	callbacksCond                 *sync.Cond
+	callbacks                     *callbackGate
 }
 
 type notificationRegistration struct {
@@ -483,29 +552,19 @@ type notificationRegistration struct {
 }
 
 func (s *deviceState) beginCallback() bool {
-	s.callbackMutex.Lock()
-	s.activeCallbacks++
-	allowed := !s.callbacksClosed
-	s.callbackMutex.Unlock()
-	return allowed
+	return s.callbacks.begin()
 }
 
 func (s *deviceState) endCallback() {
-	s.callbackMutex.Lock()
-	s.activeCallbacks--
-	if s.callbacksClosed && s.activeCallbacks == 0 && s.callbacksCond != nil {
-		s.callbacksCond.Broadcast()
-	}
-	s.callbackMutex.Unlock()
+	s.callbacks.end()
 }
 
-func (s *deviceState) closeCallbacks() {
-	s.callbackMutex.Lock()
-	s.callbacksClosed = true
-	for s.activeCallbacks > 0 {
-		s.callbacksCond.Wait()
-	}
-	s.callbackMutex.Unlock()
+func (s *deviceState) blockCallbacks() {
+	s.callbacks.close()
+}
+
+func (s *deviceState) waitCallbacks() {
+	s.callbacks.wait()
 }
 
 func (d Device) beginOperation() (*deviceState, error) {
@@ -650,11 +709,12 @@ func (a *Adapter) Connect(address Address, params ConnectionParams) (Device, err
 
 	ctx, cancel := context.WithCancel(context.Background())
 	state := &deviceState{
-		cancel:  cancel,
-		device:  bleDevice,
-		session: newSession,
+		cancel:      cancel,
+		device:      bleDevice,
+		session:     newSession,
+		cleanupDone: make(chan struct{}),
+		callbacks:   newCallbackGate(),
 	}
-	state.callbacksCond = sync.NewCond(&state.callbackMutex)
 
 	device := Device{
 		Address: address,
@@ -719,8 +779,8 @@ func (a *Adapter) Connect(address Address, params ConnectionParams) (Device, err
 	return device, nil
 }
 
-// Disconnect from the BLE device. This method is non-blocking and does not
-// wait until the connection is fully gone.
+// Disconnect from the BLE device and wait until all callbacks and WinRT/GATT
+// objects owned by this connection have reached cleanup completion.
 func (d Device) Disconnect() error {
 	if d.state == nil {
 		return nil
@@ -734,26 +794,48 @@ func (d Device) Disconnect() error {
 		return err
 	}
 	if state.cleanupStarted {
+		done := state.cleanupDone
 		state.cleanupMutex.Unlock()
-		return nil
+		<-done
+		state.cleanupMutex.Lock()
+		err := state.cleanupErr
+		state.cleanupMutex.Unlock()
+		return err
 	}
 	state.cleanupStarted = true
 	state.closed.Store(true)
+	done := state.cleanupDone
 	state.cleanupMutex.Unlock()
 	go d.cleanup()
-	return nil
+	<-done
+	state.cleanupMutex.Lock()
+	err := state.cleanupErr
+	state.cleanupMutex.Unlock()
+	return err
 }
 
 func (d Device) cleanup() {
 	state := d.state
-	state.closeCallbacks()
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			state.cleanupMutex.Lock()
+			if state.cleanupErr == nil {
+				state.cleanupErr = fmt.Errorf("bluetooth cleanup panicked: %v", recovered)
+			}
+			state.cleanupMutex.Unlock()
+		}
+		state.cleanupMutex.Lock()
+		state.cleanupComplete = true
+		close(state.cleanupDone)
+		state.cleanupMutex.Unlock()
+	}()
+	state.blockCallbacks()
 	state.operationMutex.Lock()
 	defer state.operationMutex.Unlock()
 	leaveThread, err := enterWinRTThread()
 	if err != nil {
 		state.cleanupMutex.Lock()
 		state.cleanupErr = err
-		state.cleanupComplete = true
 		state.cleanupMutex.Unlock()
 		return
 	}
@@ -770,6 +852,9 @@ func (d Device) cleanup() {
 			_ = notification.characteristic.RemoveValueChanged(notification.token)
 		}
 	}
+	// Event removal prevents new dispatches. Drain callbacks that were already
+	// running before releasing their handlers and owned WinRT objects.
+	state.waitCallbacks()
 	if state.connectionStatusListener != nil {
 		state.connectionStatusListener.Release()
 		state.connectionStatusListener = nil
@@ -808,9 +893,6 @@ func (d Device) cleanup() {
 		state.device.Release()
 		state.device = nil
 	}
-	state.cleanupMutex.Lock()
-	state.cleanupComplete = true
-	state.cleanupMutex.Unlock()
 }
 
 // Connected returns whether the device is currently connected.

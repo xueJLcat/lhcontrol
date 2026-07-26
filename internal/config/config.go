@@ -229,6 +229,9 @@ func (c *Config) GetStationDisplayName(address, originalName string) (string, bo
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
 	if renamedName, ok := c.RenamedStationsByAddress[address]; ok {
+		if renamedName == "" {
+			return originalName, false
+		}
 		return renamedName, true
 	}
 	renamedName, ok := c.RenamedStations[originalName]
@@ -244,10 +247,14 @@ func (c *Config) SetRenamedStationByAddress(address, originalName, newName strin
 	previousAddressName, addressExisted := c.RenamedStationsByAddress[address]
 	previousLegacyName, legacyExisted := c.RenamedStations[originalName]
 	if newName == "" {
-		delete(c.RenamedStationsByAddress, address)
-		// Also remove the legacy name-keyed entry. Otherwise resetting a
-		// migrated station would immediately fall back to its old alias.
-		delete(c.RenamedStations, originalName)
+		if legacyExisted {
+			// An empty address entry is a tombstone for this device only. It
+			// prevents the shared legacy name from being applied again without
+			// removing that alias from other devices with the same factory name.
+			c.RenamedStationsByAddress[address] = ""
+		} else {
+			delete(c.RenamedStationsByAddress, address)
+		}
 	} else {
 		c.RenamedStationsByAddress[address] = newName
 	}

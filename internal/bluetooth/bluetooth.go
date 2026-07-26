@@ -326,6 +326,15 @@ func IsAdapterUnavailable(err error) bool {
 		errors.Is(err, bluetooth.ErrDisabledByPolicy)
 }
 
+// IsGATTCommunicationFailure reports failures for which cached WinRT service
+// and characteristic handles must not be reused by the next device operation.
+func IsGATTCommunicationFailure(err error) bool {
+	return errors.Is(err, bluetooth.ErrGATTUnreachable) ||
+		errors.Is(err, bluetooth.ErrGATTProtocol) ||
+		errors.Is(err, bluetooth.ErrGATTAccessDenied) ||
+		errors.Is(err, bluetooth.ErrGATTCommunication)
+}
+
 // ScanForDuration performs a blocking BLE scan for the specified duration
 // and returns a list of discovered base stations.
 // Uses time.AfterFunc to stop the scan.
@@ -590,11 +599,12 @@ func ReadPowerState(station *BaseStation) error {
 	return nil
 }
 
-func invalidateStationConnection(station *BaseStation) {
+func invalidateStationConnection(station *BaseStation) bluetooth.GAPDevice {
 	if station == nil {
-		return
+		return nil
 	}
 	station.mutex.Lock()
+	device := station.device
 	station.isConnected = false
 	station.device = nil
 	station.characteristic = nil
@@ -603,18 +613,26 @@ func invalidateStationConnection(station *BaseStation) {
 	station.LastPowerReadAt = time.Time{}
 	station.LastChannelReadAt = time.Time{}
 	station.mutex.Unlock()
+	return device
 }
 
-// InvalidateAllConnections drops cached WinRT/GATT handles without invoking
-// Disconnect. It is used after the Windows radio becomes unavailable, when
-// those handles can no longer be trusted and disconnect itself may fail.
+// InvalidateAllConnections first detaches cached handles so no new operation
+// can reuse them, then waits for each old WinRT/GATT connection to clean up.
 func InvalidateAllConnections() {
 	connectedStationsMutex.Lock()
 	stations := append([]*BaseStation(nil), connectedStations...)
 	connectedStations = nil
 	connectedStationsMutex.Unlock()
+	devices := make([]bluetooth.GAPDevice, 0, len(stations))
 	for _, station := range stations {
-		invalidateStationConnection(station)
+		if device := invalidateStationConnection(station); device != nil {
+			devices = append(devices, device)
+		}
+	}
+	for _, device := range devices {
+		if err := device.Disconnect(); err != nil {
+			log.Printf("Bluetooth: cleanup after adapter loss failed: %v", err)
+		}
 	}
 }
 
@@ -1289,6 +1307,13 @@ func SetChannel(station *BaseStation, channel int) (ChannelWriteResult, error) {
 	}
 	if err := readChannelInternal(station); err == nil {
 		result.Channel = station.Channel
+		if station.Channel == channel {
+			result.WriteWarning = fmt.Sprintf("channel %d was confirmed by the final readback", channel)
+			station.LastReadAt = time.Now()
+			station.LastError = ""
+			return result, nil
+		}
+		confirmationErr = fmt.Errorf("reported channel %d, expected %d", station.Channel, channel)
 	} else if confirmationErr == nil {
 		confirmationErr = err
 	}

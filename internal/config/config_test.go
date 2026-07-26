@@ -66,7 +66,7 @@ func TestAddressRenameTakesPriorityOverLegacyName(t *testing.T) {
 	}
 }
 
-func TestResetAddressRenameAlsoRemovesLegacyFallback(t *testing.T) {
+func TestResetAddressRenameOnlySuppressesLegacyFallbackForThatDevice(t *testing.T) {
 	t.Setenv("AppData", t.TempDir())
 
 	cfg := NewConfig()
@@ -78,5 +78,19 @@ func TestResetAddressRenameAlsoRemovesLegacyFallback(t *testing.T) {
 	}
 	if got, ok := cfg.GetStationDisplayName("11:22:33:44:55:66", "LHB-OLD"); ok {
 		t.Fatalf("reset rename unexpectedly returned %q", got)
+	}
+	if got, ok := cfg.GetStationDisplayName("AA:BB:CC:DD:EE:FF", "LHB-OLD"); !ok || got != "Legacy name" {
+		t.Fatalf("reset removed another device's legacy alias: %q, %v", got, ok)
+	}
+
+	reloaded := NewConfig()
+	if err := reloaded.Load(); err != nil {
+		t.Fatalf("Config.Load() error = %v", err)
+	}
+	if got, ok := reloaded.GetStationDisplayName("11:22:33:44:55:66", "LHB-OLD"); ok {
+		t.Fatalf("reloaded reset rename unexpectedly returned %q", got)
+	}
+	if got, ok := reloaded.GetStationDisplayName("AA:BB:CC:DD:EE:FF", "LHB-OLD"); !ok || got != "Legacy name" {
+		t.Fatalf("reloaded config lost shared legacy alias: %q, %v", got, ok)
 	}
 }

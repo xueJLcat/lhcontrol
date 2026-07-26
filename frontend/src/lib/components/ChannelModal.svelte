@@ -58,9 +58,7 @@
   {#if error}<div class="alert danger">{error}</div>{/if}
   <p class="hint">The value is only accepted after the base station reads back the requested channel. Failure will not trigger an automatic rollback.</p>
   <div class="modal-actions">
-    {#if station.capabilities.identify}
-      <button class="btn" on:click={() => onIdentify(station)} disabled={busy || locked}><Eye size={15} /> Identify this station</button>
-    {/if}
+    <button class="btn" on:click={() => onIdentify(station)} disabled={busy || locked}><Eye size={15} /> Identify this station</button>
     <button class="btn primary" on:click={() => onSave(targetChannel, confirmUnknownChannelRisk)} disabled={saveDisabled}>Confirm change</button>
   </div>
 </div>

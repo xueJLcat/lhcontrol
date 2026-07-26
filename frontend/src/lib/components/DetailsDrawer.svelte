@@ -53,12 +53,8 @@
     {/if}
     <div class="drawer-actions">
       <button class="btn" on:click={() => onRefresh(station)} disabled={busy || locked}><RefreshCw size={15} /> Refresh capabilities</button>
-      {#if station.capabilitiesKnown && station.capabilities.identify}
-        <button class="btn" on:click={() => onIdentify(station)} disabled={busy || locked}><Eye size={15} /> Identify</button>
-      {/if}
-      {#if station.capabilitiesKnown && station.capabilities.channelRead && station.capabilities.channelWrite}
-        <button class="btn primary" on:click={() => onOpenChannelEditor(station)} disabled={!station.scanFresh || busy || locked} title={station.scanFresh ? 'Change Channel safely' : 'Run a new scan before changing Channel'}><Settings2 size={15} /> Change Channel</button>
-      {/if}
+      <button class="btn" on:click={() => onIdentify(station)} disabled={busy || locked} title={station.capabilities.identify ? 'Send the identify signal' : 'Recheck support and identify'}><Eye size={15} /> Identify</button>
+      <button class="btn primary" on:click={() => onOpenChannelEditor(station)} disabled={!station.scanFresh || busy || locked} title={station.scanFresh ? 'Recheck support and change Channel safely' : 'Run a new scan before changing Channel'}><Settings2 size={15} /> Change Channel</button>
     </div>
     {#if station.capabilities.identify}<p class="hint">Identify may wake a sleeping base station.</p>{/if}
     {#if !station.scanFresh}<p class="hint warning-text">Run a new scan before changing Channel so conflicts are checked against the current room.</p>{/if}

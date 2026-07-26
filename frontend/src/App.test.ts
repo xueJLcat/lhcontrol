@@ -28,6 +28,10 @@ const runtime = vi.hoisted(() => ({
 
 vi.mock('../wailsjs/go/main/App', () => api);
 vi.mock('../wailsjs/runtime/runtime', () => ({ EventsOn: runtime.EventsOn }));
+vi.mock('./lib/toast', async (importOriginal) => {
+  const original = await importOriginal<typeof import('./lib/toast')>();
+  return { ...original, pushToast: vi.fn() };
+});
 
 import App from './App.svelte';
 
@@ -208,6 +212,51 @@ describe('App asynchronous operations', () => {
     await waitFor(() => expect(onButtons[2]).not.toBeDisabled());
   });
 
+  it('keeps a failed station result when another concurrent operation advances the list revision', async () => {
+    const stationA = createStation({ name: 'LHB-A', address: 'AA' });
+    const stationB = createStation({ name: 'LHB-B', address: 'BB' });
+    const updatedB = createStation({
+      name: 'LHB-B',
+      address: 'BB',
+      powerState: 1,
+      powerStateName: 'on'
+    });
+    api.ScanAndFetchStations.mockResolvedValue([stationA, stationB]);
+
+    let rejectA!: (error: Error) => void;
+    let resolveB!: (value: unknown) => void;
+    let resolveRefresh!: (stations: StationInfo[]) => void;
+    api.SetStationPower.mockImplementation((address: string) => {
+      if (address === 'AA') {
+        return new Promise((_, reject) => { rejectA = reject; });
+      }
+      return new Promise((resolve) => { resolveB = resolve; });
+    });
+    api.GetCurrentStationInfo.mockReturnValue(new Promise((resolve) => {
+      resolveRefresh = resolve;
+    }));
+
+    render(App);
+    await screen.findByText('LHB-B');
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Scan' })).not.toBeDisabled());
+    await fireEvent.click(screen.getByRole('button', { name: 'Turn LHB-A on' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Turn LHB-B on' }));
+
+    rejectA(new Error('connection lost'));
+    await waitFor(() => expect(api.GetCurrentStationInfo).toHaveBeenCalledOnce());
+    resolveB({
+      station: updatedB,
+      commandSent: true,
+      confirmed: true,
+      confirmationError: ''
+    });
+    expect(await screen.findByText('On confirmed')).toBeInTheDocument();
+
+    resolveRefresh([stationA, updatedB]);
+    expect(await screen.findByText('Failed · actual sleep')).toBeInTheDocument();
+    expect(screen.queryByText('Switching to On…')).not.toBeInTheDocument();
+  });
+
   it('keeps GATT capacity available during rename but locks scan and bulk', async () => {
     const stationA = createStation({ name: 'LHB-A', address: 'AA' });
     const stationB = createStation({ name: 'LHB-B', address: 'BB' });
@@ -251,6 +300,34 @@ describe('App asynchronous operations', () => {
     expect(screen.getByText('External scan in progress...')).toBeInTheDocument();
   });
 
+  it('does not let a pending device result overwrite a newer external scan', async () => {
+    let resolvePower!: (value: unknown) => void;
+    api.SetStationPower.mockReturnValue(new Promise((resolve) => {
+      resolvePower = resolve;
+    }));
+
+    render(App);
+    await screen.findByText('LHB-TEST');
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Scan' })).not.toBeDisabled());
+    await fireEvent.click(screen.getByRole('button', { name: 'Turn LHB-TEST on' }));
+    await waitFor(() => expect(api.SetStationPower).toHaveBeenCalledOnce());
+
+    runtime.handlers.get('external-scan-started')?.();
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Scanning...' })).toBeDisabled());
+    expect(screen.getByText('External scan in progress...')).toBeInTheDocument();
+
+    resolvePower({
+      station: createStation({ powerState: 1, powerStateName: 'on', rawPowerState: 0x0b }),
+      commandSent: true,
+      confirmed: true,
+      confirmationError: ''
+    });
+    await Promise.resolve();
+
+    expect(screen.getByText('External scan in progress...')).toBeInTheDocument();
+    expect(screen.queryByText('On confirmed')).not.toBeInTheDocument();
+  });
+
   it('distinguishes already-at-target and unsupported bulk skips', async () => {
     const stationA = createStation({ name: 'LHB-A', address: 'AA' });
     const stationB = createStation({ name: 'LHB-B', address: 'BB' });
@@ -277,6 +354,44 @@ describe('App asynchronous operations', () => {
 
     expect(await screen.findByText('Already On')).toBeInTheDocument();
     expect(await screen.findByText('Skipped · power control is not supported')).toBeInTheDocument();
+  });
+
+  it('shows the backend confirmation error for an unconfirmed bulk command', async () => {
+    const station = createStation();
+    api.SetAllStationsPowerDetailed.mockResolvedValue({
+      target: 'on',
+      results: [{
+        address: station.address,
+        name: station.name,
+        skipped: false,
+        reason: '',
+        commandSent: true,
+        success: true,
+        confirmed: false,
+        error: 'readback timed out',
+        station
+      }]
+    });
+
+    render(App);
+    await screen.findByText('LHB-TEST');
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Scan' })).not.toBeDisabled());
+    await fireEvent.click(screen.getByTitle('Turn all known stations on'));
+
+    expect(await screen.findByText('On sent · readback timed out')).toBeInTheDocument();
+  });
+
+  it('locks the empty-state scan button while an external scan is running', async () => {
+    api.ScanAndFetchStations.mockResolvedValue([]);
+    api.GetScanStatus.mockResolvedValue({ state: 'completed', found: 0, warnings: [] });
+
+    render(App);
+    expect(await screen.findByRole('button', { name: 'Scan Now' })).not.toBeDisabled();
+    runtime.handlers.get('external-scan-started')?.();
+
+    const scanningButtons = await screen.findAllByRole('button', { name: 'Scanning...' });
+    expect(scanningButtons.length).toBeGreaterThan(0);
+    for (const button of scanningButtons) expect(button).toBeDisabled();
   });
 
   it('does not let an older API status response overwrite a newer poll', async () => {

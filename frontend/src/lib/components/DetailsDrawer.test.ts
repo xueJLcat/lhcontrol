@@ -127,4 +127,27 @@ describe('DetailsDrawer actions', () => {
     expect(onIdentify).toHaveBeenCalledOnce();
     expect(onOpenChannelEditor).toHaveBeenCalledOnce();
   });
+
+  it('keeps recovery actions available when cached capabilities are missing', () => {
+    const unknownCapabilities = station();
+    unknownCapabilities.capabilitiesKnown = true;
+    unknownCapabilities.capabilities.identify = false;
+    unknownCapabilities.capabilities.channelRead = false;
+    unknownCapabilities.capabilities.channelWrite = false;
+
+    render(DetailsDrawer, {
+      props: {
+        station: unknownCapabilities,
+        busy: false,
+        locked: false,
+        onClose: vi.fn(),
+        onRefresh: vi.fn(),
+        onIdentify: vi.fn(),
+        onOpenChannelEditor: vi.fn()
+      }
+    });
+
+    expect(screen.getByRole('button', { name: /Identify/i })).toBeEnabled();
+    expect(screen.getByRole('button', { name: /Change Channel/i })).toBeEnabled();
+  });
 });

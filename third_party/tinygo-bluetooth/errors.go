@@ -2,8 +2,56 @@ package bluetooth
 
 import (
 	"encoding/hex"
+	"errors"
+	"fmt"
 	"strings"
 )
+
+var (
+	// ErrGATTUnreachable means Windows could not communicate with the device.
+	ErrGATTUnreachable = errors.New("Bluetooth GATT device is unreachable")
+	// ErrGATTProtocol means the device rejected or could not complete the GATT request.
+	ErrGATTProtocol = errors.New("Bluetooth GATT protocol error")
+	// ErrGATTAccessDenied means Windows denied the requested GATT operation.
+	ErrGATTAccessDenied = errors.New("Bluetooth GATT access denied")
+	// ErrGATTCommunication covers communication statuses unknown to this build.
+	ErrGATTCommunication = errors.New("Bluetooth GATT communication failed")
+)
+
+// GATTCommunicationError preserves the WinRT communication status while
+// exposing a stable error category through errors.Is.
+type GATTCommunicationError struct {
+	Operation string
+	Status    int32
+	cause     error
+}
+
+func (e *GATTCommunicationError) Error() string {
+	return fmt.Sprintf("%s: %v (WinRT GATT status %d)", e.Operation, e.cause, e.Status)
+}
+
+func (e *GATTCommunicationError) Unwrap() error {
+	return e.cause
+}
+
+func gattCommunicationStatusError(operation string, status int32) error {
+	var cause error
+	switch status {
+	case 1:
+		cause = ErrGATTUnreachable
+	case 2:
+		cause = ErrGATTProtocol
+	case 3:
+		cause = ErrGATTAccessDenied
+	default:
+		cause = ErrGATTCommunication
+	}
+	return &GATTCommunicationError{
+		Operation: operation,
+		Status:    status,
+		cause:     cause,
+	}
+}
 
 // AttributeProtocolError represents an ATT error code as defined in the
 // Bluetooth Core Specification, Section 3.4.1.1 (ATT_ERROR_RSP), Table 3.4.

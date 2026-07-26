@@ -55,6 +55,7 @@
   let externalScanning = false;
   const listRevisions = new RevisionGate();
   const apiRevisions = new RevisionGate();
+  let scanEpoch = 0;
   let disposed = false;
 
   $: sortedStations = [...stations].sort((a, b) => {
@@ -117,19 +118,41 @@
     return true;
   }
 
+  function canCommitOperation(epoch: number): boolean {
+    return !disposed && epoch === scanEpoch;
+  }
+
+  function beginScanEpoch(): number {
+    scanEpoch += 1;
+    return scanEpoch;
+  }
+
+  function mergeStationUpdates(updated: StationInfo[]) {
+    if (!updated.length) return;
+    const byAddress = new Map(updated.map((station) => [station.address, station]));
+    stations = stations.map((station) => byAddress.get(station.address) ?? station);
+  }
+
   onMount(async () => {
     refreshAPIStatus();
     apiStatusInterval = setInterval(refreshAPIStatus, 15000);
     cancelExternalScanStartedListener = EventsOn('external-scan-started', () => {
       if (disposed) return;
+      beginScanEpoch();
       listRevisions.next();
       cancelRename();
+      powerTargetByAddress = {};
+      powerFeedbackByAddress = {};
       externalScanning = true;
       statusMessage = 'External scan in progress...';
     });
     cancelExternalScanListener = EventsOn('external-scan-completed', async (updated: StationInfo[]) => {
       if (disposed) return;
+      beginScanEpoch();
       const revision = listRevisions.next();
+      cancelRename();
+      powerTargetByAddress = {};
+      powerFeedbackByAddress = {};
       externalScanning = false;
       stations = updated || [];
       const scanStatus = await GetScanStatus().catch(() => null);
@@ -139,6 +162,7 @@
     });
     cancelExternalScanFailureListener = EventsOn('external-scan-failed', (message: string) => {
       if (disposed) return;
+      beginScanEpoch();
       listRevisions.next();
       externalScanning = false;
       statusMessage = `External scan failed: ${message}`;
@@ -210,19 +234,20 @@
     configOperations = new Set();
     powerTargetByAddress = {};
     powerFeedbackByAddress = {};
+    const operationEpoch = beginScanEpoch();
     const revision = listRevisions.next();
     statusMessage = 'Scanning for base stations...';
     try {
       if (!applyStationList(await ScanAndFetchStations(), revision)) return;
       const scanStatus = await GetScanStatus().catch(() => null);
-      if (disposed || !listRevisions.isCurrent(revision)) return;
+      if (!canCommitOperation(operationEpoch) || !listRevisions.isCurrent(revision)) return;
       const warning = scanStatus?.warnings?.join(' ');
       const found = scanStatus?.found ?? stations.filter((station) => station.seenInLatestScan).length;
       statusMessage = warning
         ? `Found ${found}; ${stations.length} known station(s). ${warning}`
         : found ? `Found ${found}; ${stations.length} known station(s).` : 'No stations found in this scan.';
     } catch (error) {
-      if (disposed || !listRevisions.isCurrent(revision)) return;
+      if (!canCommitOperation(operationEpoch) || !listRevisions.isCurrent(revision)) return;
       statusMessage = `Scan failed: ${error}`;
       pushToast(`Scan failed: ${error}`);
     } finally {
@@ -233,16 +258,26 @@
   async function fetchLatestList(revision = listRevisions.next()): Promise<boolean> {
     try {
       return applyStationList(await GetCurrentStationInfo(), revision);
-    } catch (error) {
-      if (disposed || !listRevisions.isCurrent(revision)) return false;
-      statusMessage = `Error refreshing list: ${error}`;
+    } catch {
       return false;
     }
+  }
+
+  async function fetchStationUpdate(address: string, epoch: number): Promise<StationInfo | null> {
+    const revision = listRevisions.next();
+    const updated = await GetCurrentStationInfo().catch(() => null);
+    if (!canCommitOperation(epoch)) return null;
+    const station = updated?.find((item) => item.address === address) ?? null;
+    if (station && listRevisions.isCurrent(revision)) {
+      stations = stations.map((current) => current.address === address ? station : current);
+    }
+    return stations.find((current) => current.address === address) ?? station;
   }
 
   async function setPower(station: StationInfo, state: PowerTarget) {
     if (!canSetPower(station, state) || stationBusy(station.address) || gattLockedFor(station.address)) return;
     const targetLabel = powerTargetLabel(state);
+    const operationEpoch = scanEpoch;
     setGattBusy(station.address, true);
     powerTargetByAddress = { ...powerTargetByAddress, [station.address]: state };
     powerFeedbackByAddress = {
@@ -252,7 +287,7 @@
     statusMessage = `Setting ${station.name} to ${targetLabel}…`;
     try {
       const result = await SetStationPower(station.address, state);
-      if (disposed) return;
+      if (!canCommitOperation(operationEpoch)) return;
       const revision = listRevisions.next();
       if (!listRevisions.isCurrent(revision)) return;
       stations = stations.map((current) => current.address === station.address ? result.station : current);
@@ -270,10 +305,10 @@
           ? `${station.name}: command sent, but confirmation failed. ${result.confirmationError}`
           : `${station.name}: ${targetLabel} command sent; this firmware cannot confirm the state.`;
     } catch (error) {
-      if (disposed) return;
+      if (!canCommitOperation(operationEpoch)) return;
       const errorText = String(error);
-      if (!await fetchLatestList()) return;
-      const actual = stations.find((current) => current.address === station.address);
+      const actual = await fetchStationUpdate(station.address, operationEpoch);
+      if (!canCommitOperation(operationEpoch)) return;
       const actualState = actual ? stateLabel(actual) : 'unknown';
       powerFeedbackByAddress = {
         ...powerFeedbackByAddress,
@@ -309,21 +344,24 @@
     globalOperation = 'bulk-power';
     bulkTarget = state;
     const targetLabel = powerTargetLabel(state);
+    const operationEpoch = scanEpoch;
     statusMessage = `Setting all available stations to ${targetLabel}…`;
     try {
       const result = await SetAllStationsPowerDetailed(state);
-      if (disposed) return;
-      if (!await fetchLatestList()) return;
+      if (!canCommitOperation(operationEpoch)) return;
+      await fetchLatestList();
+      if (!canCommitOperation(operationEpoch)) return;
+      mergeStationUpdates(result.results.map((item) => item.station).filter(Boolean));
       const feedback = { ...powerFeedbackByAddress };
       for (const item of result.results) {
         feedback[item.address] = item.skipped
           ? item.success && item.confirmed
             ? { kind: 'success', text: `Already ${targetLabel}` }
             : { kind: 'warning', text: `Skipped · ${item.reason || 'not actionable'}` }
-          : item.success && item.confirmed
-            ? { kind: 'success', text: `${targetLabel} confirmed` }
-            : item.success && item.commandSent
-              ? { kind: 'warning', text: `${targetLabel} sent · status unavailable` }
+            : item.success && item.confirmed
+              ? { kind: 'success', text: `${targetLabel} confirmed` }
+              : item.success && item.commandSent
+              ? { kind: 'warning', text: `${targetLabel} sent · ${item.error || 'status unavailable'}` }
               : { kind: 'error', text: item.error || `Failed to set ${targetLabel}` };
       }
       powerFeedbackByAddress = feedback;
@@ -336,8 +374,9 @@
         : `${confirmed} confirmed; ${unconfirmed} sent but unconfirmed; ${skipped.length} skipped for ${targetLabel}.`;
       if (failed.length) pushToast(`Bulk ${targetLabel}: ${failed.length} station(s) failed. See status bar.`);
     } catch (error) {
-      if (disposed) return;
-      if (!await fetchLatestList()) return;
+      if (!canCommitOperation(operationEpoch)) return;
+      await fetchLatestList();
+      if (!canCommitOperation(operationEpoch)) return;
       statusMessage = `Bulk ${targetLabel} operation partially failed: ${error}`;
       pushToast(`Bulk ${targetLabel} operation partially failed: ${error}`);
     } finally {
@@ -365,13 +404,19 @@
     cancelRename();
     if (name === station.name) return;
     setConfigBusy(station.address, true);
+    const operationEpoch = scanEpoch;
     try {
       await RenameStationByAddress(station.address, name);
-      if (disposed) return;
-      if (!await fetchLatestList()) return;
+      if (!canCommitOperation(operationEpoch)) return;
+      await fetchStationUpdate(station.address, operationEpoch);
+      if (!canCommitOperation(operationEpoch)) return;
+      listRevisions.next();
+      stations = stations.map((current) => current.address === station.address
+        ? Object.assign(current, { name: name || current.originalName })
+        : current);
       statusMessage = name ? `Renamed to ${name}.` : `Reset name for ${station.originalName}.`;
     } catch (error) {
-      if (disposed) return;
+      if (!canCommitOperation(operationEpoch)) return;
       statusMessage = `Error renaming: ${error}`;
       pushToast(`Error renaming: ${error}`);
     } finally {
@@ -382,14 +427,17 @@
   async function identify(station: StationInfo) {
     if (stationBusy(station.address) || gattLockedFor(station.address)) return;
     setGattBusy(station.address, true);
+    const operationEpoch = scanEpoch;
     try {
       await IdentifyStation(station.address);
-      if (disposed) return;
-      if (!await fetchLatestList()) return;
+      if (!canCommitOperation(operationEpoch)) return;
+      await fetchStationUpdate(station.address, operationEpoch);
+      if (!canCommitOperation(operationEpoch)) return;
       statusMessage = `Identify signal sent to ${station.name}.`;
     } catch (error) {
-      if (disposed) return;
-      if (!await fetchLatestList()) return;
+      if (!canCommitOperation(operationEpoch)) return;
+      await fetchStationUpdate(station.address, operationEpoch);
+      if (!canCommitOperation(operationEpoch)) return;
       statusMessage = `Identify failed for ${station.name}: ${error}`;
       pushToast(`Identify failed for ${station.name}: ${error}`);
     } finally {
@@ -400,9 +448,10 @@
   async function refreshCapabilities(station: StationInfo) {
     if (stationBusy(station.address) || gattLockedFor(station.address)) return;
     setGattBusy(station.address, true);
+    const operationEpoch = scanEpoch;
     try {
       const updated = await RefreshStationCapabilities(station.address);
-      if (disposed) return;
+      if (!canCommitOperation(operationEpoch)) return;
       const revision = listRevisions.next();
       if (!listRevisions.isCurrent(revision)) return;
       stations = stations.map((current) => current.address === station.address ? updated : current);
@@ -410,8 +459,9 @@
         ? `Capabilities refreshed for ${station.name}, but some values are unavailable: ${updated.lastError}`
         : `Capabilities refreshed for ${station.name}.`;
     } catch (error) {
-      if (disposed) return;
-      if (!await fetchLatestList()) return;
+      if (!canCommitOperation(operationEpoch)) return;
+      await fetchStationUpdate(station.address, operationEpoch);
+      if (!canCommitOperation(operationEpoch)) return;
       statusMessage = `Capability refresh failed for ${station.name}: ${error}`;
       pushToast(`Capability refresh failed for ${station.name}: ${error}`);
     } finally {
@@ -429,17 +479,24 @@
       stationBusy(selectedStation.address) || gattLockedFor(selectedStation.address) ||
       (selectedStation.channel > 0 && selectedStation.channel === targetChannel)) return;
     const address = selectedStation.address;
+    const operationEpoch = scanEpoch;
     setGattBusy(address, true);
     channelError = '';
     try {
       const result = await SetStationChannel(address, targetChannel, allowUnknownConflictRisk);
-      if (disposed) return;
-      if (!await fetchLatestList()) return;
+      if (!canCommitOperation(operationEpoch)) return;
+      await fetchStationUpdate(address, operationEpoch);
+      if (!canCommitOperation(operationEpoch)) return;
+      listRevisions.next();
+      stations = stations.map((station) => station.address === address
+        ? Object.assign(station, { channel: result.channel, channelFresh: true, lastError: '' })
+        : station);
       channelEditorOpen = false;
       statusMessage = `Channel changed from ${result.previousChannel || 'unknown'} to ${result.channel}. ${result.warnings.join(' ')}`;
     } catch (error) {
-      if (disposed) return;
-      if (!await fetchLatestList()) return;
+      if (!canCommitOperation(operationEpoch)) return;
+      await fetchStationUpdate(address, operationEpoch);
+      if (!canCommitOperation(operationEpoch)) return;
       const actual = stations.find((station) => station.address === address)?.channel ?? 0;
       channelError = `${String(error)} Actual readback: ${actual || 'unknown'}.`;
     } finally {
@@ -461,7 +518,7 @@
 
 <div class="app-container">
   <AppHeader
-    {isLoading}
+    scanning={isLoading || externalScanning}
     {isBulkLoading}
     {scanLocked}
     {bulkLocked}
@@ -509,7 +566,9 @@
       <div class="empty">
         <div class="empty-icon"><Activity size={40} /></div>
         <p>No base stations found.</p>
-        <button class="btn primary" on:click={handleScanClick}>Scan Now</button>
+        <button class="btn primary" disabled={scanLocked} on:click={handleScanClick}>
+          {externalScanning ? 'Scanning...' : 'Scan Now'}
+        </button>
       </div>
     {/if}
   </main>

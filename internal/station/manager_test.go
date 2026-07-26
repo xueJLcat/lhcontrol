@@ -723,6 +723,31 @@ func TestStalePowerStateIsNotConfirmed(t *testing.T) {
 	}
 }
 
+func TestGetStationInfoCanRunWhileStationMapChanges(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for index := 0; index < 500; index++ {
+			key := "dynamic"
+			manager.stationsMutex.Lock()
+			manager.stations[key] = &internalbluetooth.BaseStation{Name: "LHB-DYNAMIC"}
+			if index%2 == 0 {
+				delete(manager.stations, key)
+			}
+			manager.stationsMutex.Unlock()
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for index := 0; index < 500; index++ {
+			_ = manager.GetStationInfo()
+		}
+	}()
+	wg.Wait()
+}
+
 func TestStaleBootingStationIsNotSkippedByBulkSelection(t *testing.T) {
 	manager := NewManager(config.NewConfig())
 	manager.stations["booting"] = &internalbluetooth.BaseStation{
@@ -736,6 +761,40 @@ func TestStaleBootingStationIsNotSkippedByBulkSelection(t *testing.T) {
 	}
 	if len(result.Results) != 1 || result.Results[0].Skipped {
 		t.Fatalf("stale booting station was skipped: %+v", result.Results)
+	}
+}
+
+func TestStationGATTFailureInvalidatesConnectionAndRegistersRecovery(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	address := "11:22:33:44:55:61"
+	station := &internalbluetooth.BaseStation{
+		Name:              "LHB-61",
+		Address:           mustAddress(t, address),
+		Present:           true,
+		Capabilities:      internalbluetooth.Capabilities{PowerWrite: true},
+		CapabilitiesKnown: true,
+	}
+	manager.stations[address] = station
+	manager.bluetoothOps.setPowerState = func(*internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
+		return internalbluetooth.PowerControlResult{}, tinybluetooth.ErrGATTUnreachable
+	}
+	var disconnects atomic.Int32
+	manager.bluetoothOps.disconnectStation = func(*internalbluetooth.BaseStation) {
+		disconnects.Add(1)
+	}
+
+	_, err := manager.SetStationPower(address, "on")
+	if !errors.Is(err, tinybluetooth.ErrGATTUnreachable) {
+		t.Fatalf("SetStationPower() error = %v, want ErrGATTUnreachable", err)
+	}
+	if got := disconnects.Load(); got != 1 {
+		t.Fatalf("disconnect calls = %d, want 1", got)
+	}
+	manager.statusRetryMutex.Lock()
+	_, tracked := manager.statusRetries[address]
+	manager.statusRetryMutex.Unlock()
+	if !tracked {
+		t.Fatal("GATT communication failure did not register status recovery")
 	}
 }
 
@@ -766,6 +825,50 @@ func TestStatusCheckSchedulesInitialRecoveryForDisconnectedStation(t *testing.T)
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("background recovery did not create a retry backoff")
+}
+
+func TestStatusCheckReportsBusyStationAndContinuesOtherReads(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	addresses := []string{"11:22:33:44:55:61", "11:22:33:44:55:62"}
+	for _, address := range addresses {
+		manager.stations[address] = &internalbluetooth.BaseStation{
+			Name:    "LHB-" + address[len(address)-2:],
+			Address: mustAddress(t, address),
+			Present: true,
+		}
+	}
+	manager.bluetoothOps.stationConnected = func(*internalbluetooth.BaseStation) bool {
+		return true
+	}
+	var readAddressesMutex sync.Mutex
+	readAddresses := make([]string, 0, 1)
+	manager.bluetoothOps.readPowerState = func(station *internalbluetooth.BaseStation) error {
+		readAddressesMutex.Lock()
+		readAddresses = append(readAddresses, station.Snapshot().Address)
+		readAddressesMutex.Unlock()
+		return nil
+	}
+
+	if err := manager.beginStationOperation(addresses[0]); err != nil {
+		t.Fatalf("reserve busy station: %v", err)
+	}
+	defer manager.endStationOperation(addresses[0])
+
+	_, err := manager.CheckAllStationStatuses()
+	if !errors.Is(err, ErrOperationInProgress) {
+		t.Fatalf("CheckAllStationStatuses() error = %v, want ErrOperationInProgress", err)
+	}
+	readAddressesMutex.Lock()
+	defer readAddressesMutex.Unlock()
+	if len(readAddresses) != 1 || readAddresses[0] != addresses[1] {
+		t.Fatalf("status reads = %v, want only %s", readAddresses, addresses[1])
+	}
+	manager.statusRetryMutex.Lock()
+	_, busyTracked := manager.statusRetries[addresses[0]]
+	manager.statusRetryMutex.Unlock()
+	if busyTracked {
+		t.Fatal("busy station was incorrectly added to connection recovery")
+	}
 }
 
 func TestStatusRecoveryBackfillsBusyCandidatesAndLimitsConcurrency(t *testing.T) {
@@ -849,5 +952,41 @@ func TestStatusRecoveryLeavesOneSlotForForegroundWork(t *testing.T) {
 	}
 	if manager.statusRecoveryRunning.Load() {
 		t.Fatal("recovery did not finish")
+	}
+}
+
+func TestStatusRecoveryProcessesScheduleRequestedDuringActiveRound(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	address := "11:22:33:44:55:61"
+	manager.stations[address] = &internalbluetooth.BaseStation{
+		Name: "LHB-RECOVERY", Address: mustAddress(t, address), Present: true,
+	}
+	manager.statusRetries[address] = statusRetry{nextAt: time.Now().Add(-time.Second)}
+
+	firstStarted := make(chan struct{})
+	firstRelease := make(chan struct{})
+	var calls atomic.Int32
+	manager.bluetoothOps.fetchInitialPowerState = func(*internalbluetooth.BaseStation) error {
+		if calls.Add(1) == 1 {
+			close(firstStarted)
+			<-firstRelease
+		}
+		return nil
+	}
+
+	manager.scheduleStatusRecovery()
+	<-firstStarted
+	manager.scheduleStatusRecovery()
+	close(firstRelease)
+
+	deadline := time.Now().Add(time.Second)
+	for manager.statusRecoveryRunning.Load() && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if manager.statusRecoveryRunning.Load() {
+		t.Fatal("recovery did not finish")
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("recovery calls = %d, want 2", got)
 	}
 }
