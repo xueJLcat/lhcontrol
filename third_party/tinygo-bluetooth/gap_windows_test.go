@@ -99,6 +99,53 @@ func TestDisconnectRetriesAfterWinRTThreadInitializationFailure(t *testing.T) {
 	}
 }
 
+func TestDisconnectPanicAfterOwnershipBeginsDoesNotRetry(t *testing.T) {
+	originalEnter := enterWinRTThread
+	enterWinRTThread = func() (func(), error) { return func() {}, nil }
+	t.Cleanup(func() { enterWinRTThread = originalEnter })
+
+	var cancelCalls int
+	state := &deviceState{
+		callbacks: newCallbackGate(),
+		cancel: func() {
+			cancelCalls++
+			panic("fixture cancel panic")
+		},
+	}
+	device := Device{state: state}
+	firstErr := device.Disconnect()
+	if !IsDisconnectCleanupComplete(firstErr) {
+		t.Fatalf("Disconnect() error = %v, want completed cleanup warning", firstErr)
+	}
+	if err := device.Disconnect(); err != firstErr {
+		t.Fatalf("second Disconnect() error = %v, want cached %v", err, firstErr)
+	}
+	if cancelCalls != 1 {
+		t.Fatalf("cancel calls = %d, want 1", cancelCalls)
+	}
+	if state.cancel != nil {
+		t.Fatal("cleanup retained detached cancel function")
+	}
+}
+
+func TestCleanupCallContainsPanicAndConnectionCallbackContinues(t *testing.T) {
+	err := cleanupCall("fixture release", func() error {
+		panic("fixture panic")
+	})
+	if err == nil || !strings.Contains(err.Error(), "fixture release panicked") {
+		t.Fatalf("cleanupCall() error = %v", err)
+	}
+
+	returned := false
+	invokeConnectionCallbackSafely(func() {
+		panic("handler panic")
+	})
+	returned = true
+	if !returned {
+		t.Fatal("connection callback panic escaped its boundary")
+	}
+}
+
 func TestDisconnectCleanupCompletedErrorPreservesCause(t *testing.T) {
 	cause := errors.New("session close warning")
 	err := &DisconnectCleanupError{Err: cause}

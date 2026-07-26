@@ -91,6 +91,7 @@ type BaseStation struct {
 	LastError         string
 	MissedScans       int
 	bootingSince      time.Time
+	presenceUncertain bool
 }
 
 // DiscoveredStation contains only immutable scan data. Keeping the mutex-bearing
@@ -126,8 +127,17 @@ func newScanSession() *scanSession {
 }
 
 func (s *scanSession) requestStop(reason scanStopReason) error {
+	s.requestStopAsync(reason)
+	<-s.stopDone
 	s.mutex.Lock()
-	if s.reason.Load() == uint32(scanStopNone) {
+	defer s.mutex.Unlock()
+	return s.stopErr
+}
+
+func (s *scanSession) requestStopAsync(reason scanStopReason) {
+	s.mutex.Lock()
+	currentReason := scanStopReason(s.reason.Load())
+	if currentReason == scanStopNone || reason == scanStopShutdown {
 		s.reason.Store(uint32(reason))
 	}
 	shouldStop := s.started && !s.finished
@@ -135,10 +145,6 @@ func (s *scanSession) requestStop(reason scanStopReason) error {
 	if shouldStop {
 		s.issueStop()
 	}
-	<-s.stopDone
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
-	return s.stopErr
 }
 
 func (s *scanSession) issueStop() {
@@ -149,11 +155,13 @@ func (s *scanSession) issueStop() {
 	}
 	s.stopStarted = true
 	s.mutex.Unlock()
-	err := stopScanSafely()
-	s.mutex.Lock()
-	s.stopErr = err
-	s.mutex.Unlock()
-	s.doneOnce.Do(func() { close(s.stopDone) })
+	go func() {
+		err := stopScanSafely()
+		s.mutex.Lock()
+		s.stopErr = err
+		s.mutex.Unlock()
+		s.doneOnce.Do(func() { close(s.stopDone) })
+	}()
 }
 
 func (s *scanSession) markStarted() {
@@ -173,6 +181,15 @@ func (s *scanSession) markFinished() {
 	s.mutex.Unlock()
 	if !stopStarted {
 		s.doneOnce.Do(func() { close(s.stopDone) })
+	}
+}
+
+func (s *scanSession) waitForIssuedStop() {
+	s.mutex.Lock()
+	stopStarted := s.stopStarted
+	s.mutex.Unlock()
+	if stopStarted {
+		<-s.stopDone
 	}
 }
 
@@ -252,6 +269,7 @@ type BaseStationSnapshot struct {
 	LastError         string
 	MissedScans       int
 	Connected         bool
+	PresenceUncertain bool
 }
 
 func (bs *BaseStation) Snapshot() BaseStationSnapshot {
@@ -276,6 +294,7 @@ func (bs *BaseStation) Snapshot() BaseStationSnapshot {
 		LastError:         bs.LastError,
 		MissedScans:       bs.MissedScans,
 		Connected:         bs.isConnected && bs.device != nil,
+		PresenceUncertain: bs.presenceUncertain,
 	}
 }
 
@@ -290,6 +309,7 @@ func (bs *BaseStation) MarkSeen(now time.Time) {
 	bs.Present = true
 	bs.MissedScans = 0
 	bs.LastSeenAt = now
+	bs.presenceUncertain = false
 	bs.mutex.Unlock()
 }
 
@@ -298,10 +318,20 @@ func (bs *BaseStation) MarkSeen(now time.Time) {
 // is still being released.
 func (bs *BaseStation) MarkMissed() {
 	bs.mutex.Lock()
+	bs.presenceUncertain = false
 	bs.MissedScans++
 	if bs.MissedScans >= 2 {
 		bs.Present = false
 	}
+	bs.mutex.Unlock()
+}
+
+// MarkPresenceUncertain records that a completed scan could not reliably
+// determine whether this station advertised. It does not count as a miss and
+// therefore cannot move a known station closer to the absence threshold.
+func (bs *BaseStation) MarkPresenceUncertain() {
+	bs.mutex.Lock()
+	bs.presenceUncertain = true
 	bs.mutex.Unlock()
 }
 
@@ -526,6 +556,7 @@ func ScanForDuration(duration time.Duration) ([]DiscoveredStation, error) {
 	log.Println("[BT] ScanForDuration: Calling adapter.Scan()...")
 	scanErr := scanSafely(scanCallback, scanStarted)
 	session.markFinished()
+	session.waitForIssuedStop()
 	timerStopped := stopTimer == nil || stopTimer.Stop()
 	if stopTimer != nil && !timerStopped {
 		// The timer callback has started. Wait for it so a late StopScan cannot
@@ -605,6 +636,17 @@ func CancelScan() error {
 		return nil
 	}
 	return session.requestStop(scanStopShutdown)
+}
+
+// RequestScanCancellation records shutdown cancellation and starts StopScan
+// when possible without waiting for the WinRT watcher to start or stop.
+func RequestScanCancellation() {
+	activeScanMutex.Lock()
+	session := activeScan
+	activeScanMutex.Unlock()
+	if session != nil {
+		session.requestStopAsync(scanStopShutdown)
+	}
 }
 
 func scanCompletionError(scanErr error) error {
@@ -1420,6 +1462,7 @@ type ChannelWriteResult struct {
 	PreviousChannel int
 	Channel         int
 	WriteWarning    string
+	CommandSent     bool
 }
 
 func SetChannel(station *BaseStation, channel int) (ChannelWriteResult, error) {
@@ -1463,6 +1506,7 @@ func SetChannel(station *BaseStation, channel int) (ChannelWriteResult, error) {
 		if readErr := readChannelInternal(station); readErr == nil {
 			result.Channel = station.Channel
 			if station.Channel == channel {
+				result.CommandSent = true
 				result.WriteWarning = fmt.Sprintf("the write call reported an error, but channel %d was confirmed by readback: %v", channel, writeErr)
 				station.LastReadAt = time.Now()
 				station.LastError = ""
@@ -1481,6 +1525,7 @@ func SetChannel(station *BaseStation, channel int) (ChannelWriteResult, error) {
 		station.LastError = writeErr.Error()
 		return result, fmt.Errorf("failed to write channel %d for %s: %w", channel, station.Name, writeErr)
 	}
+	result.CommandSent = true
 	var confirmationErr error
 	consecutiveReadErrors := 0
 	for attempt := 0; attempt < 5; attempt++ {

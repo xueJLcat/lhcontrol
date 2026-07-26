@@ -122,8 +122,44 @@ describe('App asynchronous operations', () => {
 
   it('shows a recoverable Bluetooth message when the initial scan fails', async () => {
     api.ScanAndFetchStations.mockRejectedValue(new Error('Bluetooth is unavailable; turn on Bluetooth and retry'));
+    api.GetCurrentStationInfo.mockResolvedValue([
+      createStation({ name: 'LHB-LATEST', connectionState: 'disconnected' })
+    ]);
     render(App);
     expect((await screen.findAllByText(/Scan failed:.*Bluetooth is unavailable/)).length).toBeGreaterThan(0);
+    expect(await screen.findByText('LHB-LATEST')).toBeInTheDocument();
+    expect(api.GetCurrentStationInfo).toHaveBeenCalled();
+  });
+
+  it('refreshes station state after an external scan failure and keeps the scan error', async () => {
+    render(App);
+    await screen.findByText('LHB-TEST');
+    api.GetCurrentStationInfo.mockResolvedValue([
+      createStation({ name: 'LHB-AFTER-FAILURE', connectionState: 'disconnected' })
+    ]);
+
+    runtime.handlers.get('external-scan-failed')?.('fixture radio failure');
+
+    expect(await screen.findByText('LHB-AFTER-FAILURE')).toBeInTheDocument();
+    expect(await screen.findByText(/External scan failed: fixture radio failure/)).toBeInTheDocument();
+  });
+
+  it('does not let an old external failure refresh overwrite a newer scan start', async () => {
+    render(App);
+    await screen.findByText('LHB-TEST');
+    let resolveFailureRefresh!: (stations: StationInfo[]) => void;
+    api.GetCurrentStationInfo.mockReturnValueOnce(new Promise((resolve) => {
+      resolveFailureRefresh = resolve;
+    }));
+
+    runtime.handlers.get('external-scan-failed')?.('old failure');
+    runtime.handlers.get('external-scan-started')?.();
+    resolveFailureRefresh([createStation({ name: 'LHB-STALE' })]);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(screen.queryByText('LHB-STALE')).not.toBeInTheDocument();
+    expect(screen.getByText('External scan in progress...')).toBeInTheDocument();
   });
 
   it('does not run periodic status reads during an external scan', async () => {
@@ -176,6 +212,36 @@ describe('App asynchronous operations', () => {
     await fireEvent.click(bulkOn);
     await waitFor(() => expect(api.SetAllStationsPowerDetailed).toHaveBeenCalledWith('on'));
     expect(await screen.findByText('On confirmed')).toBeInTheDocument();
+  });
+
+  it('adds backend-known bulk result stations when the follow-up list refresh fails', async () => {
+    const stationA = createStation({ name: 'LHB-A', address: 'AA' });
+    const stationB = createStation({ name: 'LHB-B', address: 'BB' });
+    api.ScanAndFetchStations.mockResolvedValue([stationA]);
+    api.GetCurrentStationInfo.mockRejectedValue(new Error('fixture list failure'));
+    api.SetAllStationsPowerDetailed.mockResolvedValue({
+      target: 'on',
+      results: [
+        {
+          address: 'AA', name: 'LHB-A', skipped: false, reason: '',
+          commandSent: true, success: true, confirmed: true, error: '',
+          station: { ...stationA, powerState: 1, powerStateName: 'on', rawPowerState: 0x0b }
+        },
+        {
+          address: 'BB', name: 'LHB-B', skipped: false, reason: '',
+          commandSent: true, success: true, confirmed: true, error: '',
+          station: { ...stationB, powerState: 1, powerStateName: 'on', rawPowerState: 0x0b }
+        }
+      ]
+    });
+
+    render(App);
+    await screen.findByText('LHB-A');
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Scan' })).not.toBeDisabled());
+    await fireEvent.click(screen.getByTitle('Turn all known stations on'));
+
+    expect(await screen.findByText('LHB-B')).toBeInTheDocument();
+    expect(screen.getAllByText('On confirmed')).toHaveLength(2);
   });
 
   it('locks rename while a bulk operation is pending', async () => {
@@ -418,6 +484,33 @@ describe('App asynchronous operations', () => {
     await Promise.resolve();
 
     expect(screen.getByText('External scan in progress...')).toBeInTheDocument();
+    expect(screen.queryByText('On confirmed')).not.toBeInTheDocument();
+  });
+
+  it('clears stale device busy state when an external scan supersedes a settled backend operation', async () => {
+    let resolvePower!: (value: unknown) => void;
+    api.SetStationPower.mockReturnValue(new Promise((resolve) => {
+      resolvePower = resolve;
+    }));
+    const scannedStation = createStation({ powerState: 0, powerStateName: 'sleep', rawPowerState: 0 });
+
+    render(App);
+    await screen.findByText('LHB-TEST');
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Scan' })).not.toBeDisabled());
+    await fireEvent.click(screen.getByRole('button', { name: 'Turn LHB-TEST on' }));
+    await waitFor(() => expect(api.SetStationPower).toHaveBeenCalledOnce());
+
+    runtime.handlers.get('external-scan-started')?.();
+    runtime.handlers.get('external-scan-completed')?.([scannedStation]);
+
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Turn LHB-TEST on' })).not.toBeDisabled());
+    resolvePower({
+      station: createStation({ powerState: 1, powerStateName: 'on', rawPowerState: 0x0b }),
+      commandSent: true,
+      confirmed: true,
+      confirmationError: ''
+    });
+    await Promise.resolve();
     expect(screen.queryByText('On confirmed')).not.toBeInTheDocument();
   });
 

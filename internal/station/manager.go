@@ -132,6 +132,9 @@ type Manager struct {
 	deviceOperationSlots   chan struct{}
 	recoveryOperationMutex sync.Mutex
 	recoveryOperationDone  chan struct{}
+	recoveryGeneration     uint64
+	foregroundSlotMissHook func()
+	scanReadyHook          func()
 	isScanning             atomic.Bool
 	scanStatusMutex        sync.RWMutex
 	scanStatus             ScanStatus
@@ -554,11 +557,13 @@ func (m *Manager) beginRecoveryStationOperation(address string) error {
 	}
 	done := make(chan struct{})
 	m.recoveryOperationDone = done
+	m.recoveryGeneration++
 	m.recoveryOperationMutex.Unlock()
 	if err := m.beginStationOperation(address); err != nil {
 		m.recoveryOperationMutex.Lock()
 		if m.recoveryOperationDone == done {
 			m.recoveryOperationDone = nil
+			m.recoveryGeneration++
 			close(done)
 		}
 		m.recoveryOperationMutex.Unlock()
@@ -573,6 +578,7 @@ func (m *Manager) endRecoveryStationOperation(address string) {
 	done := m.recoveryOperationDone
 	m.recoveryOperationDone = nil
 	if done != nil {
+		m.recoveryGeneration++
 		close(done)
 	}
 	m.recoveryOperationMutex.Unlock()
@@ -584,13 +590,23 @@ func (m *Manager) endRecoveryStationOperation(address string) {
 // device action fail with Busy.
 func (m *Manager) beginForegroundStationOperation(address string) error {
 	for {
+		m.recoveryOperationMutex.Lock()
+		generationBefore := m.recoveryGeneration
+		m.recoveryOperationMutex.Unlock()
 		err := m.beginStationOperation(address)
 		if !errors.Is(err, ErrOperationInProgress) {
 			return err
 		}
+		if m.foregroundSlotMissHook != nil {
+			m.foregroundSlotMissHook()
+		}
 		m.recoveryOperationMutex.Lock()
 		done := m.recoveryOperationDone
+		generationAfter := m.recoveryGeneration
 		m.recoveryOperationMutex.Unlock()
+		if generationAfter != generationBefore {
+			continue
+		}
 		if done == nil {
 			return err
 		}
@@ -628,6 +644,7 @@ func (m *Manager) GetStationInfo() []StationInfo {
 	for _, snapshot := range snapshots {
 		if snapshot.Present &&
 			snapshot.MissedScans == 0 &&
+			!snapshot.PresenceUncertain &&
 			isRecent(snapshot.LastSeenAt, now, channelScanFreshnessWindow) &&
 			snapshot.Channel != bluetooth.ChannelUnknown &&
 			isFresh(snapshot.LastChannelReadAt, now) {
@@ -647,7 +664,10 @@ func (m *Manager) GetStationInfo() []StationInfo {
 		}
 		powerFresh := snapshot.RawPowerState != bluetooth.RawPowerStateUnknown && isFresh(snapshot.LastPowerReadAt, now)
 		channelFresh := snapshot.Channel != bluetooth.ChannelUnknown && isFresh(snapshot.LastChannelReadAt, now)
-		scanFresh := snapshot.MissedScans == 0 &&
+		seenInLatestScan := snapshot.MissedScans == 0 &&
+			!snapshot.PresenceUncertain &&
+			!snapshot.LastSeenAt.IsZero()
+		scanFresh := seenInLatestScan &&
 			isRecent(snapshot.LastSeenAt, now, channelScanFreshnessWindow)
 		metadataFresh := !snapshot.MetadataReadAt.IsZero()
 		stationInfos = append(stationInfos, StationInfo{
@@ -662,7 +682,7 @@ func (m *Manager) GetStationInfo() []StationInfo {
 			ChannelConflict: snapshot.Present && scanFresh && channelFresh &&
 				channelCounts[snapshot.Channel] > 1,
 			IsPresent:         snapshot.Present,
-			SeenInLatestScan:  snapshot.MissedScans == 0 && !snapshot.LastSeenAt.IsZero(),
+			SeenInLatestScan:  seenInLatestScan,
 			ScanFresh:         scanFresh,
 			MissedScans:       snapshot.MissedScans,
 			LastSeenAt:        formatTimestamp(snapshot.LastSeenAt),
@@ -761,7 +781,20 @@ func (m *Manager) beginScan(callbacks ScanCallbacks) error {
 		m.endOperation()
 		return err
 	}
+	if m.scanReadyHook != nil {
+		m.scanReadyHook()
+	}
+	// Publish the scan state under the same lifecycle lock that begins
+	// shutdown. BeginShutdown can therefore never miss a scan that passed its
+	// final readiness check.
+	m.lifecycleMutex.Lock()
+	if m.shuttingDown.Load() {
+		m.lifecycleMutex.Unlock()
+		m.endOperation()
+		return ErrShuttingDown
+	}
 	m.isScanning.Store(true)
+	m.lifecycleMutex.Unlock()
 	m.markScanStarted()
 	if callbacks.Started != nil {
 		if callbackErr := runSafely("scan started callback", func() error {
@@ -825,11 +858,13 @@ func (m *Manager) scanAndFetchStations() ([]StationInfo, int, error) {
 	}
 	m.stationsMutex.RUnlock()
 	releaseErrors := make([]error, 0)
+	unreliablePresence := make(map[string]struct{})
 	for _, stationPtr := range connectedStations {
 		address := stationPtr.Snapshot().Address
 		if releaseErr := m.bluetoothOps.releaseStationForScan(stationPtr); releaseErr != nil {
 			m.observeBluetoothError(releaseErr)
 			releaseErrors = append(releaseErrors, fmt.Errorf("%s: %w", address, releaseErr))
+			unreliablePresence[strings.ToLower(address)] = struct{}{}
 		}
 	}
 	if len(releaseErrors) > 0 {
@@ -851,6 +886,10 @@ func (m *Manager) scanAndFetchStations() ([]StationInfo, int, error) {
 	m.stationsMutex.Lock()
 	for _, stationPtr := range m.stations {
 		if stationPtr != nil {
+			if _, unreliable := unreliablePresence[strings.ToLower(stationPtr.Snapshot().Address)]; unreliable {
+				stationPtr.MarkPresenceUncertain()
+				continue
+			}
 			stationPtr.MarkMissed()
 		}
 	}
@@ -1010,6 +1049,7 @@ func (m *Manager) CheckAllStationStatuses() ([]StationInfo, error) {
 	}
 	defer m.statusOperationMutex.Unlock()
 	stationsToRead := make([]*bluetooth.BaseStation, 0)
+	disconnectedAddresses := make([]string, 0)
 	m.stationsMutex.RLock()
 	for _, stationPtr := range m.stations {
 		if stationPtr == nil {
@@ -1021,23 +1061,14 @@ func (m *Manager) CheckAllStationStatuses() ([]StationInfo, error) {
 		}
 		if m.bluetoothOps.stationConnected(stationPtr) {
 			stationsToRead = append(stationsToRead, stationPtr)
+		} else {
+			disconnectedAddresses = append(disconnectedAddresses, snapshot.Address)
 		}
 	}
 	m.stationsMutex.RUnlock()
 
+	sort.Strings(disconnectedAddresses)
 	if len(stationsToRead) == 0 {
-		m.stationsMutex.RLock()
-		disconnectedAddresses := make([]string, 0, len(m.stations))
-		for _, station := range m.stations {
-			if station == nil {
-				continue
-			}
-			snapshot := station.Snapshot()
-			if snapshot.Present && !snapshot.Connected {
-				disconnectedAddresses = append(disconnectedAddresses, snapshot.Address)
-			}
-		}
-		m.stationsMutex.RUnlock()
 		for _, address := range disconnectedAddresses {
 			m.ensureStatusRecoveryTracked(address)
 		}
@@ -1096,6 +1127,12 @@ func (m *Manager) CheckAllStationStatuses() ([]StationInfo, error) {
 	}
 	close(work)
 	wg.Wait()
+	// Start newly discovered disconnect recovery only after foreground status
+	// reads have released their slots. Otherwise this refresh can make one of
+	// its own connected-device reads fail with Busy.
+	for _, address := range disconnectedAddresses {
+		m.ensureStatusRecoveryTracked(address)
+	}
 	m.scheduleStatusRecovery()
 
 	statusInfos := m.GetStationInfo()
@@ -1143,9 +1180,22 @@ func (m *Manager) wakeStatusRecovery() {
 
 func (m *Manager) ensureStatusRecoveryTracked(address string) {
 	m.statusRetryMutex.Lock()
-	if _, exists := m.statusRetries[address]; !exists {
-		m.statusRetries[address] = statusRetry{nextAt: time.Now()}
+	retry, exists := m.statusRetries[address]
+	if !exists {
+		retry = statusRetry{
+			kinds:  statusRetryConnection,
+			nextAt: time.Now(),
+		}
+	} else if effectiveStatusRetryKinds(retry)&statusRetryConnection == 0 {
+		// A channel-only retry must not delay a newly observed disconnect.
+		// Add an immediate, independent connection schedule while preserving
+		// the existing channel backoff.
+		retry.kinds |= statusRetryConnection
+		retry.failures = 0
+		retry.lastAttempt = time.Time{}
+		retry.nextAt = time.Now()
 	}
+	m.statusRetries[address] = retry
 	m.statusRetryMutex.Unlock()
 	m.scheduleStatusRecovery()
 }
@@ -1462,9 +1512,6 @@ func (m *Manager) SetStationPower(address, state string) (PowerActionResult, err
 	})
 	if err != nil {
 		m.observeStationBluetoothError(stationPtr, canonicalAddress, err)
-		if bluetooth.IsUnsupportedCapabilityError(err) {
-			return PowerActionResult{}, fmt.Errorf("%w: %v", ErrUnsupported, err)
-		}
 		var confirmationErr *bluetooth.PowerConfirmationError
 		if errors.As(err, &confirmationErr) {
 			if !bluetooth.RequiresReconnect(err) && !bluetooth.IsAdapterUnavailable(err) {
@@ -1479,6 +1526,9 @@ func (m *Manager) SetStationPower(address, state string) (PowerActionResult, err
 					ConfirmationError: err.Error(),
 				}, err
 			}
+		}
+		if bluetooth.IsUnsupportedCapabilityError(err) {
+			return PowerActionResult{}, fmt.Errorf("%w: %v", ErrUnsupported, err)
 		}
 		return PowerActionResult{}, err
 	}
@@ -1665,7 +1715,10 @@ func (m *Manager) SetStationChannel(address string, channel int, allowUnknownCon
 	}
 	if err != nil {
 		m.observeStationBluetoothError(stationPtr, canonicalAddress, err)
-		if bluetooth.IsUnsupportedCapabilityError(err) {
+		if writeResult.CommandSent {
+			result.Warnings = append(result.Warnings, "The channel command was sent, but its result could not be confirmed.")
+		}
+		if bluetooth.IsUnsupportedCapabilityError(err) && !writeResult.CommandSent {
 			return result, fmt.Errorf("%w: %v", ErrUnsupported, err)
 		}
 		return result, err
@@ -1845,15 +1898,13 @@ func (m *Manager) setAllStationsPowerDetailed(state string) (BulkPowerResult, er
 			})
 			if workerErr != nil {
 				m.observeStationBluetoothError(s, stationResult.Address, workerErr)
-				if bluetooth.IsUnsupportedCapabilityError(workerErr) {
+				var confirmationErr *bluetooth.PowerConfirmationError
+				if errors.As(workerErr, &confirmationErr) {
+					stationResult.CommandSent = true
+					stationResult.Success = true
+				} else if bluetooth.IsUnsupportedCapabilityError(workerErr) {
 					stationResult.Skipped = true
 					stationResult.Reason = workerErr.Error()
-				} else {
-					var confirmationErr *bluetooth.PowerConfirmationError
-					if errors.As(workerErr, &confirmationErr) {
-						stationResult.CommandSent = true
-						stationResult.Success = true
-					}
 				}
 				if !stationResult.Skipped {
 					stationResult.Error = workerErr.Error()
@@ -1926,9 +1977,7 @@ func (m *Manager) BeginShutdown() {
 		m.lifecycleMutex.Unlock()
 	})
 	if m.isScanning.Load() {
-		if err := bluetooth.CancelScan(); err != nil {
-			log.Printf("Unable to stop active Bluetooth scan during shutdown: %v", err)
-		}
+		bluetooth.RequestScanCancellation()
 	}
 }
 

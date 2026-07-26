@@ -544,6 +544,9 @@ func TestSetChannelConfirmsReadback(t *testing.T) {
 	if result.PreviousChannel != 3 || result.Channel != 5 {
 		t.Fatalf("result = %+v", result)
 	}
+	if !result.CommandSent {
+		t.Fatalf("result = %+v, want command sent", result)
+	}
 }
 
 func TestSetChannelSkipsWriteWhenUnchanged(t *testing.T) {
@@ -556,6 +559,9 @@ func TestSetChannelSkipsWriteWhenUnchanged(t *testing.T) {
 	}
 	if result.PreviousChannel != 3 || result.Channel != 3 {
 		t.Fatalf("result = %+v", result)
+	}
+	if result.CommandSent {
+		t.Fatalf("result = %+v, unchanged channel must not report command sent", result)
 	}
 	if len(mode.writes) != 0 {
 		t.Fatalf("unchanged channel produced writes: %v", mode.writes)
@@ -650,6 +656,27 @@ func TestSetChannelWriteAndReadbackFailureInvalidatesConnection(t *testing.T) {
 	}
 }
 
+func TestSetChannelUnsupportedConfirmationReportsCommandSent(t *testing.T) {
+	device := &trackingConnectedDevice{}
+	mode := &fakeCharacteristic{
+		value:             []byte{0x03},
+		readErrAfterWrite: tinybluetooth.ErrAttReadNotPermitted,
+	}
+	station := connectedFakeStation(&fakeCharacteristic{}, mode, nil, Capabilities{ChannelRead: true, ChannelWrite: true})
+	station.device = device
+
+	result, err := SetChannel(station, 5)
+	if !IsUnsupportedCapabilityError(err) {
+		t.Fatalf("SetChannel() error = %v, want unsupported confirmation read", err)
+	}
+	if !result.CommandSent || result.PreviousChannel != 3 {
+		t.Fatalf("result = %+v, want sent command after channel 3", result)
+	}
+	if station.Snapshot().Connected == false || device.disconnected {
+		t.Fatal("unsupported confirmation read discarded a healthy connection")
+	}
+}
+
 func TestATTCapabilityErrorsDoNotRequireReconnect(t *testing.T) {
 	for _, protocolErr := range []tinybluetooth.AttributeProtocolError{
 		tinybluetooth.ErrAttReadNotPermitted,
@@ -705,6 +732,9 @@ func TestSetChannelAcceptsConfirmedReadbackAfterWriteError(t *testing.T) {
 	}
 	if result.Channel != 5 || result.WriteWarning == "" {
 		t.Fatalf("result = %+v, want confirmed channel and warning", result)
+	}
+	if !result.CommandSent {
+		t.Fatalf("result = %+v, want command sent", result)
 	}
 }
 
@@ -899,6 +929,29 @@ func TestMarkMissedRequiresTwoConsecutiveScans(t *testing.T) {
 	}
 }
 
+func TestUncertainPresenceDoesNotCountAsMiss(t *testing.T) {
+	now := time.Now()
+	station := &BaseStation{Present: true}
+	station.MarkSeen(now)
+	station.MarkPresenceUncertain()
+	uncertain := station.Snapshot()
+	if !uncertain.Present || uncertain.MissedScans != 0 || !uncertain.PresenceUncertain {
+		t.Fatalf("uncertain scan changed presence history: %+v", uncertain)
+	}
+
+	station.MarkMissed()
+	firstReliableMiss := station.Snapshot()
+	if !firstReliableMiss.Present || firstReliableMiss.MissedScans != 1 || firstReliableMiss.PresenceUncertain {
+		t.Fatalf("first reliable miss after uncertainty = %+v", firstReliableMiss)
+	}
+
+	station.MarkSeen(now.Add(time.Second))
+	recovered := station.Snapshot()
+	if !recovered.Present || recovered.MissedScans != 0 || recovered.PresenceUncertain {
+		t.Fatalf("seen station did not clear uncertainty: %+v", recovered)
+	}
+}
+
 func TestMergeMetadataPreservesPreviouslyReadFields(t *testing.T) {
 	previous := DeviceMetadata{Manufacturer: "Valve", Model: "Old model"}
 	discovered := DeviceMetadata{Model: "New model", FirmwareRevision: "1.2.3"}
@@ -1014,6 +1067,59 @@ func TestCancelScanStopsActiveScan(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("active scan did not stop after cancellation")
+	}
+}
+
+func TestRequestScanCancellationBeforeWatcherStartIsNonBlocking(t *testing.T) {
+	originalAdapter := adapter
+	fake := newFakeBLEAdapter()
+	fake.startDelay = make(chan struct{})
+	adapter = fake
+	t.Cleanup(func() { adapter = originalAdapter })
+
+	result := make(chan error, 1)
+	go func() {
+		_, err := ScanForDuration(time.Hour)
+		result <- err
+	}()
+	deadline := time.Now().Add(time.Second)
+	for {
+		activeScanMutex.Lock()
+		active := activeScan != nil
+		activeScanMutex.Unlock()
+		if active {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("scan session was not registered")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	returned := make(chan struct{})
+	go func() {
+		RequestScanCancellation()
+		close(returned)
+	}()
+	select {
+	case <-returned:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("cancellation request blocked before watcher startup")
+	}
+	if got := fake.stopCalls.Load(); got != 0 {
+		t.Fatalf("StopScan calls before watcher start = %d, want 0", got)
+	}
+	close(fake.startDelay)
+	select {
+	case err := <-result:
+		if !errors.Is(err, ErrScanCancelled) {
+			t.Fatalf("scan error = %v, want ErrScanCancelled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("scan did not exit after watcher startup")
+	}
+	if got := fake.stopCalls.Load(); got != 1 {
+		t.Fatalf("StopScan calls = %d, want 1", got)
 	}
 }
 

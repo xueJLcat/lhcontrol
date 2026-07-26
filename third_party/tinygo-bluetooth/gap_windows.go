@@ -619,11 +619,12 @@ func (d Device) beginOperation() (*deviceState, error) {
 
 func (d Device) endOperation() {
 	if d.state != nil {
+		defer d.state.operationMutex.Unlock()
 		if d.state.leaveThread != nil {
-			d.state.leaveThread()
+			leaveThread := d.state.leaveThread
 			d.state.leaveThread = nil
+			leaveThread()
 		}
-		d.state.operationMutex.Unlock()
 	}
 }
 
@@ -767,24 +768,26 @@ func (a *Adapter) Connect(address Address, params ConnectionParams) (Device, err
 		if !allowed {
 			return
 		}
-		operationState, operationErr := device.beginOperation()
-		if operationErr != nil {
-			return
-		}
-		status, err := operationState.device.GetConnectionStatus()
-		device.endOperation()
-		if err != nil {
-			return
-		}
-		if status == bluetooth.BluetoothConnectionStatusDisconnected {
-			// Do not release the currently executing handler on its own
-			// callback stack. Disconnect is idempotent across Device copies.
-			go func() { _ = device.Disconnect() }()
-		}
+		invokeConnectionCallbackSafely(func() {
+			operationState, operationErr := device.beginOperation()
+			if operationErr != nil {
+				return
+			}
+			defer device.endOperation()
+			status, err := operationState.device.GetConnectionStatus()
+			if err != nil {
+				return
+			}
+			if status == bluetooth.BluetoothConnectionStatusDisconnected {
+				// Do not release the currently executing handler on its own
+				// callback stack. Disconnect is idempotent across Device copies.
+				go func() { _ = device.Disconnect() }()
+			}
 
-		if a.connectHandler != nil {
-			a.connectHandler(device, status == bluetooth.BluetoothConnectionStatusConnected)
-		}
+			if a.connectHandler != nil {
+				a.connectHandler(device, status == bluetooth.BluetoothConnectionStatusConnected)
+			}
+		})
 	})
 
 	// Serialize registration with teardown. The callback may run as soon as
@@ -843,12 +846,13 @@ func (d Device) Disconnect() error {
 func (d Device) cleanup(attempt *deviceCleanupAttempt) {
 	state := d.state
 	retryable := false
+	ownershipDetached := false
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			if attempt.err == nil {
 				attempt.err = fmt.Errorf("bluetooth cleanup panicked: %v", recovered)
 			}
-			retryable = true
+			retryable = !ownershipDetached
 		}
 		if !retryable && attempt.err != nil {
 			attempt.err = &DisconnectCleanupError{Err: attempt.err}
@@ -873,59 +877,144 @@ func (d Device) cleanup(attempt *deviceCleanupAttempt) {
 	}
 	defer leaveThread()
 
+	var warnings []error
 	state.drainCallbacksForCleanup(func() {
 		if state.cancel != nil {
-			state.cancel()
+			if err := cleanupCall("cancel device context", func() error {
+				state.cancel()
+				return nil
+			}); err != nil {
+				warnings = append(warnings, err)
+			}
 		}
 		if state.device != nil && state.connectionStatusListenerAdded {
-			_ = state.device.RemoveConnectionStatusChanged(state.connectionStatusListenerToken)
+			if err := cleanupCall("remove connection status listener", func() error {
+				return state.device.RemoveConnectionStatusChanged(state.connectionStatusListenerToken)
+			}); err != nil {
+				warnings = append(warnings, err)
+			}
 		}
 		for _, notification := range state.notifications {
 			if notification.characteristic != nil {
-				_ = notification.characteristic.RemoveValueChanged(notification.token)
+				if err := cleanupCall("remove characteristic notification", func() error {
+					return notification.characteristic.RemoveValueChanged(notification.token)
+				}); err != nil {
+					warnings = append(warnings, err)
+				}
 			}
 		}
 	})
-	defer state.operationMutex.Unlock()
 
-	if state.connectionStatusListener != nil {
-		state.connectionStatusListener.Release()
-		state.connectionStatusListener = nil
-	}
-	for _, notification := range state.notifications {
-		if notification.handler != nil {
-			notification.handler.Release()
-		}
-	}
+	// Transfer final COM ownership out of shared state before releasing any
+	// object. A panic can then never expose an already-released pointer to a
+	// subsequent Disconnect attempt.
+	listener := state.connectionStatusListener
+	notifications := state.notifications
+	characteristics := state.characteristics
+	services := state.services
+	session := state.session
+	device := state.device
+	state.cancel = nil
+	state.connectionStatusListener = nil
+	state.connectionStatusListenerAdded = false
 	state.notifications = nil
-	for _, characteristic := range state.characteristics {
-		if characteristic != nil {
-			characteristic.Release()
-		}
-	}
 	state.characteristics = nil
-	for _, service := range state.services {
-		if service != nil {
-			_ = service.Close()
-			service.Release()
-		}
-	}
 	state.services = nil
-	if state.session != nil {
-		_ = state.session.SetMaintainConnection(false)
-		if err := state.session.Close(); err != nil {
-			attempt.err = err
+	state.session = nil
+	state.device = nil
+	state.operationMutex.Unlock()
+	ownershipDetached = true
+
+	if listener != nil {
+		if err := cleanupCall("release connection status listener", func() error {
+			listener.Release()
+			return nil
+		}); err != nil {
+			warnings = append(warnings, err)
 		}
-		state.session.Release()
-		state.session = nil
 	}
-	if state.device != nil {
-		if err := state.device.Close(); err != nil && attempt.err == nil {
-			attempt.err = err
+	for _, notification := range notifications {
+		if notification.handler != nil {
+			if err := cleanupCall("release notification handler", func() error {
+				notification.handler.Release()
+				return nil
+			}); err != nil {
+				warnings = append(warnings, err)
+			}
 		}
-		state.device.Release()
-		state.device = nil
 	}
+	for _, characteristic := range characteristics {
+		if characteristic != nil {
+			if err := cleanupCall("release characteristic", func() error {
+				characteristic.Release()
+				return nil
+			}); err != nil {
+				warnings = append(warnings, err)
+			}
+		}
+	}
+	for _, service := range services {
+		if service != nil {
+			if err := cleanupCall("close service", service.Close); err != nil {
+				warnings = append(warnings, err)
+			}
+			if err := cleanupCall("release service", func() error {
+				service.Release()
+				return nil
+			}); err != nil {
+				warnings = append(warnings, err)
+			}
+		}
+	}
+	if session != nil {
+		if err := cleanupCall("disable maintained connection", func() error {
+			return session.SetMaintainConnection(false)
+		}); err != nil {
+			warnings = append(warnings, err)
+		}
+		if err := cleanupCall("close GATT session", session.Close); err != nil {
+			warnings = append(warnings, err)
+		}
+		if err := cleanupCall("release GATT session", func() error {
+			session.Release()
+			return nil
+		}); err != nil {
+			warnings = append(warnings, err)
+		}
+	}
+	if device != nil {
+		if err := cleanupCall("close Bluetooth device", device.Close); err != nil {
+			warnings = append(warnings, err)
+		}
+		if err := cleanupCall("release Bluetooth device", func() error {
+			device.Release()
+			return nil
+		}); err != nil {
+			warnings = append(warnings, err)
+		}
+	}
+	if len(warnings) > 0 {
+		attempt.err = errors.Join(warnings...)
+	}
+}
+
+func cleanupCall(operation string, cleanup func() error) (returnErr error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			returnErr = fmt.Errorf("%s panicked: %v", operation, recovered)
+		}
+	}()
+	if err := cleanup(); err != nil {
+		return fmt.Errorf("%s: %w", operation, err)
+	}
+	return nil
+}
+
+func invokeConnectionCallbackSafely(callback func()) {
+	defer func() {
+		_ = recover()
+	}()
+	callback()
 }
 
 // Connected returns whether the device is currently connected.

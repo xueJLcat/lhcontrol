@@ -4,10 +4,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"lhcontrol/internal/bluetooth"
 	"lhcontrol/internal/station"
@@ -137,6 +139,108 @@ func TestNewAppReportsConfiguredAPIAddress(t *testing.T) {
 	}
 	if timeout := app.api.Config().WriteTimeout; timeout != 0 {
 		t.Fatalf("WriteTimeout = %v, want no premature timeout for Bluetooth operations", timeout)
+	}
+}
+
+func TestAPIServerRetriesFixedAddressAfterInitialBindFailure(t *testing.T) {
+	blocker, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := NewApp()
+	app.apiStatus.Address = blocker.Addr().String()
+	app.apiRetryDelay = 10 * time.Millisecond
+	app.startAPIServer()
+	t.Cleanup(func() {
+		app.apiLifecycleMutex.Lock()
+		cancel := app.apiCancel
+		app.apiCancel = nil
+		app.apiLifecycleMutex.Unlock()
+		if cancel != nil {
+			cancel()
+		}
+		_ = app.api.Shutdown()
+		app.apiWG.Wait()
+	})
+
+	deadline := time.Now().Add(time.Second)
+	for app.GetAPIStatus().Error == "" && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if status := app.GetAPIStatus(); status.Running || status.Error == "" {
+		t.Fatalf("status while address occupied = %+v", status)
+	}
+	if err := blocker.Close(); err != nil {
+		t.Fatal(err)
+	}
+	deadline = time.Now().Add(time.Second)
+	for !app.GetAPIStatus().Running && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if status := app.GetAPIStatus(); !status.Running || status.Error != "" {
+		t.Fatalf("status after address became available = %+v", status)
+	}
+}
+
+func TestAPIServerRetryStopsDuringShutdown(t *testing.T) {
+	blocker, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer blocker.Close()
+	app := NewApp()
+	app.apiStatus.Address = blocker.Addr().String()
+	app.apiRetryDelay = time.Hour
+	app.startAPIServer()
+	deadline := time.Now().Add(time.Second)
+	for app.GetAPIStatus().Error == "" && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+
+	app.apiLifecycleMutex.Lock()
+	cancel := app.apiCancel
+	app.apiCancel = nil
+	app.apiLifecycleMutex.Unlock()
+	cancel()
+	done := make(chan struct{})
+	go func() {
+		app.apiWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("API retry loop did not stop after cancellation")
+	}
+}
+
+func TestAPIServerCancellationAtSuccessfulBindCannotStrandListener(t *testing.T) {
+	app := NewApp()
+	app.listen = func(string, string) (net.Listener, error) {
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			return nil, err
+		}
+		app.apiLifecycleMutex.Lock()
+		cancel := app.apiCancel
+		app.apiLifecycleMutex.Unlock()
+		cancel()
+		return listener, nil
+	}
+	app.startAPIServer()
+	done := make(chan struct{})
+	go func() {
+		app.apiWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		_ = app.api.Shutdown()
+		t.Fatal("API listener remained active when cancellation raced with bind")
+	}
+	if status := app.GetAPIStatus(); status.Running {
+		t.Fatalf("API status after cancellation = %+v", status)
 	}
 }
 

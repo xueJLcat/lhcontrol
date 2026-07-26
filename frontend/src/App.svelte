@@ -171,6 +171,11 @@
     cancelRename();
     channelEditorOpen = false;
     channelError = '';
+    // A started scan has already acquired the backend's exclusive operation
+    // lock, so any older device/config request has finished server-side even
+    // if its Wails promise has not settled in this renderer yet.
+    gattOperations = new Set();
+    configOperations = new Set();
     powerTargetByAddress = {};
     powerFeedbackByAddress = {};
   }
@@ -178,7 +183,11 @@
   function mergeStationUpdates(updated: StationInfo[]) {
     if (!updated.length) return;
     const byAddress = new Map(updated.map((station) => [station.address, station]));
-    stations = stations.map((station) => byAddress.get(station.address) ?? station);
+    const existingAddresses = new Set(stations.map((station) => station.address));
+    stations = [
+      ...stations.map((station) => byAddress.get(station.address) ?? station),
+      ...updated.filter((station) => !existingAddresses.has(station.address))
+    ];
   }
 
   function withStationChanges(current: StationInfo, changes: Partial<StationInfo>): StationInfo {
@@ -208,12 +217,15 @@
       const found = scanStatus?.found ?? stations.filter((station) => station.seenInLatestScan).length;
       statusMessage = `External scan completed: found ${found}; ${stations.length} known station(s).`;
     });
-    cancelExternalScanFailureListener = EventsOn('external-scan-failed', (message: string) => {
+    cancelExternalScanFailureListener = EventsOn('external-scan-failed', async (message: string) => {
       if (disposed) return;
-      beginScanEpoch();
-      listRevisions.next();
+      const operationEpoch = beginScanEpoch();
+      const revision = listRevisions.next();
       prepareForScan();
       externalScanning = false;
+      const updated = await GetCurrentStationInfo().catch(() => null);
+      if (!canCommitOperation(operationEpoch) || !listRevisions.isCurrent(revision)) return;
+      if (updated) applyStationList(updated, revision);
       statusMessage = `External scan failed: ${message}`;
       pushToast(`External scan failed: ${message}`);
     });
@@ -280,8 +292,6 @@
     if (isLoading || scanLocked) return;
     prepareForScan();
     globalOperation = 'scanning';
-    gattOperations = new Set();
-    configOperations = new Set();
     const operationEpoch = beginScanEpoch();
     const revision = listRevisions.next();
     statusMessage = 'Scanning for base stations...';
@@ -296,6 +306,9 @@
         : found ? `Found ${found}; ${stations.length} known station(s).` : 'No stations found in this scan.';
     } catch (error) {
       if (!canCommitOperation(operationEpoch) || !listRevisions.isCurrent(revision)) return;
+      const updated = await GetCurrentStationInfo().catch(() => null);
+      if (!canCommitOperation(operationEpoch) || !listRevisions.isCurrent(revision)) return;
+      if (updated) applyStationList(updated, revision);
       statusMessage = `Scan failed: ${error}`;
       pushToast(`Scan failed: ${error}`);
     } finally {

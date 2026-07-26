@@ -56,13 +56,18 @@ func sendPowerActionResponse(c *fiber.Ctx, result station.PowerActionResult, err
 
 // App struct
 type App struct {
-	ctx            context.Context
-	config         *config.Config
-	stationManager *station.Manager
-	api            *fiber.App
-	apiStatusMutex sync.RWMutex
-	apiStatus      APIStatus
-	shuttingDown   atomic.Bool
+	ctx               context.Context
+	config            *config.Config
+	stationManager    *station.Manager
+	api               *fiber.App
+	apiStatusMutex    sync.RWMutex
+	apiStatus         APIStatus
+	apiLifecycleMutex sync.Mutex
+	apiCancel         context.CancelFunc
+	apiWG             sync.WaitGroup
+	listen            func(string, string) (net.Listener, error)
+	apiRetryDelay     time.Duration
+	shuttingDown      atomic.Bool
 }
 
 type APIStatus struct {
@@ -199,7 +204,9 @@ func NewApp() *App {
 			WriteTimeout: 0,
 			IdleTimeout:  30 * time.Second,
 		}),
-		apiStatus: APIStatus{Address: "127.0.0.1:7575"},
+		apiStatus:     APIStatus{Address: "127.0.0.1:7575"},
+		listen:        net.Listen,
+		apiRetryDelay: 2 * time.Second,
 	}
 }
 
@@ -239,29 +246,91 @@ func (a *App) startup(ctx context.Context) {
 			}
 		},
 	}, a.GetAPIStatus)
-	listener, listenErr := net.Listen("tcp", a.GetAPIStatus().Address)
-	if listenErr != nil {
-		a.setAPIStatus(false, listenErr)
-		log.Printf("Error starting API server: %v", listenErr)
-	} else {
-		a.setAPIStatus(true, nil)
-		go func() {
-			defer func() {
-				if recovered := recover(); recovered != nil {
-					a.setAPIStatus(false, fmt.Errorf("API server panic: %v", recovered))
-					log.Printf("Recovered API server panic: %v\n%s", recovered, debug.Stack())
-				}
-			}()
-			if err := a.api.Listener(listener); err != nil && !errors.Is(err, net.ErrClosed) {
-				a.setAPIStatus(false, err)
-				log.Printf("API server stopped with error: %v", err)
-				return
-			}
-			a.setAPIStatus(false, nil)
-		}()
-	}
+	a.startAPIServer()
 
 	log.Println("Startup sequence complete.")
+}
+
+func (a *App) startAPIServer() {
+	a.apiLifecycleMutex.Lock()
+	if a.apiCancel != nil {
+		a.apiLifecycleMutex.Unlock()
+		return
+	}
+	apiContext, cancel := context.WithCancel(context.Background())
+	a.apiCancel = cancel
+	a.apiWG.Add(1)
+	a.apiLifecycleMutex.Unlock()
+	go func() {
+		defer a.apiWG.Done()
+		a.runAPIServer(apiContext)
+	}()
+}
+
+func (a *App) runAPIServer(ctx context.Context) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err := fmt.Errorf("API server panic: %v", recovered)
+			a.setAPIStatus(false, err)
+			log.Printf("Recovered API server panic: %v\n%s", recovered, debug.Stack())
+		}
+	}()
+	for {
+		select {
+		case <-ctx.Done():
+			a.setAPIStatus(false, nil)
+			return
+		default:
+		}
+
+		listener, err := a.listen("tcp", a.GetAPIStatus().Address)
+		if err != nil {
+			a.setAPIStatus(false, err)
+			log.Printf("Error starting API server; retrying: %v", err)
+			timer := time.NewTimer(a.apiRetryDelay)
+			select {
+			case <-ctx.Done():
+				if !timer.Stop() {
+					<-timer.C
+				}
+				a.setAPIStatus(false, nil)
+				return
+			case <-timer.C:
+				continue
+			}
+		}
+
+		a.setAPIStatus(true, nil)
+		listenerDone := make(chan struct{})
+		go func() {
+			select {
+			case <-ctx.Done():
+				_ = listener.Close()
+			case <-listenerDone:
+			}
+		}()
+		err = a.api.Listener(listener)
+		close(listenerDone)
+		if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
+			a.setAPIStatus(false, nil)
+			return
+		}
+		if err == nil {
+			err = errors.New("API listener stopped unexpectedly")
+		}
+		a.setAPIStatus(false, err)
+		log.Printf("API server stopped; retrying: %v", err)
+		timer := time.NewTimer(a.apiRetryDelay)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			a.setAPIStatus(false, nil)
+			return
+		case <-timer.C:
+		}
+	}
 }
 
 // --- Bluetooth Methods exposed to Wails --- //
@@ -377,12 +446,20 @@ func (a *App) shutdown(ctx context.Context) {
 	a.shuttingDown.Store(true)
 	log.Println("App shutdown requested. Cleaning up...")
 	a.stationManager.BeginShutdown()
+	a.apiLifecycleMutex.Lock()
+	cancelAPI := a.apiCancel
+	a.apiCancel = nil
+	a.apiLifecycleMutex.Unlock()
+	if cancelAPI != nil {
+		cancelAPI()
+	}
 	if a.api != nil {
 		log.Println("Shutting down API server...")
 		if err := a.api.Shutdown(); err != nil {
 			log.Printf("Error shutting down API server: %v", err)
 		}
 	}
+	a.apiWG.Wait()
 	log.Println("Requesting disconnect for all stations...")
 	a.stationManager.Shutdown()
 	log.Println("App shutdown sequence complete.")

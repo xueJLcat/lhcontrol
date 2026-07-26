@@ -42,6 +42,20 @@ function Set-ScanRecordSnapshot {
     $Record.stations = @($Stations)
 }
 
+function Set-ScanTimeoutEvidence {
+    param($Record, $Evidence)
+    if ($null -eq $Evidence) {
+        return
+    }
+    if ($null -ne $Evidence.status) {
+        Set-ScanRecordSnapshot $Record $Evidence.status $Evidence.stations
+    }
+    else {
+        $Record.stations = @($Evidence.stations)
+        $Record.addresses = @((Get-VisibleStations $Evidence.stations) | ForEach-Object { $_.address })
+    }
+}
+
 function Assert-ScanSnapshot {
     param($Scan, [object[]]$Stations, [int]$Minimum, [string[]]$Expected)
     Assert-StableOrder $Stations
@@ -146,6 +160,17 @@ function Invoke-SelfTest {
         $failedScanRecord.addresses.Count -ne 1 -or $null -eq $failedScanRecord.status) {
         throw "Self-test failed: failed scan evidence was not retained"
     }
+    $timeoutRecord = [ordered]@{
+        state = "running"; found = 0; warnings = @(); addresses = @(); stations = @(); status = $null
+    }
+    Set-ScanTimeoutEvidence $timeoutRecord ([ordered]@{
+        status = [pscustomobject]@{ state = "running"; found = 1; warnings = @("still scanning") }
+        stations = $visible
+    })
+    if ($timeoutRecord.state -ne "running" -or $timeoutRecord.found -ne 1 -or
+        $timeoutRecord.addresses.Count -ne 1 -or $null -eq $timeoutRecord.status) {
+        throw "Self-test failed: timed-out scan evidence was not retained"
+    }
 
     $failedBulk = [pscustomobject]@{
         results = @([pscustomobject]@{
@@ -192,11 +217,14 @@ $results = [ordered]@{
 $initialStates = [ordered]@{}
 $powerStarted = $false
 $restoreFailed = $false
+$lastScanTimeoutEvidence = $null
 
 function Wait-Scan {
     $deadline = (Get-Date).AddSeconds(60)
+    $lastStatus = $null
     while ((Get-Date) -lt $deadline) {
         $status = Invoke-RestMethod -Method Get -Uri "$ApiBase/scan/status"
+        $lastStatus = $status
         if ($status.state -eq "completed") {
             return $status
         }
@@ -204,6 +232,17 @@ function Wait-Scan {
             return $status
         }
         Start-Sleep -Milliseconds 500
+    }
+    $lastStations = @()
+    try {
+        $lastStations = Get-Stations
+    }
+    catch {
+        $lastStations = @()
+    }
+    $script:lastScanTimeoutEvidence = [ordered]@{
+        status = $lastStatus
+        stations = @($lastStations)
     }
     throw "Scan did not complete within 60 seconds"
 }
@@ -250,6 +289,10 @@ try {
             Write-Host "Scan $cycle/$ScanCycles completed: $($scan.found) found, $($stations.Count) known"
         }
         catch {
+            if ($null -ne $lastScanTimeoutEvidence) {
+                Set-ScanTimeoutEvidence $scanRecord $lastScanTimeoutEvidence
+                $lastScanTimeoutEvidence = $null
+            }
             $scanRecord.state = "failed"
             $scanRecord.error = $_.Exception.Message
             throw
