@@ -23,7 +23,9 @@ var (
 	procRoUninitialize = combaseDLL.NewProc("RoUninitialize")
 )
 
-func enterWinRTThread() (func(), error) {
+var enterWinRTThread = enterWinRTThreadReal
+
+func enterWinRTThreadReal() (func(), error) {
 	runtime.LockOSThread()
 	hr, _, _ := procRoInitialize.Call(1) // RO_INIT_MULTITHREADED
 	if hr != 0 && hr != 1 {              // S_OK and S_FALSE are both success.
@@ -173,15 +175,18 @@ func getAsyncError(asyncOperation *foundation.IAsyncOperation) error {
 	return hresultToError(uint32(result.Value))
 }
 
-// hresultToError converts an HRESULT to an appropriate error type.
-// For Bluetooth ATT errors (facility 0x65), it returns an error with the ATT error code.
-// For other errors, it returns a generic error with the HRESULT value.
+// hresultToError converts an HRESULT to an appropriate error type while
+// retaining the original HRESULT for diagnostics.
 func hresultToError(hr uint32) error {
 	facility := (hr >> 16) & 0x1FFF
 	code := hr & 0xFFFF
 
 	if facility == 0x65 { // FACILITY_BLUETOOTH_ATT
-		return fmt.Errorf("Bluetooth ATT error (code 0x%04X)", code)
+		return fmt.Errorf(
+			"Bluetooth ATT operation failed (HRESULT 0x%08X): %w",
+			hr,
+			AttributeProtocolError(uint8(code)),
+		)
 	}
 
 	return fmt.Errorf("HRESULT 0x%08X", hr)

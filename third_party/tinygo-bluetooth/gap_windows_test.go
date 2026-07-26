@@ -4,6 +4,8 @@ package bluetooth
 
 import (
 	"errors"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -33,9 +35,10 @@ func TestScanStoppedErrorMapping(t *testing.T) {
 
 func TestDisconnectWaitsForExistingCleanup(t *testing.T) {
 	cleanupErr := errors.New("cleanup failed")
+	attempt := &deviceCleanupAttempt{done: make(chan struct{})}
 	state := &deviceState{
 		cleanupStarted: true,
-		cleanupDone:    make(chan struct{}),
+		cleanupAttempt: attempt,
 	}
 	device := Device{state: state}
 	returned := make(chan error, 1)
@@ -50,9 +53,9 @@ func TestDisconnectWaitsForExistingCleanup(t *testing.T) {
 	}
 
 	state.cleanupMutex.Lock()
-	state.cleanupErr = cleanupErr
+	attempt.err = cleanupErr
 	state.cleanupComplete = true
-	close(state.cleanupDone)
+	close(attempt.done)
 	state.cleanupMutex.Unlock()
 
 	select {
@@ -62,6 +65,37 @@ func TestDisconnectWaitsForExistingCleanup(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("Disconnect did not return after cleanup completed")
+	}
+}
+
+func TestDisconnectRetriesAfterWinRTThreadInitializationFailure(t *testing.T) {
+	originalEnter := enterWinRTThread
+	attempts := 0
+	enterWinRTThread = func() (func(), error) {
+		attempts++
+		if attempts == 1 {
+			return nil, errors.New("temporary apartment failure")
+		}
+		return func() {}, nil
+	}
+	t.Cleanup(func() { enterWinRTThread = originalEnter })
+
+	state := &deviceState{callbacks: newCallbackGate()}
+	device := Device{state: state}
+	if err := device.Disconnect(); err == nil {
+		t.Fatal("first Disconnect() unexpectedly succeeded")
+	}
+	if err := device.Disconnect(); err != nil {
+		t.Fatalf("second Disconnect() error = %v", err)
+	}
+	if attempts != 2 {
+		t.Fatalf("WinRT initialization attempts = %d, want 2", attempts)
+	}
+	state.cleanupMutex.Lock()
+	complete := state.cleanupComplete
+	state.cleanupMutex.Unlock()
+	if !complete {
+		t.Fatal("successful retry did not mark cleanup complete")
 	}
 }
 
@@ -98,5 +132,109 @@ func TestCallbackGateWaitsForActiveCallbackAndRejectsNewWork(t *testing.T) {
 	case <-waited:
 	case <-time.After(time.Second):
 		t.Fatal("callback gate did not finish after callbacks drained")
+	}
+}
+
+func TestDeviceCleanupLetsAdmittedCallbackLeaveOperationLock(t *testing.T) {
+	state := &deviceState{
+		callbacks: newCallbackGate(),
+	}
+	if !state.beginCallback() {
+		t.Fatal("callback was not admitted before cleanup")
+	}
+
+	callbackReady := make(chan struct{})
+	continueCallback := make(chan struct{})
+	callbackDone := make(chan struct{})
+	go func() {
+		defer close(callbackDone)
+		defer state.endCallback()
+		close(callbackReady)
+		<-continueCallback
+		state.operationMutex.Lock()
+		if !state.closed.Load() {
+			t.Error("callback did not observe the closing device")
+		}
+		state.operationMutex.Unlock()
+	}()
+	<-callbackReady
+
+	state.closed.Store(true)
+	state.blockCallbacks()
+	drained := make(chan struct{})
+	go func() {
+		state.drainCallbacksForCleanup(func() {})
+		close(drained)
+	}()
+
+	close(continueCallback)
+	select {
+	case <-callbackDone:
+	case <-time.After(time.Second):
+		t.Fatal("callback remained blocked behind cleanup operation lock")
+	}
+	select {
+	case <-drained:
+		state.operationMutex.Unlock()
+	case <-time.After(time.Second):
+		t.Fatal("cleanup deadlocked while waiting for admitted callback")
+	}
+}
+
+func TestCallbackGateConcurrentCloseStress(t *testing.T) {
+	for iteration := 0; iteration < 100; iteration++ {
+		gate := newCallbackGate()
+		var callbacks sync.WaitGroup
+		start := make(chan struct{})
+		for callback := 0; callback < 8; callback++ {
+			callbacks.Add(1)
+			go func() {
+				defer callbacks.Done()
+				<-start
+				allowed := gate.begin()
+				defer gate.end()
+				if allowed {
+					time.Sleep(time.Microsecond)
+				}
+			}()
+		}
+
+		close(start)
+		gate.close()
+		gate.wait()
+		callbacks.Wait()
+		if gate.begin() {
+			gate.end()
+			t.Fatalf("iteration %d: closed gate admitted late callback", iteration)
+		}
+	}
+}
+
+func TestHRESULTToErrorPreservesATTTypeAndHRESULT(t *testing.T) {
+	const hr = uint32(0x80650001)
+	err := hresultToError(hr)
+
+	var attErr AttributeProtocolError
+	if !errors.As(err, &attErr) {
+		t.Fatalf("error %v does not expose AttributeProtocolError", err)
+	}
+	if attErr != ErrAttInvalidHandle {
+		t.Fatalf("ATT error = 0x%02X, want 0x%02X", attErr.Code(), ErrAttInvalidHandle.Code())
+	}
+	if !strings.Contains(err.Error(), "0x80650001") {
+		t.Fatalf("error %q does not retain HRESULT", err)
+	}
+}
+
+func TestHRESULTToErrorPreservesUnknownHRESULT(t *testing.T) {
+	const hr = uint32(0x80004005)
+	err := hresultToError(hr)
+
+	var attErr AttributeProtocolError
+	if errors.As(err, &attErr) {
+		t.Fatalf("unknown HRESULT unexpectedly classified as ATT: %v", err)
+	}
+	if !strings.Contains(err.Error(), "0x80004005") {
+		t.Fatalf("error %q does not retain HRESULT", err)
 	}
 }

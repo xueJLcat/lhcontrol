@@ -114,8 +114,8 @@ type bluetoothOperations struct {
 	setPowerState          func(*bluetooth.BaseStation, bluetooth.PowerState) (bluetooth.PowerControlResult, error)
 	identify               func(*bluetooth.BaseStation) error
 	setChannel             func(*bluetooth.BaseStation, int) (bluetooth.ChannelWriteResult, error)
-	disconnectStation      func(*bluetooth.BaseStation)
-	releaseStationForScan  func(*bluetooth.BaseStation)
+	disconnectStation      func(*bluetooth.BaseStation) error
+	releaseStationForScan  func(*bluetooth.BaseStation) error
 	stationConnected       func(*bluetooth.BaseStation) bool
 }
 
@@ -141,7 +141,12 @@ type Manager struct {
 	statusRetryMutex       sync.Mutex
 	statusRetries          map[string]statusRetry
 	statusRecoveryRunning  atomic.Bool
-	statusRecoveryPending  atomic.Bool
+	statusRecoveryStart    sync.Once
+	statusRecoveryWake     chan struct{}
+	statusRecoveryWg       sync.WaitGroup
+	statusRetryBase        time.Duration
+	statusRetryMax         time.Duration
+	statusBusyRetry        time.Duration
 	shuttingDown           atomic.Bool
 	shutdownOnce           sync.Once
 	shutdownCh             chan struct{}
@@ -155,7 +160,15 @@ type statusRetry struct {
 	failures    int
 	lastAttempt time.Time
 	nextAt      time.Time
+	kinds       statusRetryKind
 }
+
+type statusRetryKind uint8
+
+const (
+	statusRetryConnection statusRetryKind = 1 << iota
+	statusRetryChannel
+)
 
 func NewManager(cfg *config.Config) *Manager {
 	manager := &Manager{
@@ -164,6 +177,10 @@ func NewManager(cfg *config.Config) *Manager {
 		activeDeviceOperations: make(map[string]struct{}),
 		deviceOperationSlots:   make(chan struct{}, 2),
 		statusRetries:          make(map[string]statusRetry),
+		statusRecoveryWake:     make(chan struct{}, 1),
+		statusRetryBase:        30 * time.Second,
+		statusRetryMax:         5 * time.Minute,
+		statusBusyRetry:        250 * time.Millisecond,
 		scanStatus:             ScanStatus{State: "idle", Warnings: []string{}},
 		initializeBluetooth:    bluetooth.Initialize,
 		shutdownCh:             make(chan struct{}),
@@ -188,26 +205,61 @@ func NewManager(cfg *config.Config) *Manager {
 }
 
 func (m *Manager) noteStatusFailure(address string) {
+	m.noteStatusFailureKind(address, statusRetryConnection)
+}
+
+func (m *Manager) noteChannelFailure(address string) {
+	m.noteStatusFailureKind(address, statusRetryChannel)
+}
+
+func (m *Manager) noteStatusFailureKind(address string, kind statusRetryKind) {
 	m.statusRetryMutex.Lock()
 	retry := m.statusRetries[address]
+	retry.kinds |= kind
 	retry.failures++
-	delay := 30 * time.Second
-	for attempt := 1; attempt < retry.failures && delay < 5*time.Minute; attempt++ {
+	delay := m.statusRetryBase
+	for attempt := 1; attempt < retry.failures && delay < m.statusRetryMax; attempt++ {
 		delay *= 2
 	}
-	if delay > 5*time.Minute {
-		delay = 5 * time.Minute
+	if delay > m.statusRetryMax {
+		delay = m.statusRetryMax
 	}
 	retry.lastAttempt = time.Now()
 	retry.nextAt = retry.lastAttempt.Add(delay)
 	m.statusRetries[address] = retry
 	m.statusRetryMutex.Unlock()
+	m.scheduleStatusRecovery()
 }
 
 func (m *Manager) clearStatusFailure(address string) {
 	m.statusRetryMutex.Lock()
 	delete(m.statusRetries, address)
 	m.statusRetryMutex.Unlock()
+	m.wakeStatusRecovery()
+}
+
+func (m *Manager) clearStatusFailureKind(address string, kind statusRetryKind) {
+	m.statusRetryMutex.Lock()
+	retry, exists := m.statusRetries[address]
+	if exists {
+		retry.kinds &^= kind
+		if retry.kinds == 0 {
+			delete(m.statusRetries, address)
+		} else {
+			m.statusRetries[address] = retry
+		}
+	}
+	m.statusRetryMutex.Unlock()
+	m.wakeStatusRecovery()
+}
+
+func effectiveStatusRetryKinds(retry statusRetry) statusRetryKind {
+	// Retry entries created by older tests/configuration helpers without a
+	// kind represent the historical connection recovery behavior.
+	if retry.kinds == 0 {
+		return statusRetryConnection
+	}
+	return retry.kinds
 }
 
 // Initialize should be called at app startup
@@ -259,6 +311,7 @@ func (m *Manager) markBluetoothUnavailable(err error) {
 	m.nextInitializeAt = time.Now().Add(2 * time.Second)
 	m.initializeMutex.Unlock()
 	bluetooth.InvalidateAllConnections()
+	m.wakeStatusRecovery()
 }
 
 func (m *Manager) observeBluetoothError(err error) error {
@@ -270,8 +323,8 @@ func (m *Manager) observeBluetoothError(err error) error {
 
 func (m *Manager) observeStationBluetoothError(station *bluetooth.BaseStation, address string, err error) error {
 	m.observeBluetoothError(err)
-	if err != nil && bluetooth.IsGATTCommunicationFailure(err) {
-		m.bluetoothOps.disconnectStation(station)
+	if err != nil && (bluetooth.RequiresReconnect(err) || bluetooth.IsAdapterUnavailable(err)) {
+		_ = m.bluetoothOps.disconnectStation(station)
 		m.noteStatusFailure(address)
 	}
 	return err
@@ -590,13 +643,25 @@ func (m *Manager) scanAndFetchStations() ([]StationInfo, int, error) {
 	m.stationsMutex.RLock()
 	connectedStations := make([]*bluetooth.BaseStation, 0, len(m.stations))
 	for _, stationPtr := range m.stations {
-		if stationPtr != nil && stationPtr.Snapshot().Connected {
+		if stationPtr != nil {
 			connectedStations = append(connectedStations, stationPtr)
 		}
 	}
 	m.stationsMutex.RUnlock()
+	releaseErrors := make([]error, 0)
 	for _, stationPtr := range connectedStations {
-		m.bluetoothOps.releaseStationForScan(stationPtr)
+		address := stationPtr.Snapshot().Address
+		if releaseErr := m.bluetoothOps.releaseStationForScan(stationPtr); releaseErr != nil {
+			m.observeBluetoothError(releaseErr)
+			releaseErrors = append(releaseErrors, fmt.Errorf("%s: %w", address, releaseErr))
+		}
+	}
+	if len(releaseErrors) > 0 {
+		m.addScanWarning(fmt.Sprintf(
+			"%d station connection(s) could not be fully released before scanning: %v",
+			len(releaseErrors),
+			errors.Join(releaseErrors...),
+		))
 	}
 
 	discoveredValues, err := m.bluetoothOps.scanForDuration(scanDuration)
@@ -680,10 +745,19 @@ func (m *Manager) scanAndFetchStations() ([]StationInfo, int, error) {
 			m.observeBluetoothError(result.err)
 			var initialErr *bluetooth.InitialReadError
 			if !errors.As(result.err, &initialErr) || initialErr.Power != nil {
-				m.bluetoothOps.disconnectStation(result.station)
-				m.noteStatusFailure(result.address)
+				if initialErr != nil && bluetooth.IsUnsupportedCapabilityError(initialErr.Power) {
+					m.clearStatusFailureKind(result.address, statusRetryConnection)
+				} else {
+					_ = m.bluetoothOps.disconnectStation(result.station)
+					m.noteStatusFailure(result.address)
+				}
 			} else {
-				m.clearStatusFailure(result.address)
+				m.clearStatusFailureKind(result.address, statusRetryConnection)
+				if bluetooth.IsUnsupportedCapabilityError(initialErr.Channel) {
+					m.clearStatusFailureKind(result.address, statusRetryChannel)
+				} else {
+					m.noteChannelFailure(result.address)
+				}
 			}
 			readErrors = append(readErrors, fmt.Errorf("%s: %w", result.address, result.err))
 		}
@@ -786,7 +860,21 @@ func (m *Manager) CheckAllStationStatuses() ([]StationInfo, error) {
 	m.stationsMutex.RUnlock()
 
 	if len(stationsToRead) == 0 {
-		m.scheduleStatusRecovery()
+		m.stationsMutex.RLock()
+		disconnectedAddresses := make([]string, 0, len(m.stations))
+		for _, station := range m.stations {
+			if station == nil {
+				continue
+			}
+			snapshot := station.Snapshot()
+			if snapshot.Present && !snapshot.Connected {
+				disconnectedAddresses = append(disconnectedAddresses, snapshot.Address)
+			}
+		}
+		m.stationsMutex.RUnlock()
+		for _, address := range disconnectedAddresses {
+			m.ensureStatusRecoveryTracked(address)
+		}
 		return m.GetStationInfo(), nil
 	}
 
@@ -825,10 +913,19 @@ func (m *Manager) CheckAllStationStatuses() ([]StationInfo, error) {
 						m.observeBluetoothError(workerErr)
 						var readErr *bluetooth.StatusReadError
 						if !errors.As(workerErr, &readErr) || readErr.Power != nil {
-							m.bluetoothOps.disconnectStation(ptr)
-							m.noteStatusFailure(address)
+							if readErr != nil && bluetooth.IsUnsupportedCapabilityError(readErr.Power) {
+								m.clearStatusFailureKind(address, statusRetryConnection)
+							} else {
+								_ = m.bluetoothOps.disconnectStation(ptr)
+								m.noteStatusFailure(address)
+							}
 						} else {
-							m.clearStatusFailure(address)
+							m.clearStatusFailureKind(address, statusRetryConnection)
+							if bluetooth.IsUnsupportedCapabilityError(readErr.Channel) {
+								m.clearStatusFailureKind(address, statusRetryChannel)
+							} else {
+								m.noteChannelFailure(address)
+							}
 						}
 						statusErrors[item.index] = fmt.Errorf("%s: %w", address, workerErr)
 					} else {
@@ -859,35 +956,179 @@ func (m *Manager) CheckAllStationStatuses() ([]StationInfo, error) {
 }
 
 func (m *Manager) scheduleStatusRecovery() {
-	m.statusRecoveryPending.Store(true)
-	if !m.statusRecoveryRunning.CompareAndSwap(false, true) {
-		return
-	}
-	go func() {
-		for {
-			m.statusRecoveryPending.Store(false)
-			m.runStatusRecoveryRound()
-			if m.statusRecoveryPending.Load() {
-				continue
-			}
-			m.statusRecoveryRunning.Store(false)
-			if !m.statusRecoveryPending.Load() ||
-				!m.statusRecoveryRunning.CompareAndSwap(false, true) {
-				return
-			}
-		}
-	}()
+	m.startStatusRecoveryScheduler()
+	m.wakeStatusRecovery()
 }
 
-func (m *Manager) runStatusRecoveryRound() {
-	select {
-	case <-m.shutdownCh:
+func (m *Manager) startStatusRecoveryScheduler() {
+	m.lifecycleMutex.Lock()
+	defer m.lifecycleMutex.Unlock()
+	if m.shuttingDown.Load() {
 		return
+	}
+	m.statusRecoveryStart.Do(func() {
+		m.statusRecoveryWg.Add(1)
+		go func() {
+			defer m.statusRecoveryWg.Done()
+			m.statusRecoveryLoop()
+		}()
+	})
+}
+
+func (m *Manager) wakeStatusRecovery() {
+	if m.shuttingDown.Load() {
+		return
+	}
+	select {
+	case m.statusRecoveryWake <- struct{}{}:
 	default:
 	}
-	if m.shuttingDown.Load() || m.isScanning.Load() {
-		return
+}
+
+func (m *Manager) ensureStatusRecoveryTracked(address string) {
+	m.statusRetryMutex.Lock()
+	if _, exists := m.statusRetries[address]; !exists {
+		m.statusRetries[address] = statusRetry{nextAt: time.Now()}
 	}
+	m.statusRetryMutex.Unlock()
+	m.scheduleStatusRecovery()
+}
+
+func (m *Manager) statusRecoveryLoop() {
+	var timer *time.Timer
+	stopTimer := func() {
+		if timer == nil {
+			return
+		}
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+	}
+	defer stopTimer()
+
+	for {
+		select {
+		case <-m.shutdownCh:
+			return
+		default:
+		}
+		delay, scheduled := m.nextStatusRecoveryDelay()
+		if !scheduled {
+			select {
+			case <-m.shutdownCh:
+				return
+			case <-m.statusRecoveryWake:
+				continue
+			}
+		}
+		if delay > 0 {
+			if timer == nil {
+				timer = time.NewTimer(delay)
+			} else {
+				stopTimer()
+				timer.Reset(delay)
+			}
+			select {
+			case <-m.shutdownCh:
+				return
+			case <-m.statusRecoveryWake:
+				stopTimer()
+				continue
+			case <-timer.C:
+			}
+		}
+
+		m.statusRecoveryRunning.Store(true)
+		retryAfter := m.runStatusRecoveryRound()
+		m.statusRecoveryRunning.Store(false)
+		if retryAfter > 0 {
+			if timer == nil {
+				timer = time.NewTimer(retryAfter)
+			} else {
+				stopTimer()
+				timer.Reset(retryAfter)
+			}
+			select {
+			case <-m.shutdownCh:
+				return
+			case <-m.statusRecoveryWake:
+				stopTimer()
+			case <-timer.C:
+			}
+		}
+	}
+}
+
+func (m *Manager) nextStatusRecoveryDelay() (time.Duration, bool) {
+	m.statusRetryMutex.Lock()
+	retries := make(map[string]statusRetry, len(m.statusRetries))
+	for address, retry := range m.statusRetries {
+		retries[address] = retry
+	}
+	m.statusRetryMutex.Unlock()
+	if len(retries) == 0 {
+		return 0, false
+	}
+
+	disconnected := make(map[string]struct{}, len(retries))
+	m.stationsMutex.RLock()
+	for _, station := range m.stations {
+		if station == nil {
+			continue
+		}
+		snapshot := station.Snapshot()
+		kinds := effectiveStatusRetryKinds(retries[snapshot.Address])
+		if kinds&statusRetryChannel != 0 || !snapshot.Connected {
+			disconnected[snapshot.Address] = struct{}{}
+		}
+	}
+	m.stationsMutex.RUnlock()
+
+	now := time.Now()
+	var earliest time.Time
+	for address, retry := range retries {
+		if _, eligible := disconnected[address]; !eligible {
+			continue
+		}
+		if earliest.IsZero() || retry.nextAt.Before(earliest) {
+			earliest = retry.nextAt
+		}
+	}
+	if earliest.IsZero() {
+		return 0, false
+	}
+	if !now.Before(earliest) {
+		return 0, true
+	}
+	return earliest.Sub(now), true
+}
+
+func (m *Manager) initializationRetryDelay() time.Duration {
+	m.initializeMutex.Lock()
+	defer m.initializeMutex.Unlock()
+	delay := time.Until(m.nextInitializeAt)
+	if delay <= 0 {
+		return m.statusBusyRetry
+	}
+	return delay
+}
+
+func (m *Manager) runStatusRecoveryRound() time.Duration {
+	select {
+	case <-m.shutdownCh:
+		return 0
+	default:
+	}
+	if m.shuttingDown.Load() {
+		return 0
+	}
+	if m.isScanning.Load() {
+		return m.statusBusyRetry
+	}
+
 	now := time.Now()
 	type recoveryCandidate struct {
 		station *bluetooth.BaseStation
@@ -907,21 +1148,23 @@ func (m *Manager) runStatusRecoveryRound() {
 			continue
 		}
 		snapshot := station.Snapshot()
-		if !snapshot.Present || snapshot.Connected {
+		retry, tracked := retries[snapshot.Address]
+		if !tracked || now.Before(retry.nextAt) {
 			continue
 		}
-		retry, tracked := retries[snapshot.Address]
-		if !tracked || !now.Before(retry.nextAt) {
-			candidates = append(candidates, recoveryCandidate{
-				station: station,
-				address: snapshot.Address,
-				retry:   retry,
-			})
+		kinds := effectiveStatusRetryKinds(retry)
+		if snapshot.Connected && kinds&statusRetryChannel == 0 {
+			continue
 		}
+		candidates = append(candidates, recoveryCandidate{
+			station: station,
+			address: snapshot.Address,
+			retry:   retry,
+		})
 	}
 	m.stationsMutex.RUnlock()
 	if len(candidates) == 0 {
-		return
+		return 0
 	}
 	sort.Slice(candidates, func(i, j int) bool {
 		left, right := candidates[i], candidates[j]
@@ -936,38 +1179,42 @@ func (m *Manager) runStatusRecoveryRound() {
 		}
 		return strings.ToLower(left.address) < strings.ToLower(right.address)
 	})
-	var wg sync.WaitGroup
-	started := 0
+
 	for _, candidate := range candidates {
-		if started == 1 {
-			break
-		}
 		if err := m.beginStationOperation(candidate.address); err != nil {
+			if errors.Is(err, ErrShuttingDown) {
+				return 0
+			}
 			continue
 		}
-		started++
-		wg.Add(1)
-		go func(candidate recoveryCandidate) {
-			defer wg.Done()
-			defer m.endStationOperation(candidate.address)
-			err := runSafely("station status recovery", func() error {
-				return m.bluetoothOps.fetchInitialPowerState(candidate.station)
-			})
+		defer m.endStationOperation(candidate.address)
+		if err := m.ensureReady(); err != nil {
 			m.observeBluetoothError(err)
-			var initialErr *bluetooth.InitialReadError
-			if errors.As(err, &initialErr) && initialErr.Power == nil {
-				m.clearStatusFailure(candidate.address)
-				return
+			return m.initializationRetryDelay()
+		}
+		err := runSafely("station status recovery", func() error {
+			return m.bluetoothOps.fetchInitialPowerState(candidate.station)
+		})
+		m.observeBluetoothError(err)
+		var initialErr *bluetooth.InitialReadError
+		if errors.As(err, &initialErr) && initialErr.Power == nil {
+			m.clearStatusFailureKind(candidate.address, statusRetryConnection)
+			if bluetooth.IsUnsupportedCapabilityError(initialErr.Channel) {
+				m.clearStatusFailureKind(candidate.address, statusRetryChannel)
+			} else {
+				m.noteChannelFailure(candidate.address)
 			}
-			if err != nil {
-				m.bluetoothOps.disconnectStation(candidate.station)
-				m.noteStatusFailure(candidate.address)
-				return
-			}
-			m.clearStatusFailure(candidate.address)
-		}(candidate)
+			return 0
+		}
+		if err != nil {
+			_ = m.bluetoothOps.disconnectStation(candidate.station)
+			m.noteStatusFailure(candidate.address)
+			return 0
+		}
+		m.clearStatusFailure(candidate.address)
+		return 0
 	}
-	wg.Wait()
+	return m.statusBusyRetry
 }
 
 func (m *Manager) PowerOnStation(address string) error {
@@ -1028,7 +1275,9 @@ func (m *Manager) SetStationPower(address, state string) (PowerActionResult, err
 	}
 	snapshot := stationPtr.Snapshot()
 	capabilities := snapshot.Capabilities
-	if !snapshot.CapabilitiesKnown || !capabilities.PowerWrite {
+	if !snapshot.CapabilitiesKnown ||
+		!capabilities.PowerWrite ||
+		(target == bluetooth.PowerStateStandby && !capabilities.Standby) {
 		err = runSafely("power capability refresh", func() error {
 			var refreshErr error
 			if snapshot.CapabilitiesKnown {
@@ -1057,8 +1306,14 @@ func (m *Manager) SetStationPower(address, state string) (PowerActionResult, err
 	})
 	if err != nil {
 		m.observeStationBluetoothError(stationPtr, canonicalAddress, err)
+		if bluetooth.IsUnsupportedCapabilityError(err) {
+			return PowerActionResult{}, fmt.Errorf("%w: %v", ErrUnsupported, err)
+		}
 		var confirmationErr *bluetooth.PowerConfirmationError
 		if errors.As(err, &confirmationErr) {
+			if !bluetooth.RequiresReconnect(err) && !bluetooth.IsAdapterUnavailable(err) {
+				m.clearStatusFailureKind(canonicalAddress, statusRetryConnection)
+			}
 			info, infoErr := m.stationInfoByAddress(address)
 			if infoErr == nil {
 				return PowerActionResult{
@@ -1075,7 +1330,7 @@ func (m *Manager) SetStationPower(address, state string) (PowerActionResult, err
 	if err != nil {
 		return PowerActionResult{}, err
 	}
-	m.clearStatusFailure(canonicalAddress)
+	m.clearStatusFailureKind(canonicalAddress, statusRetryConnection)
 	return PowerActionResult{Station: info, CommandSent: true, Confirmed: controlResult.Confirmed}, nil
 }
 
@@ -1110,7 +1365,14 @@ func (m *Manager) IdentifyStation(address string) error {
 	err = runSafely("identify operation", func() error {
 		return m.bluetoothOps.identify(stationPtr)
 	})
-	return m.observeStationBluetoothError(stationPtr, canonicalAddress, err)
+	if bluetooth.IsUnsupportedCapabilityError(err) {
+		return fmt.Errorf("%w: %v", ErrUnsupported, err)
+	}
+	if err != nil {
+		return m.observeStationBluetoothError(stationPtr, canonicalAddress, err)
+	}
+	m.clearStatusFailureKind(canonicalAddress, statusRetryConnection)
+	return nil
 }
 
 func (m *Manager) RefreshStationCapabilities(address string) (StationInfo, error) {
@@ -1130,25 +1392,36 @@ func (m *Manager) RefreshStationCapabilities(address string) (StationInfo, error
 		_, refreshErr := m.bluetoothOps.refreshCapabilities(stationPtr)
 		return refreshErr
 	}); err != nil {
-		m.observeBluetoothError(err)
+		m.observeStationBluetoothError(stationPtr, canonicalAddress, err)
 		return StationInfo{}, err
 	}
 	if err := runSafely("capability refresh state read", func() error {
 		return m.bluetoothOps.fetchInitialPowerState(stationPtr)
 	}); err != nil {
-		m.observeBluetoothError(err)
 		var readErr *bluetooth.InitialReadError
 		if !errors.As(err, &readErr) {
-			m.bluetoothOps.disconnectStation(stationPtr)
-			m.noteStatusFailure(canonicalAddress)
+			m.observeStationBluetoothError(stationPtr, canonicalAddress, err)
 			return StationInfo{}, err
 		}
 		if readErr.Power != nil {
-			m.bluetoothOps.disconnectStation(stationPtr)
+			if bluetooth.IsUnsupportedCapabilityError(readErr.Power) {
+				m.clearStatusFailureKind(canonicalAddress, statusRetryConnection)
+				if readErr.Channel != nil && !bluetooth.IsUnsupportedCapabilityError(readErr.Channel) {
+					m.noteChannelFailure(canonicalAddress)
+				}
+				return m.stationInfoByAddress(address)
+			}
+			m.observeBluetoothError(err)
+			_ = m.bluetoothOps.disconnectStation(stationPtr)
 			m.noteStatusFailure(canonicalAddress)
 			return StationInfo{}, err
 		}
-		m.clearStatusFailure(canonicalAddress)
+		m.clearStatusFailureKind(canonicalAddress, statusRetryConnection)
+		if bluetooth.IsUnsupportedCapabilityError(readErr.Channel) {
+			m.clearStatusFailureKind(canonicalAddress, statusRetryChannel)
+		} else {
+			m.noteChannelFailure(canonicalAddress)
+		}
 		return m.stationInfoByAddress(address)
 	}
 	m.clearStatusFailure(canonicalAddress)
@@ -1247,9 +1520,12 @@ func (m *Manager) SetStationChannel(address string, channel int, allowUnknownCon
 	}
 	if err != nil {
 		m.observeStationBluetoothError(stationPtr, canonicalAddress, err)
+		if bluetooth.IsUnsupportedCapabilityError(err) {
+			return result, fmt.Errorf("%w: %v", ErrUnsupported, err)
+		}
 		return result, err
 	}
-	m.clearStatusFailure(canonicalAddress)
+	m.clearStatusFailureKind(canonicalAddress, statusRetryConnection|statusRetryChannel)
 	return result, nil
 }
 
@@ -1347,11 +1623,6 @@ func (m *Manager) setAllStationsPowerDetailed(state string) (BulkPowerResult, er
 		case snapshot.PowerState == bluetooth.PowerStateBooting && isFresh(snapshot.LastPowerReadAt, selectionTime):
 			stationResult.Skipped = true
 			stationResult.Reason = "station is booting"
-		case snapshot.CapabilitiesKnown && target == bluetooth.PowerStateStandby &&
-			snapshot.Capabilities.PowerWrite &&
-			!snapshot.Capabilities.Standby:
-			stationResult.Skipped = true
-			stationResult.Reason = "standby is not supported"
 		case snapshot.PowerState == target &&
 			isFresh(snapshot.LastPowerReadAt, selectionTime) &&
 			bluetooth.IsPowerStateConfirmed(snapshot.PowerState, snapshot.RawPowerState):
@@ -1396,7 +1667,9 @@ func (m *Manager) setAllStationsPowerDetailed(state string) (BulkPowerResult, er
 				stationResult.Name = snapshot.Name
 				capabilities := snapshot.Capabilities
 				var err error
-				if snapshot.CapabilitiesKnown && capabilities.PowerWrite {
+				if snapshot.CapabilitiesKnown &&
+					capabilities.PowerWrite &&
+					(target != bluetooth.PowerStateStandby || capabilities.Standby) {
 					capabilities, err = m.bluetoothOps.ensureCapabilities(s)
 				} else if snapshot.CapabilitiesKnown {
 					capabilities, err = m.bluetoothOps.refreshCapabilities(s)
@@ -1427,19 +1700,27 @@ func (m *Manager) setAllStationsPowerDetailed(state string) (BulkPowerResult, er
 			})
 			if workerErr != nil {
 				m.observeStationBluetoothError(s, stationResult.Address, workerErr)
-				var confirmationErr *bluetooth.PowerConfirmationError
-				if errors.As(workerErr, &confirmationErr) {
-					stationResult.CommandSent = true
-					stationResult.Success = true
+				if bluetooth.IsUnsupportedCapabilityError(workerErr) {
+					stationResult.Skipped = true
+					stationResult.Reason = workerErr.Error()
+				} else {
+					var confirmationErr *bluetooth.PowerConfirmationError
+					if errors.As(workerErr, &confirmationErr) {
+						stationResult.CommandSent = true
+						stationResult.Success = true
+					}
 				}
-				stationResult.Error = workerErr.Error()
+				if !stationResult.Skipped {
+					stationResult.Error = workerErr.Error()
+				}
 			}
 			if info, infoErr := m.stationInfoByAddress(stationResult.Address); infoErr == nil {
 				stationResult.Station = info
 				stationResult.Name = info.Name
 			}
-			if stationResult.Success {
-				m.clearStatusFailure(stationResult.Address)
+			if stationResult.Success && !bluetooth.RequiresReconnect(workerErr) &&
+				!bluetooth.IsAdapterUnavailable(workerErr) {
+				m.clearStatusFailureKind(stationResult.Address, statusRetryConnection)
 			}
 			result.Results[resultIndex] = stationResult
 		}(item.resultIndex, item.station)
@@ -1508,11 +1789,14 @@ func (m *Manager) BeginShutdown() {
 
 func (m *Manager) Shutdown() {
 	m.BeginShutdown()
+	m.statusRecoveryWg.Wait()
 	m.lifecycleMutex.Lock()
 	for m.activeOperations > 0 {
 		m.lifecycleCond.Wait()
 	}
 	m.lifecycleMutex.Unlock()
 	m.asyncScanWg.Wait()
-	bluetooth.DisconnectAllStations()
+	if err := bluetooth.DisconnectAllStations(); err != nil {
+		log.Printf("Bluetooth shutdown cleanup was incomplete: %v", err)
+	}
 }

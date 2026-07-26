@@ -79,6 +79,15 @@ func (d Device) DiscoverServices(filterUUIDs []UUID) ([]DeviceService, error) {
 	if err != nil {
 		return nil, err
 	} else if status != genericattributeprofile.GattCommunicationStatusSuccess {
+		if status == genericattributeprofile.GattCommunicationStatusProtocolError {
+			if protocolErr := getGattProtocolError(
+				&servicesResult.IUnknown,
+				genericattributeprofile.GUIDiGattDeviceServicesResult,
+				7,
+			); protocolErr != nil {
+				return nil, protocolErr
+			}
+		}
 		return nil, gattCommunicationStatusError("could not retrieve device services", int32(status))
 	}
 
@@ -254,6 +263,15 @@ func (s DeviceService) DiscoverCharacteristics(filterUUIDs []UUID) ([]DeviceChar
 		return nil, err
 	}
 	if status != genericattributeprofile.GattCommunicationStatusSuccess {
+		if status == genericattributeprofile.GattCommunicationStatusProtocolError {
+			if protocolErr := getGattProtocolError(
+				&gattCharResult.IUnknown,
+				genericattributeprofile.GUIDiGattCharacteristicsResult,
+				7,
+			); protocolErr != nil {
+				return nil, protocolErr
+			}
+		}
 		return nil, gattCommunicationStatusError("could not retrieve characteristics", int32(status))
 	}
 
@@ -498,6 +516,15 @@ func (c DeviceCharacteristic) Read(data []byte) (int, error) {
 		return 0, err
 	}
 	if status != genericattributeprofile.GattCommunicationStatusSuccess {
+		if status == genericattributeprofile.GattCommunicationStatusProtocolError {
+			if protocolErr := getGattProtocolError(
+				&result.IUnknown,
+				genericattributeprofile.GUIDiGattReadResult2,
+				6,
+			); protocolErr != nil {
+				return 0, protocolErr
+			}
+		}
 		return 0, gattCommunicationStatusError("Bluetooth read failed", int32(status))
 	}
 
@@ -533,6 +560,45 @@ func (c DeviceCharacteristic) Read(data []byte) (int, error) {
 	}
 
 	return copy(data, readBuffer), nil
+}
+
+// getGattProtocolError reads the nullable ATT protocol byte from a WinRT GATT
+// result interface. winrt-go currently generates these vtable slots without
+// public wrappers, so the Windows backend keeps this narrow ABI bridge.
+func getGattProtocolError(source *ole.IUnknown, interfaceID string, methodIndex int) error {
+	if source == nil {
+		return nil
+	}
+	itf, err := source.QueryInterface(ole.NewGUID(interfaceID))
+	if err != nil {
+		return err
+	}
+	defer itf.Release()
+	vtable := (*[16]uintptr)(unsafe.Pointer(itf.RawVTable))
+	if methodIndex < 0 || methodIndex >= len(vtable) || vtable[methodIndex] == 0 {
+		return errors.New("bluetooth: GATT protocol error accessor is unavailable")
+	}
+	var reference *foundation.IReference
+	hr, _, _ := syscall.SyscallN(
+		vtable[methodIndex],
+		uintptr(unsafe.Pointer(itf)),
+		uintptr(unsafe.Pointer(&reference)),
+	)
+	if hr != 0 {
+		return ole.NewError(hr)
+	}
+	if reference == nil {
+		return nil
+	}
+	defer reference.Release()
+	value, err := reference.GetValue()
+	if err != nil {
+		return err
+	}
+	if value == nil {
+		return nil
+	}
+	return AttributeProtocolError(uint8(uintptr(value)))
 }
 
 // EnableNotifications enables notifications or indicate in the Client Characteristic

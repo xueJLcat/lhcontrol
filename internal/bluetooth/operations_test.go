@@ -47,6 +47,7 @@ type fakeBLEAdapter struct {
 	startOnce   sync.Once
 	once        sync.Once
 	stopCalls   atomic.Int32
+	startDelay  chan struct{}
 }
 
 func newFakeBLEAdapter(results ...tinybluetooth.ScanResult) *fakeBLEAdapter {
@@ -59,10 +60,19 @@ func (a *fakeBLEAdapter) Connect(tinybluetooth.Address, tinybluetooth.Connection
 }
 func (a *fakeBLEAdapter) SetConnectHandler(func(tinybluetooth.Device, bool)) {}
 func (a *fakeBLEAdapter) Scan(callback func(*tinybluetooth.Adapter, tinybluetooth.ScanResult)) error {
+	return a.ScanWithStart(callback, nil)
+}
+func (a *fakeBLEAdapter) ScanWithStart(callback func(*tinybluetooth.Adapter, tinybluetooth.ScanResult), started func()) error {
 	if a.panicScan {
 		panic("scan callback boundary")
 	}
+	if a.startDelay != nil {
+		<-a.startDelay
+	}
 	a.startOnce.Do(func() { close(a.started) })
+	if started != nil {
+		started()
+	}
 	for _, result := range a.results {
 		callback(nil, result)
 	}
@@ -92,8 +102,10 @@ type fakeCharacteristic struct {
 	readIndex            int
 	writeErr             error
 	writeErrorAfterApply bool
+	readErrAfterWrite    error
 	ignoreWrite          bool
 	powerSemantics       bool
+	writeAttempts        int
 	writes               [][]byte
 }
 
@@ -107,12 +119,36 @@ func (fakeConnectedDevice) DiscoverServices([]tinybluetooth.UUID) ([]tinybluetoo
 func (fakeConnectedDevice) RequestConnectionParams(tinybluetooth.ConnectionParams) error { return nil }
 
 type trackingConnectedDevice struct {
-	disconnected bool
+	disconnected  bool
+	disconnectErr error
+	disconnects   int
 }
 
 func (device *trackingConnectedDevice) Disconnect() error {
 	device.disconnected = true
-	return nil
+	device.disconnects++
+	return device.disconnectErr
+}
+
+func TestDisconnectFailureRetainsDeviceUntilCleanupCanBeRetried(t *testing.T) {
+	cleanupErr := errors.New("temporary cleanup failure")
+	device := &trackingConnectedDevice{disconnectErr: cleanupErr}
+	station := connectedFakeStation(&fakeCharacteristic{}, nil, nil, Capabilities{PowerWrite: true})
+	station.device = device
+
+	if err := DisconnectStation(station); !errors.Is(err, cleanupErr) {
+		t.Fatalf("DisconnectStation() error = %v, want %v", err, cleanupErr)
+	}
+	if station.device == nil {
+		t.Fatal("failed cleanup discarded the only device handle")
+	}
+	device.disconnectErr = nil
+	if err := DisconnectStation(station); err != nil {
+		t.Fatalf("DisconnectStation() retry error = %v", err)
+	}
+	if station.device != nil || device.disconnects != 2 {
+		t.Fatalf("cleanup retry state: device=%v disconnects=%d", station.device, device.disconnects)
+	}
 }
 func (*trackingConnectedDevice) Connected() (bool, error) { return true, nil }
 func (*trackingConnectedDevice) DiscoverServices([]tinybluetooth.UUID) ([]tinybluetooth.DeviceService, error) {
@@ -123,6 +159,9 @@ func (*trackingConnectedDevice) RequestConnectionParams(tinybluetooth.Connection
 }
 
 func (f *fakeCharacteristic) Read(destination []byte) (int, error) {
+	if f.writeAttempts > 0 && f.readErrAfterWrite != nil {
+		return 0, f.readErrAfterWrite
+	}
 	if f.readErr != nil {
 		return 0, f.readErr
 	}
@@ -147,6 +186,7 @@ func (f *fakeCharacteristic) Properties() uint32 {
 }
 
 func (f *fakeCharacteristic) write(value []byte) (int, error) {
+	f.writeAttempts++
 	if f.writeErr != nil && !f.writeErrorAfterApply {
 		return 0, f.writeErr
 	}
@@ -235,6 +275,47 @@ func TestSetPowerStateWithoutReadReportsUnconfirmed(t *testing.T) {
 	}
 	if result.Confirmed || station.PowerState != PowerStateUnknown {
 		t.Fatalf("result = %+v, cached state = %v", result, station.PowerState)
+	}
+}
+
+func TestSetPowerStateATTWriteUnsupportedUpdatesCapabilitiesWithoutDisconnect(t *testing.T) {
+	device := &trackingConnectedDevice{}
+	power := &fakeCharacteristic{
+		value:    []byte{0x00},
+		writeErr: tinybluetooth.ErrAttWriteNotPermitted,
+	}
+	station := connectedFakeStation(power, nil, nil, Capabilities{PowerRead: true, PowerWrite: true, Standby: true})
+	station.device = device
+
+	_, err := SetPowerState(station, PowerStateOn)
+	if !IsUnsupportedCapabilityError(err) {
+		t.Fatalf("SetPowerState() error = %v, want unsupported capability", err)
+	}
+	snapshot := station.Snapshot()
+	if snapshot.Capabilities.PowerWrite || snapshot.Capabilities.Standby {
+		t.Fatalf("capabilities were not updated after ATT rejection: %+v", snapshot.Capabilities)
+	}
+	if !snapshot.Connected || device.disconnected {
+		t.Fatal("ATT capability rejection discarded a healthy connection")
+	}
+}
+
+func TestReadPowerATTUnsupportedUpdatesCapabilityWithoutReconnect(t *testing.T) {
+	device := &trackingConnectedDevice{}
+	power := &fakeCharacteristic{readErr: tinybluetooth.ErrAttReadNotPermitted}
+	station := connectedFakeStation(power, nil, nil, Capabilities{PowerRead: true, PowerWrite: true})
+	station.device = device
+
+	err := ReadPowerState(station)
+	if !IsUnsupportedCapabilityError(err) {
+		t.Fatalf("ReadPowerState() error = %v, want unsupported capability", err)
+	}
+	snapshot := station.Snapshot()
+	if snapshot.Capabilities.PowerRead || !snapshot.Capabilities.PowerWrite {
+		t.Fatalf("capabilities after read rejection = %+v", snapshot.Capabilities)
+	}
+	if !snapshot.Connected || device.disconnected || RequiresReconnect(err) {
+		t.Fatal("ATT read capability rejection was treated as a broken connection")
 	}
 }
 
@@ -378,6 +459,53 @@ func TestSetChannelWriteFailureRetainsPreviousChannel(t *testing.T) {
 	}
 	if result.PreviousChannel != 3 || result.Channel != 3 {
 		t.Fatalf("result = %+v", result)
+	}
+}
+
+func TestSetChannelWriteAndReadbackFailureInvalidatesConnection(t *testing.T) {
+	device := &trackingConnectedDevice{}
+	mode := &fakeCharacteristic{
+		value:             []byte{0x03},
+		writeErr:          errors.New("write transport failed"),
+		readErrAfterWrite: errors.New("readback transport failed"),
+	}
+	station := connectedFakeStation(&fakeCharacteristic{}, mode, nil, Capabilities{ChannelRead: true, ChannelWrite: true})
+	station.device = device
+
+	_, err := SetChannel(station, 5)
+	if err == nil {
+		t.Fatal("SetChannel() unexpectedly succeeded")
+	}
+	if !RequiresReconnect(err) {
+		t.Fatalf("SetChannel() error = %v, want reconnect classification", err)
+	}
+	if station.Snapshot().Connected || !device.disconnected {
+		t.Fatal("write plus readback failure retained the invalid connection")
+	}
+}
+
+func TestATTCapabilityErrorsDoNotRequireReconnect(t *testing.T) {
+	for _, protocolErr := range []tinybluetooth.AttributeProtocolError{
+		tinybluetooth.ErrAttReadNotPermitted,
+		tinybluetooth.ErrAttWriteNotPermitted,
+		tinybluetooth.ErrAttRequestNotSupported,
+	} {
+		err := transportError("operation", protocolErr)
+		if !IsCapabilityUnsupported(err) {
+			t.Fatalf("%v was not classified as unsupported", protocolErr)
+		}
+		if RequiresReconnect(err) {
+			t.Fatalf("%v incorrectly required reconnect", protocolErr)
+		}
+	}
+	for _, protocolErr := range []tinybluetooth.AttributeProtocolError{
+		tinybluetooth.ErrAttInvalidHandle,
+		tinybluetooth.ErrAttOutOfSync,
+		tinybluetooth.ErrAttUnlikelyError,
+	} {
+		if !RequiresReconnect(protocolErr) {
+			t.Fatalf("%v did not require reconnect", protocolErr)
+		}
 	}
 }
 
@@ -649,7 +777,7 @@ func TestScanSafelyConvertsPanicToError(t *testing.T) {
 	adapter = fake
 	t.Cleanup(func() { adapter = originalAdapter })
 
-	if err := scanSafely(func(*tinybluetooth.Adapter, tinybluetooth.ScanResult) {}); err == nil {
+	if err := scanSafely(func(*tinybluetooth.Adapter, tinybluetooth.ScanResult) {}, func() {}); err == nil {
 		t.Fatal("scanSafely() unexpectedly ignored panic")
 	}
 }
@@ -737,6 +865,36 @@ func TestScanTimerAndCancellationStopOnlyOnce(t *testing.T) {
 	time.Sleep(10 * time.Millisecond)
 	_ = CancelScan()
 	<-result
+	if got := fake.stopCalls.Load(); got != 1 {
+		t.Fatalf("StopScan calls = %d, want 1", got)
+	}
+}
+
+func TestScanDurationStartsAfterWatcherReportsStarted(t *testing.T) {
+	originalAdapter := adapter
+	fake := newFakeBLEAdapter()
+	fake.startDelay = make(chan struct{})
+	adapter = fake
+	t.Cleanup(func() { adapter = originalAdapter })
+
+	result := make(chan error, 1)
+	go func() {
+		_, err := ScanForDuration(20 * time.Millisecond)
+		result <- err
+	}()
+	time.Sleep(50 * time.Millisecond)
+	if got := fake.stopCalls.Load(); got != 0 {
+		t.Fatalf("StopScan calls before watcher start = %d, want 0", got)
+	}
+	close(fake.startDelay)
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("ScanForDuration() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("scan did not stop after its post-start duration")
+	}
 	if got := fake.stopCalls.Load(); got != 1 {
 		t.Fatalf("StopScan calls = %d, want 1", got)
 	}

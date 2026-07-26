@@ -188,6 +188,14 @@ func (a *Advertisement) Stop() error {
 // Scan starts a BLE scan. It is stopped by a call to StopScan. A common pattern
 // is to cancel the scan when a particular device has been found.
 func (a *Adapter) Scan(callback func(*Adapter, ScanResult)) (err error) {
+	return a.ScanWithStart(callback, nil)
+}
+
+// ScanWithStart is the Windows scan implementation with an optional callback
+// that runs only after the watcher has successfully entered the Started state.
+// Applications that implement a fixed scan duration should start their timer
+// from this callback, not before WinRT watcher setup.
+func (a *Adapter) ScanWithStart(callback func(*Adapter, ScanResult), started func()) (err error) {
 	leaveThread, err := enterWinRTThread()
 	if err != nil {
 		return err
@@ -336,6 +344,9 @@ func (a *Adapter) Scan(callback func(*Adapter, ScanResult)) (err error) {
 	err = watcher.Start()
 	if err != nil {
 		return err
+	}
+	if started != nil {
+		started()
 	}
 
 	// Wait until advertisement has stopped, and finish.
@@ -529,8 +540,7 @@ type deviceState struct {
 	closed          atomic.Bool
 	cleanupStarted  bool
 	cleanupComplete bool
-	cleanupErr      error
-	cleanupDone     chan struct{}
+	cleanupAttempt  *deviceCleanupAttempt
 	leaveThread     func()
 	cancel          context.CancelFunc
 
@@ -543,6 +553,11 @@ type deviceState struct {
 	characteristics               []*genericattributeprofile.GattCharacteristic
 	notifications                 []notificationRegistration
 	callbacks                     *callbackGate
+}
+
+type deviceCleanupAttempt struct {
+	done chan struct{}
+	err  error
 }
 
 type notificationRegistration struct {
@@ -565,6 +580,23 @@ func (s *deviceState) blockCallbacks() {
 
 func (s *deviceState) waitCallbacks() {
 	s.callbacks.wait()
+}
+
+// drainCallbacksForCleanup unregisters event sources while device operations
+// are excluded, then releases the operation lock before waiting for callbacks.
+// A callback that passed the callback gate immediately before shutdown may
+// still be waiting for operationMutex. Releasing the lock lets that callback
+// observe closed and leave, avoiding a cleanup/callback lock-order deadlock.
+//
+// The method returns with operationMutex held. This provides a final barrier
+// before the caller releases the WinRT objects used by device operations.
+func (s *deviceState) drainCallbacksForCleanup(unregister func()) {
+	s.operationMutex.Lock()
+	unregister()
+	s.operationMutex.Unlock()
+
+	s.waitCallbacks()
+	s.operationMutex.Lock()
 }
 
 func (d Device) beginOperation() (*deviceState, error) {
@@ -709,11 +741,10 @@ func (a *Adapter) Connect(address Address, params ConnectionParams) (Device, err
 
 	ctx, cancel := context.WithCancel(context.Background())
 	state := &deviceState{
-		cancel:      cancel,
-		device:      bleDevice,
-		session:     newSession,
-		cleanupDone: make(chan struct{}),
-		callbacks:   newCallbackGate(),
+		cancel:    cancel,
+		device:    bleDevice,
+		session:   newSession,
+		callbacks: newCallbackGate(),
 	}
 
 	device := Device{
@@ -789,72 +820,70 @@ func (d Device) Disconnect() error {
 	state := d.state
 	state.cleanupMutex.Lock()
 	if state.cleanupComplete {
-		err := state.cleanupErr
+		err := state.cleanupAttempt.err
 		state.cleanupMutex.Unlock()
 		return err
 	}
 	if state.cleanupStarted {
-		done := state.cleanupDone
+		attempt := state.cleanupAttempt
 		state.cleanupMutex.Unlock()
-		<-done
-		state.cleanupMutex.Lock()
-		err := state.cleanupErr
-		state.cleanupMutex.Unlock()
-		return err
+		<-attempt.done
+		return attempt.err
 	}
+	attempt := &deviceCleanupAttempt{done: make(chan struct{})}
+	state.cleanupAttempt = attempt
 	state.cleanupStarted = true
 	state.closed.Store(true)
-	done := state.cleanupDone
 	state.cleanupMutex.Unlock()
-	go d.cleanup()
-	<-done
-	state.cleanupMutex.Lock()
-	err := state.cleanupErr
-	state.cleanupMutex.Unlock()
-	return err
+	go d.cleanup(attempt)
+	<-attempt.done
+	return attempt.err
 }
 
-func (d Device) cleanup() {
+func (d Device) cleanup(attempt *deviceCleanupAttempt) {
 	state := d.state
+	retryable := false
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			state.cleanupMutex.Lock()
-			if state.cleanupErr == nil {
-				state.cleanupErr = fmt.Errorf("bluetooth cleanup panicked: %v", recovered)
+			if attempt.err == nil {
+				attempt.err = fmt.Errorf("bluetooth cleanup panicked: %v", recovered)
 			}
-			state.cleanupMutex.Unlock()
 		}
 		state.cleanupMutex.Lock()
-		state.cleanupComplete = true
-		close(state.cleanupDone)
+		if retryable {
+			state.cleanupStarted = false
+			state.cleanupComplete = false
+			state.cleanupAttempt = nil
+		} else {
+			state.cleanupComplete = true
+		}
+		close(attempt.done)
 		state.cleanupMutex.Unlock()
 	}()
 	state.blockCallbacks()
-	state.operationMutex.Lock()
-	defer state.operationMutex.Unlock()
 	leaveThread, err := enterWinRTThread()
 	if err != nil {
-		state.cleanupMutex.Lock()
-		state.cleanupErr = err
-		state.cleanupMutex.Unlock()
+		attempt.err = err
+		retryable = true
 		return
 	}
 	defer leaveThread()
 
-	if state.cancel != nil {
-		state.cancel()
-	}
-	if state.device != nil && state.connectionStatusListenerAdded {
-		_ = state.device.RemoveConnectionStatusChanged(state.connectionStatusListenerToken)
-	}
-	for _, notification := range state.notifications {
-		if notification.characteristic != nil {
-			_ = notification.characteristic.RemoveValueChanged(notification.token)
+	state.drainCallbacksForCleanup(func() {
+		if state.cancel != nil {
+			state.cancel()
 		}
-	}
-	// Event removal prevents new dispatches. Drain callbacks that were already
-	// running before releasing their handlers and owned WinRT objects.
-	state.waitCallbacks()
+		if state.device != nil && state.connectionStatusListenerAdded {
+			_ = state.device.RemoveConnectionStatusChanged(state.connectionStatusListenerToken)
+		}
+		for _, notification := range state.notifications {
+			if notification.characteristic != nil {
+				_ = notification.characteristic.RemoveValueChanged(notification.token)
+			}
+		}
+	})
+	defer state.operationMutex.Unlock()
+
 	if state.connectionStatusListener != nil {
 		state.connectionStatusListener.Release()
 		state.connectionStatusListener = nil
@@ -881,14 +910,14 @@ func (d Device) cleanup() {
 	if state.session != nil {
 		_ = state.session.SetMaintainConnection(false)
 		if err := state.session.Close(); err != nil {
-			state.cleanupErr = err
+			attempt.err = err
 		}
 		state.session.Release()
 		state.session = nil
 	}
 	if state.device != nil {
-		if err := state.device.Close(); err != nil && state.cleanupErr == nil {
-			state.cleanupErr = err
+		if err := state.device.Close(); err != nil && attempt.err == nil {
+			attempt.err = err
 		}
 		state.device.Release()
 		state.device = nil

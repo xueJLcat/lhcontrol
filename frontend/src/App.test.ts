@@ -86,6 +86,19 @@ function createStation(overrides: Partial<StationInfo> = {}): StationInfo {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  Object.defineProperty(Element.prototype, 'animate', {
+    configurable: true,
+    value: vi.fn(() => {
+      const animation = {
+        cancel: vi.fn(),
+        finished: Promise.resolve(),
+        set onfinish(callback: ((event: AnimationPlaybackEvent) => void) | null) {
+          if (callback) Promise.resolve().then(() => callback({} as AnimationPlaybackEvent));
+        }
+      };
+      return animation;
+    })
+  });
   runtime.handlers.clear();
   api.GetAPIStatus.mockResolvedValue({ running: true, address: '127.0.0.1:7575', error: '' });
   api.IsScanning.mockResolvedValue(false);
@@ -212,6 +225,38 @@ describe('App asynchronous operations', () => {
     await waitFor(() => expect(onButtons[2]).not.toBeDisabled());
   });
 
+  it('commits successful results from two different stations independently', async () => {
+    const stationA = createStation({ name: 'LHB-A', address: 'AA' });
+    const stationB = createStation({ name: 'LHB-B', address: 'BB' });
+    api.ScanAndFetchStations.mockResolvedValue([stationA, stationB]);
+    const resolvers = new Map<string, (value: unknown) => void>();
+    api.SetStationPower.mockImplementation((address: string) => new Promise((resolve) => {
+      resolvers.set(address, resolve);
+    }));
+
+    render(App);
+    await screen.findByText('LHB-B');
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Scan' })).not.toBeDisabled());
+    await fireEvent.click(screen.getByRole('button', { name: 'Turn LHB-A on' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Turn LHB-B on' }));
+    await waitFor(() => expect(api.SetStationPower).toHaveBeenCalledTimes(2));
+
+    resolvers.get('BB')?.({
+      station: { ...stationB, powerState: 1, powerStateName: 'on', rawPowerState: 0x0b },
+      commandSent: true,
+      confirmed: true,
+      confirmationError: ''
+    });
+    resolvers.get('AA')?.({
+      station: { ...stationA, powerState: 1, powerStateName: 'on', rawPowerState: 0x0b },
+      commandSent: true,
+      confirmed: true,
+      confirmationError: ''
+    });
+
+    await waitFor(() => expect(screen.getAllByText('On confirmed')).toHaveLength(2));
+  });
+
   it('keeps a failed station result when another concurrent operation advances the list revision', async () => {
     const stationA = createStation({ name: 'LHB-A', address: 'AA' });
     const stationB = createStation({ name: 'LHB-B', address: 'BB' });
@@ -297,6 +342,30 @@ describe('App asynchronous operations', () => {
     runtime.handlers.get('external-scan-started')?.();
 
     await waitFor(() => expect(screen.queryByRole('textbox', { name: 'Station name' })).not.toBeInTheDocument());
+    expect(screen.getByText('External scan in progress...')).toBeInTheDocument();
+  });
+
+  it('closes the channel editor and clears device feedback when an external scan starts', async () => {
+    api.SetStationPower.mockResolvedValue({
+      station: createStation({ powerState: 1, powerStateName: 'on', rawPowerState: 0x0b }),
+      commandSent: true,
+      confirmed: true,
+      confirmationError: ''
+    });
+    render(App);
+    await screen.findByText('LHB-TEST');
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Scan' })).not.toBeDisabled());
+    await fireEvent.click(screen.getByRole('button', { name: 'Turn LHB-TEST on' }));
+    expect(await screen.findByText('On confirmed')).toBeInTheDocument();
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Details for LHB-TEST' }));
+    await fireEvent.click(await screen.findByRole('button', { name: /Change Channel/ }));
+    expect(screen.getByRole('dialog', { name: 'Change channel' })).toBeInTheDocument();
+
+    runtime.handlers.get('external-scan-started')?.();
+
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Change channel' })).not.toBeInTheDocument());
+    expect(screen.queryByText('On confirmed')).not.toBeInTheDocument();
     expect(screen.getByText('External scan in progress...')).toBeInTheDocument();
   });
 
