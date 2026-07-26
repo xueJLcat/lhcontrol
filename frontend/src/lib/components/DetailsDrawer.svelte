@@ -90,7 +90,7 @@
     <dl>
       <dt>Original name</dt><dd>{station.originalName}</dd>
       <dt>Address</dt><dd class="mono">{station.address}</dd>
-      <dt>Metadata</dt><dd title={station.metadataReadAt || undefined}>{station.metadataFresh ? 'loaded and cached' : 'unavailable'} · {relativeTime(station.metadataReadAt, now) || 'never'}</dd>
+      <dt>Metadata</dt><dd title={station.metadataReadAt || undefined}>{station.metadataLoaded ? 'loaded and cached' : 'unavailable'} · {relativeTime(station.metadataReadAt, now) || 'never'}</dd>
     </dl>
   </section>
 

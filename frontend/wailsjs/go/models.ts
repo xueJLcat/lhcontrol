@@ -97,7 +97,7 @@ export namespace station {
 	    statusFresh: boolean;
 	    powerFresh: boolean;
 	    channelFresh: boolean;
-	    metadataFresh: boolean;
+	    metadataLoaded: boolean;
 	    connectionState: string;
 	    capabilitiesKnown: boolean;
 	    capabilities: bluetooth.Capabilities;
@@ -131,7 +131,7 @@ export namespace station {
 	        this.statusFresh = source["statusFresh"];
 	        this.powerFresh = source["powerFresh"];
 	        this.channelFresh = source["channelFresh"];
-	        this.metadataFresh = source["metadataFresh"];
+	        this.metadataLoaded = source["metadataLoaded"];
 	        this.connectionState = source["connectionState"];
 	        this.capabilitiesKnown = source["capabilitiesKnown"];
 	        this.capabilities = this.convertValues(source["capabilities"], bluetooth.Capabilities);

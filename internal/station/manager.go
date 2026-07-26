@@ -53,7 +53,7 @@ type StationInfo struct {
 	StatusFresh         bool                     `json:"statusFresh"`
 	PowerFresh          bool                     `json:"powerFresh"`
 	ChannelFresh        bool                     `json:"channelFresh"`
-	MetadataFresh       bool                     `json:"metadataFresh"`
+	MetadataLoaded      bool                     `json:"metadataLoaded"`
 	ConnectionState     string                   `json:"connectionState"`
 	CapabilitiesKnown   bool                     `json:"capabilitiesKnown"`
 	Capabilities        bluetooth.Capabilities   `json:"capabilities"`
@@ -341,11 +341,31 @@ func (m *Manager) stopExhaustedAbsentRecovery(address string, station *bluetooth
 	}
 	m.statusRetryMutex.Lock()
 	retry, tracked := m.statusRetries[address]
-	if tracked && retry.failures >= statusAbsentRetryLimit {
-		delete(m.statusRetries, address)
+	changed := false
+	if tracked {
+		kinds := effectiveStatusRetryKinds(retry)
+		if kinds&statusRetryConnection != 0 && retry.failures >= statusAbsentRetryLimit {
+			retry.kinds = kinds &^ statusRetryConnection
+			retry.failures = 0
+			retry.lastAttempt = time.Time{}
+			retry.nextAt = time.Time{}
+			changed = true
+		}
+		if kinds&statusRetryChannel != 0 && retry.channelFailures >= statusAbsentRetryLimit {
+			retry.kinds &^= statusRetryChannel
+			retry.channelFailures = 0
+			retry.channelLastAttempt = time.Time{}
+			retry.channelNextAt = time.Time{}
+			changed = true
+		}
+		if retry.kinds == 0 {
+			delete(m.statusRetries, address)
+		} else {
+			m.statusRetries[address] = retry
+		}
 	}
 	m.statusRetryMutex.Unlock()
-	if tracked && retry.failures >= statusAbsentRetryLimit {
+	if changed {
 		m.wakeStatusRecovery()
 	}
 }
@@ -675,7 +695,7 @@ func (m *Manager) GetStationInfo() []StationInfo {
 			!snapshot.LastSeenAt.IsZero()
 		scanFresh := seenInLatestScan &&
 			isRecent(snapshot.LastSeenAt, now, channelScanFreshnessWindow)
-		metadataFresh := !snapshot.MetadataReadAt.IsZero()
+		metadataLoaded := !snapshot.MetadataReadAt.IsZero()
 		stationInfos = append(stationInfos, StationInfo{
 			Name:                name,
 			OriginalName:        snapshot.Name,
@@ -700,7 +720,7 @@ func (m *Manager) GetStationInfo() []StationInfo {
 			StatusFresh:       powerFresh || channelFresh,
 			PowerFresh:        powerFresh,
 			ChannelFresh:      channelFresh,
-			MetadataFresh:     metadataFresh,
+			MetadataLoaded:    metadataLoaded,
 			ConnectionState:   connectionState,
 			CapabilitiesKnown: snapshot.CapabilitiesKnown,
 			Capabilities:      snapshot.Capabilities,
@@ -737,7 +757,8 @@ func isFresh(value, now time.Time) bool {
 }
 
 func isRecent(value, now time.Time, window time.Duration) bool {
-	return !value.IsZero() && now.Sub(value) <= window
+	age := now.Sub(value)
+	return !value.IsZero() && age >= 0 && age <= window
 }
 
 func formatTimestamp(value time.Time) string {
@@ -1951,8 +1972,19 @@ func (m *Manager) setAllStationsPowerDetailed(state string) (BulkPowerResult, er
 		wg.Add(1)
 		go func(resultIndex int, s *bluetooth.BaseStation) {
 			defer wg.Done()
-			semaphore <- struct{}{}
+			select {
+			case semaphore <- struct{}{}:
+			case <-m.shutdownCh:
+				result.Results[resultIndex].Skipped = true
+				result.Results[resultIndex].Reason = "application is shutting down"
+				return
+			}
 			defer func() { <-semaphore }()
+			if m.shuttingDown.Load() {
+				result.Results[resultIndex].Skipped = true
+				result.Results[resultIndex].Reason = "application is shutting down"
+				return
+			}
 			stationResult := BulkPowerStationResult{
 				Address: s.Address.String(),
 			}

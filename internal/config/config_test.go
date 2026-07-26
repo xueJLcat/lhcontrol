@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -92,5 +93,56 @@ func TestResetAddressRenameOnlySuppressesLegacyFallbackForThatDevice(t *testing.
 	}
 	if got, ok := reloaded.GetStationDisplayName("AA:BB:CC:DD:EE:FF", "LHB-OLD"); !ok || got != "Legacy name" {
 		t.Fatalf("reloaded config lost shared legacy alias: %q, %v", got, ok)
+	}
+}
+
+func TestInvalidConfigIsPreservedBeforeLaterSave(t *testing.T) {
+	configRoot := t.TempDir()
+	t.Setenv("AppData", configRoot)
+	configDirectory := filepath.Join(configRoot, "lhcontrol")
+	if err := os.MkdirAll(configDirectory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(configDirectory, "config.json")
+	invalidContent := []byte(`{"renamedStations":{"LHB-OLD":"Before"}`)
+	if err := os.WriteFile(configPath, invalidContent, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := NewConfig()
+	loadErr := cfg.Load()
+	if loadErr == nil || !strings.Contains(loadErr.Error(), "invalid file preserved") {
+		t.Fatalf("Config.Load() error = %v, want preserved invalid-file error", loadErr)
+	}
+	preserved, err := filepath.Glob(configPath + ".invalid-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(preserved) != 1 {
+		t.Fatalf("preserved invalid files = %v, want exactly one", preserved)
+	}
+	content, err := os.ReadFile(preserved[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != string(invalidContent) {
+		t.Fatalf("preserved content = %q, want %q", content, invalidContent)
+	}
+	if err := cfg.SetRenamedStation("LHB-NEW", "After"); err != nil {
+		t.Fatalf("SetRenamedStation() error = %v", err)
+	}
+	if _, err := os.Stat(preserved[0]); err != nil {
+		t.Fatalf("later save removed preserved invalid config: %v", err)
+	}
+}
+
+func TestInvalidConfigBlocksSaveWhenItCannotBePreserved(t *testing.T) {
+	cfg := NewConfig()
+	cfg.persistenceBlockedErr = errors.New("rename denied")
+	if err := cfg.SetRenamedStation("LHB-OLD", "After"); err == nil || !strings.Contains(err.Error(), "save blocked") {
+		t.Fatalf("SetRenamedStation() error = %v, want blocked save", err)
+	}
+	if _, ok := cfg.GetRenamedStation("LHB-OLD"); ok {
+		t.Fatal("failed blocked save retained the in-memory rename")
 	}
 }

@@ -536,7 +536,7 @@ func (e *WritePossiblySentError) MayHaveBeenSent() bool {
 }
 
 func classifyWriteFailure(mode genericattributeprofile.GattWriteOption, operationCreated, explicitProtocolRejection bool, err error) error {
-	if err == nil || mode != genericattributeprofile.GattWriteOptionWriteWithoutResponse || !operationCreated || explicitProtocolRejection {
+	if err == nil || !operationCreated || explicitProtocolRejection {
 		return err
 	}
 	var protocolErr AttributeProtocolError

@@ -54,12 +54,12 @@ func TestClassifyWriteFailureProtocolRejectionIsNotPossiblySent(t *testing.T) {
 	}
 }
 
-func TestClassifyWriteFailureWithResponseIsNotPossiblySent(t *testing.T) {
+func TestClassifyWriteFailureWithResponseIsPossiblySent(t *testing.T) {
 	cause := errors.New("completion failed")
 	err := classifyWriteFailure(genericattributeprofile.GattWriteOptionWriteWithResponse, true, false, cause)
 	var possiblySent *WritePossiblySentError
-	if !errors.Is(err, cause) || errors.As(err, &possiblySent) {
-		t.Fatalf("classifyWriteFailure() = %v, want unclassified response-write error", err)
+	if !errors.Is(err, cause) || !errors.As(err, &possiblySent) {
+		t.Fatalf("classifyWriteFailure() = %v, want possibly-sent response-write error", err)
 	}
 }
 

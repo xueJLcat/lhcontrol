@@ -423,6 +423,25 @@ func TestSetPowerStateReportsUnconfirmedAmbiguousWriteWithoutReplay(t *testing.T
 	}
 }
 
+func TestSetPowerStateConfirmsAmbiguousResponseWriteWithoutReplay(t *testing.T) {
+	power := &fakeCharacteristic{
+		value:                []byte{0x00},
+		properties:           uint32(tinybluetooth.CharacteristicReadPermission | tinybluetooth.CharacteristicWritePermission),
+		writeErr:             tinybluetooth.ErrGATTUnreachable,
+		writeErrorAfterApply: true,
+		powerSemantics:       true,
+	}
+	station := connectedFakeStation(power, nil, nil, Capabilities{PowerRead: true, PowerWrite: true})
+
+	result, err := SetPowerState(station, PowerStateOn)
+	if err != nil || !result.Confirmed {
+		t.Fatalf("SetPowerState() result=%+v error=%v, want confirmed ambiguous response write", result, err)
+	}
+	if power.writeWithResponseAttempts != 1 || power.writeAttempts != 1 {
+		t.Fatalf("response write attempts=%d applied writes=%d, want 1 and 1", power.writeWithResponseAttempts, power.writeAttempts)
+	}
+}
+
 func TestSleepDoesNotContinueAfterAmbiguousPrepareWrite(t *testing.T) {
 	power := &fakeCharacteristic{
 		value:                   []byte{0x00},
@@ -659,19 +678,19 @@ func TestIdentifyDoesNotRetryAmbiguousWrite(t *testing.T) {
 	}
 }
 
-func TestIdentifyFinalWriteFailureInvalidatesConnection(t *testing.T) {
+func TestIdentifyDoesNotRetryAmbiguousResponseWrite(t *testing.T) {
 	identify := &fakeCharacteristic{
 		properties:           uint32(tinybluetooth.CharacteristicWritePermission),
 		writeWithResponseErr: errors.New("connection lost"),
 	}
 	station := connectedFakeStation(&fakeCharacteristic{}, nil, identify, Capabilities{Identify: true})
 
-	if err := Identify(station); err == nil {
-		t.Fatal("Identify() unexpectedly succeeded")
+	err := Identify(station)
+	if !IsPossiblySent(err) {
+		t.Fatalf("Identify() error = %v, want possibly-sent classification", err)
 	}
-	snapshot := station.Snapshot()
-	if snapshot.Connected || station.device != nil || station.identifyCharacteristic != nil {
-		t.Fatalf("failed identify retained stale connection state: %+v", snapshot)
+	if identify.writeWithResponseAttempts != 1 {
+		t.Fatalf("response write attempts = %d, want 1", identify.writeWithResponseAttempts)
 	}
 }
 

@@ -7,11 +7,13 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 )
 
 type Config struct {
 	RenamedStations          map[string]string `json:"renamedStations"`
 	RenamedStationsByAddress map[string]string `json:"renamedStationsByAddress"`
+	persistenceBlockedErr    error
 	mutex                    sync.RWMutex
 }
 
@@ -63,7 +65,14 @@ func (c *Config) Load() error {
 	var loaded persistedConfig
 	err = json.Unmarshal(configFile, &loaded)
 	if err != nil {
-		return fmt.Errorf("error unmarshalling config: %w", err)
+		invalidPath := fmt.Sprintf("%s.invalid-%s", configFilePath, time.Now().Format("20060102T150405.000000000"))
+		if renameErr := os.Rename(configFilePath, invalidPath); renameErr != nil {
+			c.mutex.Lock()
+			c.persistenceBlockedErr = fmt.Errorf("invalid config could not be preserved: %w", renameErr)
+			c.mutex.Unlock()
+			return fmt.Errorf("error unmarshalling config (failed to preserve invalid file: %v): %w", renameErr, err)
+		}
+		return fmt.Errorf("error unmarshalling config; invalid file preserved as '%s': %w", invalidPath, err)
 	}
 	if loaded.RenamedStations == nil {
 		loaded.RenamedStations = make(map[string]string)
@@ -74,6 +83,7 @@ func (c *Config) Load() error {
 	c.mutex.Lock()
 	c.RenamedStations = loaded.RenamedStations
 	c.RenamedStationsByAddress = loaded.RenamedStationsByAddress
+	c.persistenceBlockedErr = nil
 	c.mutex.Unlock()
 	return nil
 }
@@ -89,6 +99,9 @@ func (c *Config) Save() error {
 // and persistence under one exclusive lock prevents an older Save from
 // overwriting a newer rename.
 func (c *Config) saveLocked() error {
+	if c.persistenceBlockedErr != nil {
+		return fmt.Errorf("config save blocked to preserve the unreadable file: %w", c.persistenceBlockedErr)
+	}
 	configFilePath, err := getConfigPath()
 	if err != nil {
 		return err

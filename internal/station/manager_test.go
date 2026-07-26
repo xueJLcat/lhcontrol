@@ -1073,6 +1073,109 @@ func TestBulkPowerIncludesAbsentKnownStations(t *testing.T) {
 	}
 }
 
+func TestBulkPowerDoesNotStartQueuedWorkAfterShutdown(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	started := make(chan struct{}, 2)
+	release := make(chan struct{})
+	var writes atomic.Int32
+	for index, address := range []string{
+		"11:22:33:44:55:61",
+		"11:22:33:44:55:62",
+		"11:22:33:44:55:63",
+		"11:22:33:44:55:64",
+	} {
+		manager.stations[address] = &internalbluetooth.BaseStation{
+			Name:              fmt.Sprintf("LHB-%d", index),
+			Address:           mustAddress(t, address),
+			Present:           true,
+			Capabilities:      internalbluetooth.Capabilities{PowerWrite: true},
+			CapabilitiesKnown: true,
+		}
+	}
+	manager.bluetoothOps.ensureCapabilities = func(*internalbluetooth.BaseStation) (internalbluetooth.Capabilities, error) {
+		started <- struct{}{}
+		<-release
+		return internalbluetooth.Capabilities{PowerWrite: true}, nil
+	}
+	manager.bluetoothOps.setPowerState = func(*internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
+		writes.Add(1)
+		return internalbluetooth.PowerControlResult{}, nil
+	}
+
+	type bulkResponse struct {
+		result BulkPowerResult
+		err    error
+	}
+	done := make(chan bulkResponse, 1)
+	go func() {
+		result, err := manager.SetAllStationsPowerDetailed("on")
+		done <- bulkResponse{result: result, err: err}
+	}()
+	<-started
+	<-started
+	manager.BeginShutdown()
+	close(release)
+
+	response := <-done
+	if response.err != nil {
+		t.Fatalf("SetAllStationsPowerDetailed() error = %v", response.err)
+	}
+	if got := writes.Load(); got != 2 {
+		t.Fatalf("power writes after shutdown = %d total, want only 2 already-started writes", got)
+	}
+	cancelled := 0
+	for _, stationResult := range response.result.Results {
+		if stationResult.Skipped && stationResult.Reason == "application is shutting down" {
+			cancelled++
+		}
+	}
+	if cancelled != 2 {
+		t.Fatalf("shutdown-skipped results = %d, want 2: %+v", cancelled, response.result.Results)
+	}
+}
+
+func TestIsRecentRejectsFutureTimestamps(t *testing.T) {
+	now := time.Now()
+	window := 45 * time.Second
+	tests := []struct {
+		name  string
+		value time.Time
+		want  bool
+	}{
+		{name: "zero", value: time.Time{}, want: false},
+		{name: "current", value: now, want: true},
+		{name: "within window", value: now.Add(-window), want: true},
+		{name: "expired", value: now.Add(-window - time.Nanosecond), want: false},
+		{name: "future", value: now.Add(time.Nanosecond), want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := isRecent(test.value, now, window); got != test.want {
+				t.Fatalf("isRecent() = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
+func TestAbsentChannelRecoveryStopsAtRetryLimit(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	address := "11:22:33:44:55:65"
+	station := &internalbluetooth.BaseStation{Address: mustAddress(t, address), Present: false}
+	manager.statusRetries[address] = statusRetry{
+		channelFailures: statusAbsentRetryLimit,
+		channelNextAt:   time.Now(),
+		kinds:           statusRetryChannel,
+	}
+
+	manager.stopExhaustedAbsentRecovery(address, station)
+	manager.statusRetryMutex.Lock()
+	_, tracked := manager.statusRetries[address]
+	manager.statusRetryMutex.Unlock()
+	if tracked {
+		t.Fatal("exhausted channel-only recovery remained scheduled for an absent station")
+	}
+}
+
 func TestBulkPowerResultsUseStableStationOrder(t *testing.T) {
 	manager := NewManager(config.NewConfig())
 	now := time.Now()

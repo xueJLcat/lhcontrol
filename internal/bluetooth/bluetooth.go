@@ -1305,13 +1305,6 @@ func writeCharacteristicValueInternal(characteristic characteristicIO, value byt
 		n, err = characteristic.WriteWithoutResponse([]byte{value})
 		if err != nil && properties.Write() && IsCapabilityUnsupported(err) {
 			n, err = characteristic.Write([]byte{value})
-		} else if err != nil && !isDefiniteWriteRejection(err) {
-			possiblySent, classified := possiblySentClassification(err)
-			if !classified {
-				err = &PossiblySentError{Err: err}
-			} else if !possiblySent {
-				// A transport-provided definite classification preserves retry safety.
-			}
 		}
 	case properties.Write():
 		n, err = characteristic.Write([]byte{value})
@@ -1319,14 +1312,19 @@ func writeCharacteristicValueInternal(characteristic characteristicIO, value byt
 		return unsupportedCapability("characteristic write", nil)
 	}
 	if err != nil {
+		if !isDefiniteWriteRejection(err) {
+			possiblySent, classified := possiblySentClassification(err)
+			if !classified {
+				err = &PossiblySentError{Err: err}
+			} else if !possiblySent {
+				// A transport-provided definite classification preserves retry safety.
+			}
+		}
 		return transportError("write characteristic", err)
 	}
 	if n != 1 {
 		shortWriteErr := fmt.Errorf("wrote %d bytes instead of 1", n)
-		if properties.WriteWithoutResponse() {
-			return transportError("write characteristic", &PossiblySentError{Err: shortWriteErr})
-		}
-		return transportError("write characteristic", shortWriteErr)
+		return transportError("write characteristic", &PossiblySentError{Err: shortWriteErr})
 	}
 	return nil
 }
