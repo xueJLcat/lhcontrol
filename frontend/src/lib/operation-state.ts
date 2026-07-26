@@ -3,7 +3,8 @@ export type GlobalOperation = 'idle' | 'scanning' | 'status-refresh' | 'bulk-pow
 export interface OperationState {
   global: GlobalOperation;
   externalScanning: boolean;
-  deviceAddresses: ReadonlySet<string>;
+  gattAddresses: ReadonlySet<string>;
+  configAddresses: ReadonlySet<string>;
 }
 
 export interface OperationLocks {
@@ -14,7 +15,7 @@ export interface OperationLocks {
 }
 
 export function deriveOperationLocks(state: OperationState): OperationLocks {
-  const anyDeviceOperation = state.deviceAddresses.size > 0;
+  const anyDeviceOperation = state.gattAddresses.size > 0 || state.configAddresses.size > 0;
   const globalBusy = state.global !== 'idle';
   const bluetoothBusy = globalBusy || state.externalScanning || anyDeviceOperation;
   return {

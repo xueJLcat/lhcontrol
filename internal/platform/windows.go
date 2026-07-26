@@ -6,6 +6,7 @@ import (
 	"log"
 	"sync"
 	"syscall"
+	"time"
 	"unsafe"
 )
 
@@ -75,16 +76,14 @@ func findWindow(title string) (syscall.Handle, error) {
 	if err != nil {
 		return 0, err
 	}
-	hwnd, _, err := procFindWindowW.Call(0, uintptr(unsafe.Pointer(titlePtr)))
-	// Check for specific error "Invalid window handle." which means not found
-	if err != nil && err.Error() != "The operation completed successfully." {
-		// Check if error indicates not found (this might vary, often it's just HWND=0 with success error)
-		if hwnd == 0 { // Best check is often just if handle is zero
-			return 0, nil // Not found, but not an API error
-		}
-		return 0, err // Actual API error
-	}
-	return syscall.Handle(hwnd), nil
+	hwnd, _, _ := procFindWindowW.Call(0, uintptr(unsafe.Pointer(titlePtr)))
+	return foundWindowHandle(hwnd), nil
+}
+
+// FindWindowW documents "not found" with a zero HWND. Its last-error value is
+// not defined for that outcome and may be rendered in the user's UI language.
+func foundWindowHandle(hwnd uintptr) syscall.Handle {
+	return syscall.Handle(hwnd)
 }
 
 // setForegroundWindow brings a window to the foreground.
@@ -112,27 +111,56 @@ func flashWindowEx(hwnd syscall.Handle, flags uint32, count uint32, timeout uint
 	return ret != 0
 }
 
+func waitForWindow(
+	appTitle string,
+	timeout time.Duration,
+	interval time.Duration,
+	finder func(string) (syscall.Handle, error),
+	sleeper func(time.Duration),
+) (syscall.Handle, error) {
+	attempts := int(timeout/interval) + 1
+	for attempt := 0; attempt < attempts; attempt++ {
+		hwnd, err := finder(appTitle)
+		if err != nil || hwnd != 0 {
+			return hwnd, err
+		}
+		if attempt+1 < attempts {
+			sleeper(interval)
+		}
+	}
+	return 0, nil
+}
+
+func activateWindow(
+	hwnd syscall.Handle,
+	show func(syscall.Handle, int) bool,
+	foreground func(syscall.Handle) bool,
+	flash func(syscall.Handle, uint32, uint32, uint32) bool,
+) bool {
+	show(hwnd, SW_RESTORE)
+	if foreground(hwnd) {
+		return true
+	}
+	flash(hwnd, FLASHW_ALL|FLASHW_TIMERNOFG, 0, 0)
+	return false
+}
+
 // BringWindowToFront finds the existing window, tries to set foreground, and flashes it (Windows specific)
 func BringWindowToFront(appTitle string) bool {
-	hwnd, err := findWindow(appTitle)
+	hwnd, err := waitForWindow(appTitle, 5*time.Second, 250*time.Millisecond, findWindow, time.Sleep)
 	if err != nil {
 		log.Printf("Error finding window: %v", err)
 		return false
 	}
 	if hwnd == 0 {
-		log.Println("Existing window not found.")
+		log.Println("Existing instance owns the mutex, but its window did not appear within 5 seconds.")
 		return false
 	}
 
-	// Try restoring and setting foreground first
-	showWindow(hwnd, SW_RESTORE)    // Restore if minimized
-	if !setForegroundWindow(hwnd) { // Attempt to set foreground
-		// If SetForegroundWindow fails, flash the window
+	if !activateWindow(hwnd, showWindow, setForegroundWindow, flashWindowEx) {
 		log.Println("SetForegroundWindow failed (maybe window is not allowed to take focus?). Flashing instead.")
-		flashWindowEx(hwnd, FLASHW_ALL|FLASHW_TIMERNOFG, 0, 0) // Flash indefinitely until focus
 	} else {
 		log.Println("SetForegroundWindow succeeded.")
-		// Optional: Maybe stop flashing if it was started? But SetForegroundWindow should take precedence.
 	}
 	return true
 }

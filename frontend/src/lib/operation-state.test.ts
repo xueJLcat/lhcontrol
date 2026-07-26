@@ -1,11 +1,17 @@
 import { describe, expect, it } from 'vitest';
 import { deriveOperationLocks, type GlobalOperation } from './operation-state';
 
-function locks(global: GlobalOperation, externalScanning = false, devices: string[] = []) {
+function locks(
+  global: GlobalOperation,
+  externalScanning = false,
+  gattDevices: string[] = [],
+  configDevices: string[] = []
+) {
   return deriveOperationLocks({
     global,
     externalScanning,
-    deviceAddresses: new Set(devices)
+    gattAddresses: new Set(gattDevices),
+    configAddresses: new Set(configDevices)
   });
 }
 
@@ -32,6 +38,15 @@ describe('deriveOperationLocks', () => {
 
   it('locks scan and bulk while an individual device is active', () => {
     expect(locks('idle', false, ['AA'])).toEqual({
+      scanLocked: true,
+      bulkLocked: true,
+      stationLocked: false,
+      anyDeviceOperation: true
+    });
+  });
+
+  it('locks scan and bulk while a configuration write is active without locking GATT entry points', () => {
+    expect(locks('idle', false, [], ['AA'])).toEqual({
       scanLocked: true,
       bulkLocked: true,
       stationLocked: false,

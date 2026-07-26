@@ -11,8 +11,10 @@
   export let renaming: boolean;
   export let feedback: PowerFeedback | undefined = undefined;
   export let pendingTarget: PowerTarget | undefined = undefined;
-  export let busy: boolean;
-  export let locked: boolean;
+  export let gattBusy: boolean;
+  export let configBusy: boolean;
+  export let gattLocked: boolean;
+  export let renameLocked: boolean;
   export let onPower: (station: StationInfo, state: PowerTarget) => void;
   export let onOpenDetails: (station: StationInfo) => void;
   export let onStartRename: (station: StationInfo) => void;
@@ -70,7 +72,13 @@
     <div class="card-top">
       <span class="status-dot dot-{stateLabel(station)}" class:breathe={station.powerFresh && station.powerState === 3} aria-hidden="true"></span>
       <h3 title={station.name}>{station.name}</h3>
-      <button class="icon-btn rename-btn" title="Rename" aria-label={`Rename ${station.name}`} on:click|stopPropagation={() => onStartRename(station)}><SquarePen size={13} /></button>
+      <button
+        class="icon-btn rename-btn"
+        title="Rename"
+        aria-label={`Rename ${station.name}`}
+        on:click|stopPropagation={() => onStartRename(station)}
+        disabled={gattBusy || configBusy || renameLocked}
+      ><SquarePen size={13} /></button>
       <span class="spacer"></span>
       {#if station.channelConflict}<TriangleAlert size={13} class="conflict-icon" />{/if}
       <span class="channel-chip mono" class:warn={station.channelConflict}>{channelLabel(station.channel)}</span>
@@ -98,27 +106,30 @@
           class:active={isCurrentPowerState(station, 'on')}
           class:pending={pendingTarget === 'on'}
           aria-pressed={isCurrentPowerState(station, 'on')}
+          aria-label={`Turn ${station.name} on`}
           title="Turn lasers and motor on"
           on:click|stopPropagation={() => onPower(station, 'on')}
-          disabled={!canSetPower(station, 'on') || busy || locked}
+          disabled={!canSetPower(station, 'on') || gattBusy || configBusy || gattLocked}
         ><Zap size={12} /> On</button>
         <button
           class="seg-standby"
           class:active={isCurrentPowerState(station, 'standby')}
           class:pending={pendingTarget === 'standby'}
           aria-pressed={isCurrentPowerState(station, 'standby')}
+          aria-label={`Set ${station.name} to standby`}
           title="Lasers off, motor remains powered"
           on:click|stopPropagation={() => onPower(station, 'standby')}
-          disabled={!canSetPower(station, 'standby') || busy || locked}
+          disabled={!canSetPower(station, 'standby') || gattBusy || configBusy || gattLocked}
         ><Pause size={12} /> Standby</button>
         <button
           class="seg-sleep"
           class:active={isCurrentPowerState(station, 'sleep')}
           class:pending={pendingTarget === 'sleep'}
           aria-pressed={isCurrentPowerState(station, 'sleep')}
+          aria-label={`Put ${station.name} to sleep`}
           title="Turn lasers and motor off"
           on:click|stopPropagation={() => onPower(station, 'sleep')}
-          disabled={!canSetPower(station, 'sleep') || busy || locked}
+          disabled={!canSetPower(station, 'sleep') || gattBusy || configBusy || gattLocked}
         ><Moon size={12} /> Sleep</button>
       </div>
       <button class="icon-btn details" title="Details" aria-label={`Details for ${station.name}`} on:click|stopPropagation={openDetails}><ChevronRight size={17} /></button>

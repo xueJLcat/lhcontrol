@@ -565,8 +565,13 @@ func ReadPowerState(station *BaseStation) error {
 	}
 	var powerReadErr error
 	var channelReadErr error
-	if station.Capabilities.PowerRead && station.characteristic != nil {
-		powerReadErr = readPowerStateInternal(station)
+	if station.Capabilities.PowerRead {
+		if station.characteristic == nil {
+			powerReadErr = fmt.Errorf("power characteristic is unavailable for %s", station.Name)
+			station.LastPowerReadAt = time.Time{}
+		} else {
+			powerReadErr = readPowerStateInternal(station)
+		}
 	} else {
 		station.setPowerStateInternal(PowerStateUnknown, RawPowerStateUnknown)
 	}
@@ -1199,6 +1204,7 @@ func Identify(station *BaseStation) error {
 			time.Sleep(250 * time.Millisecond)
 		}
 	}
+	disconnectInternal(station)
 	station.LastError = lastErr.Error()
 	return fmt.Errorf("failed to identify %s after retry: %w", station.Name, lastErr)
 }
@@ -1228,6 +1234,7 @@ func SetChannel(station *BaseStation, channel int) (ChannelWriteResult, error) {
 	}
 	if err := readChannelInternal(station); err != nil {
 		station.LastError = err.Error()
+		disconnectInternal(station)
 		return result, fmt.Errorf("failed to read the existing channel for %s: %w", station.Name, err)
 	}
 	result.PreviousChannel = station.Channel

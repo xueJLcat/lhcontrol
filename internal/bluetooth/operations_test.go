@@ -215,6 +215,32 @@ func TestIdentifyWritesOne(t *testing.T) {
 	}
 }
 
+func TestIdentifyFinalWriteFailureInvalidatesConnection(t *testing.T) {
+	identify := &fakeCharacteristic{writeErr: errors.New("connection lost")}
+	station := connectedFakeStation(&fakeCharacteristic{}, nil, identify, Capabilities{Identify: true})
+
+	if err := Identify(station); err == nil {
+		t.Fatal("Identify() unexpectedly succeeded")
+	}
+	snapshot := station.Snapshot()
+	if snapshot.Connected || station.device != nil || station.identifyCharacteristic != nil {
+		t.Fatalf("failed identify retained stale connection state: %+v", snapshot)
+	}
+}
+
+func TestStatusReadReportsMissingDeclaredPowerCharacteristic(t *testing.T) {
+	station := connectedFakeStation(nil, nil, nil, Capabilities{PowerRead: true})
+
+	err := ReadPowerState(station)
+	var readErr *StatusReadError
+	if !errors.As(err, &readErr) || readErr.Power == nil {
+		t.Fatalf("ReadPowerState() error = %#v, want power StatusReadError", err)
+	}
+	if station.LastError == "" || !station.LastPowerReadAt.IsZero() {
+		t.Fatalf("missing characteristic state was not recorded: %+v", station.Snapshot())
+	}
+}
+
 func TestStatusReadClearsChannelWhenCapabilityIsUnavailable(t *testing.T) {
 	station := connectedFakeStation(&fakeCharacteristic{}, nil, nil, Capabilities{})
 	station.Channel = 7
@@ -298,6 +324,9 @@ func TestSetChannelRequiresInitialRead(t *testing.T) {
 	if len(mode.writes) != 0 {
 		t.Fatalf("channel was written despite initial read failure: %v", mode.writes)
 	}
+	if station.Snapshot().Connected {
+		t.Fatal("initial channel transport failure retained the connection")
+	}
 }
 
 func TestSetChannelWriteFailureRetainsPreviousChannel(t *testing.T) {
@@ -340,6 +369,9 @@ func TestSetChannelReportsMismatchedFinalReadback(t *testing.T) {
 	}
 	if result.PreviousChannel != 3 || result.Channel != 3 {
 		t.Fatalf("result = %+v, want previous and actual channel 3", result)
+	}
+	if !station.Snapshot().Connected {
+		t.Fatal("confirmed mismatched readback discarded a working connection")
 	}
 }
 

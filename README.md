@@ -86,7 +86,7 @@ Linux or macOS.
 
 ### Windows hardware verification
 
-With the application running, execute `.\scripts\hardware-smoke.ps1` to run ten scan cycles and save a report under `build\verification`. Add `-ExercisePower` only when it is safe to test the On, Standby, and Sleep states on every known base station.
+With the application running, execute `.\scripts\hardware-smoke.ps1` to run ten scan cycles, verify stable station ordering, and save a timed report under `build\verification`. Use `-MinimumStations`, `-ExpectedAddresses`, and `-ScanCycles` to define the hardware acceptance set; station assertions apply to devices actually discovered in every scan, not historical entries. Add `-ExercisePower` only when it is safe to test On, Standby, and Sleep on every known base station; the script requires confirmed initial states, validates each readback, restores them in a `finally` block, and exits unsuccessfully if restoration fails. Run `.\scripts\hardware-smoke.ps1 -SelfTest` to validate the reporting and assertion logic without Bluetooth hardware.
 *   **Diagnostic log:** `%APPDATA%\lhcontrol\lhcontrol.log` is capped at 5 MB. One previous segment is retained as `lhcontrol.log.1`.
 
 ## HTTP API (for External Integration)

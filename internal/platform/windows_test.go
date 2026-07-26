@@ -4,6 +4,7 @@ package platform
 
 import (
 	"fmt"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -23,5 +24,77 @@ func TestAcquireSingleInstance(t *testing.T) {
 	defer releaseSecond()
 	if !alreadyRunning {
 		t.Fatal("second acquire should report an existing instance")
+	}
+}
+
+func TestFoundWindowHandleUsesOnlyReturnedHandle(t *testing.T) {
+	if got := foundWindowHandle(0); got != 0 {
+		t.Fatalf("zero HWND = %v, want not found", got)
+	}
+	const hwnd = uintptr(0x1234)
+	if got := foundWindowHandle(hwnd); uintptr(got) != hwnd {
+		t.Fatalf("HWND = %#x, want %#x", uintptr(got), hwnd)
+	}
+}
+
+func TestWaitForWindowRetriesUntilWindowAppears(t *testing.T) {
+	var attempts int
+	var sleeps int
+	hwnd, err := waitForWindow("Lighthouse Control", time.Second, 250*time.Millisecond,
+		func(string) (syscall.Handle, error) {
+			attempts++
+			if attempts == 3 {
+				return syscall.Handle(0x1234), nil
+			}
+			return 0, nil
+		},
+		func(delay time.Duration) {
+			if delay != 250*time.Millisecond {
+				t.Fatalf("sleep delay = %v", delay)
+			}
+			sleeps++
+		},
+	)
+	if err != nil || hwnd != syscall.Handle(0x1234) {
+		t.Fatalf("waitForWindow = (%v, %v)", hwnd, err)
+	}
+	if attempts != 3 || sleeps != 2 {
+		t.Fatalf("attempts = %d, sleeps = %d", attempts, sleeps)
+	}
+}
+
+func TestWaitForWindowTimesOutAfterAllAttempts(t *testing.T) {
+	var attempts int
+	hwnd, err := waitForWindow("Lighthouse Control", time.Second, 250*time.Millisecond,
+		func(string) (syscall.Handle, error) {
+			attempts++
+			return 0, nil
+		},
+		func(time.Duration) {},
+	)
+	if err != nil || hwnd != 0 {
+		t.Fatalf("waitForWindow = (%v, %v)", hwnd, err)
+	}
+	if attempts != 5 {
+		t.Fatalf("attempts = %d, want 5", attempts)
+	}
+}
+
+func TestActivateWindowFlashesWhenForegroundFails(t *testing.T) {
+	var restored bool
+	var flashed bool
+	foregrounded := activateWindow(syscall.Handle(0x1234),
+		func(_ syscall.Handle, command int) bool {
+			restored = command == SW_RESTORE
+			return true
+		},
+		func(syscall.Handle) bool { return false },
+		func(_ syscall.Handle, flags uint32, count uint32, timeout uint32) bool {
+			flashed = flags == FLASHW_ALL|FLASHW_TIMERNOFG && count == 0 && timeout == 0
+			return true
+		},
+	)
+	if foregrounded || !restored || !flashed {
+		t.Fatalf("foregrounded=%v restored=%v flashed=%v", foregrounded, restored, flashed)
 	}
 }

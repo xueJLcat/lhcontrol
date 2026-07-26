@@ -35,7 +35,8 @@
 
   let stations: StationInfo[] = [];
   let statusMessage = 'Ready to scan.';
-  let deviceOperations = new Set<string>();
+  let gattOperations = new Set<string>();
+  let configOperations = new Set<string>();
   let powerTargetByAddress: Record<string, PowerTarget | undefined> = {};
   let powerFeedbackByAddress: Record<string, PowerFeedback | undefined> = {};
   let globalOperation: GlobalOperation = 'idle';
@@ -53,6 +54,7 @@
   let apiError = '';
   let externalScanning = false;
   const listRevisions = new RevisionGate();
+  const apiRevisions = new RevisionGate();
   let disposed = false;
 
   $: sortedStations = [...stations].sort((a, b) => {
@@ -75,7 +77,8 @@
   $: operationLocks = deriveOperationLocks({
     global: globalOperation,
     externalScanning,
-    deviceAddresses: deviceOperations
+    gattAddresses: gattOperations,
+    configAddresses: configOperations
   });
   $: isLoading = globalOperation === 'scanning';
   $: isBulkLoading = globalOperation === 'bulk-power';
@@ -84,16 +87,28 @@
   $: scanLocked = operationLocks.scanLocked;
   $: bulkLocked = operationLocks.bulkLocked;
   $: stationLocked = operationLocks.stationLocked;
+  $: gattCapacityReached = gattOperations.size >= 2;
 
   function stationBusy(address: string): boolean {
-    return deviceOperations.has(address);
+    return gattOperations.has(address) || configOperations.has(address);
   }
 
-  function setDeviceBusy(address: string, busy: boolean) {
-    const next = new Set(deviceOperations);
+  function setGattBusy(address: string, busy: boolean) {
+    const next = new Set(gattOperations);
     if (busy) next.add(address);
     else next.delete(address);
-    deviceOperations = next;
+    gattOperations = next;
+  }
+
+  function setConfigBusy(address: string, busy: boolean) {
+    const next = new Set(configOperations);
+    if (busy) next.add(address);
+    else next.delete(address);
+    configOperations = next;
+  }
+
+  function gattLockedFor(address: string): boolean {
+    return stationLocked || (gattCapacityReached && !gattOperations.has(address));
   }
 
   function applyStationList(updated: StationInfo[] | null | undefined, revision: number): boolean {
@@ -108,6 +123,7 @@
     cancelExternalScanStartedListener = EventsOn('external-scan-started', () => {
       if (disposed) return;
       listRevisions.next();
+      cancelRename();
       externalScanning = true;
       statusMessage = 'External scan in progress...';
     });
@@ -141,12 +157,13 @@
   });
 
   function refreshAPIStatus() {
+    const revision = apiRevisions.next();
     GetAPIStatus().then((status) => {
-      if (disposed) return;
+      if (disposed || !apiRevisions.isCurrent(revision)) return;
       apiRunning = status.running;
       apiError = status.error;
     }).catch((error) => {
-      if (disposed) return;
+      if (disposed || !apiRevisions.isCurrent(revision)) return;
       apiRunning = false;
       apiError = String(error);
     });
@@ -155,6 +172,7 @@
   onDestroy(() => {
     disposed = true;
     listRevisions.dispose();
+    apiRevisions.dispose();
     if (statusCheckInterval) clearInterval(statusCheckInterval);
     if (apiStatusInterval) clearInterval(apiStatusInterval);
     cancelExternalScanListener?.();
@@ -176,7 +194,8 @@
     } catch (error) {
       if (disposed || !listRevisions.isCurrent(revision)) return;
       console.error('Periodic status check failed:', error);
-      applyStationList(await GetCurrentStationInfo().catch(() => stations), revision);
+      const fallback = await GetCurrentStationInfo().catch(() => stations);
+      if (!applyStationList(fallback, revision)) return;
       statusMessage = `Status refresh incomplete: ${error}`;
     } finally {
       if (!disposed && globalOperation === 'status-refresh') globalOperation = 'idle';
@@ -187,7 +206,8 @@
     if (isLoading || scanLocked) return;
     cancelRename();
     globalOperation = 'scanning';
-    deviceOperations = new Set();
+    gattOperations = new Set();
+    configOperations = new Set();
     powerTargetByAddress = {};
     powerFeedbackByAddress = {};
     const revision = listRevisions.next();
@@ -210,20 +230,20 @@
     }
   }
 
-  async function fetchLatestList() {
-    const revision = listRevisions.next();
+  async function fetchLatestList(revision = listRevisions.next()): Promise<boolean> {
     try {
-      applyStationList(await GetCurrentStationInfo(), revision);
+      return applyStationList(await GetCurrentStationInfo(), revision);
     } catch (error) {
-      if (disposed || !listRevisions.isCurrent(revision)) return;
+      if (disposed || !listRevisions.isCurrent(revision)) return false;
       statusMessage = `Error refreshing list: ${error}`;
+      return false;
     }
   }
 
   async function setPower(station: StationInfo, state: PowerTarget) {
-    if (!canSetPower(station, state) || stationBusy(station.address) || stationLocked) return;
+    if (!canSetPower(station, state) || stationBusy(station.address) || gattLockedFor(station.address)) return;
     const targetLabel = powerTargetLabel(state);
-    setDeviceBusy(station.address, true);
+    setGattBusy(station.address, true);
     powerTargetByAddress = { ...powerTargetByAddress, [station.address]: state };
     powerFeedbackByAddress = {
       ...powerFeedbackByAddress,
@@ -252,8 +272,7 @@
     } catch (error) {
       if (disposed) return;
       const errorText = String(error);
-      await fetchLatestList();
-      if (disposed) return;
+      if (!await fetchLatestList()) return;
       const actual = stations.find((current) => current.address === station.address);
       const actualState = actual ? stateLabel(actual) : 'unknown';
       powerFeedbackByAddress = {
@@ -265,7 +284,7 @@
     } finally {
       if (!disposed) {
         powerTargetByAddress = { ...powerTargetByAddress, [station.address]: undefined };
-        setDeviceBusy(station.address, false);
+        setGattBusy(station.address, false);
       }
     }
   }
@@ -294,12 +313,13 @@
     try {
       const result = await SetAllStationsPowerDetailed(state);
       if (disposed) return;
-      await fetchLatestList();
-      if (disposed) return;
+      if (!await fetchLatestList()) return;
       const feedback = { ...powerFeedbackByAddress };
       for (const item of result.results) {
         feedback[item.address] = item.skipped
-          ? { kind: 'warning', text: `Skipped · ${item.reason || 'not actionable'}` }
+          ? item.success && item.confirmed
+            ? { kind: 'success', text: `Already ${targetLabel}` }
+            : { kind: 'warning', text: `Skipped · ${item.reason || 'not actionable'}` }
           : item.success && item.confirmed
             ? { kind: 'success', text: `${targetLabel} confirmed` }
             : item.success && item.commandSent
@@ -317,8 +337,7 @@
       if (failed.length) pushToast(`Bulk ${targetLabel}: ${failed.length} station(s) failed. See status bar.`);
     } catch (error) {
       if (disposed) return;
-      await fetchLatestList();
-      if (disposed) return;
+      if (!await fetchLatestList()) return;
       statusMessage = `Bulk ${targetLabel} operation partially failed: ${error}`;
       pushToast(`Bulk ${targetLabel} operation partially failed: ${error}`);
     } finally {
@@ -330,7 +349,7 @@
   }
 
   function startRename(station: StationInfo) {
-    if (deviceOperations.has(station.address)) return;
+    if (stationBusy(station.address) || stationLocked) return;
     editingAddress = station.address;
   }
 
@@ -339,60 +358,64 @@
   }
 
   async function saveRename(station: StationInfo, name: string) {
+    if (stationBusy(station.address) || stationLocked) {
+      cancelRename();
+      return;
+    }
     cancelRename();
     if (name === station.name) return;
+    setConfigBusy(station.address, true);
     try {
       await RenameStationByAddress(station.address, name);
       if (disposed) return;
-      await fetchLatestList();
-      if (disposed) return;
+      if (!await fetchLatestList()) return;
       statusMessage = name ? `Renamed to ${name}.` : `Reset name for ${station.originalName}.`;
     } catch (error) {
       if (disposed) return;
       statusMessage = `Error renaming: ${error}`;
       pushToast(`Error renaming: ${error}`);
+    } finally {
+      if (!disposed) setConfigBusy(station.address, false);
     }
   }
 
   async function identify(station: StationInfo) {
-    if (stationBusy(station.address) || stationLocked) return;
-    setDeviceBusy(station.address, true);
+    if (stationBusy(station.address) || gattLockedFor(station.address)) return;
+    setGattBusy(station.address, true);
     try {
       await IdentifyStation(station.address);
       if (disposed) return;
-      await fetchLatestList();
-      if (disposed) return;
+      if (!await fetchLatestList()) return;
       statusMessage = `Identify signal sent to ${station.name}.`;
     } catch (error) {
       if (disposed) return;
-      await fetchLatestList();
-      if (disposed) return;
+      if (!await fetchLatestList()) return;
       statusMessage = `Identify failed for ${station.name}: ${error}`;
       pushToast(`Identify failed for ${station.name}: ${error}`);
     } finally {
-      if (!disposed) setDeviceBusy(station.address, false);
+      if (!disposed) setGattBusy(station.address, false);
     }
   }
 
   async function refreshCapabilities(station: StationInfo) {
-    if (stationBusy(station.address) || stationLocked) return;
-    setDeviceBusy(station.address, true);
+    if (stationBusy(station.address) || gattLockedFor(station.address)) return;
+    setGattBusy(station.address, true);
     try {
       const updated = await RefreshStationCapabilities(station.address);
       if (disposed) return;
-      listRevisions.next();
+      const revision = listRevisions.next();
+      if (!listRevisions.isCurrent(revision)) return;
       stations = stations.map((current) => current.address === station.address ? updated : current);
       statusMessage = updated.lastError
         ? `Capabilities refreshed for ${station.name}, but some values are unavailable: ${updated.lastError}`
         : `Capabilities refreshed for ${station.name}.`;
     } catch (error) {
       if (disposed) return;
-      await fetchLatestList();
-      if (disposed) return;
+      if (!await fetchLatestList()) return;
       statusMessage = `Capability refresh failed for ${station.name}: ${error}`;
       pushToast(`Capability refresh failed for ${station.name}: ${error}`);
     } finally {
-      if (!disposed) setDeviceBusy(station.address, false);
+      if (!disposed) setGattBusy(station.address, false);
     }
   }
 
@@ -403,26 +426,24 @@
 
   async function saveChannel(targetChannel: number, allowUnknownConflictRisk: boolean) {
     if (!selectedStation || !selectedStation.scanFresh ||
-      stationBusy(selectedStation.address) || stationLocked ||
+      stationBusy(selectedStation.address) || gattLockedFor(selectedStation.address) ||
       (selectedStation.channel > 0 && selectedStation.channel === targetChannel)) return;
     const address = selectedStation.address;
-    setDeviceBusy(address, true);
+    setGattBusy(address, true);
     channelError = '';
     try {
       const result = await SetStationChannel(address, targetChannel, allowUnknownConflictRisk);
       if (disposed) return;
-      await fetchLatestList();
-      if (disposed) return;
+      if (!await fetchLatestList()) return;
       channelEditorOpen = false;
       statusMessage = `Channel changed from ${result.previousChannel || 'unknown'} to ${result.channel}. ${result.warnings.join(' ')}`;
     } catch (error) {
       if (disposed) return;
-      await fetchLatestList();
-      if (disposed) return;
+      if (!await fetchLatestList()) return;
       const actual = stations.find((station) => station.address === address)?.channel ?? 0;
       channelError = `${String(error)} Actual readback: ${actual || 'unknown'}.`;
     } finally {
-      if (!disposed) setDeviceBusy(address, false);
+      if (!disposed) setGattBusy(address, false);
     }
   }
 
@@ -471,8 +492,10 @@
               renaming={editingAddress === station.address}
               feedback={powerFeedbackByAddress[station.address]}
               pendingTarget={powerTargetByAddress[station.address]}
-              busy={stationBusy(station.address)}
-              locked={stationLocked}
+              gattBusy={gattOperations.has(station.address)}
+              configBusy={configOperations.has(station.address)}
+              gattLocked={stationLocked || (gattOperations.size >= 2 && !gattOperations.has(station.address))}
+              renameLocked={stationLocked}
               onPower={setPower}
               onOpenDetails={(s) => selectedAddress = s.address}
               onStartRename={startRename}
@@ -504,7 +527,7 @@
   <DetailsDrawer
     station={selectedStation}
     busy={stationBusy(selectedStation.address)}
-    locked={stationLocked}
+    locked={stationLocked || (gattOperations.size >= 2 && !gattOperations.has(selectedStation.address))}
     onClose={() => selectedAddress = null}
     onRefresh={refreshCapabilities}
     onIdentify={identify}
@@ -525,7 +548,7 @@
       {hasUnknownVisibleChannel}
       error={channelError}
       busy={stationBusy(selectedStation.address)}
-      locked={stationLocked}
+      locked={stationLocked || (gattOperations.size >= 2 && !gattOperations.has(selectedStation.address))}
       onClose={() => channelEditorOpen = false}
       onSave={saveChannel}
       onIdentify={identify}

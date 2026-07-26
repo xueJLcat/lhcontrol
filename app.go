@@ -369,7 +369,7 @@ func (a *App) RenameStationByAddress(address string, newName string) error {
 }
 
 func (a *App) SaveConfig() error {
-	return a.config.Save()
+	return a.stationManager.SaveConfig()
 }
 
 // shutdown is called when the app terminates.

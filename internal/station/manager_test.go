@@ -2,6 +2,8 @@ package station
 
 import (
 	"errors"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -72,6 +74,216 @@ func TestShutdownWaitsForActiveOperation(t *testing.T) {
 	case <-shutdownDone:
 	case <-time.After(time.Second):
 		t.Fatal("Shutdown did not finish after the active operation ended")
+	}
+}
+
+func TestShutdownWaitsForSharedConfigurationOperation(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	if err := manager.beginSharedOperation(); err != nil {
+		t.Fatalf("beginSharedOperation() error = %v", err)
+	}
+	shutdownDone := make(chan struct{})
+	go func() {
+		manager.Shutdown()
+		close(shutdownDone)
+	}()
+	select {
+	case <-shutdownDone:
+		t.Fatal("Shutdown returned while a shared operation was active")
+	case <-time.After(25 * time.Millisecond):
+	}
+	manager.endSharedOperation()
+	select {
+	case <-shutdownDone:
+	case <-time.After(time.Second):
+		t.Fatal("Shutdown did not finish after shared operation ended")
+	}
+	if err := manager.beginSharedOperation(); !errors.Is(err, ErrShuttingDown) {
+		t.Fatalf("beginSharedOperation() after shutdown = %v, want ErrShuttingDown", err)
+	}
+}
+
+func TestShutdownWaitsForInitializationAndPreventsLateScan(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	manager.initializeErr = errors.New("radio unavailable")
+	manager.nextInitializeAt = time.Now().Add(-time.Second)
+	initializeStarted := make(chan struct{})
+	initializeRelease := make(chan struct{})
+	manager.initializeBluetooth = func() error {
+		close(initializeStarted)
+		<-initializeRelease
+		return nil
+	}
+	var scanCalls atomic.Int32
+	manager.bluetoothOps.scanForDuration = func(time.Duration) ([]internalbluetooth.DiscoveredStation, error) {
+		scanCalls.Add(1)
+		return nil, nil
+	}
+
+	scanDone := make(chan error, 1)
+	go func() {
+		_, err := manager.ScanAndFetchStations()
+		scanDone <- err
+	}()
+	<-initializeStarted
+	shutdownDone := make(chan struct{})
+	go func() {
+		manager.Shutdown()
+		close(shutdownDone)
+	}()
+	select {
+	case <-shutdownDone:
+		t.Fatal("Shutdown returned while adapter initialization was active")
+	case <-time.After(25 * time.Millisecond):
+	}
+	close(initializeRelease)
+	if err := <-scanDone; !errors.Is(err, ErrShuttingDown) {
+		t.Fatalf("scan error = %v, want ErrShuttingDown", err)
+	}
+	select {
+	case <-shutdownDone:
+	case <-time.After(time.Second):
+		t.Fatal("Shutdown did not finish after initialization stopped")
+	}
+	if scanCalls.Load() != 0 {
+		t.Fatalf("scan started %d time(s) after shutdown began", scanCalls.Load())
+	}
+}
+
+func TestAsyncScanEventsCannotOvertakePreviousCompletion(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	firstScanRelease := make(chan struct{})
+	firstCompletionEntered := make(chan struct{})
+	firstCompletionRelease := make(chan struct{})
+	var scanCalls atomic.Int32
+	manager.bluetoothOps.scanForDuration = func(time.Duration) ([]internalbluetooth.DiscoveredStation, error) {
+		if scanCalls.Add(1) == 1 {
+			<-firstScanRelease
+		}
+		return nil, nil
+	}
+
+	var eventsMutex sync.Mutex
+	events := make([]string, 0, 4)
+	callbacks := ScanCallbacks{
+		Started: func() {
+			eventsMutex.Lock()
+			events = append(events, "started")
+			eventsMutex.Unlock()
+		},
+		Completed: func([]StationInfo) {
+			eventsMutex.Lock()
+			events = append(events, "completed")
+			completionNumber := 0
+			for _, event := range events {
+				if event == "completed" {
+					completionNumber++
+				}
+			}
+			eventsMutex.Unlock()
+			if completionNumber == 1 {
+				close(firstCompletionEntered)
+				<-firstCompletionRelease
+			}
+		},
+	}
+	if err := manager.StartScan(callbacks); err != nil {
+		t.Fatalf("first StartScan() error = %v", err)
+	}
+	close(firstScanRelease)
+	<-firstCompletionEntered
+	if status := manager.GetScanStatus(); status.State != "completed" {
+		t.Fatalf("status while completion callback is running = %+v", status)
+	}
+	if manager.IsBusy() {
+		t.Fatal("terminal scan status was published before releasing the operation lock")
+	}
+
+	secondReturned := make(chan error, 1)
+	go func() { secondReturned <- manager.StartScan(callbacks) }()
+	select {
+	case err := <-secondReturned:
+		t.Fatalf("second StartScan returned before prior completion callback ended: %v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+	close(firstCompletionRelease)
+	if err := <-secondReturned; err != nil {
+		t.Fatalf("second StartScan() error = %v", err)
+	}
+	manager.asyncScanWg.Wait()
+
+	eventsMutex.Lock()
+	defer eventsMutex.Unlock()
+	want := []string{"started", "completed", "started", "completed"}
+	if len(events) != len(want) {
+		t.Fatalf("events = %v, want %v", events, want)
+	}
+	for index := range want {
+		if events[index] != want[index] {
+			t.Fatalf("events = %v, want %v", events, want)
+		}
+	}
+}
+
+func TestScanInitialReadClassifiesPartialFailures(t *testing.T) {
+	for _, test := range []struct {
+		name            string
+		readErr         error
+		wantDisconnect  bool
+		wantRetry       bool
+		wantUnavailable bool
+	}{
+		{
+			name:    "channel only",
+			readErr: &internalbluetooth.InitialReadError{Channel: errors.New("channel unavailable")},
+		},
+		{
+			name:           "power",
+			readErr:        &internalbluetooth.InitialReadError{Power: errors.New("power unavailable")},
+			wantDisconnect: true,
+			wantRetry:      true,
+		},
+		{
+			name:            "adapter",
+			readErr:         tinybluetooth.ErrRadioNotAvailable,
+			wantDisconnect:  true,
+			wantRetry:       true,
+			wantUnavailable: true,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			manager := NewManager(config.NewConfig())
+			address := "11:22:33:44:55:66"
+			manager.bluetoothOps.scanForDuration = func(time.Duration) ([]internalbluetooth.DiscoveredStation, error) {
+				return []internalbluetooth.DiscoveredStation{{
+					Name: "LHB-TEST", Address: mustAddress(t, address),
+				}}, nil
+			}
+			manager.bluetoothOps.fetchInitialPowerState = func(*internalbluetooth.BaseStation) error {
+				return test.readErr
+			}
+			disconnects := 0
+			manager.bluetoothOps.disconnectStation = func(*internalbluetooth.BaseStation) { disconnects++ }
+
+			if _, err := manager.ScanAndFetchStations(); err != nil {
+				t.Fatalf("ScanAndFetchStations() error = %v", err)
+			}
+			if got := disconnects > 0; got != test.wantDisconnect {
+				t.Fatalf("disconnect = %v, want %v", got, test.wantDisconnect)
+			}
+			manager.statusRetryMutex.Lock()
+			_, retryTracked := manager.statusRetries[address]
+			manager.statusRetryMutex.Unlock()
+			if retryTracked != test.wantRetry {
+				t.Fatalf("retry tracked = %v, want %v", retryTracked, test.wantRetry)
+			}
+			manager.initializeMutex.Lock()
+			unavailable := manager.initializeErr != nil
+			manager.initializeMutex.Unlock()
+			if unavailable != test.wantUnavailable {
+				t.Fatalf("adapter unavailable = %v, want %v", unavailable, test.wantUnavailable)
+			}
+		})
 	}
 }
 
@@ -423,6 +635,51 @@ func TestBulkPowerResultsUseStableStationOrder(t *testing.T) {
 	}
 }
 
+func TestBulkPowerReportsConfirmedUnsupportedCapabilitiesAsSkipped(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	address := "11:22:33:44:55:66"
+	manager.stations[address] = &internalbluetooth.BaseStation{
+		Name: "LHB-UNSUPPORTED", Address: mustAddress(t, address), Present: true,
+	}
+	manager.bluetoothOps.ensureCapabilities = func(*internalbluetooth.BaseStation) (internalbluetooth.Capabilities, error) {
+		return internalbluetooth.Capabilities{}, nil
+	}
+	manager.bluetoothOps.setPowerState = func(*internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
+		t.Fatal("power write was attempted for an unsupported station")
+		return internalbluetooth.PowerControlResult{}, nil
+	}
+
+	result, err := manager.SetAllStationsPowerDetailed("on")
+	if err != nil {
+		t.Fatalf("SetAllStationsPowerDetailed() error = %v", err)
+	}
+	if len(result.Results) != 1 || !result.Results[0].Skipped ||
+		result.Results[0].Reason != "power control is not supported" ||
+		result.Results[0].Success || result.Results[0].CommandSent {
+		t.Fatalf("unsupported result = %+v", result.Results)
+	}
+}
+
+func TestBulkPowerKeepsCapabilityConnectionFailuresAsFailed(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	address := "11:22:33:44:55:66"
+	manager.stations[address] = &internalbluetooth.BaseStation{
+		Name: "LHB-FAILED", Address: mustAddress(t, address), Present: true,
+	}
+	manager.bluetoothOps.ensureCapabilities = func(*internalbluetooth.BaseStation) (internalbluetooth.Capabilities, error) {
+		return internalbluetooth.Capabilities{}, errors.New("connection failed")
+	}
+
+	result, err := manager.SetAllStationsPowerDetailed("on")
+	if err != nil {
+		t.Fatalf("SetAllStationsPowerDetailed() error = %v", err)
+	}
+	if len(result.Results) != 1 || result.Results[0].Skipped ||
+		result.Results[0].Success || result.Results[0].Error == "" {
+		t.Fatalf("connection failure result = %+v", result.Results)
+	}
+}
+
 func TestScanStatusLifecycleAndDefensiveCopy(t *testing.T) {
 	manager := NewManager(config.NewConfig())
 	manager.markScanStarted()
@@ -509,4 +766,88 @@ func TestStatusCheckSchedulesInitialRecoveryForDisconnectedStation(t *testing.T)
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("background recovery did not create a retry backoff")
+}
+
+func TestStatusRecoveryBackfillsBusyCandidatesAndLimitsConcurrency(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	now := time.Now()
+	addresses := []string{"11:22:33:44:55:61", "11:22:33:44:55:62", "11:22:33:44:55:63"}
+	for _, address := range addresses {
+		manager.stations[address] = &internalbluetooth.BaseStation{
+			Name:    "LHB-" + address[len(address)-2:],
+			Address: mustAddress(t, address),
+			Present: true,
+		}
+		manager.statusRetries[address] = statusRetry{nextAt: now.Add(-time.Second)}
+	}
+	if err := manager.beginStationOperation(addresses[0]); err != nil {
+		t.Fatalf("reserve busy station: %v", err)
+	}
+	defer manager.endStationOperation(addresses[0])
+
+	var active atomic.Int32
+	var maximum atomic.Int32
+	var recoveredMutex sync.Mutex
+	recovered := make([]string, 0, 2)
+	manager.bluetoothOps.fetchInitialPowerState = func(station *internalbluetooth.BaseStation) error {
+		current := active.Add(1)
+		for {
+			previous := maximum.Load()
+			if current <= previous || maximum.CompareAndSwap(previous, current) {
+				break
+			}
+		}
+		recoveredMutex.Lock()
+		recovered = append(recovered, station.Snapshot().Address)
+		recoveredMutex.Unlock()
+		time.Sleep(25 * time.Millisecond)
+		active.Add(-1)
+		return nil
+	}
+
+	manager.scheduleStatusRecovery()
+	deadline := time.Now().Add(time.Second)
+	for manager.statusRecoveryRunning.Load() && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	recoveredMutex.Lock()
+	defer recoveredMutex.Unlock()
+	if len(recovered) != 1 || recovered[0] != addresses[1] {
+		t.Fatalf("recovered addresses = %v, want busy candidate skipped and %s recovered", recovered, addresses[1])
+	}
+	if maximum.Load() > 1 {
+		t.Fatalf("recovery concurrency = %d, want at most 1", maximum.Load())
+	}
+}
+
+func TestStatusRecoveryLeavesOneSlotForForegroundWork(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	recoveryAddress := "11:22:33:44:55:61"
+	foregroundAddress := "11:22:33:44:55:62"
+	manager.stations[recoveryAddress] = &internalbluetooth.BaseStation{
+		Name: "LHB-RECOVERY", Address: mustAddress(t, recoveryAddress), Present: true,
+	}
+	manager.statusRetries[recoveryAddress] = statusRetry{nextAt: time.Now().Add(-time.Second)}
+	recoveryStarted := make(chan struct{})
+	recoveryRelease := make(chan struct{})
+	manager.bluetoothOps.fetchInitialPowerState = func(*internalbluetooth.BaseStation) error {
+		close(recoveryStarted)
+		<-recoveryRelease
+		return nil
+	}
+
+	manager.scheduleStatusRecovery()
+	<-recoveryStarted
+	if err := manager.beginStationOperation(foregroundAddress); err != nil {
+		t.Fatalf("foreground operation could not use reserved slot: %v", err)
+	}
+	manager.endStationOperation(foregroundAddress)
+	close(recoveryRelease)
+	deadline := time.Now().Add(time.Second)
+	for manager.statusRecoveryRunning.Load() && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if manager.statusRecoveryRunning.Load() {
+		t.Fatal("recovery did not finish")
+	}
 }
