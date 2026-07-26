@@ -120,10 +120,15 @@ func (d Device) DiscoverServices(filterUUIDs []UUID) ([]DeviceService, error) {
 		if err != nil {
 			return nil, err
 		}
+		if s == nil {
+			return nil, errors.New("bluetooth: service discovery returned a nil service")
+		}
 
 		srv := (*genericattributeprofile.GattDeviceService)(s)
 		guid, err := srv.GetUuid()
 		if err != nil {
+			_ = srv.Close()
+			srv.Release()
 			return nil, err
 		}
 
@@ -304,10 +309,14 @@ func (s DeviceService) DiscoverCharacteristics(filterUUIDs []UUID) ([]DeviceChar
 		if err != nil {
 			return nil, err
 		}
+		if c == nil {
+			return nil, errors.New("bluetooth: characteristic discovery returned a nil characteristic")
+		}
 
 		characteristic := (*genericattributeprofile.GattCharacteristic)(c)
 		guid, err := characteristic.GetUuid()
 		if err != nil {
+			characteristic.Release()
 			return nil, err
 		}
 
@@ -315,6 +324,7 @@ func (s DeviceService) DiscoverCharacteristics(filterUUIDs []UUID) ([]DeviceChar
 
 		properties, err := characteristic.GetCharacteristicProperties()
 		if err != nil {
+			characteristic.Release()
 			return nil, err
 		}
 

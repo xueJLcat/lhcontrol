@@ -18,6 +18,28 @@ var (
 	ErrGATTCommunication = errors.New("Bluetooth GATT communication failed")
 )
 
+// DisconnectCleanupError reports a warning returned after all WinRT objects
+// owned by a device have already been released. Retrying Disconnect cannot
+// improve this result and must not prevent a replacement connection.
+type DisconnectCleanupError struct {
+	Err error
+}
+
+func (e *DisconnectCleanupError) Error() string {
+	return fmt.Sprintf("Bluetooth disconnect cleanup completed with an error: %v", e.Err)
+}
+
+func (e *DisconnectCleanupError) Unwrap() error {
+	return e.Err
+}
+
+// IsDisconnectCleanupComplete distinguishes a completed cleanup warning from
+// an error that occurred before cleanup could run and should be retried.
+func IsDisconnectCleanupComplete(err error) bool {
+	var completed *DisconnectCleanupError
+	return errors.As(err, &completed)
+}
+
 // GATTCommunicationError preserves the WinRT communication status while
 // exposing a stable error category through errors.Is.
 type GATTCommunicationError struct {

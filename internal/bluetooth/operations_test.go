@@ -2,6 +2,7 @@ package bluetooth
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -95,18 +96,22 @@ func (a *fakeBLEAdapter) StopScan() error {
 }
 
 type fakeCharacteristic struct {
-	value                []byte
-	properties           uint32
-	readErr              error
-	readValues           [][]byte
-	readIndex            int
-	writeErr             error
-	writeErrorAfterApply bool
-	readErrAfterWrite    error
-	ignoreWrite          bool
-	powerSemantics       bool
-	writeAttempts        int
-	writes               [][]byte
+	value                        []byte
+	properties                   uint32
+	readErr                      error
+	readValues                   [][]byte
+	readIndex                    int
+	writeErr                     error
+	writeWithResponseErr         error
+	writeWithoutResponseErr      error
+	writeErrorAfterApply         bool
+	readErrAfterWrite            error
+	ignoreWrite                  bool
+	powerSemantics               bool
+	writeAttempts                int
+	writeWithResponseAttempts    int
+	writeWithoutResponseAttempts int
+	writes                       [][]byte
 }
 
 type fakeConnectedDevice struct{}
@@ -139,17 +144,50 @@ func TestDisconnectFailureRetainsDeviceUntilCleanupCanBeRetried(t *testing.T) {
 	if err := DisconnectStation(station); !errors.Is(err, cleanupErr) {
 		t.Fatalf("DisconnectStation() error = %v, want %v", err, cleanupErr)
 	}
-	if station.device == nil {
-		t.Fatal("failed cleanup discarded the only device handle")
+	if station.device != nil || station.pendingCleanup == nil {
+		t.Fatal("failed cleanup did not retain the device as pending cleanup")
 	}
 	device.disconnectErr = nil
 	if err := DisconnectStation(station); err != nil {
 		t.Fatalf("DisconnectStation() retry error = %v", err)
 	}
-	if station.device != nil || device.disconnects != 2 {
-		t.Fatalf("cleanup retry state: device=%v disconnects=%d", station.device, device.disconnects)
+	if station.device != nil || station.pendingCleanup != nil || device.disconnects != 2 {
+		t.Fatalf("cleanup retry state: device=%v pending=%v disconnects=%d", station.device, station.pendingCleanup, device.disconnects)
 	}
 }
+
+func TestCompletedDisconnectWarningDoesNotBlockReplacementConnection(t *testing.T) {
+	device := &trackingConnectedDevice{
+		disconnectErr: &tinybluetooth.DisconnectCleanupError{Err: errors.New("session close warning")},
+	}
+	station := connectedFakeStation(&fakeCharacteristic{}, nil, nil, Capabilities{PowerWrite: true})
+	station.device = device
+
+	if err := DisconnectStation(station); err != nil {
+		t.Fatalf("DisconnectStation() error = %v, want completed warning treated as success", err)
+	}
+	if station.device != nil || station.pendingCleanup != nil {
+		t.Fatalf("completed cleanup retained stale handles: device=%v pending=%v", station.device, station.pendingCleanup)
+	}
+}
+
+func TestCompletedPendingCleanupWarningIsCleared(t *testing.T) {
+	device := &trackingConnectedDevice{
+		disconnectErr: &tinybluetooth.DisconnectCleanupError{Err: errors.New("device close warning")},
+	}
+	station := connectedFakeStation(nil, nil, nil, Capabilities{})
+	station.device = nil
+	station.isConnected = false
+	station.pendingCleanup = device
+
+	if err := DisconnectStation(station); err != nil {
+		t.Fatalf("DisconnectStation() pending cleanup error = %v", err)
+	}
+	if station.pendingCleanup != nil {
+		t.Fatal("completed pending cleanup warning retained the stale device")
+	}
+}
+
 func (*trackingConnectedDevice) Connected() (bool, error) { return true, nil }
 func (*trackingConnectedDevice) DiscoverServices([]tinybluetooth.UUID) ([]tinybluetooth.DeviceService, error) {
 	return nil, errors.New("fake discovery is not configured")
@@ -174,10 +212,18 @@ func (f *fakeCharacteristic) Read(destination []byte) (int, error) {
 }
 
 func (f *fakeCharacteristic) Write(value []byte) (int, error) {
+	f.writeWithResponseAttempts++
+	if f.writeWithResponseErr != nil {
+		return 0, f.writeWithResponseErr
+	}
 	return f.write(value)
 }
 
 func (f *fakeCharacteristic) WriteWithoutResponse(value []byte) (int, error) {
+	f.writeWithoutResponseAttempts++
+	if f.writeWithoutResponseErr != nil {
+		return 0, f.writeWithoutResponseErr
+	}
 	return f.write(value)
 }
 
@@ -205,6 +251,21 @@ func (f *fakeCharacteristic) write(value []byte) (int, error) {
 }
 
 func connectedFakeStation(power, mode, identify characteristicIO, capabilities Capabilities) *BaseStation {
+	setFakeProperties := func(characteristic characteristicIO, readable, writable bool) {
+		fake, ok := characteristic.(*fakeCharacteristic)
+		if !ok || fake.properties != 0 {
+			return
+		}
+		if readable {
+			fake.properties |= uint32(tinybluetooth.CharacteristicReadPermission)
+		}
+		if writable {
+			fake.properties |= uint32(tinybluetooth.CharacteristicWriteWithoutResponsePermission)
+		}
+	}
+	setFakeProperties(power, capabilities.PowerRead, capabilities.PowerWrite)
+	setFakeProperties(mode, capabilities.ChannelRead, capabilities.ChannelWrite)
+	setFakeProperties(identify, false, capabilities.Identify)
 	return &BaseStation{
 		Name:                   "LHB-TEST",
 		device:                 fakeConnectedDevice{},
@@ -275,6 +336,88 @@ func TestSetPowerStateWithoutReadReportsUnconfirmed(t *testing.T) {
 	}
 	if result.Confirmed || station.PowerState != PowerStateUnknown {
 		t.Fatalf("result = %+v, cached state = %v", result, station.PowerState)
+	}
+}
+
+func TestWriteCharacteristicDoesNotRetryAmbiguousTransportFailure(t *testing.T) {
+	characteristic := &fakeCharacteristic{
+		properties: uint32(tinybluetooth.CharacteristicWriteWithoutResponsePermission |
+			tinybluetooth.CharacteristicWritePermission),
+		writeWithoutResponseErr: tinybluetooth.ErrGATTUnreachable,
+	}
+
+	err := writeCharacteristicValueInternal(characteristic, 0x01)
+	if !errors.Is(err, tinybluetooth.ErrGATTUnreachable) {
+		t.Fatalf("writeCharacteristicValueInternal() error = %v", err)
+	}
+	if characteristic.writeWithoutResponseAttempts != 1 || characteristic.writeWithResponseAttempts != 0 {
+		t.Fatalf(
+			"write attempts without-response=%d with-response=%d, want 1 and 0",
+			characteristic.writeWithoutResponseAttempts,
+			characteristic.writeWithResponseAttempts,
+		)
+	}
+}
+
+func TestWriteCharacteristicFallsBackOnlyForUnsupportedWriteMode(t *testing.T) {
+	characteristic := &fakeCharacteristic{
+		properties: uint32(tinybluetooth.CharacteristicWriteWithoutResponsePermission |
+			tinybluetooth.CharacteristicWritePermission),
+		writeWithoutResponseErr: tinybluetooth.ErrAttRequestNotSupported,
+	}
+
+	if err := writeCharacteristicValueInternal(characteristic, 0x01); err != nil {
+		t.Fatalf("writeCharacteristicValueInternal() error = %v", err)
+	}
+	if characteristic.writeWithoutResponseAttempts != 1 || characteristic.writeWithResponseAttempts != 1 {
+		t.Fatalf(
+			"write attempts without-response=%d with-response=%d, want 1 and 1",
+			characteristic.writeWithoutResponseAttempts,
+			characteristic.writeWithResponseAttempts,
+		)
+	}
+}
+
+func TestPowerConfirmationReadUnsupportedRetainsConnection(t *testing.T) {
+	device := &trackingConnectedDevice{}
+	power := &fakeCharacteristic{
+		value:             []byte{0x00},
+		powerSemantics:    true,
+		readErrAfterWrite: tinybluetooth.ErrAttReadNotPermitted,
+	}
+	station := connectedFakeStation(power, nil, nil, Capabilities{PowerRead: true, PowerWrite: true})
+	station.device = device
+
+	result, err := SetPowerState(station, PowerStateOn)
+	var confirmationErr *PowerConfirmationError
+	if !errors.As(err, &confirmationErr) || result.Confirmed {
+		t.Fatalf("SetPowerState() result=%+v error=%v, want unconfirmed result", result, err)
+	}
+	snapshot := station.Snapshot()
+	if snapshot.Capabilities.PowerRead || !snapshot.Connected || device.disconnected {
+		t.Fatalf("unsupported confirmation read damaged healthy connection: %+v", snapshot)
+	}
+}
+
+func TestStandbyValueNotAllowedOnlyDisablesStandby(t *testing.T) {
+	device := &trackingConnectedDevice{}
+	power := &fakeCharacteristic{
+		value:    []byte{0x00},
+		writeErr: tinybluetooth.ErrAttValueNotAllowed,
+	}
+	station := connectedFakeStation(power, nil, nil, Capabilities{PowerRead: true, PowerWrite: true, Standby: true})
+	station.device = device
+
+	_, err := SetPowerState(station, PowerStateStandby)
+	if !IsUnsupportedCapabilityError(err) {
+		t.Fatalf("SetPowerState() error = %v, want unsupported standby", err)
+	}
+	snapshot := station.Snapshot()
+	if snapshot.Capabilities.Standby || !snapshot.Capabilities.PowerWrite {
+		t.Fatalf("standby rejection changed unrelated capability: %+v", snapshot.Capabilities)
+	}
+	if !snapshot.Connected || device.disconnected {
+		t.Fatal("standby value rejection discarded a healthy connection")
 	}
 }
 
@@ -449,6 +592,29 @@ func TestSetChannelRequiresInitialRead(t *testing.T) {
 	}
 }
 
+func TestSetChannelInitialReadUnsupportedRetainsConnection(t *testing.T) {
+	device := &trackingConnectedDevice{}
+	mode := &fakeCharacteristic{readErr: tinybluetooth.ErrAttReadNotPermitted}
+	station := connectedFakeStation(
+		&fakeCharacteristic{},
+		mode,
+		nil,
+		Capabilities{ChannelRead: true, ChannelWrite: true},
+	)
+	station.device = device
+
+	_, err := SetChannel(station, 5)
+	if !IsUnsupportedCapabilityError(err) {
+		t.Fatalf("SetChannel() error = %v, want unsupported channel read", err)
+	}
+	if station.Snapshot().Connected == false || device.disconnected {
+		t.Fatal("unsupported initial channel read discarded a healthy connection")
+	}
+	if len(mode.writes) != 0 {
+		t.Fatalf("channel was written despite unsupported initial read: %v", mode.writes)
+	}
+}
+
 func TestSetChannelWriteFailureRetainsPreviousChannel(t *testing.T) {
 	mode := &fakeCharacteristic{value: []byte{0x03}, writeErr: errors.New("connection lost")}
 	power := &fakeCharacteristic{}
@@ -506,6 +672,22 @@ func TestATTCapabilityErrorsDoNotRequireReconnect(t *testing.T) {
 		if !RequiresReconnect(protocolErr) {
 			t.Fatalf("%v did not require reconnect", protocolErr)
 		}
+	}
+}
+
+func TestCleanupTransportFailureIsNotMaskedByUnsupportedCapability(t *testing.T) {
+	err := fmt.Errorf(
+		"capability discovery failed: %w",
+		errors.Join(
+			unsupportedCapability("power control", tinybluetooth.ErrAttRequestNotSupported),
+			transportError("cleanup connection", tinybluetooth.ErrGATTCommunication),
+		),
+	)
+	if !IsUnsupportedCapabilityError(err) {
+		t.Fatalf("joined error lost unsupported classification: %v", err)
+	}
+	if !RequiresReconnect(err) {
+		t.Fatalf("joined cleanup failure did not require reconnect: %v", err)
 	}
 }
 
@@ -937,7 +1119,9 @@ func TestInvalidateAllConnectionsDropsCachedHandles(t *testing.T) {
 		connectedStationsMutex.Unlock()
 	})
 
-	InvalidateAllConnections()
+	if err := InvalidateAllConnections(); err != nil {
+		t.Fatalf("InvalidateAllConnections() error = %v", err)
+	}
 	snapshot := station.Snapshot()
 	if snapshot.Connected || !snapshot.LastPowerReadAt.IsZero() || !snapshot.LastChannelReadAt.IsZero() {
 		t.Fatalf("connection was not invalidated: %+v", snapshot)
@@ -950,5 +1134,40 @@ func TestInvalidateAllConnectionsDropsCachedHandles(t *testing.T) {
 	}
 	if !device.disconnected {
 		t.Fatal("detached device was not cleaned up")
+	}
+}
+
+func TestInvalidateAllConnectionsRetainsFailedCleanupForRetry(t *testing.T) {
+	cleanupErr := errors.New("temporary global cleanup failure")
+	station := connectedFakeStation(
+		&fakeCharacteristic{value: []byte{0x0B}},
+		nil,
+		nil,
+		Capabilities{PowerRead: true},
+	)
+	device := &trackingConnectedDevice{disconnectErr: cleanupErr}
+	station.device = device
+	connectedStationsMutex.Lock()
+	previous := connectedStations
+	connectedStations = []*BaseStation{station}
+	connectedStationsMutex.Unlock()
+	t.Cleanup(func() {
+		connectedStationsMutex.Lock()
+		connectedStations = previous
+		connectedStationsMutex.Unlock()
+	})
+
+	if err := InvalidateAllConnections(); !errors.Is(err, cleanupErr) {
+		t.Fatalf("InvalidateAllConnections() error = %v, want %v", err, cleanupErr)
+	}
+	if station.device != nil || station.pendingCleanup == nil {
+		t.Fatal("global invalidation discarded failed cleanup ownership")
+	}
+	device.disconnectErr = nil
+	if err := DisconnectStation(station); err != nil {
+		t.Fatalf("DisconnectStation() cleanup retry error = %v", err)
+	}
+	if station.pendingCleanup != nil || device.disconnects != 2 {
+		t.Fatalf("cleanup retry state: pending=%v disconnects=%d", station.pendingCleanup, device.disconnects)
 	}
 }

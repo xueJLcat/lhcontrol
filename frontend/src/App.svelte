@@ -531,6 +531,11 @@
     channelEditorOpen = true;
   }
 
+  function closeChannelEditor() {
+    if (selectedStation && stationBusy(selectedStation.address)) return;
+    channelEditorOpen = false;
+  }
+
   async function saveChannel(targetChannel: number, allowUnknownConflictRisk: boolean) {
     if (!selectedStation || !selectedStation.scanFresh ||
       stationBusy(selectedStation.address) || gattLockedFor(selectedStation.address) ||
@@ -556,6 +561,8 @@
       if (!canCommitStationOperation(operationEpoch, address, operationRevision)) return;
       const actual = stations.find((station) => station.address === address)?.channel ?? 0;
       channelError = `${String(error)} Actual readback: ${actual || 'unknown'}.`;
+      statusMessage = `Channel change failed: ${channelError}`;
+      pushToast(statusMessage);
     } finally {
       if (canCommitStationOperation(operationEpoch, address, operationRevision)) {
         setGattBusy(address, false);
@@ -566,7 +573,7 @@
   function handleGlobalKeydown(event: KeyboardEvent) {
     if (event.key !== 'Escape') return;
     if (channelEditorOpen) {
-      channelEditorOpen = false;
+      closeChannelEditor();
     } else if (selectedAddress) {
       selectedAddress = null;
     }
@@ -658,16 +665,16 @@
     class="modal-scrim"
     role="presentation"
     transition:fade={{ duration: 180 }}
-    on:click={() => channelEditorOpen = false}
+    on:click={closeChannelEditor}
   >
     <ChannelModal
       station={selectedStation}
       {occupiedChannels}
       {hasUnknownVisibleChannel}
       error={channelError}
-      busy={stationBusy(selectedStation.address)}
+      busy={gattOperations.has(selectedStation.address) || configOperations.has(selectedStation.address)}
       locked={stationLocked || (gattOperations.size >= 2 && !gattOperations.has(selectedStation.address))}
-      onClose={() => channelEditorOpen = false}
+      onClose={closeChannelEditor}
       onSave={saveChannel}
       onIdentify={identify}
     />

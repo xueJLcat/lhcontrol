@@ -99,6 +99,17 @@ func TestDisconnectRetriesAfterWinRTThreadInitializationFailure(t *testing.T) {
 	}
 }
 
+func TestDisconnectCleanupCompletedErrorPreservesCause(t *testing.T) {
+	cause := errors.New("session close warning")
+	err := &DisconnectCleanupError{Err: cause}
+	if !IsDisconnectCleanupComplete(err) || !errors.Is(err, cause) {
+		t.Fatalf("completed cleanup error classification failed: %v", err)
+	}
+	if IsDisconnectCleanupComplete(cause) {
+		t.Fatal("ordinary disconnect failure was classified as completed cleanup")
+	}
+}
+
 func TestCallbackGateWaitsForActiveCallbackAndRejectsNewWork(t *testing.T) {
 	gate := newCallbackGate()
 	if !gate.begin() {

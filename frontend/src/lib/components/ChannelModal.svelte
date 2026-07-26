@@ -36,7 +36,7 @@
 >
   <div class="drawer-head">
     <div><small>Safe channel change</small><h2>{station.name}</h2></div>
-    <button class="icon-btn" title="Close" on:click={onClose}><X size={18} /></button>
+    <button class="icon-btn" title="Close" on:click={onClose} disabled={busy}><X size={18} /></button>
   </div>
   <dl>
     <dt>Original name</dt><dd>{station.originalName}</dd>
@@ -44,7 +44,7 @@
     <dt>Current channel</dt><dd class="mono">{station.channel || 'Unknown'}</dd>
   </dl>
   <label class="field">Target channel
-    <select bind:value={targetChannel}>
+    <select bind:value={targetChannel} disabled={busy || locked}>
       {#each Array.from({ length: 16 }, (_, index) => index + 1) as channel}
         <option value={channel} disabled={occupiedChannels.has(channel)}>
           {channel}{occupiedChannels.has(channel) ? ` — ${occupiedChannels.get(channel)}` : ''}
@@ -53,7 +53,7 @@
     </select>
   </label>
   {#if hasUnknownVisibleChannel}
-    <label class="risk"><input type="checkbox" bind:checked={confirmUnknownChannelRisk} /> I understand that a visible station has an unknown channel, so a conflict cannot be fully ruled out.</label>
+    <label class="risk"><input type="checkbox" bind:checked={confirmUnknownChannelRisk} disabled={busy || locked} /> I understand that a visible station has an unknown channel, so a conflict cannot be fully ruled out.</label>
   {/if}
   {#if error}<div class="alert danger">{error}</div>{/if}
   <p class="hint">The value is only accepted after the base station reads back the requested channel. Failure will not trigger an automatic rollback.</p>

@@ -848,6 +848,10 @@ func (d Device) cleanup(attempt *deviceCleanupAttempt) {
 			if attempt.err == nil {
 				attempt.err = fmt.Errorf("bluetooth cleanup panicked: %v", recovered)
 			}
+			retryable = true
+		}
+		if !retryable && attempt.err != nil {
+			attempt.err = &DisconnectCleanupError{Err: attempt.err}
 		}
 		state.cleanupMutex.Lock()
 		if retryable {

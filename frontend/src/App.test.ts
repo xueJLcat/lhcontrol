@@ -369,6 +369,30 @@ describe('App asynchronous operations', () => {
     expect(screen.getByText('External scan in progress...')).toBeInTheDocument();
   });
 
+  it('keeps the channel result visible by preventing close while a save is pending', async () => {
+    let resolveChannel!: (value: unknown) => void;
+    api.SetStationChannel.mockReturnValue(new Promise((resolve) => {
+      resolveChannel = resolve;
+    }));
+
+    render(App);
+    await screen.findByText('LHB-TEST');
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Scan' })).not.toBeDisabled());
+    await fireEvent.click(screen.getByRole('button', { name: 'Details for LHB-TEST' }));
+    await fireEvent.click(await screen.findByRole('button', { name: /Change Channel/ }));
+    await fireEvent.change(screen.getByRole('combobox', { name: 'Target channel' }), { target: { value: '4' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Confirm change' }));
+    await waitFor(() => expect(api.SetStationChannel).toHaveBeenCalledWith('11:22:33:44:55:66', 4, false));
+
+    const channelDialog = screen.getByRole('dialog', { name: 'Change channel' });
+    await waitFor(() => expect(within(channelDialog).getByRole('button', { name: 'Close' })).toBeDisabled());
+    await fireEvent.keyDown(window, { key: 'Escape' });
+    expect(screen.getByRole('dialog', { name: 'Change channel' })).toBeInTheDocument();
+
+    resolveChannel({ previousChannel: 3, channel: 4, warnings: [] });
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Change channel' })).not.toBeInTheDocument());
+  });
+
   it('does not let a pending device result overwrite a newer external scan', async () => {
     let resolvePower!: (value: unknown) => void;
     api.SetStationPower.mockReturnValue(new Promise((resolve) => {

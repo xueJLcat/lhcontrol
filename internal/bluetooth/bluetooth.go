@@ -75,6 +75,7 @@ type BaseStation struct {
 	Metadata          DeviceMetadata
 	// Fields for storing handles and state
 	device                 bluetooth.GAPDevice
+	pendingCleanup         bluetooth.GAPDevice
 	characteristic         characteristicIO
 	modeCharacteristic     characteristicIO
 	identifyCharacteristic characteristicIO
@@ -182,37 +183,18 @@ func (s *scanSession) stopReason() scanStopReason {
 // IsConnected returns the current connection status safely.
 func (bs *BaseStation) IsConnected() bool {
 	bs.mutex.Lock()
+	defer bs.mutex.Unlock()
 	if !bs.isConnected || bs.device == nil {
-		bs.mutex.Unlock()
 		return false
 	}
-	device := bs.device
-	connected, err := device.Connected()
+	connected, err := bs.device.Connected()
 	if err == nil && connected {
-		bs.mutex.Unlock()
 		return true
 	}
-	bs.isConnected = false
-	bs.device = nil
-	bs.characteristic = nil
-	bs.modeCharacteristic = nil
-	bs.identifyCharacteristic = nil
-	bs.LastPowerReadAt = time.Time{}
-	bs.LastChannelReadAt = time.Time{}
 	if err != nil {
 		bs.LastError = err.Error()
 	}
-	bs.mutex.Unlock()
-	_ = device.Disconnect()
-	connectedStationsMutex.Lock()
-	remaining := connectedStations[:0]
-	for _, station := range connectedStations {
-		if station != bs {
-			remaining = append(remaining, station)
-		}
-	}
-	connectedStations = remaining
-	connectedStationsMutex.Unlock()
+	_ = disconnectInternal(bs)
 	return false
 }
 
@@ -444,21 +426,39 @@ func IsCapabilityUnsupported(err error) bool {
 // RequiresReconnect reports failures for which cached WinRT service and
 // characteristic handles must not be reused by the next device operation.
 func RequiresReconnect(err error) bool {
-	if err == nil || IsUnsupportedCapabilityError(err) {
+	if err == nil {
 		return false
 	}
-	var transportErr *DeviceTransportError
-	if errors.As(err, &transportErr) {
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		for _, nested := range joined.Unwrap() {
+			if RequiresReconnect(nested) {
+				return true
+			}
+		}
+		return false
+	}
+	if protocolErr, ok := err.(bluetooth.AttributeProtocolError); ok {
+		return !IsCapabilityUnsupported(protocolErr)
+	}
+	if capabilityErr, ok := err.(*UnsupportedCapabilityError); ok {
+		return RequiresReconnect(capabilityErr.Err)
+	}
+	if transportErr, ok := err.(*DeviceTransportError); ok {
+		if RequiresReconnect(transportErr.Err) {
+			return true
+		}
+		if IsUnsupportedCapabilityError(transportErr.Err) {
+			return false
+		}
 		return true
 	}
-	var protocolErr bluetooth.AttributeProtocolError
-	if errors.As(err, &protocolErr) {
-		return true
-	}
-	return errors.Is(err, bluetooth.ErrGATTUnreachable) ||
+	if errors.Is(err, bluetooth.ErrGATTUnreachable) ||
 		errors.Is(err, bluetooth.ErrGATTProtocol) ||
 		errors.Is(err, bluetooth.ErrGATTAccessDenied) ||
-		errors.Is(err, bluetooth.ErrGATTCommunication)
+		errors.Is(err, bluetooth.ErrGATTCommunication) {
+		return true
+	}
+	return RequiresReconnect(errors.Unwrap(err))
 }
 
 func IsGATTCommunicationFailure(err error) bool {
@@ -749,41 +749,20 @@ func ReadPowerState(station *BaseStation) error {
 	return nil
 }
 
-func invalidateStationConnection(station *BaseStation) bluetooth.GAPDevice {
-	if station == nil {
-		return nil
-	}
-	station.mutex.Lock()
-	device := station.device
-	station.isConnected = false
-	station.device = nil
-	station.characteristic = nil
-	station.modeCharacteristic = nil
-	station.identifyCharacteristic = nil
-	station.LastPowerReadAt = time.Time{}
-	station.LastChannelReadAt = time.Time{}
-	station.mutex.Unlock()
-	return device
-}
-
-// InvalidateAllConnections first detaches cached handles so no new operation
-// can reuse them, then waits for each old WinRT/GATT connection to clean up.
-func InvalidateAllConnections() {
+// InvalidateAllConnections synchronously invalidates every cached connection.
+// Failed WinRT cleanup remains owned by its BaseStation so a later operation
+// or shutdown can retry it before creating a replacement GATT session.
+func InvalidateAllConnections() error {
 	connectedStationsMutex.Lock()
 	stations := append([]*BaseStation(nil), connectedStations...)
-	connectedStations = nil
 	connectedStationsMutex.Unlock()
-	devices := make([]bluetooth.GAPDevice, 0, len(stations))
+	var cleanupErrors []error
 	for _, station := range stations {
-		if device := invalidateStationConnection(station); device != nil {
-			devices = append(devices, device)
+		if err := DisconnectStation(station); err != nil {
+			cleanupErrors = append(cleanupErrors, fmt.Errorf("%s: %w", station.Snapshot().Address, err))
 		}
 	}
-	for _, device := range devices {
-		if err := device.Disconnect(); err != nil {
-			log.Printf("Bluetooth: cleanup after adapter loss failed: %v", err)
-		}
-	}
+	return errors.Join(cleanupErrors...)
 }
 
 func hasRead(properties uint32) bool {
@@ -832,19 +811,15 @@ func mergeMetadata(previous, discovered DeviceMetadata) DeviceMetadata {
 // connectAndDiscoverInternal handles connection and discovery.
 // Assumes caller holds the write lock (station.mutex.Lock()).
 func connectAndDiscoverInternal(station *BaseStation) error {
+	if err := cleanupPendingInternal(station); err != nil {
+		return transportError("finish previous connection cleanup", err)
+	}
 	if station.isConnected && station.device != nil && station.characteristic != nil {
 		connected, err := station.device.Connected()
 		if err == nil && connected {
 			return nil // Already good
 		}
 		_ = disconnectInternal(station)
-	}
-
-	if !station.isConnected && station.device != nil {
-		if err := station.device.Disconnect(); err != nil {
-			return transportError("finish previous connection cleanup", err)
-		}
-		station.device = nil
 	}
 
 	if !station.isConnected || station.device == nil {
@@ -887,7 +862,9 @@ func connectAndDiscoverInternal(station *BaseStation) error {
 		for i := 0; i < maxRetries; i++ {
 			if i > 0 {
 				log.Printf("Bluetooth: Retrying discovery for %s (attempt %d/%d)...", station.Name, i+1, maxRetries)
-				_ = disconnectInternal(station)
+				if cleanupErr := disconnectInternal(station); cleanupErr != nil {
+					return transportError("cleanup before discovery retry", cleanupErr)
+				}
 				time.Sleep(500 * time.Millisecond)
 				device, connectErr := adapter.Connect(station.Address, bluetooth.ConnectionParams{})
 				if connectErr != nil {
@@ -1004,7 +981,7 @@ func connectAndDiscoverInternal(station *BaseStation) error {
 				continue
 			}
 			if !controlServiceFound || powerCharacteristic == nil {
-				err = fmt.Errorf("power control service or characteristic not found")
+				err = unsupportedCapability("Lighthouse power control service", nil)
 				continue
 			}
 			station.characteristic = powerCharacteristic
@@ -1029,9 +1006,22 @@ func connectAndDiscoverInternal(station *BaseStation) error {
 		}
 
 		if err != nil {
-			station.CapabilitiesKnown = false
-			_ = disconnectInternal(station)
+			permanentlyUnsupported := IsUnsupportedCapabilityError(err)
+			station.CapabilitiesKnown = permanentlyUnsupported
+			if permanentlyUnsupported {
+				station.Capabilities = Capabilities{}
+			}
+			cleanupErr := disconnectInternal(station)
 			station.LastError = err.Error()
+			if permanentlyUnsupported {
+				if cleanupErr != nil {
+					return errors.Join(err, transportError("cleanup unsupported station connection", cleanupErr))
+				}
+				return err
+			}
+			if cleanupErr != nil {
+				err = errors.Join(err, fmt.Errorf("cleanup failed: %w", cleanupErr))
+			}
 			return transportError(
 				"discover station capabilities",
 				fmt.Errorf("%s after %d retries: %w", station.Name, maxRetries, err),
@@ -1099,7 +1089,9 @@ func RefreshCapabilities(station *BaseStation) (Capabilities, error) {
 	}
 	station.mutex.Lock()
 	defer station.mutex.Unlock()
-	_ = disconnectInternal(station)
+	if err := disconnectInternal(station); err != nil {
+		return Capabilities{}, transportError("cleanup before capability refresh", err)
+	}
 	station.CapabilitiesKnown = false
 	if err := connectAndDiscoverInternal(station); err != nil {
 		return Capabilities{}, err
@@ -1154,13 +1146,28 @@ func FetchInitialPowerState(station *BaseStation) error {
 	return nil
 }
 
-// writePowerValueInternal writes one power-control byte, falling back to a
-// response write when the firmware does not support WriteWithoutResponse.
+// writeCharacteristicValueInternal writes one byte using the modes advertised
+// by the characteristic. A transport failure from WriteWithoutResponse must
+// not be retried as a response write because the first command may have
+// reached the device.
 // Assumes caller holds station.mutex.
 func writeCharacteristicValueInternal(characteristic characteristicIO, value byte) error {
-	n, err := characteristic.WriteWithoutResponse([]byte{value})
-	if err != nil {
+	if characteristic == nil {
+		return transportError("write characteristic", fmt.Errorf("characteristic is unavailable"))
+	}
+	properties := bluetooth.CharacteristicPermissions(characteristic.Properties())
+	var n int
+	var err error
+	switch {
+	case properties.WriteWithoutResponse():
+		n, err = characteristic.WriteWithoutResponse([]byte{value})
+		if err != nil && properties.Write() && IsCapabilityUnsupported(err) {
+			n, err = characteristic.Write([]byte{value})
+		}
+	case properties.Write():
 		n, err = characteristic.Write([]byte{value})
+	default:
+		return unsupportedCapability("characteristic write", nil)
 	}
 	if err != nil {
 		return transportError("write characteristic", err)
@@ -1194,6 +1201,9 @@ func confirmPowerStateInternal(station *BaseStation, expectedState PowerState) e
 		}
 		if err := readPowerStateInternal(station); err != nil {
 			lastErr = err
+			if IsUnsupportedCapabilityError(err) {
+				return err
+			}
 			consecutiveReadErrors++
 			if consecutiveReadErrors >= 2 && attempt < attempts-1 {
 				_ = disconnectInternal(station)
@@ -1317,6 +1327,14 @@ func SetPowerState(station *BaseStation, target PowerState) (PowerControlResult,
 		if err == nil {
 			break
 		}
+		var protocolErr bluetooth.AttributeProtocolError
+		if target == PowerStateStandby &&
+			errors.As(err, &protocolErr) &&
+			protocolErr == bluetooth.ErrAttValueNotAllowed {
+			station.Capabilities.Standby = false
+			station.LastError = err.Error()
+			return PowerControlResult{}, unsupportedCapability("standby", err)
+		}
 		if IsCapabilityUnsupported(err) {
 			station.Capabilities.PowerWrite = false
 			station.Capabilities.Standby = false
@@ -1423,7 +1441,9 @@ func SetChannel(station *BaseStation, channel int) (ChannelWriteResult, error) {
 	}
 	if err := readChannelInternal(station); err != nil {
 		station.LastError = err.Error()
-		_ = disconnectInternal(station)
+		if RequiresReconnect(err) {
+			_ = disconnectInternal(station)
+		}
 		return result, fmt.Errorf("failed to read the existing channel for %s: %w", station.Name, err)
 	}
 	result.PreviousChannel = station.Channel
@@ -1467,6 +1487,9 @@ func SetChannel(station *BaseStation, channel int) (ChannelWriteResult, error) {
 		time.Sleep(250 * time.Millisecond)
 		if err := readChannelInternal(station); err != nil {
 			confirmationErr = err
+			if IsUnsupportedCapabilityError(err) {
+				break
+			}
 			consecutiveReadErrors++
 			if consecutiveReadErrors >= 2 && attempt < 4 {
 				_ = disconnectInternal(station)
@@ -1499,7 +1522,9 @@ func SetChannel(station *BaseStation, channel int) (ChannelWriteResult, error) {
 		confirmationErr = fmt.Errorf("reported channel %d, expected %d", station.Channel, channel)
 	} else {
 		confirmationErr = errors.Join(confirmationErr, err)
-		_ = disconnectInternal(station)
+		if RequiresReconnect(err) {
+			_ = disconnectInternal(station)
+		}
 	}
 	if confirmationErr == nil {
 		confirmationErr = fmt.Errorf("no channel confirmation was received")
@@ -1511,21 +1536,22 @@ func SetChannel(station *BaseStation, channel int) (ChannelWriteResult, error) {
 // disconnectInternal performs disconnection without locking (must be called within locked context).
 // Also removes station from the global tracking list.
 func disconnectInternal(s *BaseStation) error {
+	if cleanupErr := cleanupPendingInternal(s); cleanupErr != nil {
+		return cleanupErr
+	}
 	var disconnectErr error
-	device := s.device
 	if s.device != nil {
 		log.Printf("Bluetooth: Disconnecting internal for %s", s.Name)
 		disconnectErr = s.device.Disconnect()
+		if bluetooth.IsDisconnectCleanupComplete(disconnectErr) {
+			log.Printf("Bluetooth: Disconnect cleanup warning for %s: %v", s.Name, disconnectErr)
+			disconnectErr = nil
+		} else if disconnectErr != nil {
+			s.pendingCleanup = s.device
+		}
 	}
 	s.isConnected = false
-	if disconnectErr == nil {
-		s.device = nil
-	} else {
-		// Keep ownership of a device whose synchronous WinRT cleanup did not
-		// complete. The next connection attempt must finish that cleanup before
-		// replacing the handle with a new session.
-		s.device = device
-	}
+	s.device = nil
 	s.characteristic = nil
 	s.modeCharacteristic = nil
 	s.identifyCharacteristic = nil
@@ -1535,13 +1561,31 @@ func disconnectInternal(s *BaseStation) error {
 	connectedStationsMutex.Lock()
 	newConnectedStations := make([]*BaseStation, 0, len(connectedStations))
 	for _, cs := range connectedStations {
-		if cs.Address != s.Address || disconnectErr != nil {
+		if cs.Address != s.Address || s.pendingCleanup != nil {
 			newConnectedStations = append(newConnectedStations, cs)
 		}
 	}
 	connectedStations = newConnectedStations
 	connectedStationsMutex.Unlock()
 	return disconnectErr
+}
+
+// cleanupPendingInternal completes a previously failed synchronous Disconnect.
+// It must run before a replacement device is connected.
+func cleanupPendingInternal(s *BaseStation) error {
+	if s.pendingCleanup == nil {
+		return nil
+	}
+	if err := s.pendingCleanup.Disconnect(); err != nil {
+		if bluetooth.IsDisconnectCleanupComplete(err) {
+			log.Printf("Bluetooth: Pending disconnect cleanup completed for %s with warning: %v", s.Name, err)
+			s.pendingCleanup = nil
+			return nil
+		}
+		return err
+	}
+	s.pendingCleanup = nil
+	return nil
 }
 
 // DisconnectStation disconnects from a specific base station.

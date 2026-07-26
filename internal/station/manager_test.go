@@ -44,6 +44,131 @@ func TestBluetoothInitializationRecoversAfterRetry(t *testing.T) {
 	}
 }
 
+func TestUnsupportedPowerReadDoesNotHideChannelRecovery(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	manager.statusRetryBase = time.Hour
+	defer manager.Shutdown()
+	var disconnects atomic.Int32
+	manager.bluetoothOps.disconnectStation = func(*internalbluetooth.BaseStation) error {
+		disconnects.Add(1)
+		return nil
+	}
+	address := "AA:BB:CC:DD:EE:FF"
+
+	manager.recordStructuredReadResult(
+		&internalbluetooth.BaseStation{Address: mustAddress(t, address)},
+		address,
+		tinybluetooth.ErrAttReadNotPermitted,
+		errors.New("temporary channel read failure"),
+	)
+
+	manager.statusRetryMutex.Lock()
+	retry, tracked := manager.statusRetries[address]
+	manager.statusRetryMutex.Unlock()
+	if !tracked || effectiveStatusRetryKinds(retry) != statusRetryChannel {
+		t.Fatalf("retry = %+v tracked=%v, want channel-only retry", retry, tracked)
+	}
+	if disconnects.Load() != 0 {
+		t.Fatalf("healthy connection was disconnected %d time(s)", disconnects.Load())
+	}
+}
+
+func TestPermanentUnsupportedDiscoveryDoesNotRemainInBackgroundRecovery(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	manager.statusRetryBase = time.Hour
+	defer manager.Shutdown()
+	address := "AA:BB:CC:DD:EE:F9"
+	station := &internalbluetooth.BaseStation{Address: mustAddress(t, address)}
+	var disconnects atomic.Int32
+	manager.bluetoothOps.disconnectStation = func(*internalbluetooth.BaseStation) error {
+		disconnects.Add(1)
+		return nil
+	}
+	manager.statusRetryMutex.Lock()
+	manager.statusRetries[address] = statusRetry{
+		failures: 2,
+		kinds:    statusRetryConnection,
+		nextAt:   time.Now().Add(time.Hour),
+	}
+	manager.statusRetryMutex.Unlock()
+
+	manager.recordUnstructuredStationFailure(
+		station,
+		address,
+		tinybluetooth.ErrAttRequestNotSupported,
+	)
+
+	manager.statusRetryMutex.Lock()
+	_, tracked := manager.statusRetries[address]
+	manager.statusRetryMutex.Unlock()
+	if tracked || disconnects.Load() != 0 {
+		t.Fatalf("unsupported station recovery tracked=%v disconnects=%d, want false and 0", tracked, disconnects.Load())
+	}
+}
+
+func TestUnsupportedFailureWithCleanupErrorStillSchedulesRecovery(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	manager.statusRetryBase = time.Hour
+	defer manager.Shutdown()
+	address := "AA:BB:CC:DD:EE:F8"
+	station := &internalbluetooth.BaseStation{Address: mustAddress(t, address)}
+	var disconnects atomic.Int32
+	manager.bluetoothOps.disconnectStation = func(*internalbluetooth.BaseStation) error {
+		disconnects.Add(1)
+		return nil
+	}
+	err := errors.Join(
+		tinybluetooth.ErrAttRequestNotSupported,
+		&internalbluetooth.DeviceTransportError{
+			Operation: "cleanup",
+			Err:       tinybluetooth.ErrGATTCommunication,
+		},
+	)
+
+	manager.recordUnstructuredStationFailure(station, address, err)
+
+	manager.statusRetryMutex.Lock()
+	_, tracked := manager.statusRetries[address]
+	manager.statusRetryMutex.Unlock()
+	if !tracked || disconnects.Load() != 1 {
+		t.Fatalf("mixed failure recovery tracked=%v disconnects=%d, want true and 1", tracked, disconnects.Load())
+	}
+}
+
+func TestConnectionAndChannelRetrySchedulesAreIndependent(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	manager.statusRetryBase = time.Hour
+	manager.statusRetryMax = 4 * time.Hour
+	defer manager.Shutdown()
+	address := "AA:BB:CC:DD:EE:FA"
+
+	manager.noteStatusFailure(address)
+	manager.noteStatusFailure(address)
+	manager.noteChannelFailure(address)
+
+	manager.statusRetryMutex.Lock()
+	retry := manager.statusRetries[address]
+	manager.statusRetryMutex.Unlock()
+	if retry.failures != 2 || retry.channelFailures != 1 {
+		t.Fatalf("retry counters = connection:%d channel:%d, want 2 and 1", retry.failures, retry.channelFailures)
+	}
+	if retry.nextAt.Sub(retry.lastAttempt) != 2*time.Hour {
+		t.Fatalf("connection delay = %v, want 2h", retry.nextAt.Sub(retry.lastAttempt))
+	}
+	if retry.channelNextAt.Sub(retry.channelLastAttempt) != time.Hour {
+		t.Fatalf("channel delay = %v, want 1h", retry.channelNextAt.Sub(retry.channelLastAttempt))
+	}
+
+	manager.clearStatusFailureKind(address, statusRetryConnection)
+	manager.statusRetryMutex.Lock()
+	retry, tracked := manager.statusRetries[address]
+	manager.statusRetryMutex.Unlock()
+	if !tracked || retry.channelFailures != 1 || retry.channelNextAt.IsZero() ||
+		effectiveStatusRetryKinds(retry) != statusRetryChannel {
+		t.Fatalf("clearing connection retry damaged channel schedule: %+v tracked=%v", retry, tracked)
+	}
+}
+
 func TestShutdownRejectsNewOperations(t *testing.T) {
 	manager := NewManager(config.NewConfig())
 	manager.Shutdown()
@@ -1167,6 +1292,39 @@ func TestStatusRecoveryLeavesOneSlotForForegroundWork(t *testing.T) {
 	}
 }
 
+func TestSecondForegroundOperationWaitsForHiddenRecoverySlot(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	if err := manager.beginRecoveryStationOperation("RECOVERY"); err != nil {
+		t.Fatalf("beginRecoveryStationOperation() error = %v", err)
+	}
+	if err := manager.beginForegroundStationOperation("FIRST"); err != nil {
+		t.Fatalf("first foreground operation error = %v", err)
+	}
+
+	secondResult := make(chan error, 1)
+	go func() {
+		secondResult <- manager.beginForegroundStationOperation("SECOND")
+	}()
+	select {
+	case err := <-secondResult:
+		t.Fatalf("second foreground operation returned before recovery ended: %v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+
+	manager.endRecoveryStationOperation("RECOVERY")
+	select {
+	case err := <-secondResult:
+		if err != nil {
+			t.Fatalf("second foreground operation error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("second foreground operation did not acquire the released recovery slot")
+	}
+	manager.endStationOperation("SECOND")
+	manager.endStationOperation("FIRST")
+}
+
 func TestStatusRecoveryProcessesScheduleRequestedDuringActiveRound(t *testing.T) {
 	manager := NewManager(config.NewConfig())
 	defer manager.Shutdown()
@@ -1207,6 +1365,34 @@ func TestStatusRecoveryProcessesScheduleRequestedDuringActiveRound(t *testing.T)
 	}
 	if got := calls.Load(); got != 2 {
 		t.Fatalf("recovery calls = %d, want 2", got)
+	}
+}
+
+func TestAbsentStationRecoveryStopsAfterBoundedFailures(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	address := "11:22:33:44:55:79"
+	manager.stations[address] = &internalbluetooth.BaseStation{
+		Name: "LHB-GONE", Address: mustAddress(t, address), Present: false,
+	}
+	manager.statusRetryMutex.Lock()
+	manager.statusRetries[address] = statusRetry{
+		failures: statusAbsentRetryLimit - 1,
+		kinds:    statusRetryConnection,
+		nextAt:   time.Now().Add(-time.Second),
+	}
+	manager.statusRetryMutex.Unlock()
+	manager.bluetoothOps.fetchInitialPowerState = func(*internalbluetooth.BaseStation) error {
+		return errors.New("station remains unreachable")
+	}
+
+	manager.runStatusRecoveryRound()
+
+	manager.statusRetryMutex.Lock()
+	_, tracked := manager.statusRetries[address]
+	manager.statusRetryMutex.Unlock()
+	if tracked {
+		t.Fatal("absent station remained scheduled after the bounded failure limit")
 	}
 }
 
