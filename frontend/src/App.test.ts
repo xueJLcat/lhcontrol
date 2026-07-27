@@ -143,6 +143,21 @@ describe('App asynchronous operations', () => {
     expect(await screen.findByText('LHB-TEST')).toBeInTheDocument();
   });
 
+  it('does not overwrite an external scan started during the initial scan check', async () => {
+    let resolveStartupScan!: (scanning: boolean) => void;
+    api.IsScanning.mockReturnValueOnce(new Promise((resolve) => {
+      resolveStartupScan = resolve;
+    }));
+    render(App);
+
+    runtime.handlers.get('external-scan-started')?.(externalScanEvent(1));
+    resolveStartupScan(false);
+
+    await vi.waitFor(() => expect(screen.getByText('External scan in progress...')).toBeInTheDocument());
+    expect(api.ScanAndFetchStations).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: 'Stop' })).toBeEnabled();
+  });
+
   it('shows a recoverable Bluetooth message when the initial scan fails', async () => {
     api.ScanAndFetchStations.mockRejectedValue(new Error('Bluetooth is unavailable; turn on Bluetooth and retry'));
     api.GetCurrentStationInfo.mockResolvedValue([
@@ -236,7 +251,7 @@ describe('App asynchronous operations', () => {
     expect(api.CheckAllStationStatuses).not.toHaveBeenCalled();
   });
 
-  it('keeps card controls enabled while a periodic status refresh is pending', async () => {
+  it('locks card controls while a periodic status refresh is pending', async () => {
     vi.useFakeTimers();
     let resolveStatusRefresh!: (stations: StationInfo[]) => void;
     api.CheckAllStationStatuses.mockReturnValue(new Promise((resolve) => {
@@ -249,10 +264,10 @@ describe('App asynchronous operations', () => {
     await vi.advanceTimersByTimeAsync(15_000);
     await vi.waitFor(() => expect(api.CheckAllStationStatuses).toHaveBeenCalledOnce());
 
-    expect(screen.getByRole('button', { name: 'Turn LHB-TEST on' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Turn LHB-TEST on' })).toBeDisabled();
     await fireEvent.click(screen.getByRole('button', { name: 'Details for LHB-TEST' }));
-    expect(await screen.findByRole('button', { name: 'Identify' })).toBeEnabled();
-    expect(screen.getByRole('button', { name: 'Refresh capabilities' })).toBeEnabled();
+    expect(await screen.findByRole('button', { name: 'Identify' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Refresh capabilities' })).toBeDisabled();
 
     resolveStatusRefresh([createStation()]);
   });

@@ -16,10 +16,10 @@ export interface OperationLocks {
 
 export function deriveOperationLocks(state: OperationState): OperationLocks {
   const anyDeviceOperation = state.gattAddresses.size > 0 || state.configAddresses.size > 0;
-  // A periodic status read is background work, not an exclusive user action.
-  // Let users act on a station while it runs; the backend arbitrates any GATT
-  // conflict without briefly disabling every card after a scan completes.
-  const exclusiveGlobalOperation = state.global === 'scanning' || state.global === 'bulk-power';
+  // A status refresh can occupy both backend GATT slots. Locking controls for
+  // its short duration prevents enabled actions from failing immediately as busy.
+  const exclusiveGlobalOperation = state.global === 'scanning' ||
+    state.global === 'status-refresh' || state.global === 'bulk-power';
   const bluetoothBusy = exclusiveGlobalOperation || state.externalScanning || anyDeviceOperation;
   return {
     scanLocked: bluetoothBusy,

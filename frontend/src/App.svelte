@@ -263,6 +263,7 @@
   }
 
   onMount(async () => {
+    const startupScanEpoch = scanEpoch;
     refreshAPIStatus();
     apiStatusInterval = setInterval(refreshAPIStatus, 15000);
     cancelExternalScanStartedListener = EventsOn('external-scan-started', (value: unknown) => {
@@ -345,7 +346,9 @@
     });
     statusCheckInterval = setInterval(periodicStatusCheck, 15000);
     const startupScanning = await IsScanning().catch(() => false);
-    if (disposed) return;
+    // An external scan event may have arrived while this initial query was
+    // pending. Do not let its older result overwrite the newer event state.
+    if (disposed || startupScanEpoch !== scanEpoch) return;
     externalScanning = startupScanning;
     if (externalScanning) {
       beginScanTimer();
