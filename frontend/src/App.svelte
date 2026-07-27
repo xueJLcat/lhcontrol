@@ -27,7 +27,7 @@
     powerTargetLabel, stateLabel
   } from './lib/station';
   import { formatBulkResult, formatTerminalScanResult, summarizeBulkResult } from './lib/result-format';
-  import { pushToast } from './lib/toast';
+  import { clearToasts, pushToast } from './lib/toast';
   import { deriveOperationLocks, type GlobalOperation } from './lib/operation-state';
   import { RevisionGate } from './lib/revision-gate';
   import AppHeader from './lib/components/AppHeader.svelte';
@@ -62,6 +62,7 @@
   let apiError = '';
   let externalScanning = false;
   let externalScanID: number | null = null;
+  let latestExternalScanID = 0;
   let externalScanRecoveryEpoch: number | null = null;
   let externalScanRecoveryStatusEpoch: number | null = null;
   let stoppingScan = false;
@@ -283,6 +284,8 @@
     cancelExternalScanStartedListener = EventsOn('external-scan-started', (value: unknown) => {
       if (disposed) return;
       const event = value as ExternalScanEvent;
+      if (event.id <= latestExternalScanID) return;
+      latestExternalScanID = event.id;
       beginScanEpoch();
       listRevisions.next();
       prepareForScan();
@@ -299,6 +302,7 @@
       if (!externalScanning) return;
       if (externalScanID !== null && event.id !== externalScanID) return;
       if (externalScanID === null && !(await matchesUnknownExternalScan(event))) return;
+      latestExternalScanID = Math.max(latestExternalScanID, event.id);
       const statusOperation = beginStatusOperation();
       const operationEpoch = beginScanEpoch();
       const revision = listRevisions.next();
@@ -309,13 +313,14 @@
       externalScanRecoveryStatusEpoch = statusOperation;
       stoppingScan = false;
       maybeEndScanTimer();
+      const capturedStationRevisions = new Map(stationRevisions);
       const scanStatus = await GetScanStatus().catch(() => null);
       if (disposed || !listRevisions.isCurrent(revision)) return;
       if (scanStatus) {
         externalScanRecoveryEpoch = null;
         externalScanRecoveryStatusEpoch = null;
       }
-      stations = event.stations || [];
+      if (!applyStationList(event.stations || [], revision, capturedStationRevisions)) return;
       if (!canCommitStatus(statusOperation)) return;
       const found = scanStatus?.found ?? stations.filter((station) => station.seenInLatestScan).length;
       statusMessage = formatTerminalScanResult({
@@ -327,6 +332,7 @@
       if (!externalScanning) return;
       if (externalScanID !== null && event.id !== externalScanID) return;
       if (externalScanID === null && !(await matchesUnknownExternalScan(event))) return;
+      latestExternalScanID = Math.max(latestExternalScanID, event.id);
       const statusOperation = beginStatusOperation();
       const message = event.error || 'unknown error';
       const operationEpoch = beginScanEpoch();
@@ -362,6 +368,7 @@
       if (!externalScanning) return;
       if (externalScanID !== null && event.id !== externalScanID) return;
       if (externalScanID === null && !(await matchesUnknownExternalScan(event))) return;
+      latestExternalScanID = Math.max(latestExternalScanID, event.id);
       const statusOperation = beginStatusOperation();
       const operationEpoch = beginScanEpoch();
       const revision = listRevisions.next();
@@ -413,6 +420,7 @@
 
   onDestroy(() => {
     disposed = true;
+    clearToasts();
     listRevisions.dispose();
     apiRevisions.dispose();
     endScanTimer();

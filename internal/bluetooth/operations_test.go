@@ -1371,6 +1371,24 @@ func TestScanForDurationContextStopsActiveScan(t *testing.T) {
 	}
 }
 
+func TestScanForDurationContextDoesNotStartWithCancelledContext(t *testing.T) {
+	originalAdapter := adapter
+	fake := newFakeBLEAdapter()
+	adapter = fake
+	t.Cleanup(func() { adapter = originalAdapter })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := ScanForDurationContext(ctx, time.Hour); !errors.Is(err, ErrScanCancelled) {
+		t.Fatalf("ScanForDurationContext() error = %v, want ErrScanCancelled", err)
+	}
+	select {
+	case <-fake.started:
+		t.Fatal("adapter scan started with an already-cancelled context")
+	default:
+	}
+}
+
 func TestRequestScanCancellationBeforeWatcherStartIsNonBlocking(t *testing.T) {
 	originalAdapter := adapter
 	fake := newFakeBLEAdapter()

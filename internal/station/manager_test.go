@@ -1342,6 +1342,58 @@ func TestScanContinuesAndReportsConnectionReleaseWarnings(t *testing.T) {
 	}
 }
 
+func TestStopScanPreventsPlatformScanAfterConnectionRelease(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	address := "11:22:33:44:55:86"
+	manager.stations[address] = &internalbluetooth.BaseStation{
+		Name: "LHB-RELEASE-CANCEL", Address: mustAddress(t, address), Present: true,
+	}
+	releaseStarted := make(chan struct{})
+	releaseDone := make(chan struct{})
+	manager.bluetoothOps.releaseStationForScan = func(*internalbluetooth.BaseStation) error {
+		close(releaseStarted)
+		<-releaseDone
+		return nil
+	}
+	var scanCalls atomic.Int32
+	manager.bluetoothOps.scanForDurationContext = func(context.Context, time.Duration) ([]internalbluetooth.DiscoveredStation, error) {
+		scanCalls.Add(1)
+		return nil, nil
+	}
+
+	if err := manager.StartScan(ScanCallbacks{}); err != nil {
+		t.Fatalf("StartScan() error = %v", err)
+	}
+	<-releaseStarted
+	stopDone := make(chan error, 1)
+	go func() { stopDone <- manager.StopScan() }()
+	deadline := time.Now().Add(time.Second)
+	for {
+		manager.scanLifecycleMutex.Lock()
+		lifecycle := manager.scanLifecycle
+		manager.scanLifecycleMutex.Unlock()
+		if lifecycle != nil && lifecycle.ctx.Err() != nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("StopScan() did not cancel the scan lifecycle")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	close(releaseDone)
+	select {
+	case err := <-stopDone:
+		if err != nil {
+			t.Fatalf("StopScan() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("StopScan() did not finish")
+	}
+	if scanCalls.Load() != 0 {
+		t.Fatalf("platform scan calls = %d, want 0", scanCalls.Load())
+	}
+}
+
 func TestScanResumesPresenceTrackingAfterConnectionReleaseRecovers(t *testing.T) {
 	manager := NewManager(config.NewConfig())
 	address := "11:22:33:44:55:84"

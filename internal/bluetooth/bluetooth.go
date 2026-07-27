@@ -610,6 +610,9 @@ func ScanForDurationContext(ctx context.Context, duration time.Duration) ([]Disc
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if ctx.Err() != nil {
+		return nil, ErrScanCancelled
+	}
 	// log.Printf("[BT] ScanForDuration: Starting scan for %v...", duration)
 	localStations := make(map[string]DiscoveredStation)
 	var localMutex sync.Mutex

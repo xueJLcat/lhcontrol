@@ -225,6 +225,43 @@ describe('App asynchronous operations', () => {
     expect(screen.queryByText('LHB-STALE')).not.toBeInTheDocument();
   });
 
+  it('ignores a stale external start after a newer scan has terminated', async () => {
+    render(App);
+    await screen.findByText('LHB-TEST');
+
+    runtime.handlers.get('external-scan-started')?.(externalScanEvent(2));
+    runtime.handlers.get('external-scan-completed')?.(externalScanEvent(2, { stations: [createStation()] }));
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('External scan completed'));
+
+    runtime.handlers.get('external-scan-started')?.(externalScanEvent(1));
+    await Promise.resolve();
+
+    expect(screen.queryByText('External scan in progress...')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Scan' })).toBeEnabled();
+  });
+
+  it('preserves a station update completed while external scan completion is pending', async () => {
+    let resolveStatus!: (status: unknown) => void;
+    const scannedStation = createStation({ powerState: 0, powerStateName: 'sleep' });
+    const updatedStation = createStation({ powerState: 1, powerStateName: 'on', rawPowerState: 0x0b });
+    render(App);
+    await screen.findByText('LHB-TEST');
+    api.GetScanStatus.mockReturnValueOnce(new Promise((resolve) => {
+      resolveStatus = resolve;
+    }));
+    api.SetStationPower.mockResolvedValue({ station: updatedStation, commandSent: true, confirmed: true });
+
+    runtime.handlers.get('external-scan-started')?.(externalScanEvent(1));
+    runtime.handlers.get('external-scan-completed')?.(externalScanEvent(1, { stations: [scannedStation] }));
+    await waitFor(() => expect(api.GetScanStatus).toHaveBeenCalled());
+    await fireEvent.click(screen.getByRole('button', { name: 'Turn LHB-TEST on' }));
+    await waitFor(() => expect(screen.getByText('On confirmed')).toBeInTheDocument());
+
+    resolveStatus({ state: 'completed', found: 1, warnings: [] });
+    await waitFor(() => expect(screen.getByText('On confirmed')).toBeInTheDocument());
+    expect(screen.getByRole('button', { name: 'Turn LHB-TEST on' })).toHaveAttribute('aria-pressed', 'true');
+  });
+
   it('ignores a terminal event for an unknown external scan until the backend scan ends', async () => {
     api.IsScanning.mockResolvedValueOnce(true).mockResolvedValue(false);
     render(App);

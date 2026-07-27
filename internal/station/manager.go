@@ -1024,6 +1024,9 @@ func (m *Manager) scanAndFetchStations(ctx context.Context) ([]StationInfo, int,
 			errors.Join(releaseErrors...),
 		))
 	}
+	if err := scanContextError(ctx); err != nil {
+		return m.GetStationInfo(), 0, err
+	}
 
 	discoveredValues, err := m.bluetoothOps.scanForDurationContext(ctx, scanDuration)
 	if errors.Is(err, bluetooth.ErrScanCancelled) || errors.Is(err, context.Canceled) {
