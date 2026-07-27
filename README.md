@@ -1,7 +1,5 @@
 # lhcontrol
 
-[**⬇️ Get the latest Windows Installer**](https://github.com/FlameInTheDark/lhcontrol/releases/latest/download/lhcontrol-amd64-installer.exe)
-
 ![Application Screenshot](<./screenshot.png>)
 
 A simple application to control Valve Lighthouse (SteamVR) base stations v2.0 power state via Bluetooth LE.
