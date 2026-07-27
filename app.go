@@ -84,6 +84,7 @@ type App struct {
 	apiWG             sync.WaitGroup
 	listen            func(string, string) (net.Listener, error)
 	apiRetryDelay     time.Duration
+	externalScanID    atomic.Uint64
 	shuttingDown      atomic.Bool
 }
 
@@ -108,10 +109,19 @@ type apiStationManager interface {
 }
 
 type scanEventCallbacks struct {
-	started   func()
-	completed func([]station.StationInfo)
-	failed    func(error)
-	cancelled func()
+	nextID    func() uint64
+	started   func(scanEvent)
+	completed func(scanEvent)
+	failed    func(scanEvent)
+	cancelled func(scanEvent)
+}
+
+// scanEvent ties every external lifecycle notification to one scan request so
+// a delayed terminal event cannot replace a newer scan in the desktop UI.
+type scanEvent struct {
+	ID       uint64                `json:"id"`
+	Stations []station.StationInfo `json:"stations,omitempty"`
+	Error    string                `json:"error,omitempty"`
 }
 
 func registerAPIRoutes(api *fiber.App, manager apiStationManager, events scanEventCallbacks, status func() APIStatus) {
@@ -134,15 +144,34 @@ func registerAPIRoutes(api *fiber.App, manager apiStationManager, events scanEve
 		return c.JSON(status())
 	})
 	api.Post("/scan", func(c *fiber.Ctx) error {
+		id := uint64(0)
+		if events.nextID != nil {
+			id = events.nextID()
+		}
+		event := scanEvent{ID: id}
 		err := manager.StartScan(station.ScanCallbacks{
-			Started: events.started,
-			Completed: func(stations []station.StationInfo) {
-				if events.completed != nil {
-					events.completed(stations)
+			Started: func() {
+				if events.started != nil {
+					events.started(event)
 				}
 			},
-			Failed:    events.failed,
-			Cancelled: events.cancelled,
+			Completed: func(stations []station.StationInfo) {
+				if events.completed != nil {
+					event.Stations = stations
+					events.completed(event)
+				}
+			},
+			Failed: func(err error) {
+				if events.failed != nil {
+					event.Error = err.Error()
+					events.failed(event)
+				}
+			},
+			Cancelled: func() {
+				if events.cancelled != nil {
+					events.cancelled(event)
+				}
+			},
 		})
 		if err != nil {
 			return sendAPIError(c, err)
@@ -245,25 +274,28 @@ func (a *App) startup(ctx context.Context) {
 	}
 
 	registerAPIRoutes(a.api, a.stationManager, scanEventCallbacks{
-		started: func() {
+		nextID: func() uint64 {
+			return a.externalScanID.Add(1)
+		},
+		started: func(event scanEvent) {
 			if a.ctx != nil && !a.shuttingDown.Load() {
-				runtime.EventsEmit(a.ctx, "external-scan-started")
+				runtime.EventsEmit(a.ctx, "external-scan-started", event)
 			}
 		},
-		completed: func(stations []station.StationInfo) {
+		completed: func(event scanEvent) {
 			if a.ctx != nil && !a.shuttingDown.Load() {
-				runtime.EventsEmit(a.ctx, "external-scan-completed", stations)
+				runtime.EventsEmit(a.ctx, "external-scan-completed", event)
 			}
 		},
-		failed: func(err error) {
-			log.Printf("API background scan failed: %v", err)
+		failed: func(event scanEvent) {
+			log.Printf("API background scan failed: %s", event.Error)
 			if a.ctx != nil && !a.shuttingDown.Load() {
-				runtime.EventsEmit(a.ctx, "external-scan-failed", err.Error())
+				runtime.EventsEmit(a.ctx, "external-scan-failed", event)
 			}
 		},
-		cancelled: func() {
+		cancelled: func(event scanEvent) {
 			if a.ctx != nil && !a.shuttingDown.Load() {
-				runtime.EventsEmit(a.ctx, "external-scan-cancelled")
+				runtime.EventsEmit(a.ctx, "external-scan-cancelled", event)
 			}
 		},
 	}, a.GetAPIStatus)

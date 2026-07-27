@@ -2,10 +2,15 @@
 
 package platform
 
-import "log"
+import (
+	"errors"
+	"log"
+)
+
+var ErrUnsupportedPlatform = errors.New("lhcontrol is supported only on Windows")
 
 func AcquireSingleInstance(string) (func(), bool, error) {
-	return func() {}, false, nil
+	return nil, false, ErrUnsupportedPlatform
 }
 
 // BringWindowToFront is a no-op on non-Windows platforms for now.

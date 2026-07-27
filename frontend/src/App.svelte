@@ -60,6 +60,7 @@
   let apiRunning = false;
   let apiError = '';
   let externalScanning = false;
+  let externalScanID: number | null = null;
   let externalScanRecoveryPending = false;
   let stoppingScan = false;
   let stopRequestPending = false;
@@ -73,6 +74,18 @@
   let nextStationRevision = 0;
   let stationRevisions = new Map<string, number>();
   let disposed = false;
+
+  interface ExternalScanEvent {
+    id: number;
+    stations?: StationInfo[];
+    error?: string;
+  }
+
+  function matchesExternalScan(event: ExternalScanEvent): boolean {
+    // The app may have attached after the start event. In that case adopt the
+    // first terminal ID only while polling still reports an external scan.
+    return externalScanning && (externalScanID === null || event.id === externalScanID);
+  }
 
   $: sortedStations = [...stations].sort((a, b) => {
     const ac = a.channel > 0 ? a.channel : Number.MAX_SAFE_INTEGER;
@@ -252,26 +265,30 @@
   onMount(async () => {
     refreshAPIStatus();
     apiStatusInterval = setInterval(refreshAPIStatus, 15000);
-    cancelExternalScanStartedListener = EventsOn('external-scan-started', () => {
+    cancelExternalScanStartedListener = EventsOn('external-scan-started', (value: unknown) => {
       if (disposed) return;
+      const event = value as ExternalScanEvent;
       beginScanEpoch();
       listRevisions.next();
       prepareForScan();
+      externalScanID = event.id;
       externalScanning = true;
       stoppingScan = false;
       beginScanTimer();
       statusMessage = 'External scan in progress...';
     });
-    cancelExternalScanListener = EventsOn('external-scan-completed', async (updated: StationInfo[]) => {
-      if (disposed) return;
+    cancelExternalScanListener = EventsOn('external-scan-completed', async (value: unknown) => {
+      const event = value as ExternalScanEvent;
+      if (disposed || !matchesExternalScan(event)) return;
       beginScanEpoch();
       const revision = listRevisions.next();
       prepareForScan();
       externalScanning = false;
+      externalScanID = null;
       externalScanRecoveryPending = true;
       stoppingScan = false;
       maybeEndScanTimer();
-      stations = updated || [];
+      stations = event.stations || [];
       const scanStatus = await GetScanStatus().catch(() => null);
       if (disposed || !listRevisions.isCurrent(revision)) return;
       if (scanStatus) externalScanRecoveryPending = false;
@@ -280,12 +297,15 @@
         state: 'completed', found, known: stations.length, warnings: scanStatus?.warnings, external: true
       });
     });
-    cancelExternalScanFailureListener = EventsOn('external-scan-failed', async (message: string) => {
-      if (disposed) return;
+    cancelExternalScanFailureListener = EventsOn('external-scan-failed', async (value: unknown) => {
+      const event = value as ExternalScanEvent;
+      if (disposed || !matchesExternalScan(event)) return;
+      const message = event.error || 'unknown error';
       const operationEpoch = beginScanEpoch();
       const revision = listRevisions.next();
       prepareForScan();
       externalScanning = false;
+      externalScanID = null;
       if (globalOperation !== 'scanning') stoppingScan = false;
       maybeEndScanTimer();
       const capturedStationRevisions = new Map(stationRevisions);
@@ -303,12 +323,14 @@
       });
       pushToast(`External scan failed: ${message}`);
     });
-    cancelExternalScanCancelledListener = EventsOn('external-scan-cancelled', async () => {
-      if (disposed) return;
+    cancelExternalScanCancelledListener = EventsOn('external-scan-cancelled', async (value: unknown) => {
+      const event = value as ExternalScanEvent;
+      if (disposed || !matchesExternalScan(event)) return;
       const operationEpoch = beginScanEpoch();
       const revision = listRevisions.next();
       prepareForScan();
       externalScanning = false;
+      externalScanID = null;
       externalScanRecoveryPending = true;
       if (globalOperation !== 'scanning') stoppingScan = false;
       maybeEndScanTimer();
@@ -322,9 +344,8 @@
       statusMessage = 'Scan stopped.';
     });
     statusCheckInterval = setInterval(periodicStatusCheck, 15000);
-    const startupRevision = listRevisions.next();
     const startupScanning = await IsScanning().catch(() => false);
-    if (disposed || !listRevisions.isCurrent(startupRevision)) return;
+    if (disposed) return;
     externalScanning = startupScanning;
     if (externalScanning) {
       beginScanTimer();
@@ -412,6 +433,7 @@
     if (isLoading || scanLocked) return;
     prepareForScan();
     globalOperation = 'scanning';
+    externalScanID = null;
     beginScanTimer();
     const operationEpoch = beginScanEpoch();
     const revision = listRevisions.next();

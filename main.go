@@ -250,7 +250,7 @@ func main() {
 
 	releaseInstance, alreadyRunning, err := platform.AcquireSingleInstance(instanceMutexName)
 	if err != nil {
-		log.Printf("FATAL: Failed to acquire the Windows instance mutex: %v", err)
+		log.Printf("FATAL: Failed to acquire the application instance lock: %v", err)
 		if logFile != nil {
 			_ = logFile.Sync()
 		}

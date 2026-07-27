@@ -72,11 +72,25 @@ func TestScanEventsAreAlwaysStartedBeforeCompletion(t *testing.T) {
 			order := []string{}
 			api := fiber.New()
 			registerAPIRoutes(api, manager, scanEventCallbacks{
-				started: func() { order = append(order, "started") },
-				completed: func([]station.StationInfo) {
+				nextID: func() uint64 { return 42 },
+				started: func(event scanEvent) {
+					if event.ID != 42 {
+						t.Errorf("started event ID = %d, want 42", event.ID)
+					}
+					order = append(order, "started")
+				},
+				completed: func(event scanEvent) {
+					if event.ID != 42 {
+						t.Errorf("completed event ID = %d, want 42", event.ID)
+					}
 					order = append(order, "completed")
 				},
-				failed: func(error) { order = append(order, "failed") },
+				failed: func(event scanEvent) {
+					if event.ID != 42 || event.Error == "" {
+						t.Errorf("failed event = %+v, want ID 42 and error", event)
+					}
+					order = append(order, "failed")
+				},
 			}, func() APIStatus { return APIStatus{Running: true} })
 
 			response, err := api.Test(httptest.NewRequest(http.MethodPost, "/scan", nil))

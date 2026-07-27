@@ -86,6 +86,10 @@ function createStation(overrides: Partial<StationInfo> = {}): StationInfo {
   } as StationInfo;
 }
 
+function externalScanEvent(id: number, overrides: Partial<{ stations: StationInfo[]; error: string }> = {}) {
+  return { id, ...overrides };
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   Object.defineProperty(Element.prototype, 'animate', {
@@ -123,6 +127,22 @@ describe('App asynchronous operations', () => {
     expect(api.ScanAndFetchStations).toHaveBeenCalledOnce();
   });
 
+  it('still starts the initial scan after a delayed startup scan check', async () => {
+    vi.useFakeTimers();
+    let resolveStartupScan!: (scanning: boolean) => void;
+    api.IsScanning.mockReturnValueOnce(new Promise((resolve) => {
+      resolveStartupScan = resolve;
+    })).mockResolvedValue(false);
+    render(App);
+
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(api.CheckAllStationStatuses).toHaveBeenCalledOnce();
+    resolveStartupScan(false);
+
+    await vi.waitFor(() => expect(api.ScanAndFetchStations).toHaveBeenCalledOnce());
+    expect(await screen.findByText('LHB-TEST')).toBeInTheDocument();
+  });
+
   it('shows a recoverable Bluetooth message when the initial scan fails', async () => {
     api.ScanAndFetchStations.mockRejectedValue(new Error('Bluetooth is unavailable; turn on Bluetooth and retry'));
     api.GetCurrentStationInfo.mockResolvedValue([
@@ -141,7 +161,8 @@ describe('App asynchronous operations', () => {
       createStation({ name: 'LHB-AFTER-FAILURE', connectionState: 'disconnected' })
     ]);
 
-    runtime.handlers.get('external-scan-failed')?.('fixture radio failure');
+    runtime.handlers.get('external-scan-started')?.(externalScanEvent(1));
+    runtime.handlers.get('external-scan-failed')?.(externalScanEvent(1, { error: 'fixture radio failure' }));
 
     expect(await screen.findByText('LHB-AFTER-FAILURE')).toBeInTheDocument();
     expect(await screen.findByText(/External scan failed: fixture radio failure/)).toBeInTheDocument();
@@ -155,14 +176,30 @@ describe('App asynchronous operations', () => {
       resolveFailureRefresh = resolve;
     }));
 
-    runtime.handlers.get('external-scan-failed')?.('old failure');
-    runtime.handlers.get('external-scan-started')?.();
+    runtime.handlers.get('external-scan-started')?.(externalScanEvent(1));
+    runtime.handlers.get('external-scan-failed')?.(externalScanEvent(1, { error: 'old failure' }));
+    runtime.handlers.get('external-scan-started')?.(externalScanEvent(2));
     resolveFailureRefresh([createStation({ name: 'LHB-STALE' })]);
     await Promise.resolve();
     await Promise.resolve();
 
     expect(screen.queryByText('LHB-STALE')).not.toBeInTheDocument();
     expect(screen.getByText('External scan in progress...')).toBeInTheDocument();
+  });
+
+  it('ignores a delayed external completion after a newer local scan starts', async () => {
+    let resolveLocalScan!: (stations: StationInfo[]) => void;
+    api.ScanAndFetchStations.mockReturnValueOnce(new Promise((resolve) => {
+      resolveLocalScan = resolve;
+    }));
+    render(App);
+    runtime.handlers.get('external-scan-completed')?.(externalScanEvent(1, {
+      stations: [createStation({ name: 'LHB-STALE-EXTERNAL' })]
+    }));
+    resolveLocalScan([createStation({ name: 'LHB-LOCAL' })]);
+
+    expect(await screen.findByText('LHB-LOCAL')).toBeInTheDocument();
+    expect(screen.queryByText('LHB-STALE-EXTERNAL')).not.toBeInTheDocument();
   });
 
   it('preserves a station update started during an external failure refresh', async () => {
@@ -180,7 +217,8 @@ describe('App asynchronous operations', () => {
     });
     await waitFor(() => expect(screen.getByRole('button', { name: 'Scan' })).toBeEnabled());
 
-    runtime.handlers.get('external-scan-failed')?.('fixture failure');
+    runtime.handlers.get('external-scan-started')?.(externalScanEvent(1));
+    runtime.handlers.get('external-scan-failed')?.(externalScanEvent(1, { error: 'fixture failure' }));
     await fireEvent.click(screen.getByRole('button', { name: 'Turn LHB-TEST on' }));
     expect(await screen.findByText('On confirmed')).toBeInTheDocument();
     resolveRefresh([createStation({ powerState: 0, powerStateName: 'sleep' })]);
@@ -232,7 +270,7 @@ describe('App asynchronous operations', () => {
     api.GetCurrentStationInfo.mockResolvedValue([createStation({ name: 'LHB-RECOVERED' })]);
     render(App);
     await screen.findByText('LHB-TEST');
-    runtime.handlers.get('external-scan-started')?.();
+    runtime.handlers.get('external-scan-started')?.(externalScanEvent(1));
     api.GetScanStatus.mockReset();
     api.GetScanStatus.mockRejectedValueOnce(new Error('temporary scan status failure'))
       .mockResolvedValue({ state: 'failed', found: 0, error: 'radio failure', warnings: ['partial cleanup'] });
@@ -253,7 +291,10 @@ describe('App asynchronous operations', () => {
     api.GetScanStatus.mockRejectedValueOnce(new Error('temporary scan status failure'))
       .mockResolvedValue({ state: 'failed', found: 0, error: 'radio failure', warnings: [] });
 
-    runtime.handlers.get('external-scan-completed')?.([createStation({ name: 'LHB-COMPLETED' })]);
+    runtime.handlers.get('external-scan-started')?.(externalScanEvent(1));
+    runtime.handlers.get('external-scan-completed')?.(externalScanEvent(1, {
+      stations: [createStation({ name: 'LHB-COMPLETED' })]
+    }));
     expect(await screen.findByText('LHB-COMPLETED')).toBeInTheDocument();
 
     await vi.advanceTimersByTimeAsync(15_000);
@@ -272,7 +313,7 @@ describe('App asynchronous operations', () => {
     expect(api.StopScan).toHaveBeenCalledOnce();
     expect(await screen.findByRole('button', { name: 'Stopping...' })).toBeDisabled();
 
-    runtime.handlers.get('external-scan-cancelled')?.();
+    runtime.handlers.get('external-scan-cancelled')?.(externalScanEvent(1));
     expect(await screen.findByText('Scan stopped.')).toBeInTheDocument();
     resolveStop();
   });
@@ -286,7 +327,7 @@ describe('App asynchronous operations', () => {
     render(App);
     await fireEvent.click(await screen.findByRole('button', { name: 'Stop' }));
 
-    runtime.handlers.get('external-scan-cancelled')?.();
+    runtime.handlers.get('external-scan-cancelled')?.(externalScanEvent(1));
     expect(await screen.findByText('Scan stopped.')).toBeInTheDocument();
     resolveStop();
     await Promise.resolve();
@@ -305,7 +346,7 @@ describe('App asynchronous operations', () => {
     render(App);
     await fireEvent.click(await screen.findByRole('button', { name: 'Stop' }));
 
-    runtime.handlers.get('external-scan-cancelled')?.();
+    runtime.handlers.get('external-scan-cancelled')?.(externalScanEvent(1));
     expect(await screen.findByText('Scan stopped.')).toBeInTheDocument();
     rejectStop(new Error('late stop failure'));
     await Promise.resolve();
@@ -607,7 +648,7 @@ describe('App asynchronous operations', () => {
     await fireEvent.click(screen.getByRole('button', { name: 'Rename LHB-TEST' }));
     expect(screen.getByRole('textbox', { name: 'Station name' })).toBeInTheDocument();
 
-    runtime.handlers.get('external-scan-started')?.();
+    runtime.handlers.get('external-scan-started')?.(externalScanEvent(1));
 
     await waitFor(() => expect(screen.queryByRole('textbox', { name: 'Station name' })).not.toBeInTheDocument());
     expect(screen.getByText('External scan in progress...')).toBeInTheDocument();
@@ -661,7 +702,7 @@ describe('App asynchronous operations', () => {
     await fireEvent.click(await screen.findByRole('button', { name: /Change Channel/ }));
     expect(screen.getByRole('dialog', { name: 'Change channel' })).toBeInTheDocument();
 
-    runtime.handlers.get('external-scan-started')?.();
+    runtime.handlers.get('external-scan-started')?.(externalScanEvent(1));
 
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Change channel' })).not.toBeInTheDocument());
     expect(screen.queryByText('On confirmed')).not.toBeInTheDocument();
@@ -728,7 +769,7 @@ describe('App asynchronous operations', () => {
     await fireEvent.click(screen.getByRole('button', { name: 'Turn LHB-TEST on' }));
     await waitFor(() => expect(api.SetStationPower).toHaveBeenCalledOnce());
 
-    runtime.handlers.get('external-scan-started')?.();
+    runtime.handlers.get('external-scan-started')?.(externalScanEvent(1));
     await waitFor(() => expect(screen.getByRole('button', { name: 'Stop' })).toBeEnabled());
     expect(screen.getByText('External scan in progress...')).toBeInTheDocument();
 
@@ -757,8 +798,8 @@ describe('App asynchronous operations', () => {
     await fireEvent.click(screen.getByRole('button', { name: 'Turn LHB-TEST on' }));
     await waitFor(() => expect(api.SetStationPower).toHaveBeenCalledOnce());
 
-    runtime.handlers.get('external-scan-started')?.();
-    runtime.handlers.get('external-scan-completed')?.([scannedStation]);
+    runtime.handlers.get('external-scan-started')?.(externalScanEvent(1));
+    runtime.handlers.get('external-scan-completed')?.(externalScanEvent(1, { stations: [scannedStation] }));
 
     await waitFor(() => expect(screen.getByRole('button', { name: 'Turn LHB-TEST on' })).not.toBeDisabled());
     resolvePower({
@@ -864,7 +905,7 @@ describe('App asynchronous operations', () => {
 
     render(App);
     expect(await screen.findByRole('button', { name: 'Scan Now' })).not.toBeDisabled();
-    runtime.handlers.get('external-scan-started')?.();
+    runtime.handlers.get('external-scan-started')?.(externalScanEvent(1));
 
     const scanningButtons = await screen.findAllByRole('button', { name: 'Stop' });
     expect(scanningButtons.length).toBeGreaterThan(0);
@@ -900,7 +941,10 @@ describe('App asynchronous operations', () => {
     await vi.advanceTimersByTimeAsync(15_000);
     await vi.waitFor(() => expect(api.CheckAllStationStatuses).toHaveBeenCalledOnce());
 
-    runtime.handlers.get('external-scan-completed')?.([createStation({ name: 'LHB-NEW' })]);
+    runtime.handlers.get('external-scan-started')?.(externalScanEvent(1));
+    runtime.handlers.get('external-scan-completed')?.(externalScanEvent(1, {
+      stations: [createStation({ name: 'LHB-NEW' })]
+    }));
     resolveFallback([createStation({ name: 'LHB-OLD' })]);
     await vi.advanceTimersByTimeAsync(0);
 
