@@ -226,6 +226,40 @@ describe('App asynchronous operations', () => {
     expect(screen.queryByText(/External scan completed/)).not.toBeInTheDocument();
   });
 
+  it('retries external terminal recovery when the first scan-status request fails', async () => {
+    vi.useFakeTimers();
+    api.IsScanning.mockResolvedValue(false);
+    api.GetCurrentStationInfo.mockResolvedValue([createStation({ name: 'LHB-RECOVERED' })]);
+    render(App);
+    await screen.findByText('LHB-TEST');
+    runtime.handlers.get('external-scan-started')?.();
+    api.GetScanStatus.mockReset();
+    api.GetScanStatus.mockRejectedValueOnce(new Error('temporary scan status failure'))
+      .mockResolvedValue({ state: 'failed', found: 0, error: 'radio failure', warnings: ['partial cleanup'] });
+
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(screen.queryByText(/External scan failed/)).not.toBeInTheDocument();
+
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(await screen.findByText('External scan failed: radio failure partial cleanup')).toBeInTheDocument();
+  });
+
+  it('keeps terminal recovery pending when an external completion status request fails', async () => {
+    vi.useFakeTimers();
+    api.IsScanning.mockResolvedValue(false);
+    render(App);
+    await screen.findByText('LHB-TEST');
+    api.GetScanStatus.mockReset();
+    api.GetScanStatus.mockRejectedValueOnce(new Error('temporary scan status failure'))
+      .mockResolvedValue({ state: 'failed', found: 0, error: 'radio failure', warnings: [] });
+
+    runtime.handlers.get('external-scan-completed')?.([createStation({ name: 'LHB-COMPLETED' })]);
+    expect(await screen.findByText('LHB-COMPLETED')).toBeInTheDocument();
+
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(await screen.findByText('External scan failed: radio failure')).toBeInTheDocument();
+  });
+
   it('stops an active scan and handles its cancellation event', async () => {
     let resolveStop!: () => void;
     api.IsScanning.mockResolvedValue(true);
@@ -259,6 +293,24 @@ describe('App asynchronous operations', () => {
 
     expect(screen.getByText('Scan stopped.')).toBeInTheDocument();
     expect(screen.queryByText('Scan stop requested...')).not.toBeInTheDocument();
+  });
+
+  it('does not let a late stop rejection overwrite a cancellation event', async () => {
+    let rejectStop!: (error: Error) => void;
+    api.IsScanning.mockResolvedValue(true);
+    api.StopScan.mockReturnValue(new Promise<void>((_, reject) => {
+      rejectStop = reject;
+    }));
+    render(App);
+    await fireEvent.click(await screen.findByRole('button', { name: 'Stop' }));
+
+    runtime.handlers.get('external-scan-cancelled')?.();
+    expect(await screen.findByText('Scan stopped.')).toBeInTheDocument();
+    rejectStop(new Error('late stop failure'));
+    await Promise.resolve();
+
+    expect(screen.getByText('Scan stopped.')).toBeInTheDocument();
+    expect(screen.queryByText(/Unable to stop scan/)).not.toBeInTheDocument();
   });
 
   it('keeps a local scan stopping until the StopScan promise settles', async () => {

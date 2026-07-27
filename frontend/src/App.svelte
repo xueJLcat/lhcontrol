@@ -267,12 +267,13 @@
       const revision = listRevisions.next();
       prepareForScan();
       externalScanning = false;
-      externalScanRecoveryPending = false;
+      externalScanRecoveryPending = true;
       stoppingScan = false;
       maybeEndScanTimer();
       stations = updated || [];
       const scanStatus = await GetScanStatus().catch(() => null);
       if (disposed || !listRevisions.isCurrent(revision)) return;
+      if (scanStatus) externalScanRecoveryPending = false;
       const found = scanStatus?.found ?? stations.filter((station) => station.seenInLatestScan).length;
       statusMessage = formatTerminalScanResult({
         state: 'completed', found, known: stations.length, warnings: scanStatus?.warnings, external: true
@@ -284,19 +285,17 @@
       const revision = listRevisions.next();
       prepareForScan();
       externalScanning = false;
-      externalScanRecoveryPending = true;
       if (globalOperation !== 'scanning') stoppingScan = false;
       maybeEndScanTimer();
       const capturedStationRevisions = new Map(stationRevisions);
       const updated = await GetCurrentStationInfo().catch(() => null);
       if (!canCommitOperation(operationEpoch) || !listRevisions.isCurrent(revision)) return;
       if (updated) {
-        if (applyStationList(updated, revision, capturedStationRevisions)) {
-          externalScanRecoveryPending = false;
-        }
+        applyStationList(updated, revision, capturedStationRevisions);
       }
       const scanStatus = await GetScanStatus().catch(() => null);
       if (disposed || !listRevisions.isCurrent(revision)) return;
+      if (updated && scanStatus) externalScanRecoveryPending = false;
       statusMessage = formatTerminalScanResult({
         state: 'failed', error: message, known: stations.length,
         warnings: scanStatus?.warnings, external: true
@@ -309,6 +308,7 @@
       const revision = listRevisions.next();
       prepareForScan();
       externalScanning = false;
+      externalScanRecoveryPending = true;
       if (globalOperation !== 'scanning') stoppingScan = false;
       maybeEndScanTimer();
       const capturedStationRevisions = new Map(stationRevisions);
@@ -378,6 +378,10 @@
           }
           const scanStatus = await GetScanStatus().catch(() => null);
           if (disposed || !listRevisions.isCurrent(revision)) return;
+          if (!scanStatus) {
+            externalScanRecoveryPending = true;
+            return;
+          }
           externalScanRecoveryPending = false;
           const found = scanStatus?.found ?? stations.filter((station) => station.seenInLatestScan).length;
           statusMessage = formatTerminalScanResult({
@@ -445,11 +449,13 @@
 
   async function handleStopScan() {
     if (!scanningActive || stoppingScan) return;
+    const operationEpoch = scanEpoch;
     stoppingScan = true;
     stopRequestPending = true;
     statusMessage = 'Stopping scan...';
     try {
       await StopScan();
+      if (!canCommitOperation(operationEpoch)) return;
       stopRequestPending = false;
       if (!stoppingScan) return;
       externalScanning = false;
@@ -457,6 +463,7 @@
       statusMessage = 'Scan stopped.';
       maybeEndScanTimer();
     } catch (error) {
+      if (!canCommitOperation(operationEpoch)) return;
       stopRequestPending = false;
       stoppingScan = false;
       statusMessage = `Unable to stop scan: ${error}`;

@@ -747,7 +747,7 @@ func (d Device) registerNotification(registration notificationRegistration) erro
 // Connect starts a connection attempt to the given peripheral device address.
 //
 // On Linux and Windows, the IsRandom part of the address is ignored.
-func (a *Adapter) Connect(address Address, params ConnectionParams) (Device, error) {
+func (a *Adapter) Connect(address Address, params ConnectionParams) (result Device, returnErr error) {
 	leaveThread, threadErr := enterWinRTThread()
 	if threadErr != nil {
 		return Device{}, threadErr
@@ -783,12 +783,11 @@ func (a *Adapter) Connect(address Address, params ConnectionParams) (Device, err
 	}
 
 	bleDevice := (*bluetooth.BluetoothLEDevice)(res)
-	var cleanupErrs []error
 	cleanupDevice := true
 	defer func() {
 		if cleanupDevice && bleDevice != nil {
 			if err := bleDevice.Close(); err != nil {
-				cleanupErrs = append(cleanupErrs, err)
+				returnErr = errors.Join(returnErr, err)
 			}
 			bleDevice.Release()
 		}
@@ -827,7 +826,7 @@ func (a *Adapter) Connect(address Address, params ConnectionParams) (Device, err
 	defer func() {
 		if cleanupSession {
 			if err := newSession.Close(); err != nil {
-				cleanupErrs = append(cleanupErrs, err)
+				returnErr = errors.Join(returnErr, err)
 			}
 			newSession.Release()
 		}
@@ -897,9 +896,6 @@ func (a *Adapter) Connect(address Address, params ConnectionParams) (Device, err
 	if err != nil {
 		state.operationMutex.Unlock()
 		handler.Release()
-		if len(cleanupErrs) > 0 {
-			return Device{}, errors.Join(append([]error{err}, cleanupErrs...)...)
-		}
 		return Device{}, err
 	}
 	state.connectionStatusListenerToken = token
