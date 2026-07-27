@@ -16,12 +16,15 @@ export interface OperationLocks {
 
 export function deriveOperationLocks(state: OperationState): OperationLocks {
   const anyDeviceOperation = state.gattAddresses.size > 0 || state.configAddresses.size > 0;
-  const globalBusy = state.global !== 'idle';
-  const bluetoothBusy = globalBusy || state.externalScanning || anyDeviceOperation;
+  // A periodic status read is background work, not an exclusive user action.
+  // Let users act on a station while it runs; the backend arbitrates any GATT
+  // conflict without briefly disabling every card after a scan completes.
+  const exclusiveGlobalOperation = state.global === 'scanning' || state.global === 'bulk-power';
+  const bluetoothBusy = exclusiveGlobalOperation || state.externalScanning || anyDeviceOperation;
   return {
     scanLocked: bluetoothBusy,
     bulkLocked: bluetoothBusy,
-    stationLocked: globalBusy || state.externalScanning,
+    stationLocked: exclusiveGlobalOperation || state.externalScanning,
     anyDeviceOperation
   };
 }

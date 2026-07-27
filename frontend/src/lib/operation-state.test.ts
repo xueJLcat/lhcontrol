@@ -25,7 +25,7 @@ describe('deriveOperationLocks', () => {
     });
   });
 
-  it.each<GlobalOperation>(['scanning', 'status-refresh', 'bulk-power'])(
+  it.each<GlobalOperation>(['scanning', 'bulk-power'])(
     'locks all Bluetooth entry points during %s',
     (operation) => {
       expect(locks(operation)).toMatchObject({
@@ -35,6 +35,15 @@ describe('deriveOperationLocks', () => {
       });
     }
   );
+
+  it('keeps station controls available during a background status refresh', () => {
+    expect(locks('status-refresh')).toEqual({
+      scanLocked: false,
+      bulkLocked: false,
+      stationLocked: false,
+      anyDeviceOperation: false
+    });
+  });
 
   it('locks scan and bulk while an individual device is active', () => {
     expect(locks('idle', false, ['AA'])).toEqual({

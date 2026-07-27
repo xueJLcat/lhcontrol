@@ -236,6 +236,27 @@ describe('App asynchronous operations', () => {
     expect(api.CheckAllStationStatuses).not.toHaveBeenCalled();
   });
 
+  it('keeps card controls enabled while a periodic status refresh is pending', async () => {
+    vi.useFakeTimers();
+    let resolveStatusRefresh!: (stations: StationInfo[]) => void;
+    api.CheckAllStationStatuses.mockReturnValue(new Promise((resolve) => {
+      resolveStatusRefresh = resolve;
+    }));
+    render(App);
+    await vi.waitFor(() => expect(screen.getByText('LHB-TEST')).toBeInTheDocument());
+    await vi.waitFor(() => expect(screen.getByRole('button', { name: 'Turn LHB-TEST on' })).toBeEnabled());
+
+    await vi.advanceTimersByTimeAsync(15_000);
+    await vi.waitFor(() => expect(api.CheckAllStationStatuses).toHaveBeenCalledOnce());
+
+    expect(screen.getByRole('button', { name: 'Turn LHB-TEST on' })).toBeEnabled();
+    await fireEvent.click(screen.getByRole('button', { name: 'Details for LHB-TEST' }));
+    expect(await screen.findByRole('button', { name: 'Identify' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Refresh capabilities' })).toBeEnabled();
+
+    resolveStatusRefresh([createStation()]);
+  });
+
   it('self-recovers when polling observes an external scan has ended without an event', async () => {
     vi.useFakeTimers();
     api.IsScanning.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
