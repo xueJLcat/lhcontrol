@@ -371,7 +371,7 @@ func TestChannelResultForWailsPreservesSentUnconfirmedResult(t *testing.T) {
 	}
 }
 
-func TestChannelAPIPreservesStructuredConfirmationError(t *testing.T) {
+func TestChannelAPIReturnsStructuredSuccessWhenCommandWasSentButUnconfirmed(t *testing.T) {
 	manager := &fakeAPIStationManager{
 		channelResult: station.ChannelChangeResult{
 			Address:           "AA",
@@ -391,11 +391,10 @@ func TestChannelAPIPreservesStructuredConfirmationError(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer response.Body.Close()
-	if response.StatusCode != fiber.StatusInternalServerError {
-		t.Fatalf("status = %d, want 500", response.StatusCode)
+	if response.StatusCode != fiber.StatusOK {
+		t.Fatalf("status = %d, want 200", response.StatusCode)
 	}
 	var body struct {
-		Error             string   `json:"error"`
 		CommandSent       bool     `json:"commandSent"`
 		Confirmed         bool     `json:"confirmed"`
 		ConfirmationError string   `json:"confirmationError"`
@@ -404,7 +403,7 @@ func TestChannelAPIPreservesStructuredConfirmationError(t *testing.T) {
 	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
 		t.Fatal(err)
 	}
-	if body.Error == "" || !body.CommandSent || body.Confirmed || body.ConfirmationError != "readback timed out" || len(body.Warnings) != 1 {
+	if !body.CommandSent || body.Confirmed || body.ConfirmationError != "readback timed out" || len(body.Warnings) != 1 {
 		t.Fatalf("structured channel error = %+v", body)
 	}
 }

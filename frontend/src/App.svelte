@@ -63,6 +63,7 @@
   let externalScanRecoveryPending = false;
   let stoppingScan = false;
   let stopRequestPending = false;
+  let stopRequestGeneration = 0;
   let scanStartedAt: number | null = null;
   let scanElapsed = 0;
   let scanTimer: ReturnType<typeof setInterval> | null = null;
@@ -450,6 +451,7 @@
   async function handleStopScan() {
     if (!scanningActive || stoppingScan) return;
     const operationEpoch = scanEpoch;
+    const requestGeneration = ++stopRequestGeneration;
     stoppingScan = true;
     stopRequestPending = true;
     statusMessage = 'Stopping scan...';
@@ -468,6 +470,13 @@
       stoppingScan = false;
       statusMessage = `Unable to stop scan: ${error}`;
       pushToast(statusMessage);
+    } finally {
+      // Terminal scan events can advance scanEpoch before StopScan settles.
+      // Clear this request by identity rather than treating it as stale.
+      if (stopRequestGeneration === requestGeneration) {
+        stopRequestPending = false;
+        if (globalOperation !== 'scanning' && !externalScanning) stoppingScan = false;
+      }
     }
   }
 

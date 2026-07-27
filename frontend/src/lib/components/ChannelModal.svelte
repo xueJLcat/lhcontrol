@@ -16,7 +16,15 @@
   export let onSave: (channel: number, allowUnknownConflictRisk: boolean) => void;
   export let onIdentify: (station: StationInfo) => void;
 
-  let targetChannel = station.channel > 0 ? station.channel : 1;
+  function initialTargetChannel(channel: number, occupied: Map<number, string>): number {
+    if (channel > 0 && !occupied.has(channel)) return channel;
+    for (let candidate = 1; candidate <= 16; candidate += 1) {
+      if (!occupied.has(candidate)) return candidate;
+    }
+    return channel > 0 ? channel : 1;
+  }
+
+  let targetChannel = initialTargetChannel(station.channel, occupiedChannels);
   let confirmUnknownChannelRisk = false;
 
   $: unchanged = station.isPresent && station.scanFresh && station.channelFresh &&

@@ -54,6 +54,23 @@ func sendPowerActionResponse(c *fiber.Ctx, result station.PowerActionResult, err
 	return sendAPIError(c, err)
 }
 
+func sendChannelActionResponse(c *fiber.Ctx, result station.ChannelChangeResult, expectedChannel int, err error) error {
+	if err == nil || (result.CommandSent && !result.Confirmed) {
+		return c.Status(fiber.StatusOK).JSON(result)
+	}
+	return c.Status(apiStatusForError(err)).JSON(fiber.Map{
+		"error":             err.Error(),
+		"address":           result.Address,
+		"previousChannel":   result.PreviousChannel,
+		"expectedChannel":   expectedChannel,
+		"actualChannel":     result.Channel,
+		"commandSent":       result.CommandSent,
+		"confirmed":         result.Confirmed,
+		"confirmationError": result.ConfirmationError,
+		"warnings":          result.Warnings,
+	})
+}
+
 // App struct
 type App struct {
 	ctx               context.Context
@@ -186,20 +203,7 @@ func registerAPIRoutes(api *fiber.App, manager apiStationManager, events scanEve
 			return sendAPIError(c, fmt.Errorf("%w: invalid JSON body", station.ErrInvalidArgument))
 		}
 		result, err := manager.SetStationChannel(c.Params("address"), request.Channel, request.AllowUnknownConflictRisk)
-		if err != nil {
-			return c.Status(apiStatusForError(err)).JSON(fiber.Map{
-				"error":             err.Error(),
-				"address":           result.Address,
-				"previousChannel":   result.PreviousChannel,
-				"expectedChannel":   request.Channel,
-				"actualChannel":     result.Channel,
-				"commandSent":       result.CommandSent,
-				"confirmed":         result.Confirmed,
-				"confirmationError": result.ConfirmationError,
-				"warnings":          result.Warnings,
-			})
-		}
-		return c.JSON(result)
+		return sendChannelActionResponse(c, result, request.Channel, err)
 	})
 }
 

@@ -293,6 +293,7 @@ describe('App asynchronous operations', () => {
 
     expect(screen.getByText('Scan stopped.')).toBeInTheDocument();
     expect(screen.queryByText('Scan stop requested...')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Scan' })).toBeEnabled();
   });
 
   it('does not let a late stop rejection overwrite a cancellation event', async () => {

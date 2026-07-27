@@ -125,6 +125,16 @@ describe('ChannelModal channel grid', () => {
     expect(screen.getByRole('button', { name: 'Confirm change' })).toBeDisabled();
   });
 
+  it('selects the first free channel when the current channel conflicts', () => {
+    renderModal({
+      station: station({ channelConflict: true }),
+      occupiedChannels: new Map([[3, 'LHB-B'], [4, 'LHB-C']])
+    });
+
+    expect(screen.getByRole('button', { name: '1' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: 'Confirm change' })).toBeEnabled();
+  });
+
   it('allows a stale current channel to be submitted for confirmation', async () => {
     const onSave = renderModal({ station: station({ channelFresh: false }) });
     const confirm = screen.getByRole('button', { name: 'Confirm change' });

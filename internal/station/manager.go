@@ -2077,12 +2077,10 @@ func (m *Manager) setAllStationsPowerDetailed(state string) (BulkPowerResult, er
 				capabilities := snapshot.Capabilities
 				var err error
 				if snapshot.CapabilitiesKnown &&
-					capabilities.PowerWrite &&
-					(target != bluetooth.PowerStateStandby || capabilities.Standby) {
-					capabilities, err = m.bluetoothOps.ensureCapabilities(s)
-				} else if snapshot.CapabilitiesKnown {
+					(!capabilities.PowerWrite ||
+						(target == bluetooth.PowerStateStandby && !capabilities.Standby)) {
 					capabilities, err = m.bluetoothOps.refreshCapabilities(s)
-				} else {
+				} else if !snapshot.CapabilitiesKnown {
 					capabilities, err = m.bluetoothOps.ensureCapabilities(s)
 				}
 				if err == nil && !capabilities.PowerWrite {
@@ -2113,6 +2111,8 @@ func (m *Manager) setAllStationsPowerDetailed(state string) (BulkPowerResult, er
 				if errors.As(workerErr, &confirmationErr) {
 					stationResult.CommandSent = true
 					stationResult.Success = true
+					stationResult.Confirmed = false
+					stationResult.Error = workerErr.Error()
 				} else if bluetooth.IsUnsupportedCapabilityError(workerErr) {
 					stationResult.Skipped = true
 					stationResult.Reason = workerErr.Error()
@@ -2125,7 +2125,7 @@ func (m *Manager) setAllStationsPowerDetailed(state string) (BulkPowerResult, er
 				stationResult.Station = info
 				stationResult.Name = info.Name
 			}
-			if stationResult.Success && !bluetooth.RequiresReconnect(workerErr) &&
+			if stationResult.Confirmed && !bluetooth.RequiresReconnect(workerErr) &&
 				!bluetooth.IsAdapterUnavailable(workerErr) {
 				m.clearStatusFailureKind(stationResult.Address, statusRetryConnection)
 			}

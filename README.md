@@ -158,7 +158,7 @@ This application also exposes a simple HTTP API on `http://127.0.0.1:7575` for b
 
 *   **`PUT /stations/:address/channel`**
     *   **Body:** `{"channel":5}` (valid range: 1-16).
-    *   **Description:** Rejects visible conflicts, writes the channel, and succeeds only after readback matches.
+    *   **Description:** Rejects visible conflicts, writes the channel, and succeeds only after readback matches. If the command was sent but readback is unavailable, returns `200 OK` with `commandSent: true` and `confirmed: false`; clients must not automatically retry it.
 
 **Example Usage (curl):**
 

@@ -1190,14 +1190,11 @@ func TestBulkPowerDoesNotStartQueuedWorkAfterShutdown(t *testing.T) {
 			CapabilitiesKnown: true,
 		}
 	}
-	manager.bluetoothOps.ensureCapabilities = func(*internalbluetooth.BaseStation) (internalbluetooth.Capabilities, error) {
+	manager.bluetoothOps.setPowerState = func(*internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
 		started <- struct{}{}
 		<-release
-		return internalbluetooth.Capabilities{PowerWrite: true}, nil
-	}
-	manager.bluetoothOps.setPowerState = func(*internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
 		writes.Add(1)
-		return internalbluetooth.PowerControlResult{}, nil
+		return internalbluetooth.PowerControlResult{Confirmed: true}, nil
 	}
 
 	type bulkResponse struct {
@@ -1417,9 +1414,6 @@ func TestBulkConfirmationTransportFailureKeepsRecoveryScheduled(t *testing.T) {
 		Capabilities: internalbluetooth.Capabilities{PowerWrite: true}, CapabilitiesKnown: true,
 	}
 	manager.stations[address] = station
-	manager.bluetoothOps.ensureCapabilities = func(*internalbluetooth.BaseStation) (internalbluetooth.Capabilities, error) {
-		return internalbluetooth.Capabilities{PowerWrite: true}, nil
-	}
 	manager.bluetoothOps.setPowerState = func(*internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
 		return internalbluetooth.PowerControlResult{}, &internalbluetooth.PowerConfirmationError{
 			Target: internalbluetooth.PowerStateOn,
@@ -1433,7 +1427,7 @@ func TestBulkConfirmationTransportFailureKeepsRecoveryScheduled(t *testing.T) {
 		t.Fatalf("SetAllStationsPowerDetailed() error = %v", err)
 	}
 	if len(result.Results) != 1 || !result.Results[0].Success ||
-		!result.Results[0].CommandSent || result.Results[0].Confirmed {
+		!result.Results[0].CommandSent || result.Results[0].Confirmed || result.Results[0].Error == "" {
 		t.Fatalf("confirmation result = %+v", result.Results)
 	}
 	manager.statusRetryMutex.Lock()
@@ -1485,9 +1479,6 @@ func TestBulkPowerConfirmationUnsupportedReadIsNotSkipped(t *testing.T) {
 		Name: "LHB-BULK-CONFIRM-UNSUPPORTED", Address: mustAddress(t, address), Present: true,
 		Capabilities:      internalbluetooth.Capabilities{PowerRead: true, PowerWrite: true},
 		CapabilitiesKnown: true,
-	}
-	manager.bluetoothOps.ensureCapabilities = func(*internalbluetooth.BaseStation) (internalbluetooth.Capabilities, error) {
-		return internalbluetooth.Capabilities{PowerRead: true, PowerWrite: true}, nil
 	}
 	manager.bluetoothOps.setPowerState = func(*internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
 		return internalbluetooth.PowerControlResult{State: internalbluetooth.PowerStateUnknown}, &internalbluetooth.PowerConfirmationError{
