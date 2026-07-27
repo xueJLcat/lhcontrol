@@ -294,6 +294,55 @@ func TestAPIServerCancellationAtSuccessfulBindCannotStrandListener(t *testing.T)
 	}
 }
 
+func TestAPIServerServesRegisteredRoutesOverLoopback(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := NewApp()
+	app.apiStatus.Address = listener.Addr().String()
+	registerAPIRoutes(app.api, &fakeAPIStationManager{}, scanEventCallbacks{}, app.GetAPIStatus)
+	app.listen = func(string, string) (net.Listener, error) {
+		return listener, nil
+	}
+	app.startAPIServer()
+	t.Cleanup(func() {
+		app.apiLifecycleMutex.Lock()
+		cancel := app.apiCancel
+		app.apiCancel = nil
+		app.apiLifecycleMutex.Unlock()
+		if cancel != nil {
+			cancel()
+		}
+		_ = app.api.Shutdown()
+		app.apiWG.Wait()
+	})
+
+	deadline := time.Now().Add(time.Second)
+	for !app.GetAPIStatus().Running && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if status := app.GetAPIStatus(); !status.Running {
+		t.Fatalf("API status = %+v, want running", status)
+	}
+
+	response, err := http.Get("http://" + listener.Addr().String() + "/health")
+	if err != nil {
+		t.Fatalf("loopback health request: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("health status = %d, want 200", response.StatusCode)
+	}
+	var status APIStatus
+	if err := json.NewDecoder(response.Body).Decode(&status); err != nil {
+		t.Fatalf("decode health response: %v", err)
+	}
+	if !status.Running || status.Address != listener.Addr().String() || status.Error != "" {
+		t.Fatalf("health response = %+v, want running loopback status", status)
+	}
+}
+
 func TestPowerActionConfirmationFailureReturnsStructuredSuccess(t *testing.T) {
 	confirmationErr := &bluetooth.PowerConfirmationError{
 		Target: bluetooth.PowerStateOn,
