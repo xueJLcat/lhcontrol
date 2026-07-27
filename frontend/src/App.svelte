@@ -40,6 +40,7 @@
 
   let stations: StationInfo[] = [];
   let statusMessage = 'Ready to scan.';
+  let statusEpoch = 0;
   let gattOperations = new Set<string>();
   let configOperations = new Set<string>();
   let powerTargetByAddress: Record<string, PowerTarget | undefined> = {};
@@ -82,13 +83,21 @@
     error?: string;
   }
 
-  async function matchesExternalScan(event: ExternalScanEvent): Promise<boolean> {
+  async function matchesUnknownExternalScan(event: ExternalScanEvent): Promise<boolean> {
     // The app may have attached after the start event. In that case adopt the
     // first terminal ID only after confirming the backend scan has ended.
-    if (!externalScanning) return false;
-    if (externalScanID !== null) return event.id === externalScanID;
+    if (!externalScanning || externalScanID !== null) return false;
+    const epoch = scanEpoch;
     const scanning = await IsScanning().catch(() => true);
-    return externalScanning && externalScanID === null && !scanning;
+    return externalScanning && externalScanID === null && scanEpoch === epoch && !scanning;
+  }
+
+  function beginStatusOperation(): number {
+    return ++statusEpoch;
+  }
+
+  function canCommitStatus(epoch: number): boolean {
+    return !disposed && epoch === statusEpoch;
   }
 
   $: sortedStations = [...stations].sort((a, b) => {
@@ -285,7 +294,10 @@
     });
     cancelExternalScanListener = EventsOn('external-scan-completed', async (value: unknown) => {
       const event = value as ExternalScanEvent;
-      if (disposed || !(await matchesExternalScan(event))) return;
+      if (!externalScanning) return;
+      if (externalScanID !== null && event.id !== externalScanID) return;
+      if (externalScanID === null && !(await matchesUnknownExternalScan(event))) return;
+      const statusOperation = beginStatusOperation();
       const operationEpoch = beginScanEpoch();
       const revision = listRevisions.next();
       prepareForScan();
@@ -294,10 +306,10 @@
       externalScanRecoveryEpoch = operationEpoch;
       stoppingScan = false;
       maybeEndScanTimer();
-      stations = event.stations || [];
       const scanStatus = await GetScanStatus().catch(() => null);
-      if (disposed || !listRevisions.isCurrent(revision)) return;
+      if (disposed || !listRevisions.isCurrent(revision) || !canCommitStatus(statusOperation)) return;
       if (scanStatus) externalScanRecoveryEpoch = null;
+      stations = event.stations || [];
       const found = scanStatus?.found ?? stations.filter((station) => station.seenInLatestScan).length;
       statusMessage = formatTerminalScanResult({
         state: 'completed', found, known: stations.length, warnings: scanStatus?.warnings, external: true
@@ -305,7 +317,10 @@
     });
     cancelExternalScanFailureListener = EventsOn('external-scan-failed', async (value: unknown) => {
       const event = value as ExternalScanEvent;
-      if (disposed || !(await matchesExternalScan(event))) return;
+      if (!externalScanning) return;
+      if (externalScanID !== null && event.id !== externalScanID) return;
+      if (externalScanID === null && !(await matchesUnknownExternalScan(event))) return;
+      const statusOperation = beginStatusOperation();
       const message = event.error || 'unknown error';
       const operationEpoch = beginScanEpoch();
       const revision = listRevisions.next();
@@ -322,7 +337,7 @@
         applyStationList(updated, revision, capturedStationRevisions);
       }
       const scanStatus = await GetScanStatus().catch(() => null);
-      if (disposed || !listRevisions.isCurrent(revision)) return;
+      if (disposed || !listRevisions.isCurrent(revision) || !canCommitStatus(statusOperation)) return;
       if (updated && scanStatus) externalScanRecoveryEpoch = null;
       statusMessage = formatTerminalScanResult({
         state: 'failed', error: message, known: stations.length,
@@ -332,7 +347,10 @@
     });
     cancelExternalScanCancelledListener = EventsOn('external-scan-cancelled', async (value: unknown) => {
       const event = value as ExternalScanEvent;
-      if (disposed || !(await matchesExternalScan(event))) return;
+      if (!externalScanning) return;
+      if (externalScanID !== null && event.id !== externalScanID) return;
+      if (externalScanID === null && !(await matchesUnknownExternalScan(event))) return;
+      const statusOperation = beginStatusOperation();
       const operationEpoch = beginScanEpoch();
       const revision = listRevisions.next();
       prepareForScan();
@@ -343,7 +361,7 @@
       maybeEndScanTimer();
       const capturedStationRevisions = new Map(stationRevisions);
       const updated = await GetCurrentStationInfo().catch(() => null);
-      if (!canCommitOperation(operationEpoch) || !listRevisions.isCurrent(revision)) return;
+      if (!canCommitOperation(operationEpoch) || !listRevisions.isCurrent(revision) || !canCommitStatus(statusOperation)) return;
       if (updated) {
         applyStationList(updated, revision, capturedStationRevisions);
       }
@@ -445,6 +463,7 @@
     globalOperation = 'scanning';
     externalScanID = null;
     externalScanRecoveryEpoch = null;
+    beginStatusOperation();
     beginScanTimer();
     const operationEpoch = beginScanEpoch();
     const revision = listRevisions.next();
@@ -553,6 +572,7 @@
     if (!canSetPower(station, state) || stationBusy(station.address) || gattLockedFor(station.address)) return;
     const targetLabel = powerTargetLabel(state);
     const operationEpoch = scanEpoch;
+    beginStatusOperation();
     const operationRevision = beginStationOperationRevision(station.address);
     setGattBusy(station.address, true);
     powerTargetByAddress = { ...powerTargetByAddress, [station.address]: state };
@@ -615,6 +635,7 @@
     // capabilities and returns a result for every known station.
     if (bulkLocked || eligiblePowerStations(state).length === 0) return;
     globalOperation = 'bulk-power';
+    beginStatusOperation();
     bulkTarget = state;
     const targetLabel = powerTargetLabel(state);
     const operationEpoch = scanEpoch;
@@ -674,6 +695,7 @@
     cancelRename();
     if (name === station.name) return;
     setConfigBusy(station.address, true);
+    beginStatusOperation();
     const operationEpoch = scanEpoch;
     const operationRevision = beginStationOperationRevision(station.address);
     try {
@@ -699,6 +721,7 @@
   async function identify(station: StationInfo) {
     if (stationBusy(station.address) || gattLockedFor(station.address)) return;
     setGattBusy(station.address, true);
+    beginStatusOperation();
     const operationEpoch = scanEpoch;
     const operationRevision = beginStationOperationRevision(station.address);
     try {
@@ -723,6 +746,7 @@
   async function refreshCapabilities(station: StationInfo) {
     if (stationBusy(station.address) || gattLockedFor(station.address)) return;
     setGattBusy(station.address, true);
+    beginStatusOperation();
     const operationEpoch = scanEpoch;
     const operationRevision = beginStationOperationRevision(station.address);
     try {
@@ -761,6 +785,7 @@
       stationBusy(selectedStation.address) || gattLockedFor(selectedStation.address) ||
       (hasCurrentChannel(selectedStation) && selectedStation.channel === targetChannel)) return;
     const address = selectedStation.address;
+    beginStatusOperation();
     const operationEpoch = scanEpoch;
     const operationRevision = beginStationOperationRevision(address);
     setGattBusy(address, true);

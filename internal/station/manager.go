@@ -834,21 +834,6 @@ func (m *Manager) beginScan(callbacks ScanCallbacks) error {
 		m.scanTransitionMutex.Unlock()
 		return err
 	}
-	if err := m.ensureReady(); err != nil {
-		m.endOperation()
-		m.scanTransitionMutex.Unlock()
-		return err
-	}
-	if m.scanReadyHook != nil {
-		m.scanReadyHook()
-	}
-	m.lifecycleMutex.Lock()
-	if m.shuttingDown.Load() {
-		m.lifecycleMutex.Unlock()
-		m.endOperation()
-		m.scanTransitionMutex.Unlock()
-		return ErrShuttingDown
-	}
 	ctx, cancel := context.WithCancel(context.Background())
 	lifecycle := &scanLifecycle{
 		ctx:         ctx,
@@ -860,10 +845,64 @@ func (m *Manager) beginScan(callbacks ScanCallbacks) error {
 	m.scanLifecycle = lifecycle
 	m.scanLifecycleMutex.Unlock()
 	m.isScanning.Store(true)
+	m.markScanStarted()
+	if err := m.ensureReady(); err != nil {
+		if m.shuttingDown.Load() {
+			m.abortScanStart(lifecycle, ErrShuttingDown, false)
+			m.scanTransitionMutex.Unlock()
+			return ErrShuttingDown
+		}
+		cancelled := ctx.Err() != nil
+		m.abortScanStart(lifecycle, err, cancelled)
+		m.scanTransitionMutex.Unlock()
+		if cancelled {
+			return bluetooth.ErrScanCancelled
+		}
+		return err
+	}
+	if m.scanReadyHook != nil {
+		m.scanReadyHook()
+	}
+	m.lifecycleMutex.Lock()
+	if m.shuttingDown.Load() {
+		m.lifecycleMutex.Unlock()
+		m.abortScanStart(lifecycle, ErrShuttingDown, false)
+		m.scanTransitionMutex.Unlock()
+		return ErrShuttingDown
+	}
+	if ctx.Err() != nil {
+		m.lifecycleMutex.Unlock()
+		m.abortScanStart(lifecycle, bluetooth.ErrScanCancelled, true)
+		m.scanTransitionMutex.Unlock()
+		return bluetooth.ErrScanCancelled
+	}
 	m.lifecycleMutex.Unlock()
 	m.scanTransitionMutex.Unlock()
-	m.markScanStarted()
 	return nil
+}
+
+// abortScanStart publishes a terminal lifecycle state before scan processing
+// starts, allowing StopScan to wait safely during adapter initialization.
+func (m *Manager) abortScanStart(lifecycle *scanLifecycle, err error, cancelled bool) {
+	m.isScanning.Store(false)
+	m.endOperation()
+	m.scanLifecycleMutex.Lock()
+	if m.scanLifecycle == lifecycle {
+		m.scanLifecycle = nil
+	}
+	m.scanLifecycleMutex.Unlock()
+	lifecycle.mu.Lock()
+	if cancelled {
+		lifecycle.state = "cancelled"
+		lifecycle.result = nil
+		m.markScanFinished(m.GetStationInfo(), 0, bluetooth.ErrScanCancelled)
+	} else {
+		lifecycle.state = "failed"
+		lifecycle.result = err
+		m.markScanFinished(m.GetStationInfo(), 0, err)
+	}
+	close(lifecycle.done)
+	lifecycle.mu.Unlock()
 }
 
 func (m *Manager) finishScan(stations []StationInfo, found int, err error, callbacks ScanCallbacks) func() {

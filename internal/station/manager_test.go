@@ -332,6 +332,43 @@ func TestShutdownWaitsForInitializationAndPreventsLateScan(t *testing.T) {
 	}
 }
 
+func TestStopScanCancelsPendingInitializationBeforeScanStarts(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	manager.initializeErr = errors.New("radio unavailable")
+	manager.nextInitializeAt = time.Now().Add(-time.Second)
+	initializeStarted := make(chan struct{})
+	initializeRelease := make(chan struct{})
+	manager.initializeBluetooth = func() error {
+		close(initializeStarted)
+		<-initializeRelease
+		return nil
+	}
+	var scanCalls atomic.Int32
+	manager.bluetoothOps.scanForDurationContext = func(context.Context, time.Duration) ([]internalbluetooth.DiscoveredStation, error) {
+		scanCalls.Add(1)
+		return nil, nil
+	}
+
+	startDone := make(chan error, 1)
+	go func() { startDone <- manager.StartScan(ScanCallbacks{}) }()
+	<-initializeStarted
+	stopDone := make(chan error, 1)
+	go func() { stopDone <- manager.StopScan() }()
+	close(initializeRelease)
+	if err := <-startDone; err != nil && !errors.Is(err, internalbluetooth.ErrScanCancelled) {
+		t.Fatalf("StartScan() error = %v, want nil or ErrScanCancelled", err)
+	}
+	if err := <-stopDone; err != nil {
+		t.Fatalf("StopScan() error = %v", err)
+	}
+	if scanCalls.Load() != 0 {
+		t.Fatalf("scan started %d time(s) after pending cancellation", scanCalls.Load())
+	}
+	if status := manager.GetScanStatus(); status.State != "cancelled" {
+		t.Fatalf("scan status = %+v, want cancelled", status)
+	}
+}
+
 func TestAsyncScanEventsCannotOvertakePreviousCompletion(t *testing.T) {
 	manager := NewManager(config.NewConfig())
 	firstScanRelease := make(chan struct{})

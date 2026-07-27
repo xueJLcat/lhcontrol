@@ -202,6 +202,29 @@ describe('App asynchronous operations', () => {
     expect(screen.getByText('External scan in progress...')).toBeInTheDocument();
   });
 
+  it('does not let an older terminal event end a newer external scan', async () => {
+    let resolveStatus!: (value: unknown) => void;
+    api.GetScanStatus.mockReturnValueOnce(new Promise((resolve) => {
+      resolveStatus = resolve;
+    }));
+    render(App);
+    await screen.findByText('LHB-TEST');
+    const initialStatusCalls = api.GetScanStatus.mock.calls.length;
+
+    runtime.handlers.get('external-scan-started')?.(externalScanEvent(1));
+    runtime.handlers.get('external-scan-completed')?.(externalScanEvent(1, {
+      stations: [createStation({ name: 'LHB-STALE' })]
+    }));
+    await waitFor(() => expect(api.GetScanStatus).toHaveBeenCalledTimes(initialStatusCalls + 1));
+    runtime.handlers.get('external-scan-started')?.(externalScanEvent(2));
+    resolveStatus({ state: 'completed', found: 1, warnings: [] });
+    await Promise.resolve();
+
+    expect(screen.getByText('External scan in progress...')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Stop' })).toBeEnabled();
+    expect(screen.queryByText('LHB-STALE')).not.toBeInTheDocument();
+  });
+
   it('ignores a terminal event for an unknown external scan until the backend scan ends', async () => {
     api.IsScanning.mockResolvedValueOnce(true).mockResolvedValue(false);
     render(App);
