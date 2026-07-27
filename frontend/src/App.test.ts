@@ -254,6 +254,7 @@ describe('App asynchronous operations', () => {
     runtime.handlers.get('external-scan-started')?.(externalScanEvent(1));
     runtime.handlers.get('external-scan-completed')?.(externalScanEvent(1, { stations: [scannedStation] }));
     await waitFor(() => expect(api.GetScanStatus).toHaveBeenCalled());
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Turn LHB-TEST on' })).not.toBeDisabled());
     await fireEvent.click(screen.getByRole('button', { name: 'Turn LHB-TEST on' }));
     await waitFor(() => expect(screen.getByText('On confirmed')).toBeInTheDocument());
 
@@ -441,12 +442,47 @@ describe('App asynchronous operations', () => {
 
     runtime.handlers.get('external-scan-started')?.(externalScanEvent(7));
     await fireEvent.click(await screen.findByRole('button', { name: 'Stop' }));
-    expect(await screen.findByRole('button', { name: 'Stopping...' })).toBeDisabled();
+    expect(await screen.findByRole('button', { name: 'Scan' })).toBeEnabled();
 
     runtime.handlers.get('external-scan-cancelled')?.(externalScanEvent(7));
 
     expect(await screen.findByText('LHB-AFTER-STOP')).toBeInTheDocument();
-    expect(screen.getByText('Scan stopped.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Scan' })).toBeEnabled();
+  });
+
+  it('recovers immediately when an external stop has no terminal event', async () => {
+    api.IsScanning.mockResolvedValueOnce(false).mockResolvedValue(false);
+    api.StopScan.mockResolvedValue(undefined);
+    api.GetCurrentStationInfo.mockResolvedValue([createStation({ name: 'LHB-STOP-RECOVERED' })]);
+    api.GetScanStatus.mockResolvedValue({ state: 'cancelled', found: 0, warnings: [] });
+    render(App);
+    await screen.findByText('LHB-TEST');
+
+    runtime.handlers.get('external-scan-started')?.(externalScanEvent(7));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Stop' }));
+
+    expect(await screen.findByText('LHB-STOP-RECOVERED')).toBeInTheDocument();
+    expect(await screen.findByText('External scan stopped.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Scan' })).toBeEnabled();
+  });
+
+  it('claims only one terminal event for an adopted external scan', async () => {
+    const terminalChecks: Array<(scanning: boolean) => void> = [];
+    api.IsScanning.mockResolvedValueOnce(true).mockImplementation(() => new Promise((resolve) => {
+      terminalChecks.push(resolve);
+    }));
+    render(App);
+    await screen.findByRole('button', { name: 'Stop' });
+
+    runtime.handlers.get('external-scan-completed')?.(externalScanEvent(9, { stations: [createStation({ name: 'LHB-COMPLETED' })] }));
+    runtime.handlers.get('external-scan-failed')?.(externalScanEvent(9, { error: 'stale failure' }));
+    await waitFor(() => expect(terminalChecks).toHaveLength(2));
+    terminalChecks[0](false);
+    terminalChecks[1](false);
+
+    expect(await screen.findByText('LHB-COMPLETED')).toBeInTheDocument();
+    expect(screen.queryByText(/External scan failed/)).not.toBeInTheDocument();
+    expect(pushToast).not.toHaveBeenCalledWith('External scan failed: stale failure');
   });
 
   it('does not let stale external recovery overwrite a later local scan result', async () => {

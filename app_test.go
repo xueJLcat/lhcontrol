@@ -119,6 +119,18 @@ func TestStopScanAPI(t *testing.T) {
 		t.Fatalf("stop response status=%d calls=%d, want 204 and 1", response.StatusCode, manager.stopCalls)
 	}
 }
+
+func TestScanCancellationAPIIsConflict(t *testing.T) {
+	manager := &fakeAPIStationManager{legacyErr: bluetooth.ErrScanCancelled}
+	response, err := testAPI(manager).Test(httptest.NewRequest(http.MethodPost, "/scan", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != fiber.StatusConflict {
+		t.Fatalf("scan cancellation status = %d, want %d", response.StatusCode, fiber.StatusConflict)
+	}
+}
 func (f *fakeAPIStationManager) GetScanStatus() station.ScanStatus {
 	return station.ScanStatus{State: "idle", Warnings: []string{}}
 }
@@ -157,6 +169,7 @@ func TestAPIStatusForError(t *testing.T) {
 		{station.ErrOperationInProgress, fiber.StatusConflict},
 		{station.ErrChannelConflict, fiber.StatusConflict},
 		{station.ErrScanRequired, fiber.StatusConflict},
+		{bluetooth.ErrScanCancelled, fiber.StatusConflict},
 		{station.ErrUnsupported, fiber.StatusUnprocessableEntity},
 		{station.ErrShuttingDown, fiber.StatusServiceUnavailable},
 		{fmt.Errorf("BLE failure"), fiber.StatusInternalServerError},

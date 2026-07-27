@@ -28,7 +28,8 @@ func apiStatusForError(err error) int {
 		status = fiber.StatusNotFound
 	case errors.Is(err, station.ErrOperationInProgress),
 		errors.Is(err, station.ErrChannelConflict),
-		errors.Is(err, station.ErrScanRequired):
+		errors.Is(err, station.ErrScanRequired),
+		errors.Is(err, bluetooth.ErrScanCancelled):
 		status = fiber.StatusConflict
 	case errors.Is(err, station.ErrUnsupported):
 		status = fiber.StatusUnprocessableEntity

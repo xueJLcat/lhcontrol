@@ -94,6 +94,35 @@
     return externalScanning && externalScanID === null && scanEpoch === epoch && !scanning;
   }
 
+  function beginExternalScan(id: number | null) {
+    beginScanEpoch();
+    listRevisions.next();
+    prepareForScan();
+    externalScanRecoveryEpoch = null;
+    externalScanRecoveryStatusEpoch = null;
+    externalScanID = id;
+    externalScanning = true;
+    stoppingScan = false;
+    beginScanTimer();
+    statusMessage = 'External scan in progress...';
+  }
+
+  function claimExternalScanTerminal(event: ExternalScanEvent): boolean {
+    if (!externalScanning) return false;
+    if (!externalScanning || (externalScanID !== null && event.id !== externalScanID)) return false;
+    latestExternalScanID = Math.max(latestExternalScanID, event.id);
+    externalScanning = false;
+    externalScanID = null;
+    return true;
+  }
+
+  async function claimUnknownExternalScanTerminal(event: ExternalScanEvent): Promise<boolean> {
+    if (!externalScanning || externalScanID !== null || !(await matchesUnknownExternalScan(event))) return false;
+    // An adopted scan has no ID until its terminal event. Claim it before any
+    // further awaits so concurrent terminal notifications cannot both commit.
+    return claimExternalScanTerminal(event);
+  }
+
   function beginStatusOperation(): number {
     return ++statusEpoch;
   }
@@ -286,29 +315,17 @@
       const event = value as ExternalScanEvent;
       if (event.id <= latestExternalScanID) return;
       latestExternalScanID = event.id;
-      beginScanEpoch();
-      listRevisions.next();
-      prepareForScan();
-      externalScanRecoveryEpoch = null;
-      externalScanRecoveryStatusEpoch = null;
-      externalScanID = event.id;
-      externalScanning = true;
-      stoppingScan = false;
-      beginScanTimer();
-      statusMessage = 'External scan in progress...';
+      beginExternalScan(event.id);
     });
     cancelExternalScanListener = EventsOn('external-scan-completed', async (value: unknown) => {
       const event = value as ExternalScanEvent;
-      if (!externalScanning) return;
-      if (externalScanID !== null && event.id !== externalScanID) return;
-      if (externalScanID === null && !(await matchesUnknownExternalScan(event))) return;
-      latestExternalScanID = Math.max(latestExternalScanID, event.id);
+      if (externalScanID === null
+        ? !(await claimUnknownExternalScanTerminal(event))
+        : !claimExternalScanTerminal(event)) return;
       const statusOperation = beginStatusOperation();
       const operationEpoch = beginScanEpoch();
       const revision = listRevisions.next();
       prepareForScan();
-      externalScanning = false;
-      externalScanID = null;
       externalScanRecoveryEpoch = operationEpoch;
       externalScanRecoveryStatusEpoch = statusOperation;
       stoppingScan = false;
@@ -329,17 +346,14 @@
     });
     cancelExternalScanFailureListener = EventsOn('external-scan-failed', async (value: unknown) => {
       const event = value as ExternalScanEvent;
-      if (!externalScanning) return;
-      if (externalScanID !== null && event.id !== externalScanID) return;
-      if (externalScanID === null && !(await matchesUnknownExternalScan(event))) return;
-      latestExternalScanID = Math.max(latestExternalScanID, event.id);
+      if (externalScanID === null
+        ? !(await claimUnknownExternalScanTerminal(event))
+        : !claimExternalScanTerminal(event)) return;
       const statusOperation = beginStatusOperation();
       const message = event.error || 'unknown error';
       const operationEpoch = beginScanEpoch();
       const revision = listRevisions.next();
       prepareForScan();
-      externalScanning = false;
-      externalScanID = null;
       externalScanRecoveryEpoch = operationEpoch;
       externalScanRecoveryStatusEpoch = statusOperation;
       if (globalOperation !== 'scanning') stoppingScan = false;
@@ -365,16 +379,13 @@
     });
     cancelExternalScanCancelledListener = EventsOn('external-scan-cancelled', async (value: unknown) => {
       const event = value as ExternalScanEvent;
-      if (!externalScanning) return;
-      if (externalScanID !== null && event.id !== externalScanID) return;
-      if (externalScanID === null && !(await matchesUnknownExternalScan(event))) return;
-      latestExternalScanID = Math.max(latestExternalScanID, event.id);
+      if (externalScanID === null
+        ? !(await claimUnknownExternalScanTerminal(event))
+        : !claimExternalScanTerminal(event)) return;
       const statusOperation = beginStatusOperation();
       const operationEpoch = beginScanEpoch();
       const revision = listRevisions.next();
       prepareForScan();
-      externalScanning = false;
-      externalScanID = null;
       externalScanRecoveryEpoch = operationEpoch;
       externalScanRecoveryStatusEpoch = statusOperation;
       if (globalOperation !== 'scanning') stoppingScan = false;
@@ -396,10 +407,8 @@
     // An external scan event may have arrived while this initial query was
     // pending. Do not let its older result overwrite the newer event state.
     if (disposed || startupScanEpoch !== scanEpoch) return;
-    externalScanning = startupScanning;
-    if (externalScanning) {
-      beginScanTimer();
-      statusMessage = 'External scan in progress...';
+    if (startupScanning) {
+      beginExternalScan(null);
     } else {
       await handleScanClick();
     }
@@ -442,7 +451,8 @@
       const scanning = await IsScanning();
       if (disposed || !listRevisions.isCurrent(revision)) return;
       const wasExternalScanning = externalScanning;
-      externalScanning = scanning && !isLoading;
+      if (scanning && !isLoading && !externalScanning) beginExternalScan(null);
+      else externalScanning = scanning && !isLoading;
       if (!scanning) {
         stoppingScan = false;
         if (wasExternalScanning) {
@@ -543,7 +553,35 @@
       stopRequestPending = false;
       if (!stoppingScan) return;
       if (externalScanning) {
-        statusMessage = 'Stopping scan...';
+        const stillScanning = await IsScanning().catch(() => true);
+        if (!canCommitOperation(operationEpoch) || stopRequestGeneration !== requestGeneration) return;
+        if (stillScanning) {
+          statusMessage = 'Stopping scan...';
+        } else {
+          externalScanning = false;
+          externalScanID = null;
+          stoppingScan = false;
+          externalScanRecoveryEpoch = scanEpoch;
+          externalScanRecoveryStatusEpoch = statusEpoch;
+          const revision = listRevisions.next();
+          const capturedStationRevisions = new Map(stationRevisions);
+          const updated = await GetCurrentStationInfo().catch(() => null);
+          if (!canCommitOperation(operationEpoch) || !listRevisions.isCurrent(revision)) return;
+          if (updated) applyStationList(updated, revision, capturedStationRevisions);
+          const scanStatus = await GetScanStatus().catch(() => null);
+          if (!canCommitOperation(operationEpoch) || !listRevisions.isCurrent(revision)) return;
+          externalScanRecoveryEpoch = null;
+          const canWriteTerminalStatus = externalScanRecoveryStatusEpoch === statusEpoch;
+          externalScanRecoveryStatusEpoch = null;
+          if (canWriteTerminalStatus) {
+            const found = scanStatus?.found ?? stations.filter((station) => station.seenInLatestScan).length;
+            statusMessage = formatTerminalScanResult({
+              state: scanStatus?.state ?? 'cancelled', found, known: stations.length,
+              error: scanStatus?.error, warnings: scanStatus?.warnings, external: true
+            });
+          }
+          maybeEndScanTimer();
+        }
       } else {
         if (globalOperation !== 'scanning') stoppingScan = false;
         statusMessage = 'Scan stopped.';
