@@ -61,7 +61,7 @@
   let apiError = '';
   let externalScanning = false;
   let externalScanID: number | null = null;
-  let externalScanRecoveryPending = false;
+  let externalScanRecoveryEpoch: number | null = null;
   let stoppingScan = false;
   let stopRequestPending = false;
   let stopRequestGeneration = 0;
@@ -276,6 +276,7 @@
       beginScanEpoch();
       listRevisions.next();
       prepareForScan();
+      externalScanRecoveryEpoch = null;
       externalScanID = event.id;
       externalScanning = true;
       stoppingScan = false;
@@ -285,18 +286,18 @@
     cancelExternalScanListener = EventsOn('external-scan-completed', async (value: unknown) => {
       const event = value as ExternalScanEvent;
       if (disposed || !(await matchesExternalScan(event))) return;
-      beginScanEpoch();
+      const operationEpoch = beginScanEpoch();
       const revision = listRevisions.next();
       prepareForScan();
       externalScanning = false;
       externalScanID = null;
-      externalScanRecoveryPending = true;
+      externalScanRecoveryEpoch = operationEpoch;
       stoppingScan = false;
       maybeEndScanTimer();
       stations = event.stations || [];
       const scanStatus = await GetScanStatus().catch(() => null);
       if (disposed || !listRevisions.isCurrent(revision)) return;
-      if (scanStatus) externalScanRecoveryPending = false;
+      if (scanStatus) externalScanRecoveryEpoch = null;
       const found = scanStatus?.found ?? stations.filter((station) => station.seenInLatestScan).length;
       statusMessage = formatTerminalScanResult({
         state: 'completed', found, known: stations.length, warnings: scanStatus?.warnings, external: true
@@ -311,7 +312,7 @@
       prepareForScan();
       externalScanning = false;
       externalScanID = null;
-		 externalScanRecoveryPending = true;
+      externalScanRecoveryEpoch = operationEpoch;
       if (globalOperation !== 'scanning') stoppingScan = false;
       maybeEndScanTimer();
       const capturedStationRevisions = new Map(stationRevisions);
@@ -322,7 +323,7 @@
       }
       const scanStatus = await GetScanStatus().catch(() => null);
       if (disposed || !listRevisions.isCurrent(revision)) return;
-		 if (updated && scanStatus) externalScanRecoveryPending = false;
+      if (updated && scanStatus) externalScanRecoveryEpoch = null;
       statusMessage = formatTerminalScanResult({
         state: 'failed', error: message, known: stations.length,
         warnings: scanStatus?.warnings, external: true
@@ -337,7 +338,7 @@
       prepareForScan();
       externalScanning = false;
       externalScanID = null;
-      externalScanRecoveryPending = true;
+      externalScanRecoveryEpoch = operationEpoch;
       if (globalOperation !== 'scanning') stoppingScan = false;
       maybeEndScanTimer();
       const capturedStationRevisions = new Map(stationRevisions);
@@ -403,18 +404,17 @@
       externalScanning = scanning && !isLoading;
       if (!scanning) {
         stoppingScan = false;
-        if (wasExternalScanning || externalScanRecoveryPending) {
+        if (wasExternalScanning) externalScanRecoveryEpoch = scanEpoch;
+        if (externalScanRecoveryEpoch === scanEpoch) {
           if (!applyStationList(await GetCurrentStationInfo(), revision, capturedStationRevisions)) {
-            externalScanRecoveryPending = true;
             return;
           }
           const scanStatus = await GetScanStatus().catch(() => null);
           if (disposed || !listRevisions.isCurrent(revision)) return;
           if (!scanStatus) {
-            externalScanRecoveryPending = true;
             return;
           }
-          externalScanRecoveryPending = false;
+          externalScanRecoveryEpoch = null;
           const found = scanStatus?.found ?? stations.filter((station) => station.seenInLatestScan).length;
           statusMessage = formatTerminalScanResult({
             state: scanStatus?.state ?? 'completed',
@@ -444,6 +444,7 @@
     prepareForScan();
     globalOperation = 'scanning';
     externalScanID = null;
+    externalScanRecoveryEpoch = null;
     beginScanTimer();
     const operationEpoch = beginScanEpoch();
     const revision = listRevisions.next();
@@ -492,10 +493,13 @@
       if (!canCommitOperation(operationEpoch)) return;
       stopRequestPending = false;
       if (!stoppingScan) return;
-      externalScanning = false;
-      if (globalOperation !== 'scanning') stoppingScan = false;
-      statusMessage = 'Scan stopped.';
-      maybeEndScanTimer();
+      if (externalScanning) {
+        statusMessage = 'Stopping scan...';
+      } else {
+        if (globalOperation !== 'scanning') stoppingScan = false;
+        statusMessage = 'Scan stopped.';
+        maybeEndScanTimer();
+      }
     } catch (error) {
       if (!canCommitOperation(operationEpoch)) return;
       stopRequestPending = false;
