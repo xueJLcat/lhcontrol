@@ -1,183 +1,1291 @@
-# lhcontrol
+一个通过 **Bluetooth Low Energy（BLE，低功耗蓝牙）** 控制 Valve Lighthouse（SteamVR）2.0 定位基站电源状态的简单应用程序。
 
-![Application Screenshot](<./screenshot.png>)
+![pasted-image.png · 83](https://img.cdn1.vip/i/6a67245d654e5_1785144413.webp)
 
-A simple application to control Valve Lighthouse (SteamVR) base stations v2.0 power state via Bluetooth LE.
+Modified based on [lhcontrol](https://github.com/FlameInTheDark/lhcontrol). Special thanks to the original author for making the project open source.
 
-lhcontrol is a Windows-only application. Its bundled Bluetooth dependency
-contains Windows WinRT stability patches and is not intended to compile on
-Linux or macOS.
+基于 https://github.com/FlameInTheDark/lhcontrol 修改 感谢原作者开源
+
+`lhcontrol` 目前仅支持 Windows。项目中捆绑的蓝牙依赖包含针对 Windows WinRT 的稳定性补丁，因此不适用于 Linux 或 macOS 编译。
+
+## 功能特性
+
+* 扫描附近的 Lighthouse 2.0 定位基站。
+* 显示 Lighthouse 2.0 基站的完整电源状态：
+
+  * Sleep（休眠）
+  * Standby（待机）
+  * Booting（启动中）
+  * On（运行中）
+  * Unknown（未知）
+* 显示 Lighthouse 2.0 基站上报的光学通道号（1-16）。
+* 单独控制指定基站进入：
+
+  * On
+  * Standby
+  * Sleep
+* 在设备支持的情况下，通过闪烁 LED 来识别指定的实体基站。
+* 检测基站之间的通道冲突，并通过强制回读验证的方式安全修改通道。
+* 显示基站相关详细信息，包括：
+
+  * 固件版本
+  * 硬件版本
+  * 型号
+  * 序列号
+  * 制造商
+  * BLE 功能支持情况
+* 一键开启或关闭当前应用会话中已经发现的全部基站。
+* 支持为基站设置本地名称，方便区分和管理。
+* 在单次应用运行期间持续保存已经发现的基站，即使后续扫描未再次发现，也不会立即从列表中移除。
+
+## 技术栈
+
+* **应用框架：** [Wails v2](https://wails.io/)
+* **后端：** Go
+* **前端：** Svelte
+* **蓝牙：** [TinyGo Bluetooth Library](https://github.com/tinygo-org/bluetooth)
+
+## 环境要求
+
+* **操作系统：** Windows 10 或 Windows 11，x64。
+* **蓝牙适配器：** 支持 Bluetooth Low Energy 的 Windows 蓝牙适配器，并建议安装最新驱动。
+* **Go：** 1.25.12。
+* **Node.js：** 22.14 或更高版本，建议使用 Node.js 22 系列。
+* **Wails CLI：**
+
+```bash
+go install github.com/wailsapp/wails/v2/cmd/wails@v2.13.0
+```
+
+* **NSIS：** 仅在构建 Windows 安装程序时需要，要求版本 3.12：
+
+```bash
+wails build -nsis
+```
+
+## 项目初始化
+
+### 1. 克隆仓库
+
+```bash
+git clone https://github.com/FlameInTheDark/lhcontrol
+cd lhcontrol
+```
+
+### 2. 安装前端依赖
+
+通常 Wails 会在构建时自动处理前端依赖，也可以手动执行：
+
+```bash
+cd frontend
+npm ci
+cd ..
+```
+
+## 运行应用
+
+### 开发模式
+
+支持实时重载：
+
+```bash
+wails dev
+```
+
+### 生产构建
+
+```bash
+wails build
+```
+
+构建完成后，Windows 可执行文件会生成在：
+
+```text
+build/bin
+```
+
+项目的 Releases 中也可能提供预构建安装程序：
+
+```text
+lhcontrol-amd64-installer.exe
+```
+
+## 使用方法
+
+1. 启动应用程序。
+2. 点击 **Scan**，扫描附近的 Lighthouse 基站。
+3. 应用会尝试连接发现的基站，并读取当前电源状态。
+4. 通过 **Power** 菜单将指定基站设置为：
+
+   * On
+   * Standby
+   * Sleep
+5. 打开 **Details** 可以查看设备能力和详细信息，同时可以：
+
+   * 识别实体基站
+   * 安全修改光学通道
+6. 使用 **All** 控件可以控制当前应用会话中发现过的全部基站，包括最近一次扫描没有再次发现的历史设备。
+
+## 故障排查
+
+### 扫描异常
+
+如果第一次扫描正常，但之后扫描失败，或者操作设备时出现类似以下错误：
+
+```text
+characteristic not found
+```
+
+可以尝试：
+
+1. 在 Windows 蓝牙设备列表中删除对应 Lighthouse 基站。
+2. 重启计算机。
+3. 不要在 Windows 设置中重新主动配对基站。
+4. 启动 `lhcontrol`，让程序通过 BLE 扫描自行发现基站。
+
+### Bluetooth unavailable
+
+如果蓝牙被关闭，或者蓝牙适配器临时断开：
+
+1. 重新开启蓝牙或重新连接蓝牙适配器。
+2. 等待大约两秒。
+3. 再次执行扫描。
+
+运行中的应用会尝试重新初始化蓝牙适配器，通常不需要重新启动程序。
+
+### 蓝牙驱动
+
+请确保使用最新版本的蓝牙适配器驱动程序。
+
+### 权限
+
+部分 Windows 环境可能需要允许应用访问蓝牙硬件及相关系统权限。
+
+## Windows 硬件验证
+
+保持 `lhcontrol` 应用运行，然后执行：
+
+```powershell
+.\scripts\hardware-smoke.ps1
+```
+
+该脚本默认执行 10 次连续扫描，用于验证：
+
+* 多次扫描过程是否稳定。
+* Lighthouse 基站排序是否稳定。
+* 设备发现情况是否符合预期。
+* 每次扫描的执行时间。
+* 扫描失败时的原始状态和错误。
+* 电源请求失败时的请求信息、验证信息及错误。
+
+验证报告会保存到：
+
+```text
+build\verification
+```
+
+可以使用以下参数定义硬件验收范围：
+
+```powershell
+-MinimumStations
+-ExpectedAddresses
+-ScanCycles
+```
+
+设备断言只针对**每次扫描中实际发现的设备**，不会使用应用会话中的历史设备记录进行判断。
+
+### 电源状态验证
+
+仅在确认可以安全操作所有已知 Lighthouse 基站时使用：
+
+```powershell
+.\scripts\hardware-smoke.ps1 -ExercisePower
+```
+
+该模式会测试：
+
+* On
+* Standby
+* Sleep
+
+脚本要求所有基站的初始状态均能够被确认。
+
+每次电源操作都会执行状态回读验证，并在 `finally` 阶段尝试恢复所有设备的初始状态。
+
+如果状态恢复失败，脚本会以失败状态退出。
+
+### 无硬件自检
+
+可以执行：
+
+```powershell
+.\scripts\hardware-smoke.ps1 -SelfTest
+```
+
+该模式无需蓝牙硬件，用于验证报告生成及断言逻辑本身。
+
+## 诊断日志
+
+日志文件位于：
+
+```text
+%APPDATA%\lhcontrol\lhcontrol.log
+```
+
+单个日志文件最大限制为：
+
+```text
+5 MB
+```
+
+同时保留一个上一段日志：
+
+```text
+lhcontrol.log.1
+```
+
+---
+
+# HTTP API
+
+为了方便外部脚本、自动化程序或其他应用集成，`lhcontrol` 会在本机提供一个简单的 HTTP API：
+
+```text
+http://127.0.0.1:7575
+```
+
+## `POST /allon`
+
+尝试开启当前应用会话中所有已知 Lighthouse 基站。
+
+**请求体：**
+
+无。
+
+**响应：**
+
+当所有命令均已经成功发送，或者对应操作被安全跳过时：
+
+```text
+200 OK
+```
+
+如果需要获得每个基站的详细执行和确认结果，请使用：
+
+```text
+POST /stations/power
+```
+
+如果当前已经存在其他蓝牙操作：
+
+```text
+409 Conflict
+```
+
+---
+
+## `POST /alloff`
+
+尝试将当前应用会话中所有已知 Lighthouse 基站设置为 Sleep。
+
+**请求体：**
+
+无。
+
+**响应：**
+
+所有命令均已经成功发送或安全跳过时：
+
+```text
+200 OK
+```
+
+需要查看每个设备的详细确认状态时，请使用：
+
+```text
+POST /stations/power
+```
+
+如果当前已经存在其他蓝牙操作：
+
+```text
+409 Conflict
+```
+
+---
+
+## `GET /status`
+
+返回当前应用会话中已知的 Lighthouse 基站及其状态。
+
+**请求体：**
+
+无。
+
+**响应：**
+
+```text
+200 OK
+```
+
+示例：
+
+```json
+[
+  {
+    "name": "LHB-STATION1_RENAMED",
+    "originalName": "LHB-XXXXXXXX",
+    "address": "XX:XX:XX:XX:XX:XX",
+    "powerState": 1,
+    "channel": 3
+  },
+  {
+    "name": "LHB-YYYYYYYY",
+    "originalName": "LHB-YYYYYYYY",
+    "address": "YY:YY:YY:YY:YY:YY",
+    "powerState": 0,
+    "channel": 8
+  }
+]
+```
+
+### 电源状态
+
+```text
+-1 = Unknown
+ 0 = Sleep
+ 1 = On
+ 2 = Standby
+ 3 = Booting
+```
+
+### 光学通道
+
+```text
+0    = Unknown
+1-16 = Lighthouse 光学通道
+```
+
+---
+
+## `POST /scan`
+
+触发一次后台 Lighthouse 扫描。
+
+整个过程大约包括：
+
+```text
+5 秒 BLE 扫描
++
+7 秒设备状态读取
+```
+
+扫描结束后：
+
+```text
+GET /status
+```
+
+返回的数据会自动更新。
+
+**请求体：**
+
+无。
+
+**响应：**
+
+成功启动扫描：
+
+```text
+202 Accepted
+```
+
+当前已有其他蓝牙操作：
+
+```text
+409 Conflict
+```
+
+---
+
+## `GET /scan/status`
+
+获取当前或最近一次扫描状态。
+
+返回内容包括：
+
+* 扫描状态
+* 开始/结束时间
+* 警告信息
+* 最近一次扫描实际发现的基站数量
+
+---
+
+## `POST /scan/stop`
+
+取消当前正在执行的扫描，并等待扫描工作流结束。
+
+没有扫描任务正在执行时调用该接口同样是安全的。
+
+**响应：**
+
+```text
+204 No Content
+```
+
+取消后的最终扫描状态为：
+
+```text
+cancelled
+```
+
+---
+
+## `POST /stations/power`
+
+批量修改当前已知基站的电源状态。
+
+**请求体：**
+
+开启：
+
+```json
+{
+  "state": "on"
+}
+```
+
+待机：
+
+```json
+{
+  "state": "standby"
+}
+```
+
+休眠：
+
+```json
+{
+  "state": "sleep"
+}
+```
+
+**响应：**
+
+返回每个已知 Lighthouse 基站的结构化操作结果，包括：
+
+* 是否发送命令
+* 操作是否成功
+* 是否完成状态确认
+* 确认失败原因
+* 其他错误信息
+
+---
+
+## `POST /stations/:address/power`
+
+修改指定 Lighthouse 基站的电源状态。
+
+**请求体：**
+
+```json
+{
+  "state": "on"
+}
+```
+
+或：
+
+```json
+{
+  "state": "standby"
+}
+```
+
+或：
+
+```json
+{
+  "state": "sleep"
+}
+```
+
+成功时返回：
+
+```text
+200 OK
+```
+
+响应中包含：
+
+* 更新后的基站信息
+* `commandSent`
+* `confirmed`
+* `confirmationError`
+
+如果命令已经成功写入设备，但无法确认最终状态，则会返回：
+
+```json
+{
+  "commandSent": true,
+  "confirmed": false
+}
+```
+
+命令写入之前发生的错误仍然使用正常的 `4xx` 或 `5xx` HTTP 状态码。
+
+---
+
+## `POST /stations/:address/identify`
+
+让指定 Lighthouse 基站执行 Identify 操作。
+
+设备支持该能力时，会通过 LED 闪烁帮助用户确认实体基站的位置。
+
+---
+
+## `POST /stations/:address/refresh`
+
+强制重新执行 BLE 服务和 Characteristic 发现，并刷新：
+
+* 设备能力
+* 元数据
+* 电源状态
+* 光学通道
+
+---
+
+## `PUT /stations/:address/channel`
+
+修改指定 Lighthouse 基站的光学通道。
+
+**请求体：**
+
+```json
+{
+  "channel": 5
+}
+```
+
+有效范围：
+
+```text
+1-16
+```
+
+修改流程：
+
+1. 检查当前可见基站是否存在目标通道冲突。
+2. 存在明显冲突时拒绝修改。
+3. 向基站写入新的通道。
+4. 重新读取设备通道。
+5. 只有回读值与目标值一致时，才认为修改得到完整确认。
+
+如果写入命令已经成功发送，但无法进行回读验证，会返回：
+
+```text
+200 OK
+```
+
+同时：
+
+```json
+{
+  "commandSent": true,
+  "confirmed": false
+}
+```
+
+客户端遇到这种情况时**不得自动重试通道写入**，避免重复修改导致设备状态不可预测。
+
+## curl 示例
+
+获取当前状态：
+
+```bash
+curl http://127.0.0.1:7575/status
+```
+
+开启全部基站：
+
+```bash
+curl -X POST http://127.0.0.1:7575/allon
+```
+
+关闭全部基站：
+
+```bash
+curl -X POST http://127.0.0.1:7575/alloff
+```
+
+## 发布前硬件检查清单
+
+自动化测试无法完整模拟 Windows WinRT 蓝牙栈或实体 Lighthouse 基站。
+
+因此，在发布正式版本之前，应在具有 Bluetooth 功能的 Windows 设备上进行以下验证：
+
+1. 连续执行至少 10 次扫描，确认整个进程保持稳定。
+2. 在扫描过程中退出程序，确认应用能够正常关闭且不会崩溃。
+3. 分别测试单个基站和全部已知基站的：
+
+   * On
+   * Standby
+   * Sleep
+4. 验证：
+
+   * 电源命令状态回读
+   * 通道冲突拦截
+   * 成功修改光学通道并完成回读确认
+5. 关闭并重新开启 Windows 蓝牙，然后确认：
+
+   * 扫描功能能够恢复
+   * 设备控制功能能够恢复
+
+---
+
+# English
+
+A simple application to control Valve Lighthouse (SteamVR) base station v2.0 power states via Bluetooth Low Energy.
+
+`lhcontrol` is a Windows-only application. Its bundled Bluetooth dependency contains Windows WinRT stability patches and is not intended to compile on Linux or macOS.
 
 ## Features
 
-*   Scan for nearby Lighthouse base stations.
-*   Display all Lighthouse 2.0 power states (Sleep/Standby/Booting/On/Unknown).
-*   Display the optical channel (1-16) reported by Lighthouse 2.0 stations.
-*   Set individual stations to On, Standby, or Sleep.
-*   Identify a physical station by flashing its LED when supported.
-*   Detect channel conflicts and safely change a channel with mandatory readback.
-*   Display firmware, hardware, model, serial-number, manufacturer, and BLE capabilities.
-*   Power On/Off all base stations discovered during the current app session.
-*   Rename base stations (locally) for easier identification.
-*   Persistent list of discovered stations across scans (within a single app session).
+* Scan for nearby Lighthouse base stations.
+* Display all Lighthouse 2.0 power states:
+
+  * Sleep
+  * Standby
+  * Booting
+  * On
+  * Unknown
+* Display the optical channel (1-16) reported by Lighthouse 2.0 stations.
+* Set individual stations to:
+
+  * On
+  * Standby
+  * Sleep
+* Identify a physical station by flashing its LED when supported.
+* Detect channel conflicts and safely change a channel with mandatory readback verification.
+* Display:
+
+  * Firmware version
+  * Hardware version
+  * Model
+  * Serial number
+  * Manufacturer
+  * BLE capabilities
+* Power On or Off all base stations discovered during the current application session.
+* Rename base stations locally for easier identification.
+* Keep a persistent list of discovered stations during a single application session, including stations not rediscovered during the latest scan.
 
 ## Technology Stack
 
-*   **Framework:** [Wails v2](https://wails.io/)
-*   **Backend:** Go
-*   **Frontend:** Svelte
-*   **Bluetooth:** [TinyGo Bluetooth Library](https://github.com/tinygo-org/bluetooth)
+* **Framework:** [Wails v2](https://wails.io/)
+* **Backend:** Go
+* **Frontend:** Svelte
+* **Bluetooth:** [TinyGo Bluetooth Library](https://github.com/tinygo-org/bluetooth)
 
 ## Prerequisites
 
-*   **Operating system:** Windows 10 or Windows 11, x64.
-*   **Bluetooth Adapter:** A Windows-compatible Bluetooth Low Energy adapter with current drivers.
-*   **Go:** Version 1.25.12.
-*   **Node.js:** Version 22.14 or newer in the Node 22 release line.
-*   **Wails CLI:** Install the project version with `go install github.com/wailsapp/wails/v2/cmd/wails@v2.13.0`.
-*   **NSIS:** Version 3.12 is required only when building the Windows installer with `wails build -nsis`.
+* **Operating system:** Windows 10 or Windows 11, x64.
+* **Bluetooth Adapter:** A Windows-compatible Bluetooth Low Energy adapter with current drivers.
+* **Go:** Version 1.25.12.
+* **Node.js:** Version 22.14 or newer in the Node 22 release line.
+* **Wails CLI:**
+
+```bash
+go install github.com/wailsapp/wails/v2/cmd/wails@v2.13.0
+```
+
+* **NSIS:** Version 3.12 is required only when building the Windows installer:
+
+```bash
+wails build -nsis
+```
 
 ## Setup
 
-1.  **Clone the repository:**
-    ```bash
-    git clone https://github.com/FlameInTheDark/lhcontrol
-    cd lhcontrol
-    ```
-2.  **Install frontend dependencies:**
-    Wails typically handles this automatically during the build, but you can run it manually if needed:
-    ```bash
-    cd frontend
-    npm ci
-    cd ..
-    ```
+### 1. Clone the repository
+
+```bash
+git clone https://github.com/FlameInTheDark/lhcontrol
+cd lhcontrol
+```
+
+### 2. Install frontend dependencies
+
+Wails normally handles frontend dependencies automatically during the build, but they can also be installed manually:
+
+```bash
+cd frontend
+npm ci
+cd ..
+```
 
 ## Running the Application
 
-*   **Development Mode:** (Live reload)
-    ```bash
-    wails dev
-    ```
-*   **Production Build:**
-    ```bash
-    wails build
-    ```
-    This creates a Windows executable in the `build/bin` directory. A pre-built
-    installer (`lhcontrol-amd64-installer.exe`) may also be available in the
-    project's releases.
+### Development Mode
+
+Live reload:
+
+```bash
+wails dev
+```
+
+### Production Build
+
+```bash
+wails build
+```
+
+The Windows executable is created under:
+
+```text
+build/bin
+```
+
+A pre-built installer may also be available from the project's Releases:
+
+```text
+lhcontrol-amd64-installer.exe
+```
 
 ## Usage
 
-1.  Launch the application.
-2.  Click **Scan** to discover nearby base stations.
-3.  The application will attempt to connect to discovered stations to determine their power state.
-4.  Use the **Power** menu to select On, Standby, or Sleep.
-5.  Open **Details** to inspect capabilities and metadata, identify a station, or safely change its channel.
-6.  Use the **All** controls to change all stations discovered during the current app session, including stations missed by the latest scan.
+1. Launch the application.
+2. Click **Scan** to discover nearby Lighthouse base stations.
+3. The application attempts to connect to discovered stations and determine their current power states.
+4. Use the **Power** menu to select:
+
+   * On
+   * Standby
+   * Sleep
+5. Open **Details** to inspect capabilities and metadata, identify a physical station, or safely change its optical channel.
+6. Use the **All** controls to change all stations discovered during the current application session, including stations missed by the latest scan.
 
 ## Troubleshooting
 
-*   **Scanning Issues:** If scans fail after the first time, or interactions fail with errors like "characteristic not found", try removing the base station(s) from your operating system's Bluetooth device list and restarting your computer. Do *not* re-pair them in the OS settings; the application will find them via scanning.
-*   **Bluetooth unavailable:** Turn Bluetooth back on or reconnect the adapter, wait two seconds, and scan again. The running application retries adapter initialization without requiring a restart.
-*   **Bluetooth Drivers:** Ensure you have the latest drivers for your Bluetooth adapter.
-*   **Permissions:** The application might require specific permissions to access Bluetooth hardware.
+### Scanning Issues
 
-### Windows hardware verification
+If scanning works the first time but later scans fail, or device interactions fail with errors such as:
 
-With the application running, execute `.\scripts\hardware-smoke.ps1` to run ten scan cycles, verify stable station ordering, and save a timed report under `build\verification`. Use `-MinimumStations`, `-ExpectedAddresses`, and `-ScanCycles` to define the hardware acceptance set; station assertions apply to devices actually discovered in every scan, not historical entries. Failed scans and power requests retain their raw status, station snapshot, duration, and request or validation error in the report. Add `-ExercisePower` only when it is safe to test On, Standby, and Sleep on every known base station; the script requires confirmed initial states, validates each readback, restores them in a `finally` block, and exits unsuccessfully if restoration fails. Run `.\scripts\hardware-smoke.ps1 -SelfTest` to validate the reporting and assertion logic without Bluetooth hardware.
-*   **Diagnostic log:** `%APPDATA%\lhcontrol\lhcontrol.log` is capped at 5 MB. One previous segment is retained as `lhcontrol.log.1`.
+```text
+characteristic not found
+```
 
-## HTTP API (for External Integration)
+try the following:
 
-This application also exposes a simple HTTP API on `http://127.0.0.1:7575` for basic control and status monitoring from external scripts or applications.
+1. Remove the Lighthouse base station from the Windows Bluetooth device list.
+2. Restart the computer.
+3. Do not manually re-pair the Lighthouse through Windows Settings.
+4. Start `lhcontrol` and allow the application to discover it through BLE scanning.
 
-**Endpoints:**
+### Bluetooth unavailable
 
-*   **`POST /allon`**
-    *   **Description:** Attempts to turn ON all base stations known in the current app session.
-    *   **Request Body:** None
-    *   **Response:** `200 OK` when every command was sent or skipped. Use `POST /stations/power` when per-station confirmation details are required. Returns `409 Conflict` if another Bluetooth operation is active.
+If Bluetooth is disabled or the adapter is temporarily disconnected:
 
-*   **`POST /alloff`**
-    *   **Description:** Attempts to put all base stations known in the current app session into Sleep.
-    *   **Request Body:** None
-    *   **Response:** `200 OK` when every command was sent or skipped. Use `POST /stations/power` when per-station confirmation details are required. Returns `409 Conflict` if another Bluetooth operation is active.
+1. Turn Bluetooth back on or reconnect the adapter.
+2. Wait approximately two seconds.
+3. Scan again.
 
-*   **`GET /status`**
-    *   **Description:** Returns the current list of known base stations and their states.
-    *   **Request Body:** None
-    *   **Response:** `200 OK` with JSON body:
-        ```json
-        [
-          {
-            "name": "LHB-STATION1_RENAMED",
-            "originalName": "LHB-XXXXXXXX",
-            "address": "XX:XX:XX:XX:XX:XX",
-            "powerState": 1,
-            "channel": 3
-          },
-          {
-            "name": "LHB-YYYYYYYY",
-            "originalName": "LHB-YYYYYYYY",
-            "address": "YY:YY:YY:YY:YY:YY",
-            "powerState": 0,
-            "channel": 8
-          }
-          // ... more stations
-        ]
-        ```
-        (Power States: -1 = Unknown, 0 = Sleep, 1 = On, 2 = Standby, 3 = Booting. Channel: 0 = Unknown, 1-16 = optical channel.)
+The running application retries Bluetooth adapter initialization without requiring a restart.
 
-*   **`POST /scan`**
-    *   **Description:** Triggers a background scan for base stations (approx. 5s scan + 7s state fetch). The list returned by `/status` will update once complete.
-    *   **Request Body:** None
-    *   **Response:** `202 Accepted` when the scan starts; `409 Conflict` if another Bluetooth operation is active.
+### Bluetooth Drivers
 
-*   **`GET /scan/status`**
-    *   **Description:** Returns scan state, timestamps, warnings, and the number actually seen in the most recent scan.
+Make sure the Bluetooth adapter is using current drivers.
 
-*   **`POST /scan/stop`**
-    *   **Description:** Cancels an active scan and waits for its workflow to finish. Safe to call when no scan is active.
-    *   **Response:** `204 No Content`. The terminal scan status is `cancelled`.
+### Permissions
 
-*   **`POST /stations/power`**
-    *   **Body:** `{"state":"on"}`, `{"state":"standby"}`, or `{"state":"sleep"}`.
-    *   **Response:** A structured result for every known station, including command-sent, success, confirmation, and error fields.
+Some Windows environments may require appropriate permissions for applications to access Bluetooth hardware.
 
-*   **`POST /stations/:address/power`**
-    *   **Body:** `{"state":"on"}`, `{"state":"standby"}`, or `{"state":"sleep"}`.
-    *   **Response:** `200 OK` with the updated station, `commandSent`, `confirmed`, and `confirmationError`. A command that was sent but could not be confirmed is represented by `confirmed: false`; failures before the write retain their normal 4xx/5xx status.
+## Windows Hardware Verification
 
-*   **`POST /stations/:address/identify`**
-    *   **Description:** Flashes the selected physical station when Identify is supported.
+With the application running, execute:
 
-*   **`POST /stations/:address/refresh`**
-    *   **Description:** Forces service/characteristic discovery and refreshes capabilities, metadata, power, and channel values.
+```powershell
+.\scripts\hardware-smoke.ps1
+```
 
-*   **`PUT /stations/:address/channel`**
-    *   **Body:** `{"channel":5}` (valid range: 1-16).
-    *   **Description:** Rejects visible conflicts, writes the channel, and succeeds only after readback matches. If the command was sent but readback is unavailable, returns `200 OK` with `commandSent: true` and `confirmed: false`; clients must not automatically retry it.
+The script performs ten scan cycles by default and verifies:
 
-**Example Usage (curl):**
+* Scan stability.
+* Stable station ordering.
+* Expected station discovery.
+* Scan duration.
+* Raw status and error details for failed scans.
+* Request, validation, and error details for failed power operations.
+
+Reports are stored under:
+
+```text
+build\verification
+```
+
+Use the following parameters to define the hardware acceptance set:
+
+```powershell
+-MinimumStations
+-ExpectedAddresses
+-ScanCycles
+```
+
+Station assertions apply only to devices actually discovered in every scan, not historical entries retained by the application session.
+
+### Power Exercise
+
+Only use the following option when it is safe to test all known Lighthouse stations:
+
+```powershell
+.\scripts\hardware-smoke.ps1 -ExercisePower
+```
+
+The script exercises:
+
+* On
+* Standby
+* Sleep
+
+It requires confirmed initial states for all stations.
+
+Each operation is validated through readback. The script restores the original states in a `finally` block and exits unsuccessfully if restoration fails.
+
+### Hardware-Free Self Test
+
+Run:
+
+```powershell
+.\scripts\hardware-smoke.ps1 -SelfTest
+```
+
+This validates the reporting and assertion logic without requiring Bluetooth hardware.
+
+## Diagnostic Log
+
+The diagnostic log is stored at:
+
+```text
+%APPDATA%\lhcontrol\lhcontrol.log
+```
+
+The log is capped at:
+
+```text
+5 MB
+```
+
+One previous log segment is retained as:
+
+```text
+lhcontrol.log.1
+```
+
+---
+
+# HTTP API
+
+For integration with external scripts or applications, `lhcontrol` exposes a simple local HTTP API at:
+
+```text
+http://127.0.0.1:7575
+```
+
+## `POST /allon`
+
+Attempts to turn ON all base stations known in the current application session.
+
+**Request Body:**
+
+None.
+
+**Response:**
+
+Returns:
+
+```text
+200 OK
+```
+
+when every command was sent or safely skipped.
+
+Use:
+
+```text
+POST /stations/power
+```
+
+when per-station confirmation details are required.
+
+Returns:
+
+```text
+409 Conflict
+```
+
+if another Bluetooth operation is active.
+
+---
+
+## `POST /alloff`
+
+Attempts to put all base stations known in the current application session into Sleep.
+
+**Request Body:**
+
+None.
+
+**Response:**
+
+Returns:
+
+```text
+200 OK
+```
+
+when every command was sent or safely skipped.
+
+Use:
+
+```text
+POST /stations/power
+```
+
+when detailed per-station confirmation information is required.
+
+Returns:
+
+```text
+409 Conflict
+```
+
+if another Bluetooth operation is active.
+
+---
+
+## `GET /status`
+
+Returns the current list of known Lighthouse base stations and their states.
+
+**Request Body:**
+
+None.
+
+**Response:**
+
+```text
+200 OK
+```
+
+Example:
+
+```json
+[
+  {
+    "name": "LHB-STATION1_RENAMED",
+    "originalName": "LHB-XXXXXXXX",
+    "address": "XX:XX:XX:XX:XX:XX",
+    "powerState": 1,
+    "channel": 3
+  },
+  {
+    "name": "LHB-YYYYYYYY",
+    "originalName": "LHB-YYYYYYYY",
+    "address": "YY:YY:YY:YY:YY:YY",
+    "powerState": 0,
+    "channel": 8
+  }
+]
+```
+
+### Power States
+
+```text
+-1 = Unknown
+ 0 = Sleep
+ 1 = On
+ 2 = Standby
+ 3 = Booting
+```
+
+### Optical Channel
+
+```text
+0    = Unknown
+1-16 = Optical channel
+```
+
+---
+
+## `POST /scan`
+
+Triggers a background scan for Lighthouse base stations.
+
+The workflow takes approximately:
+
+```text
+5 seconds BLE scanning
++
+7 seconds state fetching
+```
+
+The list returned by:
+
+```text
+GET /status
+```
+
+is updated after the scan completes.
+
+**Request Body:**
+
+None.
+
+**Response:**
+
+```text
+202 Accepted
+```
+
+when the scan starts.
+
+Returns:
+
+```text
+409 Conflict
+```
+
+if another Bluetooth operation is active.
+
+---
+
+## `GET /scan/status`
+
+Returns the current or latest scan state, including:
+
+* Scan status
+* Timestamps
+* Warnings
+* Number of stations actually seen during the most recent scan
+
+---
+
+## `POST /scan/stop`
+
+Cancels an active scan and waits for the scan workflow to finish.
+
+It is safe to call when no scan is active.
+
+**Response:**
+
+```text
+204 No Content
+```
+
+The terminal scan status is:
+
+```text
+cancelled
+```
+
+---
+
+## `POST /stations/power`
+
+Changes the power state of all currently known stations.
+
+**Request Body:**
+
+On:
+
+```json
+{
+  "state": "on"
+}
+```
+
+Standby:
+
+```json
+{
+  "state": "standby"
+}
+```
+
+Sleep:
+
+```json
+{
+  "state": "sleep"
+}
+```
+
+**Response:**
+
+Returns a structured result for every known station, including:
+
+* Whether the command was sent
+* Success state
+* Confirmation state
+* Confirmation errors
+* Other operation errors
+
+---
+
+## `POST /stations/:address/power`
+
+Changes the power state of a specific Lighthouse base station.
+
+**Request Body:**
+
+```json
+{
+  "state": "on"
+}
+```
+
+or:
+
+```json
+{
+  "state": "standby"
+}
+```
+
+or:
+
+```json
+{
+  "state": "sleep"
+}
+```
+
+A successful request returns:
+
+```text
+200 OK
+```
+
+with:
+
+* Updated station information
+* `commandSent`
+* `confirmed`
+* `confirmationError`
+
+A command that was successfully sent but could not be confirmed is represented as:
+
+```json
+{
+  "commandSent": true,
+  "confirmed": false
+}
+```
+
+Failures that occur before the write retain their normal `4xx` or `5xx` HTTP status.
+
+---
+
+## `POST /stations/:address/identify`
+
+Flashes the selected physical Lighthouse station when the Identify capability is supported.
+
+This can be used to determine which physical station corresponds to a device shown in the application.
+
+---
+
+## `POST /stations/:address/refresh`
+
+Forces BLE service and characteristic discovery and refreshes:
+
+* Capabilities
+* Metadata
+* Power state
+* Optical channel
+
+---
+
+## `PUT /stations/:address/channel`
+
+Changes the optical channel of a specific Lighthouse station.
+
+**Request Body:**
+
+```json
+{
+  "channel": 5
+}
+```
+
+Valid range:
+
+```text
+1-16
+```
+
+The application:
+
+1. Checks visible stations for channel conflicts.
+2. Rejects the operation when a visible conflict exists.
+3. Writes the new channel.
+4. Reads the channel back from the station.
+5. Reports full success only when the readback matches the requested value.
+
+If the command was sent successfully but readback is unavailable, the API returns:
+
+```text
+200 OK
+```
+
+with:
+
+```json
+{
+  "commandSent": true,
+  "confirmed": false
+}
+```
+
+Clients **must not automatically retry the channel write** in this situation.
+
+## Example Usage with curl
+
+Get current status:
 
 ```bash
-# Get current status
 curl http://127.0.0.1:7575/status
+```
 
-# Turn all base stations ON
+Turn all base stations ON:
+
+```bash
 curl -X POST http://127.0.0.1:7575/allon
+```
 
-# Turn all base stations OFF
+Turn all base stations OFF:
+
+```bash
 curl -X POST http://127.0.0.1:7575/alloff
 ```
 
 ## Release Hardware Checklist
 
-Automated tests cannot emulate Windows WinRT or a physical Lighthouse. Before
-publishing a release on a Bluetooth-enabled Windows machine:
+Automated tests cannot fully emulate Windows WinRT or a physical Lighthouse base station.
+
+Before publishing a release on a Bluetooth-enabled Windows machine:
 
 1. Run at least 10 consecutive scans and verify the process remains stable.
-2. Exit during a scan and confirm shutdown completes without a crash.
-3. Exercise On, Standby, and Sleep for one station and for all known stations.
-4. Verify command readback, channel conflict rejection, and a successful channel change.
-5. Disable and re-enable Bluetooth, then verify scanning and device controls recover.
+2. Exit the application during a scan and confirm shutdown completes without a crash.
+3. Exercise On, Standby, and Sleep for:
+
+   * One station
+   * All known stations
+4. Verify:
+
+   * Command readback
+   * Channel conflict rejection
+   * A successful channel change with readback confirmation
+5. Disable and re-enable Bluetooth, then verify:
+
+   * Scanning recovers
+   * Device controls recover
