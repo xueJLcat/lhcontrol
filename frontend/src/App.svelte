@@ -311,6 +311,7 @@
       prepareForScan();
       externalScanning = false;
       externalScanID = null;
+		 externalScanRecoveryPending = true;
       if (globalOperation !== 'scanning') stoppingScan = false;
       maybeEndScanTimer();
       const capturedStationRevisions = new Map(stationRevisions);
@@ -321,7 +322,7 @@
       }
       const scanStatus = await GetScanStatus().catch(() => null);
       if (disposed || !listRevisions.isCurrent(revision)) return;
-      if (updated && scanStatus) externalScanRecoveryPending = false;
+		 if (updated && scanStatus) externalScanRecoveryPending = false;
       statusMessage = formatTerminalScanResult({
         state: 'failed', error: message, known: stations.length,
         warnings: scanStatus?.warnings, external: true
@@ -345,7 +346,6 @@
       if (updated) {
         applyStationList(updated, revision, capturedStationRevisions);
       }
-      externalScanRecoveryPending = false;
       statusMessage = 'Scan stopped.';
     });
     statusCheckInterval = setInterval(periodicStatusCheck, 15000);

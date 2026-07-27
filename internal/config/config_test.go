@@ -201,3 +201,34 @@ func TestLoadClearsAliasesWhenConfigFileWasRemoved(t *testing.T) {
 		t.Fatal("Load() retained aliases after the config file was removed")
 	}
 }
+
+func TestSuccessfulInvalidConfigQuarantineResetsPreviousLoadState(t *testing.T) {
+	configRoot := t.TempDir()
+	t.Setenv("AppData", configRoot)
+	configDirectory := filepath.Join(configRoot, "lhcontrol")
+	if err := os.MkdirAll(configDirectory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(configDirectory, "config.json")
+	if err := os.WriteFile(configPath, []byte(`{"renamedStations":`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	originalRenamer := configFileRenamer
+	configFileRenamer = func(string, string) error { return errors.New("rename denied") }
+	t.Cleanup(func() { configFileRenamer = originalRenamer })
+	cfg := NewConfig()
+	cfg.RenamedStations["LHB-OLD"] = "Old"
+	if err := cfg.Load(); err == nil {
+		t.Fatal("Load() unexpectedly succeeded while quarantine failed")
+	}
+	configFileRenamer = os.Rename
+	if err := cfg.Load(); err == nil || !strings.Contains(err.Error(), "invalid file preserved") {
+		t.Fatalf("Load() error = %v, want preserved invalid-file error", err)
+	}
+	if _, ok := cfg.GetRenamedStation("LHB-OLD"); ok {
+		t.Fatal("successful quarantine retained stale aliases")
+	}
+	if err := cfg.SetRenamedStation("LHB-NEW", "New"); err != nil {
+		t.Fatalf("SetRenamedStation() remained blocked after successful quarantine: %v", err)
+	}
+}

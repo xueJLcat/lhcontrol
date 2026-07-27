@@ -336,6 +336,41 @@ describe('App asynchronous operations', () => {
     expect(await screen.findByText('External scan failed: radio failure partial cleanup')).toBeInTheDocument();
   });
 
+  it('retries failed external scan recovery after the first authoritative list request fails', async () => {
+    vi.useFakeTimers();
+    api.IsScanning.mockResolvedValue(false);
+    render(App);
+    await screen.findByText('LHB-TEST');
+    api.GetCurrentStationInfo.mockRejectedValueOnce(new Error('temporary list failure'))
+      .mockResolvedValue([createStation({ name: 'LHB-RECOVERED-FAILURE' })]);
+    api.GetScanStatus.mockResolvedValue({ state: 'failed', found: 0, error: 'radio failure', warnings: ['partial cleanup'] });
+
+    runtime.handlers.get('external-scan-started')?.(externalScanEvent(1));
+    runtime.handlers.get('external-scan-failed')?.(externalScanEvent(1, { error: 'radio failure' }));
+    await vi.advanceTimersByTimeAsync(15_000);
+
+    expect(await screen.findByText('LHB-RECOVERED-FAILURE')).toBeInTheDocument();
+    expect(screen.getByText('External scan failed: radio failure partial cleanup')).toBeInTheDocument();
+  });
+
+  it('retries cancelled external scan recovery after the first scan-status request fails', async () => {
+    vi.useFakeTimers();
+    api.IsScanning.mockResolvedValue(false);
+    api.GetCurrentStationInfo.mockResolvedValue([createStation({ name: 'LHB-RECOVERED-CANCEL' })]);
+    render(App);
+    await screen.findByText('LHB-TEST');
+    api.GetScanStatus.mockRejectedValueOnce(new Error('temporary scan status failure'))
+      .mockResolvedValue({ state: 'cancelled', found: 0, warnings: [] });
+
+    runtime.handlers.get('external-scan-started')?.(externalScanEvent(1));
+    runtime.handlers.get('external-scan-cancelled')?.(externalScanEvent(1));
+    await vi.advanceTimersByTimeAsync(15_000);
+	await vi.advanceTimersByTimeAsync(15_000);
+
+    expect(await screen.findByText('LHB-RECOVERED-CANCEL')).toBeInTheDocument();
+    expect(screen.getByText('External scan stopped.')).toBeInTheDocument();
+  });
+
   it('keeps terminal recovery pending when an external completion status request fails', async () => {
     vi.useFakeTimers();
     api.IsScanning.mockResolvedValue(false);

@@ -148,6 +148,12 @@ type trackingConnectedDevice struct {
 	disconnects   int
 }
 
+type staleTrackingConnectedDevice struct {
+	trackingConnectedDevice
+}
+
+func (*staleTrackingConnectedDevice) Connected() (bool, error) { return false, nil }
+
 func (device *trackingConnectedDevice) Disconnect() error {
 	device.disconnected = true
 	device.disconnects++
@@ -172,6 +178,25 @@ func TestDisconnectFailureRetainsDeviceUntilCleanupCanBeRetried(t *testing.T) {
 	}
 	if station.device != nil || station.pendingCleanup != nil || device.disconnects != 2 {
 		t.Fatalf("cleanup retry state: device=%v pending=%v disconnects=%d", station.device, station.pendingCleanup, device.disconnects)
+	}
+}
+
+func TestReconnectDoesNotReplaceStationBeforeStaleCleanupSucceeds(t *testing.T) {
+	cleanupErr := errors.New("stale connection cleanup failed")
+	device := &staleTrackingConnectedDevice{trackingConnectedDevice: trackingConnectedDevice{disconnectErr: cleanupErr}}
+	station := connectedFakeStation(&fakeCharacteristic{}, nil, nil, Capabilities{PowerWrite: true})
+	station.device = device
+	originalAdapter := adapter
+	fake := newFakeBLEAdapter()
+	adapter = fake
+	t.Cleanup(func() { adapter = originalAdapter })
+
+	err := connectAndDiscoverInternal(station)
+	if !errors.Is(err, cleanupErr) {
+		t.Fatalf("connectAndDiscoverInternal() error = %v, want %v", err, cleanupErr)
+	}
+	if station.pendingCleanup != device || station.device != nil {
+		t.Fatalf("stale cleanup state = pending:%v device:%v", station.pendingCleanup, station.device)
 	}
 }
 
@@ -1598,5 +1623,59 @@ func TestInvalidateAllConnectionsRetainsFailedCleanupForRetry(t *testing.T) {
 	}
 	if station.pendingCleanup != nil || device.disconnects != 2 {
 		t.Fatalf("cleanup retry state: pending=%v disconnects=%d", station.pendingCleanup, device.disconnects)
+	}
+}
+
+func TestInvalidateAllConnectionsRetriesPendingCleanupStations(t *testing.T) {
+	station := connectedFakeStation(nil, nil, nil, Capabilities{})
+	device := &trackingConnectedDevice{}
+	station.device = nil
+	station.isConnected = false
+	station.pendingCleanup = device
+	connectedStationsMutex.Lock()
+	previousConnected := connectedStations
+	previousPending := pendingCleanupStations
+	connectedStations = nil
+	pendingCleanupStations = []*BaseStation{station}
+	connectedStationsMutex.Unlock()
+	t.Cleanup(func() {
+		connectedStationsMutex.Lock()
+		connectedStations = previousConnected
+		pendingCleanupStations = previousPending
+		connectedStationsMutex.Unlock()
+	})
+
+	if err := InvalidateAllConnections(); err != nil {
+		t.Fatalf("InvalidateAllConnections() error = %v", err)
+	}
+	if device.disconnects != 1 || station.pendingCleanup != nil {
+		t.Fatalf("pending cleanup retry state: disconnects=%d pending=%v", device.disconnects, station.pendingCleanup)
+	}
+}
+
+func TestReleaseStationForScanRemovesCompletedPendingCleanup(t *testing.T) {
+	station := connectedFakeStation(nil, nil, nil, Capabilities{})
+	device := &trackingConnectedDevice{}
+	station.device = nil
+	station.isConnected = false
+	station.pendingCleanup = device
+	connectedStationsMutex.Lock()
+	previousPending := pendingCleanupStations
+	pendingCleanupStations = []*BaseStation{station}
+	connectedStationsMutex.Unlock()
+	t.Cleanup(func() {
+		connectedStationsMutex.Lock()
+		pendingCleanupStations = previousPending
+		connectedStationsMutex.Unlock()
+	})
+
+	if err := ReleaseStationForScan(station); err != nil {
+		t.Fatalf("ReleaseStationForScan() error = %v", err)
+	}
+	connectedStationsMutex.Lock()
+	remaining := len(pendingCleanupStations)
+	connectedStationsMutex.Unlock()
+	if remaining != 0 || station.pendingCleanup != nil {
+		t.Fatalf("completed cleanup remained tracked: count=%d pending=%v", remaining, station.pendingCleanup)
 	}
 }

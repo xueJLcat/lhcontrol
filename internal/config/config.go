@@ -80,6 +80,11 @@ func (c *Config) Load() error {
 			c.mutex.Unlock()
 			return fmt.Errorf("error unmarshalling config (failed to preserve invalid file: %v): %w", renameErr, err)
 		}
+		c.mutex.Lock()
+		c.RenamedStations = make(map[string]string)
+		c.RenamedStationsByAddress = make(map[string]string)
+		c.persistenceBlockedErr = nil
+		c.mutex.Unlock()
 		return fmt.Errorf("error unmarshalling config; invalid file preserved as '%s': %w", invalidPath, err)
 	}
 	if loaded.RenamedStations == nil {

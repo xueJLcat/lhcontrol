@@ -923,6 +923,18 @@ func ReadPowerState(station *BaseStation) error {
 func InvalidateAllConnections() error {
 	connectedStationsMutex.Lock()
 	stations := append([]*BaseStation(nil), connectedStations...)
+	for _, pending := range pendingCleanupStations {
+		found := false
+		for _, station := range stations {
+			if station == pending {
+				found = true
+				break
+			}
+		}
+		if !found {
+			stations = append(stations, pending)
+		}
+	}
 	connectedStationsMutex.Unlock()
 	var cleanupErrors []error
 	for _, station := range stations {
@@ -987,7 +999,9 @@ func connectAndDiscoverInternal(station *BaseStation) error {
 		if err == nil && connected {
 			return nil // Already good
 		}
-		_ = disconnectInternal(station)
+		if err := disconnectInternal(station); err != nil {
+			return transportError("disconnect stale station connection", err)
+		}
 	}
 
 	if !station.isConnected || station.device == nil {
@@ -1826,17 +1840,21 @@ func DisconnectStation(station *BaseStation) error {
 	defer station.mutex.Unlock()
 	err := disconnectInternal(station)
 	if err == nil {
-		connectedStationsMutex.Lock()
-		remaining := pendingCleanupStations[:0]
-		for _, tracked := range pendingCleanupStations {
-			if tracked != station {
-				remaining = append(remaining, tracked)
-			}
-		}
-		pendingCleanupStations = remaining
-		connectedStationsMutex.Unlock()
+		removePendingCleanupStation(station)
 	}
 	return err
+}
+
+func removePendingCleanupStation(station *BaseStation) {
+	connectedStationsMutex.Lock()
+	remaining := pendingCleanupStations[:0]
+	for _, tracked := range pendingCleanupStations {
+		if tracked != station {
+			remaining = append(remaining, tracked)
+		}
+	}
+	pendingCleanupStations = remaining
+	connectedStationsMutex.Unlock()
 }
 
 // ReleaseStationForScan closes GATT handles so the Lighthouse can advertise
@@ -1848,7 +1866,11 @@ func ReleaseStationForScan(station *BaseStation) error {
 	station.mutex.Lock()
 	defer station.mutex.Unlock()
 
-	return disconnectInternal(station)
+	err := disconnectInternal(station)
+	if err == nil {
+		removePendingCleanupStation(station)
+	}
+	return err
 }
 
 // DisconnectAllStations disconnects all tracked stations.
