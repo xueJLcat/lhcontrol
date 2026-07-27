@@ -166,6 +166,14 @@ func newScanSession() *scanSession {
 
 func (s *scanSession) requestStop(reason scanStopReason) error {
 	s.requestStopAsync(reason)
+	s.mutex.Lock()
+	// A platform watcher has not started yet, so there is no StopScan call to
+	// await. markStarted will issue the recorded cancellation when it arrives.
+	pendingStart := !s.started && !s.finished
+	s.mutex.Unlock()
+	if pendingStart {
+		return nil
+	}
 	<-s.stopDone
 	s.mutex.Lock()
 	defer s.mutex.Unlock()

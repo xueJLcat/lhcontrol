@@ -411,12 +411,11 @@ func TestAsyncScanEventsCannotOvertakePreviousCompletion(t *testing.T) {
 	}
 }
 
-func TestStopScanAllowsCancelledCallbackReentryAndIsIdempotent(t *testing.T) {
+func TestStopScanWaitsForCancelledCallbackAndIsIdempotent(t *testing.T) {
 	manager := NewManager(config.NewConfig())
 	scanStarted := make(chan struct{})
 	callbackEntered := make(chan struct{})
 	callbackRelease := make(chan struct{})
-	callbackStopDone := make(chan error, 1)
 	manager.bluetoothOps.scanForDurationContext = func(ctx context.Context, _ time.Duration) ([]internalbluetooth.DiscoveredStation, error) {
 		close(scanStarted)
 		<-ctx.Done()
@@ -424,7 +423,6 @@ func TestStopScanAllowsCancelledCallbackReentryAndIsIdempotent(t *testing.T) {
 	}
 	if err := manager.StartScan(ScanCallbacks{Cancelled: func() {
 		close(callbackEntered)
-		callbackStopDone <- manager.StopScan()
 		<-callbackRelease
 	}}); err != nil {
 		t.Fatalf("StartScan() error = %v", err)
@@ -435,12 +433,9 @@ func TestStopScanAllowsCancelledCallbackReentryAndIsIdempotent(t *testing.T) {
 	go func() { stopDone <- manager.StopScan() }()
 	<-callbackEntered
 	select {
-	case err := <-callbackStopDone:
-		if err != nil {
-			t.Fatalf("callback StopScan() error = %v", err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("callback StopScan deadlocked")
+	case err := <-stopDone:
+		t.Fatalf("StopScan returned before cancelled callback completed: %v", err)
+	case <-time.After(25 * time.Millisecond):
 	}
 	close(callbackRelease)
 	if err := <-stopDone; err != nil {
@@ -1044,6 +1039,28 @@ func TestBulkStandbyRefreshesCachedUnsupportedCapability(t *testing.T) {
 	}
 	if refreshes.Load() != 1 || len(result.Results) != 1 || result.Results[0].Skipped || !result.Results[0].Success {
 		t.Fatalf("bulk result = %+v, refreshes = %d", result, refreshes.Load())
+	}
+}
+
+func TestRefreshCapabilitiesReturnsStationAfterChannelOnlyReadFailure(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	address := "11:22:33:44:55:83"
+	manager.stations[address] = &internalbluetooth.BaseStation{
+		Name: "LHB-CHANNEL-PARTIAL", Address: mustAddress(t, address), Present: true,
+	}
+	manager.bluetoothOps.refreshCapabilities = func(*internalbluetooth.BaseStation) (internalbluetooth.Capabilities, error) {
+		return internalbluetooth.Capabilities{PowerRead: true, ChannelRead: true}, nil
+	}
+	manager.bluetoothOps.fetchInitialPowerState = func(*internalbluetooth.BaseStation) error {
+		return &internalbluetooth.InitialReadError{Channel: errors.New("channel unavailable")}
+	}
+
+	info, err := manager.RefreshStationCapabilities(address)
+	if err != nil {
+		t.Fatalf("RefreshStationCapabilities() error = %v", err)
+	}
+	if info.Address != address || info.Name != "LHB-CHANNEL-PARTIAL" {
+		t.Fatalf("RefreshStationCapabilities() returned zero or wrong station: %+v", info)
 	}
 }
 

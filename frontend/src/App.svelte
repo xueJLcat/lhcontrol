@@ -74,6 +74,7 @@
   let nextStationRevision = 0;
   let stationRevisions = new Map<string, number>();
   let disposed = false;
+  let startupPending = true;
 
   interface ExternalScanEvent {
     id: number;
@@ -346,6 +347,9 @@
     });
     statusCheckInterval = setInterval(periodicStatusCheck, 15000);
     const startupScanning = await IsScanning().catch(() => false);
+    // Do not allow the first polling tick to acquire the backend operation
+    // lock before the initial external-scan check can start the local scan.
+    startupPending = false;
     // An external scan event may have arrived while this initial query was
     // pending. Do not let its older result overwrite the newer event state.
     if (disposed || startupScanEpoch !== scanEpoch) return;
@@ -385,7 +389,7 @@
   });
 
   async function periodicStatusCheck() {
-    if (isStatusChecking || isLoading || isBulkLoading || anyDeviceOperation || editingAddress !== null) return;
+    if (startupPending || isStatusChecking || isLoading || isBulkLoading || anyDeviceOperation || editingAddress !== null) return;
     globalOperation = 'status-refresh';
     const revision = listRevisions.next();
     const capturedStationRevisions = new Map(stationRevisions);

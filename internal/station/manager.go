@@ -1141,8 +1141,6 @@ func (m *Manager) currentScanContext() context.Context {
 
 // StopScan cancels the active scan and waits until all scan processing and its
 // terminal callback have finished. Repeated and no-op calls are safe.
-// When called from within a lifecycle callback (Started, Cancelled, Failed, or
-// Completed) it returns immediately without waiting to avoid deadlock.
 func (m *Manager) StopScan() error {
 	m.scanLifecycleMutex.Lock()
 	lifecycle := m.scanLifecycle
@@ -1151,16 +1149,9 @@ func (m *Manager) StopScan() error {
 		return nil
 	}
 	lifecycle.cancel()
-	lifecycle.mu.Lock()
-	inCallback := lifecycle.inCallback
-	result := lifecycle.result
-	lifecycle.mu.Unlock()
-	if inCallback {
-		return result
-	}
 	<-lifecycle.done
 	lifecycle.mu.Lock()
-	result = lifecycle.result
+	result := lifecycle.result
 	lifecycle.mu.Unlock()
 	return result
 }
@@ -1812,6 +1803,9 @@ func (m *Manager) RefreshStationCapabilities(address string) (StationInfo, error
 			}
 			return StationInfo{}, err
 		}
+		// A channel read is optional. Keep the successfully refreshed station
+		// visible and expose the partial read through its cached status instead
+		// of reporting a zero-value successful response.
 		return m.stationInfoByAddress(address)
 	}
 	m.clearStatusFailure(canonicalAddress)

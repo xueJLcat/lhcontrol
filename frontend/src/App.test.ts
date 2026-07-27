@@ -136,7 +136,7 @@ describe('App asynchronous operations', () => {
     render(App);
 
     await vi.advanceTimersByTimeAsync(15_000);
-    expect(api.CheckAllStationStatuses).toHaveBeenCalledOnce();
+    expect(api.CheckAllStationStatuses).not.toHaveBeenCalled();
     resolveStartupScan(false);
 
     await vi.waitFor(() => expect(api.ScanAndFetchStations).toHaveBeenCalledOnce());

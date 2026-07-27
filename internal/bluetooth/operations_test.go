@@ -1367,6 +1367,53 @@ func TestRequestScanCancellationBeforeWatcherStartIsNonBlocking(t *testing.T) {
 	}
 }
 
+func TestCancelScanBeforeWatcherStartReturnsWithoutWaiting(t *testing.T) {
+	originalAdapter := adapter
+	fake := newFakeBLEAdapter()
+	fake.startDelay = make(chan struct{})
+	adapter = fake
+	t.Cleanup(func() { adapter = originalAdapter })
+
+	result := make(chan error, 1)
+	go func() {
+		_, err := ScanForDuration(time.Hour)
+		result <- err
+	}()
+	deadline := time.Now().Add(time.Second)
+	for {
+		activeScanMutex.Lock()
+		active := activeScan != nil
+		activeScanMutex.Unlock()
+		if active {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("scan session was not registered")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	cancelled := make(chan error, 1)
+	go func() { cancelled <- CancelScan() }()
+	select {
+	case err := <-cancelled:
+		if err != nil {
+			t.Fatalf("CancelScan() error = %v", err)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("CancelScan blocked before watcher startup")
+	}
+	close(fake.startDelay)
+	select {
+	case err := <-result:
+		if !errors.Is(err, ErrScanCancelled) {
+			t.Fatalf("scan error = %v, want ErrScanCancelled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("scan did not exit after watcher startup")
+	}
+}
+
 func TestScanRejectsEarlyGracefulReturn(t *testing.T) {
 	originalAdapter := adapter
 	fake := newFakeBLEAdapter()
