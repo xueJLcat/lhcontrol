@@ -2071,7 +2071,7 @@ func TestStatusCheckReadsConnectedAndTracksDisconnectedStationsTogether(t *testi
 	manager.Shutdown()
 }
 
-func TestStatusCheckDoesNotLetNewRecoveryStealConnectedReadSlots(t *testing.T) {
+func TestStatusCheckLeavesOneSlotForForegroundWork(t *testing.T) {
 	manager := NewManager(config.NewConfig())
 	defer manager.Shutdown()
 	connectedAddresses := []string{"11:22:33:44:55:73", "11:22:33:44:55:74"}
@@ -2102,46 +2102,24 @@ func TestStatusCheckDoesNotLetNewRecoveryStealConnectedReadSlots(t *testing.T) {
 		}
 		return nil
 	}
-	recoveryStarted := make(chan struct{})
-	releaseRecovery := make(chan struct{})
-	manager.bluetoothOps.fetchInitialPowerState = func(station *internalbluetooth.BaseStation) error {
-		if station == disconnected {
-			close(recoveryStarted)
-			select {
-			case <-releaseRecovery:
-			case <-manager.shutdownCh:
-			}
-		}
-		return nil
-	}
-
 	result := make(chan error, 1)
 	go func() {
 		_, err := manager.CheckAllStationStatuses()
 		result <- err
 	}()
-	for range connectedAddresses {
-		select {
-		case <-readStarted:
-		case <-time.After(time.Second):
-			t.Fatal("both connected reads did not acquire GATT slots")
-		}
-	}
 	select {
-	case <-recoveryStarted:
-		t.Fatal("disconnect recovery started before connected reads finished")
-	default:
+	case <-readStarted:
+	case <-time.After(time.Second):
+		t.Fatal("status read did not acquire a GATT slot")
 	}
+	if err := manager.beginForegroundStationOperation("11:22:33:44:55:76"); err != nil {
+		t.Fatalf("foreground operation could not use the reserved GATT slot: %v", err)
+	}
+	manager.endStationOperation("11:22:33:44:55:76")
 	close(releaseReads)
 	if err := <-result; err != nil {
 		t.Fatalf("CheckAllStationStatuses() error = %v", err)
 	}
-	select {
-	case <-recoveryStarted:
-	case <-time.After(time.Second):
-		t.Fatal("disconnect recovery was not scheduled after connected reads")
-	}
-	close(releaseRecovery)
 }
 
 func TestShutdownCannotMissScanAfterReadinessCheck(t *testing.T) {

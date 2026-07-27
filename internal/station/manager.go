@@ -1312,7 +1312,9 @@ func (m *Manager) CheckAllStationStatuses() ([]StationInfo, error) {
 	}
 	statusErrors := make([]error, len(stationsToRead))
 	work := make(chan statusReadWork)
-	workerCount := 2
+	// Keep one GATT slot available for foreground commands while the periodic
+	// refresh reads connected stations.
+	workerCount := 1
 	if len(stationsToRead) < workerCount {
 		workerCount = len(stationsToRead)
 	}

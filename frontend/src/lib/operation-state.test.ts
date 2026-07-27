@@ -36,11 +36,11 @@ describe('deriveOperationLocks', () => {
     }
   );
 
-  it('locks Bluetooth controls during a status refresh', () => {
+  it('keeps controls available during a status refresh', () => {
     expect(locks('status-refresh')).toEqual({
-      scanLocked: true,
-      bulkLocked: true,
-      stationLocked: true,
+      scanLocked: false,
+      bulkLocked: false,
+      stationLocked: false,
       anyDeviceOperation: false
     });
   });
