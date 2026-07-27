@@ -883,14 +883,6 @@ func (m *Manager) finishScan(stations []StationInfo, found int, err error, callb
 	m.scanLifecycleMutex.Unlock()
 	if lifecycle != nil {
 		defer func() {
-			lifecycle.mu.Lock()
-			lifecycle.inCallback = false
-			select {
-			case <-lifecycle.done:
-			default:
-				close(lifecycle.done)
-			}
-			lifecycle.mu.Unlock()
 			m.scanLifecycleMutex.Lock()
 			if m.scanLifecycle == lifecycle {
 				m.scanLifecycle = nil
@@ -908,6 +900,7 @@ func (m *Manager) finishScan(stations []StationInfo, found int, err error, callb
 			lifecycle.state = "completed"
 			lifecycle.result = nil
 		}
+		close(lifecycle.done)
 		lifecycle.mu.Unlock()
 	}
 	m.scanTransitionMutex.Unlock()
@@ -915,9 +908,6 @@ func (m *Manager) finishScan(stations []StationInfo, found int, err error, callb
 	if lifecycle == nil {
 		return
 	}
-	lifecycle.mu.Lock()
-	lifecycle.inCallback = true
-	lifecycle.mu.Unlock()
 	if errors.Is(err, bluetooth.ErrScanCancelled) || errors.Is(err, context.Canceled) {
 		if callbacks.Cancelled != nil {
 			if callbackErr := runSafely("scan cancelled callback", func() error {
@@ -946,14 +936,6 @@ func (m *Manager) finishScan(stations []StationInfo, found int, err error, callb
 			}
 		}
 	}
-	lifecycle.mu.Lock()
-	lifecycle.inCallback = false
-	select {
-	case <-lifecycle.done:
-	default:
-		close(lifecycle.done)
-	}
-	lifecycle.mu.Unlock()
 }
 
 func fallbackStationName(address string) string {
@@ -1139,8 +1121,9 @@ func (m *Manager) currentScanContext() context.Context {
 	return m.scanLifecycle.ctx
 }
 
-// StopScan cancels the active scan and waits until all scan processing and its
-// terminal callback have finished. Repeated and no-op calls are safe.
+// StopScan cancels the active scan and waits until scan processing has
+// finished. Terminal callbacks are delivered afterwards so callbacks can
+// safely call StopScan themselves. Repeated and no-op calls are safe.
 func (m *Manager) StopScan() error {
 	m.scanLifecycleMutex.Lock()
 	lifecycle := m.scanLifecycle
@@ -1149,6 +1132,13 @@ func (m *Manager) StopScan() error {
 		return nil
 	}
 	lifecycle.cancel()
+	lifecycle.mu.Lock()
+	if lifecycle.inCallback {
+		result := lifecycle.result
+		lifecycle.mu.Unlock()
+		return result
+	}
+	lifecycle.mu.Unlock()
 	<-lifecycle.done
 	lifecycle.mu.Lock()
 	result := lifecycle.result
