@@ -440,6 +440,7 @@ func invalidateDisconnectedDevice(station *BaseStation, disconnected bluetooth.D
 		return
 	}
 	station.isConnected = false
+	station.pendingCleanup = station.device
 	station.device = nil
 	station.characteristic = nil
 	station.modeCharacteristic = nil
@@ -686,7 +687,13 @@ func ScanForDurationContext(ctx context.Context, duration time.Duration) ([]Disc
 			return nil, err
 		}
 	}
+	// A watcher that failed to stop or timed out after a cancellation
+	// request must be reported as a failure so callers (HTTP, Wails,
+	// status) agree the scan did not complete cleanly.
 	if reason == scanStopCancelled || ctx.Err() != nil {
+		if session.stopErr != nil {
+			return nil, fmt.Errorf("failed to stop Bluetooth scan after cancellation: %w", session.stopErr)
+		}
 		return nil, ErrScanCancelled
 	}
 	if reason != scanStopDuration {

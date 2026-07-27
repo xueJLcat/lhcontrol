@@ -24,9 +24,15 @@ func TestClassifyWriteFailurePossiblySent(t *testing.T) {
 func TestClassifyWriteFailureCreationErrorIsDefinitelyUnsent(t *testing.T) {
 	cause := errors.New("operation creation failed")
 	err := classifyWriteFailure(genericattributeprofile.GattWriteOptionWriteWithoutResponse, false, false, cause)
-	var possiblySent *WritePossiblySentError
-	if !errors.Is(err, cause) || errors.As(err, &possiblySent) {
-		t.Fatalf("classifyWriteFailure() = %v, want unclassified creation error", err)
+	var neverSent *WriteNeverSubmittedError
+	if !errors.As(err, &neverSent) {
+		t.Fatalf("classifyWriteFailure() = %v (type %T), want WriteNeverSubmittedError", err, err)
+	}
+	if !errors.Is(err, cause) {
+		t.Fatalf("classified error does not wrap cause: %v", err)
+	}
+	if neverSent.PossiblySent() {
+		t.Fatal("WriteNeverSubmittedError.PossiblySent() = true, want false")
 	}
 }
 

@@ -334,6 +334,11 @@ button:focus-visible, [tabindex]:focus-visible {
   border-color: color-mix(in srgb, var(--color-danger) 45%, transparent);
   color: var(--fb-error);
 }
+.alert.warning {
+  background: color-mix(in srgb, var(--color-warning) 10%, transparent);
+  border-color: color-mix(in srgb, var(--color-warning) 45%, transparent);
+  color: var(--fb-warning);
+}
 .alert > svg { flex-shrink: 0; }
 .alert-text {
   min-width: 0;

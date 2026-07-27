@@ -59,5 +59,6 @@ describe('AppHeader bulk controls', () => {
   it('shows scan progress for an external scan as well as a local scan', () => {
     renderHeader({ scanning: true, scanLocked: true });
     expect(screen.getByRole('button', { name: 'Stop' })).toBeEnabled();
+    expect(document.querySelector('.scan-progress')).toBeInTheDocument();
   });
 });

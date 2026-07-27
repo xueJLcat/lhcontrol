@@ -222,7 +222,7 @@ describe('App asynchronous operations', () => {
 
     await vi.advanceTimersByTimeAsync(15_000);
 
-    expect(await screen.findByText('Scan stopped.')).toBeInTheDocument();
+    expect(await screen.findByText('External scan stopped.')).toBeInTheDocument();
     expect(screen.queryByText(/External scan completed/)).not.toBeInTheDocument();
   });
 

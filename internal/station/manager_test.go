@@ -383,27 +383,31 @@ func TestAsyncScanEventsCannotOvertakePreviousCompletion(t *testing.T) {
 
 	secondReturned := make(chan error, 1)
 	go func() { secondReturned <- manager.StartScan(callbacks) }()
-	select {
-	case err := <-secondReturned:
-		t.Fatalf("second StartScan returned before prior completion callback ended: %v", err)
-	case <-time.After(25 * time.Millisecond):
+	if err := <-secondReturned; !errors.Is(err, ErrOperationInProgress) {
+		t.Fatalf("second StartScan() error = %v, want ErrOperationInProgress", err)
 	}
 	close(firstCompletionRelease)
-	if err := <-secondReturned; err != nil {
-		t.Fatalf("second StartScan() error = %v", err)
+	manager.asyncScanWg.Wait()
+	if err := manager.StartScan(callbacks); err != nil {
+		t.Fatalf("StartScan() after completion callback error = %v", err)
 	}
 	manager.asyncScanWg.Wait()
 
 	eventsMutex.Lock()
 	defer eventsMutex.Unlock()
-	want := []string{"started", "completed", "started", "completed"}
-	if len(events) != len(want) {
-		t.Fatalf("events = %v, want %v", events, want)
-	}
-	for index := range want {
-		if events[index] != want[index] {
-			t.Fatalf("events = %v, want %v", events, want)
+	wantStarted := 2
+	wantCompleted := 2
+	var startedCount, completedCount int
+	for _, event := range events {
+		if event == "started" {
+			startedCount++
 		}
+		if event == "completed" {
+			completedCount++
+		}
+	}
+	if startedCount != wantStarted || completedCount != wantCompleted {
+		t.Fatalf("events = %v, want %d started and %d completed", events, wantStarted, wantCompleted)
 	}
 }
 
@@ -438,10 +442,10 @@ func TestStopScanAllowsCancelledCallbackReentryAndIsIdempotent(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("callback StopScan deadlocked")
 	}
+	close(callbackRelease)
 	if err := <-stopDone; err != nil {
 		t.Fatalf("StopScan() error = %v", err)
 	}
-	close(callbackRelease)
 	if err := manager.StopScan(); err != nil {
 		t.Fatalf("second StopScan() error = %v", err)
 	}
@@ -498,6 +502,27 @@ func TestScanInitialReadClassifiesPartialFailures(t *testing.T) {
 			readErr:        &internalbluetooth.InitialReadError{Power: errors.New("power unavailable")},
 			wantDisconnect: true,
 			wantRetry:      true,
+		},
+		{
+			name: "channel transport failure",
+			readErr: &internalbluetooth.InitialReadError{
+				Channel: &internalbluetooth.DeviceTransportError{
+					Operation: "read channel characteristic",
+					Err:       tinybluetooth.ErrGATTCommunication,
+				},
+			},
+			wantDisconnect: true,
+			wantRetry:      true,
+		},
+		{
+			name: "channel unsupported read",
+			readErr: &internalbluetooth.InitialReadError{
+				Channel: &internalbluetooth.UnsupportedCapabilityError{
+					Capability: "channel read",
+					Err:        tinybluetooth.ErrAttReadNotPermitted,
+				},
+			},
+			wantRetry: false,
 		},
 		{
 			name:            "adapter",

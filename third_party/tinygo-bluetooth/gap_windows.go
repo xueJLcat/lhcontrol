@@ -783,10 +783,13 @@ func (a *Adapter) Connect(address Address, params ConnectionParams) (Device, err
 	}
 
 	bleDevice := (*bluetooth.BluetoothLEDevice)(res)
+	var cleanupErrs []error
 	cleanupDevice := true
 	defer func() {
 		if cleanupDevice && bleDevice != nil {
-			_ = bleDevice.Close()
+			if err := bleDevice.Close(); err != nil {
+				cleanupErrs = append(cleanupErrs, err)
+			}
 			bleDevice.Release()
 		}
 	}()
@@ -823,7 +826,9 @@ func (a *Adapter) Connect(address Address, params ConnectionParams) (Device, err
 	cleanupSession := true
 	defer func() {
 		if cleanupSession {
-			_ = newSession.Close()
+			if err := newSession.Close(); err != nil {
+				cleanupErrs = append(cleanupErrs, err)
+			}
 			newSession.Release()
 		}
 	}()
@@ -883,24 +888,25 @@ func (a *Adapter) Connect(address Address, params ConnectionParams) (Device, err
 	})
 
 	// Serialize registration with teardown. The callback may run as soon as
-	// AddConnectionStatusChanged returns, so publish all handler ownership
-	// before allowing it to inspect or disconnect the shared state.
+	// AddConnectionStatusChanged returns. Hold operationMutex until all
+	// handler state fields are published so a callback cannot observe a
+	// partially initialised state.
 	state.operationMutex.Lock()
-	state.connectionStatusListener = handler
-	// From this point deviceState is the sole owner, including all failure
-	// paths. This prevents registration failure from also running the outer
-	// deferred releases for the same COM objects.
-	cleanupSession = false
-	cleanupDevice = false
 	token, err := state.device.AddConnectionStatusChanged(handler)
 
 	if err != nil {
 		state.operationMutex.Unlock()
-		_ = device.Disconnect()
+		handler.Release()
+		if len(cleanupErrs) > 0 {
+			return Device{}, errors.Join(append([]error{err}, cleanupErrs...)...)
+		}
 		return Device{}, err
 	}
 	state.connectionStatusListenerToken = token
 	state.connectionStatusListenerAdded = true
+	state.connectionStatusListener = handler
+	cleanupSession = false
+	cleanupDevice = false
 	state.operationMutex.Unlock()
 	return device, nil
 }

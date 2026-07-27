@@ -26,7 +26,7 @@
     canSetPower, hasCurrentChannel, hasVerifiedPowerState, isCurrentPowerState, maySetPower,
     powerTargetLabel, stateLabel
   } from './lib/station';
-  import { formatBulkResult, formatScanResult, summarizeBulkResult } from './lib/result-format';
+  import { formatBulkResult, formatTerminalScanResult, summarizeBulkResult } from './lib/result-format';
   import { pushToast } from './lib/toast';
   import { deriveOperationLocks, type GlobalOperation } from './lib/operation-state';
   import { RevisionGate } from './lib/revision-gate';
@@ -60,6 +60,7 @@
   let apiRunning = false;
   let apiError = '';
   let externalScanning = false;
+  let externalScanRecoveryPending = false;
   let stoppingScan = false;
   let stopRequestPending = false;
   let scanStartedAt: number | null = null;
@@ -266,13 +267,16 @@
       const revision = listRevisions.next();
       prepareForScan();
       externalScanning = false;
+      externalScanRecoveryPending = false;
       stoppingScan = false;
       maybeEndScanTimer();
       stations = updated || [];
       const scanStatus = await GetScanStatus().catch(() => null);
       if (disposed || !listRevisions.isCurrent(revision)) return;
       const found = scanStatus?.found ?? stations.filter((station) => station.seenInLatestScan).length;
-      statusMessage = formatScanResult({ found, warnings: scanStatus?.warnings }, stations.length, true);
+      statusMessage = formatTerminalScanResult({
+        state: 'completed', found, known: stations.length, warnings: scanStatus?.warnings, external: true
+      });
     });
     cancelExternalScanFailureListener = EventsOn('external-scan-failed', async (message: string) => {
       if (disposed) return;
@@ -280,13 +284,23 @@
       const revision = listRevisions.next();
       prepareForScan();
       externalScanning = false;
+      externalScanRecoveryPending = true;
       if (globalOperation !== 'scanning') stoppingScan = false;
       maybeEndScanTimer();
       const capturedStationRevisions = new Map(stationRevisions);
       const updated = await GetCurrentStationInfo().catch(() => null);
       if (!canCommitOperation(operationEpoch) || !listRevisions.isCurrent(revision)) return;
-      if (updated) applyStationList(updated, revision, capturedStationRevisions);
-      statusMessage = `External scan failed: ${message}`;
+      if (updated) {
+        if (applyStationList(updated, revision, capturedStationRevisions)) {
+          externalScanRecoveryPending = false;
+        }
+      }
+      const scanStatus = await GetScanStatus().catch(() => null);
+      if (disposed || !listRevisions.isCurrent(revision)) return;
+      statusMessage = formatTerminalScanResult({
+        state: 'failed', error: message, known: stations.length,
+        warnings: scanStatus?.warnings, external: true
+      });
       pushToast(`External scan failed: ${message}`);
     });
     cancelExternalScanCancelledListener = EventsOn('external-scan-cancelled', async () => {
@@ -300,7 +314,10 @@
       const capturedStationRevisions = new Map(stationRevisions);
       const updated = await GetCurrentStationInfo().catch(() => null);
       if (!canCommitOperation(operationEpoch) || !listRevisions.isCurrent(revision)) return;
-      if (updated) applyStationList(updated, revision, capturedStationRevisions);
+      if (updated) {
+        applyStationList(updated, revision, capturedStationRevisions);
+      }
+      externalScanRecoveryPending = false;
       statusMessage = 'Scan stopped.';
     });
     statusCheckInterval = setInterval(periodicStatusCheck, 15000);
@@ -354,14 +371,22 @@
       externalScanning = scanning && !isLoading;
       if (!scanning) {
         stoppingScan = false;
-        if (wasExternalScanning) {
-          if (!applyStationList(await GetCurrentStationInfo(), revision, capturedStationRevisions)) return;
+        if (wasExternalScanning || externalScanRecoveryPending) {
+          if (!applyStationList(await GetCurrentStationInfo(), revision, capturedStationRevisions)) {
+            externalScanRecoveryPending = true;
+            return;
+          }
           const scanStatus = await GetScanStatus().catch(() => null);
           if (disposed || !listRevisions.isCurrent(revision)) return;
+          externalScanRecoveryPending = false;
           const found = scanStatus?.found ?? stations.filter((station) => station.seenInLatestScan).length;
-          statusMessage = scanStatus?.state === 'cancelled'
-            ? 'Scan stopped.'
-            : formatScanResult({ found, warnings: scanStatus?.warnings }, stations.length, true);
+          statusMessage = formatTerminalScanResult({
+            state: scanStatus?.state ?? 'completed',
+            found, known: stations.length,
+            error: scanStatus?.error,
+            warnings: scanStatus?.warnings,
+            external: true
+          });
         } else if (!applyStationList(await CheckAllStationStatuses(), revision, capturedStationRevisions)) return;
         maybeEndScanTimer();
       } else {
@@ -391,9 +416,12 @@
       const scanStatus = await GetScanStatus().catch(() => null);
       if (!canCommitOperation(operationEpoch) || !listRevisions.isCurrent(revision)) return;
       const found = scanStatus?.found ?? stations.filter((station) => station.seenInLatestScan).length;
-      statusMessage = scanStatus?.state === 'cancelled'
-        ? 'Scan stopped.'
-        : formatScanResult({ found, warnings: scanStatus?.warnings }, stations.length);
+      statusMessage = formatTerminalScanResult({
+        state: scanStatus?.state ?? 'completed',
+        found, known: stations.length,
+        error: scanStatus?.error,
+        warnings: scanStatus?.warnings
+      });
     } catch (error) {
       if (!canCommitOperation(operationEpoch) || !listRevisions.isCurrent(revision)) return;
       const updated = await GetCurrentStationInfo().catch(() => null);
@@ -423,8 +451,6 @@
     try {
       await StopScan();
       stopRequestPending = false;
-      // A terminal event may have completed the UI transition while the
-      // backend completion barrier was resolving.
       if (!stoppingScan) return;
       externalScanning = false;
       if (globalOperation !== 'scanning') stoppingScan = false;

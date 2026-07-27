@@ -14,6 +14,41 @@ export function formatScanResult(result: ScanResult, known: number, external = f
   return warnings ? `${message} ${warnings}` : message;
 }
 
+export interface TerminalScanResult {
+  state: string;
+  found?: number;
+  known?: number;
+  error?: string;
+  warnings?: string[];
+  external?: boolean;
+}
+
+export function formatTerminalScanResult(result: TerminalScanResult): string {
+  const prefix = result.external ? 'External scan' : 'Scan';
+  const warnings = result.warnings?.filter(Boolean).join(' ') ?? '';
+
+  switch (result.state) {
+    case 'cancelled':
+      return warnings ? `${prefix} stopped. ${warnings}` : `${prefix} stopped.`;
+    case 'failed': {
+      const err = result.error ? `: ${result.error}` : '';
+      const base = `${prefix} failed${err}`;
+      return warnings ? `${base} ${warnings}` : base;
+    }
+    default: {
+      const found = result.found ?? 0;
+      const known = result.known ?? 0;
+      const summary = found
+        ? `found ${found}; ${known} known station(s).`
+        : 'no stations found in this scan.';
+      const message = result.external
+        ? `${prefix} completed: ${summary}`
+        : `${summary[0].toUpperCase()}${summary.slice(1)}`;
+      return warnings ? `${message} ${warnings}` : message;
+    }
+  }
+}
+
 export interface BulkResultSummary {
   confirmed: number;
   unconfirmed: number;

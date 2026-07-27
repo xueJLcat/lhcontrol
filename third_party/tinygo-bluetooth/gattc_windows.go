@@ -464,7 +464,7 @@ func (c DeviceCharacteristic) write(p []byte, mode genericattributeprofile.GattW
 
 	asyncOp, resultWrite, err := writeValueWithResultAndOptionAsync(c.characteristic, value, mode)
 	if err != nil {
-		return 0, err
+		return 0, classifyWriteFailure(mode, false, false, err)
 	}
 	defer asyncOp.Release()
 
@@ -535,8 +535,33 @@ func (e *WritePossiblySentError) MayHaveBeenSent() bool {
 	return true
 }
 
+// WriteNeverSubmittedError indicates the write failed before WinRT created
+// the asynchronous operation. The command definitely did not reach the device
+// and can be safely retried.
+type WriteNeverSubmittedError struct {
+	Err error
+}
+
+func (e *WriteNeverSubmittedError) Error() string {
+	return fmt.Sprintf("bluetooth: write was not submitted: %v", e.Err)
+}
+
+func (e *WriteNeverSubmittedError) Unwrap() error {
+	return e.Err
+}
+
+func (e *WriteNeverSubmittedError) PossiblySent() bool {
+	return false
+}
+
 func classifyWriteFailure(mode genericattributeprofile.GattWriteOption, operationCreated, explicitProtocolRejection bool, err error) error {
-	if err == nil || !operationCreated || explicitProtocolRejection {
+	if err == nil {
+		return nil
+	}
+	if !operationCreated {
+		return &WriteNeverSubmittedError{Err: err}
+	}
+	if explicitProtocolRejection {
 		return err
 	}
 	var protocolErr AttributeProtocolError
