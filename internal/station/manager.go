@@ -125,13 +125,13 @@ type bluetoothOperations struct {
 }
 
 type scanLifecycle struct {
-	mu         sync.Mutex
-	ctx        context.Context
-	cancel     context.CancelFunc
-	done       chan struct{}
-	result     error
-	state      string
-	inCallback bool
+	mu          sync.Mutex
+	ctx         context.Context
+	cancel      context.CancelFunc
+	done        chan struct{}
+	startedDone chan struct{}
+	result      error
+	state       string
 }
 
 type Manager struct {
@@ -160,6 +160,7 @@ type Manager struct {
 	nextInitializeAt       time.Time
 	initializeBluetooth    func() error
 	asyncScanWg            sync.WaitGroup
+	scanCallbackWg         sync.WaitGroup
 	statusRetryMutex       sync.Mutex
 	statusRetries          map[string]statusRetry
 	statusRecoveryRunning  atomic.Bool
@@ -810,7 +811,13 @@ func (m *Manager) ScanAndFetchStations() ([]StationInfo, error) {
 	}
 	ctx := m.currentScanContext()
 	stations, found, err := m.scanAndFetchStationsSafely(ctx)
-	m.finishScan(stations, found, err, ScanCallbacks{})
+	m.scanLifecycleMutex.Lock()
+	lifecycle := m.scanLifecycle
+	m.scanLifecycleMutex.Unlock()
+	if lifecycle != nil {
+		close(lifecycle.startedDone)
+	}
+	m.finishScan(stations, found, err, ScanCallbacks{})()
 	return stations, err
 }
 
@@ -844,9 +851,10 @@ func (m *Manager) beginScan(callbacks ScanCallbacks) error {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	lifecycle := &scanLifecycle{
-		ctx:    ctx,
-		cancel: cancel,
-		done:   make(chan struct{}),
+		ctx:         ctx,
+		cancel:      cancel,
+		done:        make(chan struct{}),
+		startedDone: make(chan struct{}),
 	}
 	m.scanLifecycleMutex.Lock()
 	m.scanLifecycle = lifecycle
@@ -855,24 +863,10 @@ func (m *Manager) beginScan(callbacks ScanCallbacks) error {
 	m.lifecycleMutex.Unlock()
 	m.scanTransitionMutex.Unlock()
 	m.markScanStarted()
-	if callbacks.Started != nil {
-		lifecycle.mu.Lock()
-		lifecycle.inCallback = true
-		lifecycle.mu.Unlock()
-		if callbackErr := runSafely("scan started callback", func() error {
-			callbacks.Started()
-			return nil
-		}); callbackErr != nil {
-			log.Printf("Scan started callback failed: %v", callbackErr)
-		}
-		lifecycle.mu.Lock()
-		lifecycle.inCallback = false
-		lifecycle.mu.Unlock()
-	}
 	return nil
 }
 
-func (m *Manager) finishScan(stations []StationInfo, found int, err error, callbacks ScanCallbacks) {
+func (m *Manager) finishScan(stations []StationInfo, found int, err error, callbacks ScanCallbacks) func() {
 	m.scanTransitionMutex.Lock()
 	m.isScanning.Store(false)
 	m.endOperation()
@@ -882,13 +876,6 @@ func (m *Manager) finishScan(stations []StationInfo, found int, err error, callb
 	lifecycle := m.scanLifecycle
 	m.scanLifecycleMutex.Unlock()
 	if lifecycle != nil {
-		defer func() {
-			m.scanLifecycleMutex.Lock()
-			if m.scanLifecycle == lifecycle {
-				m.scanLifecycle = nil
-			}
-			m.scanLifecycleMutex.Unlock()
-		}()
 		lifecycle.mu.Lock()
 		if errors.Is(err, bluetooth.ErrScanCancelled) || errors.Is(err, context.Canceled) {
 			lifecycle.state = "cancelled"
@@ -906,28 +893,38 @@ func (m *Manager) finishScan(stations []StationInfo, found int, err error, callb
 	m.scanTransitionMutex.Unlock()
 
 	if lifecycle == nil {
-		return
+		return func() {}
 	}
-	if errors.Is(err, bluetooth.ErrScanCancelled) || errors.Is(err, context.Canceled) {
-		if callbacks.Cancelled != nil {
-			if callbackErr := runSafely("scan cancelled callback", func() error {
-				callbacks.Cancelled()
-				return nil
-			}); callbackErr != nil {
-				log.Printf("Scan cancelled callback failed: %v", callbackErr)
+	return func() {
+		// StartScan begins scan processing before delivering Started. Keep terminal
+		// notifications behind that callback without making processing wait for it.
+		<-lifecycle.startedDone
+		defer func() {
+			m.scanLifecycleMutex.Lock()
+			if m.scanLifecycle == lifecycle {
+				m.scanLifecycle = nil
 			}
-		}
-	} else if err != nil {
-		if callbacks.Failed != nil {
-			if callbackErr := runSafely("scan failure callback", func() error {
-				callbacks.Failed(err)
-				return nil
-			}); callbackErr != nil {
-				log.Printf("Scan failure callback failed: %v", callbackErr)
+			m.scanLifecycleMutex.Unlock()
+		}()
+		if errors.Is(err, bluetooth.ErrScanCancelled) || errors.Is(err, context.Canceled) {
+			if callbacks.Cancelled != nil {
+				if callbackErr := runSafely("scan cancelled callback", func() error {
+					callbacks.Cancelled()
+					return nil
+				}); callbackErr != nil {
+					log.Printf("Scan cancelled callback failed: %v", callbackErr)
+				}
 			}
-		}
-	} else {
-		if callbacks.Completed != nil {
+		} else if err != nil {
+			if callbacks.Failed != nil {
+				if callbackErr := runSafely("scan failure callback", func() error {
+					callbacks.Failed(err)
+					return nil
+				}); callbackErr != nil {
+					log.Printf("Scan failure callback failed: %v", callbackErr)
+				}
+			}
+		} else if callbacks.Completed != nil {
 			if callbackErr := runSafely("scan completion callback", func() error {
 				callbacks.Completed(stations)
 				return nil
@@ -1132,13 +1129,6 @@ func (m *Manager) StopScan() error {
 		return nil
 	}
 	lifecycle.cancel()
-	lifecycle.mu.Lock()
-	if lifecycle.inCallback {
-		result := lifecycle.result
-		lifecycle.mu.Unlock()
-		return result
-	}
-	lifecycle.mu.Unlock()
 	<-lifecycle.done
 	lifecycle.mu.Lock()
 	result := lifecycle.result
@@ -1191,20 +1181,36 @@ func (m *Manager) GetScanStatus() ScanStatus {
 	return status
 }
 
-// StartScan reserves the Bluetooth adapter, emits Started synchronously, and
-// completes the scan asynchronously. Completion callbacks run only after the
-// scan state and operation lock have been released.
+// StartScan reserves the Bluetooth adapter, starts scan processing, then emits
+// Started synchronously. Terminal callbacks run after processing has finished.
 func (m *Manager) StartScan(callbacks ScanCallbacks) error {
 	if err := m.beginScan(callbacks); err != nil {
 		return err
 	}
 	m.asyncScanWg.Add(1)
+	m.scanCallbackWg.Add(1)
 	go func() {
-		defer m.asyncScanWg.Done()
 		ctx := m.currentScanContext()
 		stations, found, err := m.scanAndFetchStationsSafely(ctx)
-		m.finishScan(stations, found, err, callbacks)
+		deliverTerminal := m.finishScan(stations, found, err, callbacks)
+		m.asyncScanWg.Done()
+		defer m.scanCallbackWg.Done()
+		deliverTerminal()
 	}()
+	m.scanLifecycleMutex.Lock()
+	lifecycle := m.scanLifecycle
+	m.scanLifecycleMutex.Unlock()
+	if callbacks.Started != nil {
+		if callbackErr := runSafely("scan started callback", func() error {
+			callbacks.Started()
+			return nil
+		}); callbackErr != nil {
+			log.Printf("Scan started callback failed: %v", callbackErr)
+		}
+	}
+	if lifecycle != nil {
+		close(lifecycle.startedDone)
+	}
 	return nil
 }
 

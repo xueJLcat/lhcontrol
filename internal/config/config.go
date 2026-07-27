@@ -60,6 +60,11 @@ func (c *Config) Load() error {
 	configFile, err := os.ReadFile(configFilePath)
 	if err != nil {
 		if os.IsNotExist(err) {
+			c.mutex.Lock()
+			c.RenamedStations = make(map[string]string)
+			c.RenamedStationsByAddress = make(map[string]string)
+			c.persistenceBlockedErr = nil
+			c.mutex.Unlock()
 			return nil // No config file yet, which is fine
 		}
 		return fmt.Errorf("error reading config file '%s': %w", configFilePath, err)

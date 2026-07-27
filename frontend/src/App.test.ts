@@ -202,6 +202,21 @@ describe('App asynchronous operations', () => {
     expect(screen.getByText('External scan in progress...')).toBeInTheDocument();
   });
 
+  it('ignores a terminal event for an unknown external scan until the backend scan ends', async () => {
+    api.IsScanning.mockResolvedValueOnce(true).mockResolvedValue(false);
+    render(App);
+    await screen.findByRole('button', { name: 'Stop' });
+
+    runtime.handlers.get('external-scan-completed')?.(externalScanEvent(9, {
+      stations: [createStation({ name: 'LHB-STALE-EXTERNAL' })]
+    }));
+    await Promise.resolve();
+
+    expect(screen.getByText('External scan in progress...')).toBeInTheDocument();
+    expect(screen.queryByText('LHB-STALE-EXTERNAL')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Stop' })).toBeEnabled();
+  });
+
   it('ignores a delayed external completion after a newer local scan starts', async () => {
     let resolveLocalScan!: (stations: StationInfo[]) => void;
     api.ScanAndFetchStations.mockReturnValueOnce(new Promise((resolve) => {
@@ -218,6 +233,7 @@ describe('App asynchronous operations', () => {
   });
 
   it('preserves a station update started during an external failure refresh', async () => {
+    api.IsScanning.mockResolvedValueOnce(false).mockResolvedValue(false);
     render(App);
     await screen.findByText('LHB-TEST');
     let resolveRefresh!: (stations: StationInfo[]) => void;
@@ -234,6 +250,8 @@ describe('App asynchronous operations', () => {
 
     runtime.handlers.get('external-scan-started')?.(externalScanEvent(1));
     runtime.handlers.get('external-scan-failed')?.(externalScanEvent(1, { error: 'fixture failure' }));
+    await waitFor(() => expect(api.GetCurrentStationInfo).toHaveBeenCalledOnce());
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Turn LHB-TEST on' })).toBeEnabled());
     await fireEvent.click(screen.getByRole('button', { name: 'Turn LHB-TEST on' }));
     expect(await screen.findByText('On confirmed')).toBeInTheDocument();
     resolveRefresh([createStation({ powerState: 0, powerStateName: 'sleep' })]);
@@ -339,7 +357,7 @@ describe('App asynchronous operations', () => {
 
   it('stops an active scan and handles its cancellation event', async () => {
     let resolveStop!: () => void;
-    api.IsScanning.mockResolvedValue(true);
+    api.IsScanning.mockResolvedValueOnce(true).mockResolvedValue(false);
     api.StopScan.mockReturnValue(new Promise<void>((resolve) => {
       resolveStop = resolve;
     }));
@@ -356,7 +374,7 @@ describe('App asynchronous operations', () => {
 
   it('does not let the stop promise overwrite a cancellation event', async () => {
     let resolveStop!: () => void;
-    api.IsScanning.mockResolvedValue(true);
+    api.IsScanning.mockResolvedValueOnce(true).mockResolvedValue(false);
     api.StopScan.mockReturnValue(new Promise<void>((resolve) => {
       resolveStop = resolve;
     }));
@@ -375,7 +393,7 @@ describe('App asynchronous operations', () => {
 
   it('does not let a late stop rejection overwrite a cancellation event', async () => {
     let rejectStop!: (error: Error) => void;
-    api.IsScanning.mockResolvedValue(true);
+    api.IsScanning.mockResolvedValueOnce(true).mockResolvedValue(false);
     api.StopScan.mockReturnValue(new Promise<void>((_, reject) => {
       rejectStop = reject;
     }));

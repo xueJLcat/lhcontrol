@@ -82,10 +82,13 @@
     error?: string;
   }
 
-  function matchesExternalScan(event: ExternalScanEvent): boolean {
+  async function matchesExternalScan(event: ExternalScanEvent): Promise<boolean> {
     // The app may have attached after the start event. In that case adopt the
-    // first terminal ID only while polling still reports an external scan.
-    return externalScanning && (externalScanID === null || event.id === externalScanID);
+    // first terminal ID only after confirming the backend scan has ended.
+    if (!externalScanning) return false;
+    if (externalScanID !== null) return event.id === externalScanID;
+    const scanning = await IsScanning().catch(() => true);
+    return externalScanning && externalScanID === null && !scanning;
   }
 
   $: sortedStations = [...stations].sort((a, b) => {
@@ -281,7 +284,7 @@
     });
     cancelExternalScanListener = EventsOn('external-scan-completed', async (value: unknown) => {
       const event = value as ExternalScanEvent;
-      if (disposed || !matchesExternalScan(event)) return;
+      if (disposed || !(await matchesExternalScan(event))) return;
       beginScanEpoch();
       const revision = listRevisions.next();
       prepareForScan();
@@ -301,7 +304,7 @@
     });
     cancelExternalScanFailureListener = EventsOn('external-scan-failed', async (value: unknown) => {
       const event = value as ExternalScanEvent;
-      if (disposed || !matchesExternalScan(event)) return;
+      if (disposed || !(await matchesExternalScan(event))) return;
       const message = event.error || 'unknown error';
       const operationEpoch = beginScanEpoch();
       const revision = listRevisions.next();
@@ -327,7 +330,7 @@
     });
     cancelExternalScanCancelledListener = EventsOn('external-scan-cancelled', async (value: unknown) => {
       const event = value as ExternalScanEvent;
-      if (disposed || !matchesExternalScan(event)) return;
+      if (disposed || !(await matchesExternalScan(event))) return;
       const operationEpoch = beginScanEpoch();
       const revision = listRevisions.next();
       prepareForScan();

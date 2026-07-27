@@ -171,3 +171,33 @@ func TestInvalidConfigBackupFailureBlocksSaveAndRollsBackMutation(t *testing.T) 
 		t.Fatalf("invalid config content changed to %q", content)
 	}
 }
+
+func TestLoadClearsAliasesWhenConfigFileWasRemoved(t *testing.T) {
+	configRoot := t.TempDir()
+	t.Setenv("AppData", configRoot)
+	configDirectory := filepath.Join(configRoot, "lhcontrol")
+	if err := os.MkdirAll(configDirectory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(configDirectory, "config.json")
+	if err := os.WriteFile(configPath, []byte(`{
+  "renamedStations": {"LHB-OLD": "Legacy"},
+  "renamedStationsByAddress": {"11:22:33:44:55:66": "Address"}
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := NewConfig()
+	if err := cfg.Load(); err != nil {
+		t.Fatalf("initial Load() error = %v", err)
+	}
+	if err := os.Remove(configPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.Load(); err != nil {
+		t.Fatalf("Load() after removal error = %v", err)
+	}
+	if _, ok := cfg.GetStationDisplayName("11:22:33:44:55:66", "LHB-OLD"); ok {
+		t.Fatal("Load() retained aliases after the config file was removed")
+	}
+}

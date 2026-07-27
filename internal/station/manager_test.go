@@ -387,11 +387,11 @@ func TestAsyncScanEventsCannotOvertakePreviousCompletion(t *testing.T) {
 		t.Fatalf("second StartScan() error = %v, want ErrOperationInProgress", err)
 	}
 	close(firstCompletionRelease)
-	manager.asyncScanWg.Wait()
+	manager.scanCallbackWg.Wait()
 	if err := manager.StartScan(callbacks); err != nil {
 		t.Fatalf("StartScan() after completion callback error = %v", err)
 	}
-	manager.asyncScanWg.Wait()
+	manager.scanCallbackWg.Wait()
 
 	eventsMutex.Lock()
 	defer eventsMutex.Unlock()
@@ -441,7 +441,7 @@ func TestStopScanFinishesBeforeCancelledCallbackAndIsIdempotent(t *testing.T) {
 		t.Fatal("StopScan did not return after scan processing finished")
 	}
 	close(callbackRelease)
-	manager.asyncScanWg.Wait()
+	manager.scanCallbackWg.Wait()
 	if err := manager.StopScan(); err != nil {
 		t.Fatalf("second StopScan() error = %v", err)
 	}
@@ -509,9 +509,106 @@ func TestStopScanFromScanCallbackDoesNotDeadlock(t *testing.T) {
 			case <-time.After(time.Second):
 				t.Fatal("StopScan() from lifecycle callback did not return")
 			}
-			manager.asyncScanWg.Wait()
+			manager.scanCallbackWg.Wait()
 		})
 	}
+}
+
+func TestShutdownFromScanCallbackDoesNotDeadlock(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		scanErr   error
+		callbacks func(*Manager, chan<- struct{}) ScanCallbacks
+	}{
+		{
+			name: "started",
+			callbacks: func(manager *Manager, shutdownDone chan<- struct{}) ScanCallbacks {
+				return ScanCallbacks{Started: func() { manager.Shutdown(); close(shutdownDone) }}
+			},
+		},
+		{
+			name: "completed",
+			callbacks: func(manager *Manager, shutdownDone chan<- struct{}) ScanCallbacks {
+				return ScanCallbacks{Completed: func([]StationInfo) { manager.Shutdown(); close(shutdownDone) }}
+			},
+		},
+		{
+			name:    "failed",
+			scanErr: errors.New("scan failed"),
+			callbacks: func(manager *Manager, shutdownDone chan<- struct{}) ScanCallbacks {
+				return ScanCallbacks{Failed: func(error) { manager.Shutdown(); close(shutdownDone) }}
+			},
+		},
+		{
+			name: "cancelled",
+			callbacks: func(manager *Manager, shutdownDone chan<- struct{}) ScanCallbacks {
+				return ScanCallbacks{Cancelled: func() { manager.Shutdown(); close(shutdownDone) }}
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			manager := NewManager(config.NewConfig())
+			shutdownDone := make(chan struct{})
+			if test.name == "cancelled" {
+				manager.bluetoothOps.scanForDurationContext = func(ctx context.Context, _ time.Duration) ([]internalbluetooth.DiscoveredStation, error) {
+					<-ctx.Done()
+					return nil, internalbluetooth.ErrScanCancelled
+				}
+			} else {
+				manager.bluetoothOps.scanForDurationContext = func(context.Context, time.Duration) ([]internalbluetooth.DiscoveredStation, error) {
+					return nil, test.scanErr
+				}
+			}
+
+			if err := manager.StartScan(test.callbacks(manager, shutdownDone)); err != nil {
+				t.Fatalf("StartScan() error = %v", err)
+			}
+			if test.name == "cancelled" {
+				go func() { _ = manager.StopScan() }()
+			}
+			select {
+			case <-shutdownDone:
+			case <-time.After(time.Second):
+				t.Fatal("Shutdown() from lifecycle callback did not return")
+			}
+		})
+	}
+}
+
+func TestExternalStopScanWaitsForTerminalScanState(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	started := make(chan struct{})
+	releaseStarted := make(chan struct{})
+	manager.bluetoothOps.scanForDurationContext = func(ctx context.Context, _ time.Duration) ([]internalbluetooth.DiscoveredStation, error) {
+		<-ctx.Done()
+		return nil, internalbluetooth.ErrScanCancelled
+	}
+	startReturned := make(chan error, 1)
+	go func() {
+		startReturned <- manager.StartScan(ScanCallbacks{Started: func() {
+			close(started)
+			<-releaseStarted
+		}})
+	}()
+	<-started
+	stopDone := make(chan error, 1)
+	go func() { stopDone <- manager.StopScan() }()
+	select {
+	case err := <-stopDone:
+		if err != nil {
+			t.Fatalf("StopScan() error = %v", err)
+		}
+		if status := manager.GetScanStatus(); status.State != "cancelled" {
+			t.Fatalf("StopScan returned before terminal scan status: %+v", status)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("StopScan did not return after terminal scan state")
+	}
+	close(releaseStarted)
+	if err := <-startReturned; err != nil {
+		t.Fatalf("StartScan() error = %v", err)
+	}
+	manager.scanCallbackWg.Wait()
 }
 
 func TestScanCancellationSkipsPostScanInitialization(t *testing.T) {

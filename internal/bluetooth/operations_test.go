@@ -533,6 +533,38 @@ func TestStaleAdapterDisconnectDoesNotInvalidateReplacementDevice(t *testing.T) 
 	}
 }
 
+func TestDisconnectAllStationsRetriesAdapterDisconnectedCleanup(t *testing.T) {
+	mac, err := tinybluetooth.ParseMAC("11:22:33:44:55:67")
+	if err != nil {
+		t.Fatalf("ParseMAC() error = %v", err)
+	}
+	address := tinybluetooth.Address{MACAddress: tinybluetooth.MACAddress{MAC: mac}}
+	device := tinybluetooth.Device{Address: address}
+	station := connectedFakeStation(&fakeCharacteristic{}, nil, nil, Capabilities{})
+	station.Address = address
+	station.device = device
+	connectedStationsMutex.Lock()
+	previousConnected := connectedStations
+	previousPending := pendingCleanupStations
+	connectedStations = []*BaseStation{station}
+	pendingCleanupStations = nil
+	connectedStationsMutex.Unlock()
+	t.Cleanup(func() {
+		connectedStationsMutex.Lock()
+		connectedStations = previousConnected
+		pendingCleanupStations = previousPending
+		connectedStationsMutex.Unlock()
+	})
+
+	invalidateDisconnectedDevice(station, device)
+	if err := DisconnectAllStations(); err != nil {
+		t.Fatalf("DisconnectAllStations() error = %v", err)
+	}
+	if station.pendingCleanup != nil {
+		t.Fatal("pending cleanup was not retried during shutdown")
+	}
+}
+
 func TestWriteCharacteristicFallsBackOnlyForUnsupportedWriteMode(t *testing.T) {
 	characteristic := &fakeCharacteristic{
 		properties: uint32(tinybluetooth.CharacteristicWriteWithoutResponsePermission |

@@ -41,6 +41,7 @@ var (
 
 	// Track connected stations for cleanup
 	connectedStations      []*BaseStation
+	pendingCleanupStations []*BaseStation
 	connectedStationsMutex sync.Mutex
 	uuidInitOnce           sync.Once
 	uuidInitErr            error
@@ -466,6 +467,16 @@ func invalidateDisconnectedDevice(station *BaseStation, disconnected bluetooth.D
 		}
 	}
 	connectedStations = remaining
+	found := false
+	for _, tracked := range pendingCleanupStations {
+		if tracked == station {
+			found = true
+			break
+		}
+	}
+	if !found {
+		pendingCleanupStations = append(pendingCleanupStations, station)
+	}
 	connectedStationsMutex.Unlock()
 }
 
@@ -1813,7 +1824,19 @@ func DisconnectStation(station *BaseStation) error {
 	}
 	station.mutex.Lock() // Lock before calling internal disconnect
 	defer station.mutex.Unlock()
-	return disconnectInternal(station)
+	err := disconnectInternal(station)
+	if err == nil {
+		connectedStationsMutex.Lock()
+		remaining := pendingCleanupStations[:0]
+		for _, tracked := range pendingCleanupStations {
+			if tracked != station {
+				remaining = append(remaining, tracked)
+			}
+		}
+		pendingCleanupStations = remaining
+		connectedStationsMutex.Unlock()
+	}
+	return err
 }
 
 // ReleaseStationForScan closes GATT handles so the Lighthouse can advertise
@@ -1831,9 +1854,21 @@ func ReleaseStationForScan(station *BaseStation) error {
 // DisconnectAllStations disconnects all tracked stations.
 func DisconnectAllStations() error {
 	connectedStationsMutex.Lock()
-	log.Printf("Bluetooth: Disconnecting all %d tracked stations...", len(connectedStations))
-	stationsToDisconnect := make([]*BaseStation, len(connectedStations))
-	copy(stationsToDisconnect, connectedStations)
+	stationsToDisconnect := make([]*BaseStation, 0, len(connectedStations)+len(pendingCleanupStations))
+	stationsToDisconnect = append(stationsToDisconnect, connectedStations...)
+	for _, pending := range pendingCleanupStations {
+		found := false
+		for _, tracked := range stationsToDisconnect {
+			if tracked == pending {
+				found = true
+				break
+			}
+		}
+		if !found {
+			stationsToDisconnect = append(stationsToDisconnect, pending)
+		}
+	}
+	log.Printf("Bluetooth: Disconnecting all %d tracked stations...", len(stationsToDisconnect))
 	connectedStationsMutex.Unlock()
 
 	var disconnectErrors []error
