@@ -13,7 +13,7 @@
   "info": {
     "companyName": "FlameInTheDark",
     "productName": "Lighthouse Control",
-    "productVersion": "1.4.0",
+    "productVersion": "1.4.1",
     "copyright": "Copyright (c) 2024-2026 FlameInTheDark",
     "comments": "Control Valve Lighthouse base stations v2.0 power state"
   }
