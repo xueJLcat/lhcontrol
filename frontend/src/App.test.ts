@@ -704,6 +704,56 @@ describe('App asynchronous operations', () => {
     await waitFor(() => expect(screen.getAllByText('On confirmed')).toHaveLength(2));
   });
 
+  it('does not let an earlier station operation overwrite a later footer status', async () => {
+    const stationA = createStation({ name: 'LHB-A', address: 'AA' });
+    const stationB = createStation({ name: 'LHB-B', address: 'BB' });
+    api.ScanAndFetchStations.mockResolvedValue([stationA, stationB]);
+    const resolvers = new Map<string, (value: unknown) => void>();
+    api.SetStationPower.mockImplementation((address: string) => new Promise((resolve) => {
+      resolvers.set(address, resolve);
+    }));
+
+    render(App);
+    await screen.findByText('LHB-B');
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Scan' })).not.toBeDisabled());
+    await fireEvent.click(screen.getByRole('button', { name: 'Turn LHB-A on' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Turn LHB-B on' }));
+    await waitFor(() => expect(api.SetStationPower).toHaveBeenCalledTimes(2));
+
+    resolvers.get('BB')?.({ station: { ...stationB, powerState: 1, powerStateName: 'on' }, confirmed: true });
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('LHB-B is On.'));
+    resolvers.get('AA')?.({ station: { ...stationA, powerState: 1, powerStateName: 'on' }, confirmed: true });
+
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('LHB-B is On.'));
+  });
+
+  it('does not let external recovery polling overwrite a newer station footer', async () => {
+    vi.useFakeTimers();
+    const station = createStation();
+    let resolveRecoveryList!: (stations: StationInfo[]) => void;
+    api.IsScanning.mockResolvedValue(false);
+    api.GetCurrentStationInfo.mockReturnValueOnce(new Promise((resolve) => {
+      resolveRecoveryList = resolve;
+    }));
+    api.SetStationPower.mockResolvedValue({
+      station: { ...station, powerState: 1, powerStateName: 'on' }, confirmed: true
+    });
+    api.GetScanStatus.mockResolvedValue({ state: 'failed', found: 0, error: 'old external failure', warnings: [] });
+
+    render(App);
+    await screen.findByText('LHB-TEST');
+    runtime.handlers.get('external-scan-started')?.(externalScanEvent(1));
+    runtime.handlers.get('external-scan-failed')?.(externalScanEvent(1, { error: 'old external failure' }));
+    await waitFor(() => expect(api.GetCurrentStationInfo).toHaveBeenCalledOnce());
+    await fireEvent.click(screen.getByRole('button', { name: 'Turn LHB-TEST on' }));
+    expect(await screen.findByRole('status')).toHaveTextContent('LHB-TEST is On.');
+
+    resolveRecoveryList([station]);
+    await vi.advanceTimersByTimeAsync(15_000);
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('LHB-TEST is On.'));
+    expect(screen.queryByText(/External scan failed/)).not.toBeInTheDocument();
+  });
+
   it('keeps a failed station result when another concurrent operation advances the list revision', async () => {
     const stationA = createStation({ name: 'LHB-A', address: 'AA' });
     const stationB = createStation({ name: 'LHB-B', address: 'BB' });

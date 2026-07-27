@@ -330,6 +330,9 @@ func TestShutdownWaitsForInitializationAndPreventsLateScan(t *testing.T) {
 	if scanCalls.Load() != 0 {
 		t.Fatalf("scan started %d time(s) after shutdown began", scanCalls.Load())
 	}
+	if status := manager.GetScanStatus(); status.State != "cancelled" || status.Error != "" {
+		t.Fatalf("shutdown scan status = %+v, want cancelled without error", status)
+	}
 }
 
 func TestStopScanCancelsPendingInitializationBeforeScanStarts(t *testing.T) {
@@ -366,6 +369,47 @@ func TestStopScanCancelsPendingInitializationBeforeScanStarts(t *testing.T) {
 	}
 	if status := manager.GetScanStatus(); status.State != "cancelled" {
 		t.Fatalf("scan status = %+v, want cancelled", status)
+	}
+}
+
+func TestStopScanWaitsForScanLifecyclePublication(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	publishingStarted := make(chan struct{})
+	releasePublishing := make(chan struct{})
+	manager.scanLifecycleStartHook = func() {
+		close(publishingStarted)
+		<-releasePublishing
+	}
+	var scanCalls atomic.Int32
+	manager.bluetoothOps.scanForDurationContext = func(context.Context, time.Duration) ([]internalbluetooth.DiscoveredStation, error) {
+		scanCalls.Add(1)
+		return nil, nil
+	}
+
+	startDone := make(chan error, 1)
+	go func() { startDone <- manager.StartScan(ScanCallbacks{}) }()
+	<-publishingStarted
+	stopDone := make(chan error, 1)
+	go func() { stopDone <- manager.StopScan() }()
+	select {
+	case err := <-stopDone:
+		t.Fatalf("StopScan() returned before lifecycle publication: %v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+	close(releasePublishing)
+	if err := <-startDone; err != nil && !errors.Is(err, internalbluetooth.ErrScanCancelled) {
+		t.Fatalf("StartScan() error = %v, want nil or ErrScanCancelled", err)
+	}
+	select {
+	case err := <-stopDone:
+		if err != nil {
+			t.Fatalf("StopScan() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("StopScan did not finish after lifecycle publication")
+	}
+	if scanCalls.Load() != 0 {
+		t.Fatalf("platform scan started %d time(s) after cancellation", scanCalls.Load())
 	}
 }
 

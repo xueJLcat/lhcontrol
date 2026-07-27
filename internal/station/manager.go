@@ -149,6 +149,7 @@ type Manager struct {
 	recoveryOperationDone  chan struct{}
 	recoveryGeneration     uint64
 	foregroundSlotMissHook func()
+	scanLifecycleStartHook func()
 	scanReadyHook          func()
 	isScanning             atomic.Bool
 	scanStatusMutex        sync.RWMutex
@@ -834,6 +835,9 @@ func (m *Manager) beginScan(callbacks ScanCallbacks) error {
 		m.scanTransitionMutex.Unlock()
 		return err
 	}
+	if m.scanLifecycleStartHook != nil {
+		m.scanLifecycleStartHook()
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	lifecycle := &scanLifecycle{
 		ctx:         ctx,
@@ -848,7 +852,7 @@ func (m *Manager) beginScan(callbacks ScanCallbacks) error {
 	m.markScanStarted()
 	if err := m.ensureReady(); err != nil {
 		if m.shuttingDown.Load() {
-			m.abortScanStart(lifecycle, ErrShuttingDown, false)
+			m.abortScanStart(lifecycle, ErrShuttingDown, true)
 			m.scanTransitionMutex.Unlock()
 			return ErrShuttingDown
 		}
@@ -866,7 +870,7 @@ func (m *Manager) beginScan(callbacks ScanCallbacks) error {
 	m.lifecycleMutex.Lock()
 	if m.shuttingDown.Load() {
 		m.lifecycleMutex.Unlock()
-		m.abortScanStart(lifecycle, ErrShuttingDown, false)
+		m.abortScanStart(lifecycle, ErrShuttingDown, true)
 		m.scanTransitionMutex.Unlock()
 		return ErrShuttingDown
 	}
@@ -1161,13 +1165,16 @@ func (m *Manager) currentScanContext() context.Context {
 // finished. Terminal callbacks are delivered afterwards so callbacks can
 // safely call StopScan themselves. Repeated and no-op calls are safe.
 func (m *Manager) StopScan() error {
+	m.scanTransitionMutex.Lock()
 	m.scanLifecycleMutex.Lock()
 	lifecycle := m.scanLifecycle
 	m.scanLifecycleMutex.Unlock()
 	if lifecycle == nil {
+		m.scanTransitionMutex.Unlock()
 		return nil
 	}
 	lifecycle.cancel()
+	m.scanTransitionMutex.Unlock()
 	<-lifecycle.done
 	lifecycle.mu.Lock()
 	result := lifecycle.result
