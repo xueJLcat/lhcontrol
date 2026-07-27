@@ -19,6 +19,8 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
+const apiBodyLimit = 16 * 1024
+
 func apiStatusForError(err error) int {
 	status := fiber.StatusInternalServerError
 	switch {
@@ -42,6 +44,17 @@ func apiStatusForError(err error) int {
 func sendAPIError(c *fiber.Ctx, err error) error {
 	status := apiStatusForError(err)
 	return c.Status(status).JSON(fiber.Map{"error": err.Error()})
+}
+
+func apiErrorHandler(c *fiber.Ctx, err error) error {
+	status := fiber.StatusInternalServerError
+	message := "internal server error"
+	var fiberErr *fiber.Error
+	if errors.As(err, &fiberErr) {
+		status = fiberErr.Code
+		message = fiberErr.Message
+	}
+	return c.Status(status).JSON(fiber.Map{"error": message})
 }
 
 func sendPowerActionResponse(c *fiber.Ctx, result station.PowerActionResult, err error) error {
@@ -126,6 +139,12 @@ type scanEvent struct {
 }
 
 func registerAPIRoutes(api *fiber.App, manager apiStationManager, events scanEventCallbacks, status func() APIStatus) {
+	api.Use(func(c *fiber.Ctx) error {
+		if len(c.Body()) > apiBodyLimit {
+			return fiber.NewError(fiber.StatusRequestEntityTooLarge, "request body exceeds the allowed limit")
+		}
+		return c.Next()
+	})
 	api.Post("/allon", func(c *fiber.Ctx) error {
 		if err := manager.PowerOnAllStations(); err != nil {
 			return sendAPIError(c, err)
@@ -245,10 +264,10 @@ func NewApp() *App {
 		config:         cfg,
 		stationManager: mgr,
 		api: fiber.New(fiber.Config{
-			BodyLimit:    16 * 1024,
 			ReadTimeout:  5 * time.Second,
 			WriteTimeout: 0,
 			IdleTimeout:  30 * time.Second,
+			ErrorHandler: apiErrorHandler,
 		}),
 		apiStatus:     APIStatus{Address: "127.0.0.1:7575"},
 		listen:        net.Listen,

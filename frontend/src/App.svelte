@@ -117,7 +117,8 @@
   }
 
   async function claimUnknownExternalScanTerminal(event: ExternalScanEvent): Promise<boolean> {
-    if (!externalScanning || externalScanID !== null || !(await matchesUnknownExternalScan(event))) return false;
+    if (event.id <= latestExternalScanID || !externalScanning || externalScanID !== null ||
+      !(await matchesUnknownExternalScan(event))) return false;
     // An adopted scan has no ID until its terminal event. Claim it before any
     // further awaits so concurrent terminal notifications cannot both commit.
     return claimExternalScanTerminal(event);
@@ -567,9 +568,10 @@
           const capturedStationRevisions = new Map(stationRevisions);
           const updated = await GetCurrentStationInfo().catch(() => null);
           if (!canCommitOperation(operationEpoch) || !listRevisions.isCurrent(revision)) return;
-          if (updated) applyStationList(updated, revision, capturedStationRevisions);
+          if (!updated || !applyStationList(updated, revision, capturedStationRevisions)) return;
           const scanStatus = await GetScanStatus().catch(() => null);
           if (!canCommitOperation(operationEpoch) || !listRevisions.isCurrent(revision)) return;
+          if (!scanStatus) return;
           externalScanRecoveryEpoch = null;
           const canWriteTerminalStatus = externalScanRecoveryStatusEpoch === statusEpoch;
           externalScanRecoveryStatusEpoch = null;

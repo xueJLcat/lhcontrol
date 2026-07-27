@@ -152,7 +152,7 @@ func (f *fakeAPIStationManager) SetStationChannel(string, int, bool) (station.Ch
 }
 
 func testAPI(manager apiStationManager) *fiber.App {
-	api := fiber.New(fiber.Config{BodyLimit: 16 * 1024})
+	api := fiber.New(fiber.Config{ErrorHandler: apiErrorHandler})
 	registerAPIRoutes(api, manager, scanEventCallbacks{}, func() APIStatus {
 		return APIStatus{Running: true, Address: "127.0.0.1:7575"}
 	})
@@ -514,13 +514,22 @@ func TestAPIBodyLimit(t *testing.T) {
 	request.Header.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSON)
 	response, err := testAPI(&fakeAPIStationManager{}).Test(request)
 	if err != nil {
-		if strings.Contains(err.Error(), "body size exceeds") {
-			return
-		}
 		t.Fatal(err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode != fiber.StatusRequestEntityTooLarge {
 		t.Fatalf("status = %d, want %d", response.StatusCode, fiber.StatusRequestEntityTooLarge)
+	}
+	if !strings.HasPrefix(response.Header.Get(fiber.HeaderContentType), fiber.MIMEApplicationJSON) {
+		t.Fatalf("Content-Type = %q, want JSON", response.Header.Get(fiber.HeaderContentType))
+	}
+	var responseBody struct {
+		Error string `json:"error"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&responseBody); err != nil {
+		t.Fatalf("decode body-limit response: %v", err)
+	}
+	if responseBody.Error == "" {
+		t.Fatal("body-limit response omitted error message")
 	}
 }
