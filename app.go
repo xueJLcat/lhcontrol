@@ -105,9 +105,11 @@ type App struct {
 }
 
 type APIStatus struct {
-	Running bool   `json:"running"`
-	Address string `json:"address"`
-	Error   string `json:"error"`
+	Running        bool     `json:"running"`
+	Address        string   `json:"address"`
+	Error          string   `json:"error"`
+	Warnings       []string `json:"warnings"`
+	ConfigWritable bool     `json:"configWritable"`
 }
 
 type apiStationManager interface {
@@ -272,9 +274,13 @@ func NewApp() *App {
 		config:         cfg,
 		stationManager: mgr,
 		api:            api,
-		apiStatus:      APIStatus{Address: "127.0.0.1:7575"},
-		listen:         net.Listen,
-		apiRetryDelay:  2 * time.Second,
+		apiStatus: APIStatus{
+			Address:        "127.0.0.1:7575",
+			Warnings:       []string{},
+			ConfigWritable: true,
+		},
+		listen:        net.Listen,
+		apiRetryDelay: 2 * time.Second,
 	}
 	app.serveListener = api.Listener
 	return app
@@ -294,8 +300,10 @@ func (a *App) startup(ctx context.Context) {
 		log.Printf("Error initializing Bluetooth: %v", err)
 	}
 
-	if err := a.config.Load(); err != nil {
-		log.Printf("Error loading config: %v", err)
+	configLoadErr := a.config.Load()
+	a.setConfigLoadStatus(configLoadErr)
+	if configLoadErr != nil {
+		log.Printf("Error loading config: %v", configLoadErr)
 	}
 
 	registerAPIRoutes(a.api, a.stationManager, scanEventCallbacks{
@@ -461,10 +469,23 @@ func (a *App) setAPIStatus(running bool, err error) {
 	a.apiStatusMutex.Unlock()
 }
 
+func (a *App) setConfigLoadStatus(err error) {
+	a.apiStatusMutex.Lock()
+	defer a.apiStatusMutex.Unlock()
+	a.apiStatus.ConfigWritable = a.config.PersistenceError() == nil
+	if err == nil {
+		a.apiStatus.Warnings = []string{}
+		return
+	}
+	a.apiStatus.Warnings = []string{fmt.Sprintf("Configuration could not be loaded: %v", err)}
+}
+
 func (a *App) GetAPIStatus() APIStatus {
 	a.apiStatusMutex.RLock()
 	defer a.apiStatusMutex.RUnlock()
-	return a.apiStatus
+	status := a.apiStatus
+	status.Warnings = append([]string(nil), a.apiStatus.Warnings...)
+	return status
 }
 
 func (a *App) PowerOnStation(address string) error {

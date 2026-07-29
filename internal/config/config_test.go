@@ -114,6 +114,9 @@ func TestInvalidConfigIsPreservedBeforeLaterSave(t *testing.T) {
 	if loadErr == nil || !strings.Contains(loadErr.Error(), "invalid file preserved") {
 		t.Fatalf("Config.Load() error = %v, want preserved invalid-file error", loadErr)
 	}
+	if err := cfg.PersistenceError(); err != nil {
+		t.Fatalf("successfully preserved invalid config blocked persistence: %v", err)
+	}
 	preserved, err := filepath.Glob(configPath + ".invalid-*")
 	if err != nil {
 		t.Fatal(err)
@@ -156,6 +159,9 @@ func TestInvalidConfigBackupFailureBlocksSaveAndRollsBackMutation(t *testing.T) 
 	cfg := NewConfig()
 	if err := cfg.Load(); err == nil || !strings.Contains(err.Error(), "failed to preserve invalid file") {
 		t.Fatalf("Config.Load() error = %v, want backup failure", err)
+	}
+	if err := cfg.PersistenceError(); err == nil || !strings.Contains(err.Error(), "rename denied") {
+		t.Fatalf("PersistenceError() = %v, want backup failure", err)
 	}
 	if err := cfg.SetRenamedStation("LHB-OLD", "After"); err == nil || !strings.Contains(err.Error(), "save blocked") {
 		t.Fatalf("SetRenamedStation() error = %v, want blocked save", err)

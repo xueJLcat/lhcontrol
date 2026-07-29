@@ -60,6 +60,9 @@
   let cancelExternalScanCancelledListener: (() => void) | null = null;
   let apiRunning = false;
   let apiError = '';
+  let configWarnings: string[] = [];
+  let configWritable = true;
+  const reportedConfigWarnings = new Set<string>();
   let externalScanning = false;
   let externalScanID: number | null = null;
   let latestExternalScanID = 0;
@@ -432,6 +435,13 @@
       if (disposed || !apiRevisions.isCurrent(revision)) return;
       apiRunning = status.running;
       apiError = status.error;
+      configWarnings = status.warnings ?? [];
+      configWritable = status.configWritable ?? true;
+      for (const warning of configWarnings) {
+        if (reportedConfigWarnings.has(warning)) continue;
+        reportedConfigWarnings.add(warning);
+        pushToast(warning, 'warning');
+      }
     }).catch((error) => {
       if (disposed || !apiRevisions.isCurrent(revision)) return;
       apiRunning = false;
@@ -1013,7 +1023,7 @@
     {/if}
   </main>
 
-  <StatusFooter {statusMessage} {apiRunning} {apiError} />
+  <StatusFooter {statusMessage} {apiRunning} {apiError} {configWarnings} {configWritable} />
 </div>
 
 {#if selectedStation}

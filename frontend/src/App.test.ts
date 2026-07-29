@@ -106,7 +106,13 @@ beforeEach(() => {
     })
   });
   runtime.handlers.clear();
-  api.GetAPIStatus.mockResolvedValue({ running: true, address: '127.0.0.1:7575', error: '' });
+  api.GetAPIStatus.mockResolvedValue({
+    running: true,
+    address: '127.0.0.1:7575',
+    error: '',
+    warnings: [],
+    configWritable: true
+  });
   api.IsScanning.mockResolvedValue(false);
   api.ScanAndFetchStations.mockResolvedValue([createStation()]);
   api.GetScanStatus.mockResolvedValue({ state: 'completed', found: 1, warnings: [] });
@@ -1387,6 +1393,22 @@ describe('App asynchronous operations', () => {
     resolveFirst({ running: true, address: '127.0.0.1:7575', error: '' });
     await vi.advanceTimersByTimeAsync(0);
     expect(screen.getByText('API offline')).toHaveAttribute('title', 'new failure');
+  });
+
+  it('surfaces persistent configuration startup warnings', async () => {
+    const warning = 'Configuration could not be loaded: invalid JSON';
+    api.GetAPIStatus.mockResolvedValue({
+      running: true,
+      address: '127.0.0.1:7575',
+      error: '',
+      warnings: [warning],
+      configWritable: false
+    });
+
+    render(App);
+
+    expect(await screen.findByText('Config read-only')).toHaveAttribute('title', warning);
+    expect(pushToast).toHaveBeenCalledWith(warning, 'warning');
   });
 
   it('does not let a stale periodic fallback overwrite a newer scan event', async () => {

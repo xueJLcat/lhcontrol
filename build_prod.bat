@@ -15,6 +15,14 @@ if errorlevel 1 (
     echo Build failed.
     exit /b 1
 )
+if not exist "build\bin\lhcontrol.exe" (
+    echo Build failed: build\bin\lhcontrol.exe is missing.
+    exit /b 1
+)
+for %%A in ("build\bin\lhcontrol.exe") do if %%~zA LEQ 0 (
+    echo Build failed: build\bin\lhcontrol.exe is empty.
+    exit /b 1
+)
 
 echo Build complete. Check build/bin/lhcontrol.exe
 endlocal

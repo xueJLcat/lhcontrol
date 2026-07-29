@@ -4,11 +4,21 @@
   export let statusMessage: string;
   export let apiRunning: boolean;
   export let apiError: string;
+  export let configWarnings: string[] = [];
+  export let configWritable = true;
 </script>
 
 <footer>
   <Activity size={12} />
   <span class="status-text" role="status" aria-live="polite" title={statusMessage}>{statusMessage}</span>
+  {#if configWarnings.length > 0 || !configWritable}
+    <span
+      class="config-status"
+      title={configWarnings.join('\n') || 'Configuration changes cannot be saved'}
+    >
+      {configWritable ? 'Config warning' : 'Config read-only'}
+    </span>
+  {/if}
   <span class="api-status" class:ok={apiRunning} title={apiError || 'HTTP API 127.0.0.1:7575'}>
     <span class="api-dot" aria-hidden="true"></span>
     {apiRunning ? 'API ready' : 'API offline'}
@@ -36,7 +46,6 @@
     white-space: nowrap;
   }
   .api-status {
-    margin-left: auto;
     flex-shrink: 0;
     display: inline-flex;
     align-items: center;
@@ -44,6 +53,14 @@
     font-weight: 700;
     color: var(--fb-error);
   }
+  .config-status {
+    margin-left: auto;
+    flex-shrink: 0;
+    font-weight: 700;
+    color: var(--fb-warning);
+  }
+  .config-status + .api-status { margin-left: 0.4rem; }
+  .status-text + .api-status { margin-left: auto; }
   .api-status.ok { color: var(--fb-success); }
   .api-dot {
     width: 6px;

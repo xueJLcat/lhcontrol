@@ -1,7 +1,20 @@
 import { describe, expect, it } from 'vitest';
-import { station } from '../../wailsjs/go/models';
+import { main, station } from '../../wailsjs/go/models';
 
 describe('generated Wails result models', () => {
+  it('preserves configuration health fields', () => {
+    const status = main.APIStatus.createFrom({
+      running: true,
+      address: '127.0.0.1:7575',
+      error: '',
+      warnings: ['invalid configuration was preserved'],
+      configWritable: true
+    });
+
+    expect(status.warnings).toEqual(['invalid configuration was preserved']);
+    expect(status.configWritable).toBe(true);
+  });
+
   it('preserves an unconfirmed power result and its nested station', () => {
     const result = station.PowerActionResult.createFrom({
       commandSent: true,

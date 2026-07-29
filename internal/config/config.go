@@ -108,6 +108,15 @@ func (c *Config) Save() error {
 	return c.saveLocked()
 }
 
+// PersistenceError reports whether saves are intentionally blocked because an
+// unreadable config file could not be preserved. It is safe to call while the
+// application is exposing status to another goroutine.
+func (c *Config) PersistenceError() error {
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	return c.persistenceBlockedErr
+}
+
 // saveLocked persists exactly the state protected by mutex. Keeping mutation
 // and persistence under one exclusive lock prevents an older Save from
 // overwriting a newer rename.

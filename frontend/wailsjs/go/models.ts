@@ -57,6 +57,8 @@ export namespace main {
 	    running: boolean;
 	    address: string;
 	    error: string;
+	    warnings: string[];
+	    configWritable: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new APIStatus(source);
@@ -67,6 +69,8 @@ export namespace main {
 	        this.running = source["running"];
 	        this.address = source["address"];
 	        this.error = source["error"];
+	        this.warnings = source["warnings"];
+	        this.configWritable = source["configWritable"];
 	    }
 	}
 

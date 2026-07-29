@@ -185,11 +185,27 @@ func TestAPIStatusForError(t *testing.T) {
 func TestNewAppReportsConfiguredAPIAddress(t *testing.T) {
 	app := NewApp()
 	status := app.GetAPIStatus()
-	if status.Running || status.Address != "127.0.0.1:7575" || status.Error != "" {
+	if status.Running || status.Address != "127.0.0.1:7575" || status.Error != "" ||
+		!status.ConfigWritable || len(status.Warnings) != 0 {
 		t.Fatalf("initial API status = %+v", status)
 	}
 	if timeout := app.api.Config().WriteTimeout; timeout != 0 {
 		t.Fatalf("WriteTimeout = %v, want no premature timeout for Bluetooth operations", timeout)
+	}
+}
+
+func TestConfigLoadWarningIsExposedAndDefensivelyCopied(t *testing.T) {
+	app := NewApp()
+	app.setConfigLoadStatus(errors.New("invalid JSON"))
+
+	status := app.GetAPIStatus()
+	if !status.ConfigWritable || len(status.Warnings) != 1 ||
+		!strings.Contains(status.Warnings[0], "invalid JSON") {
+		t.Fatalf("config load status = %+v", status)
+	}
+	status.Warnings[0] = "changed"
+	if current := app.GetAPIStatus(); current.Warnings[0] == "changed" {
+		t.Fatal("GetAPIStatus returned mutable warning storage")
 	}
 }
 

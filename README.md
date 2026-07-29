@@ -54,6 +54,23 @@ Linux or macOS.
     cd ..
     ```
 
+## Testing
+
+The Go root package embeds the generated frontend, so a clean checkout must
+build `frontend/dist` before running `go test ./...`. Use the repository test
+entry point to install dependencies, check and test the frontend, build the
+embedded assets, and run all Go tests:
+
+```powershell
+.\scripts\test.ps1
+```
+
+On Bash:
+
+```bash
+./scripts/test.sh
+```
+
 ## Running the Application
 
 *   **Development Mode:** (Live reload)

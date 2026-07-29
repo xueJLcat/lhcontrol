@@ -230,13 +230,16 @@ type statusRetry struct {
 	// The original fields are the connection retry schedule. Keeping them
 	// separate from channel retry state prevents an optional channel failure
 	// from accelerating or delaying connection recovery.
-	failures           int
-	lastAttempt        time.Time
-	nextAt             time.Time
-	channelFailures    int
-	channelLastAttempt time.Time
-	channelNextAt      time.Time
-	kinds              statusRetryKind
+	failures            int
+	lastAttempt         time.Time
+	nextAt              time.Time
+	channelFailures     int
+	channelLastAttempt  time.Time
+	channelNextAt       time.Time
+	metadataFailures    int
+	metadataLastAttempt time.Time
+	metadataNextAt      time.Time
+	kinds               statusRetryKind
 }
 
 type statusRetryKind uint8
@@ -244,6 +247,7 @@ type statusRetryKind uint8
 const (
 	statusRetryConnection statusRetryKind = 1 << iota
 	statusRetryChannel
+	statusRetryMetadata
 	statusRetryRefresh
 	statusAbsentRetryLimit = 5
 )
@@ -297,6 +301,10 @@ func (m *Manager) noteChannelFailure(address string) {
 	m.noteStatusFailureKind(address, statusRetryChannel)
 }
 
+func (m *Manager) noteMetadataFailure(address string) {
+	m.noteStatusFailureKind(address, statusRetryMetadata)
+}
+
 func (m *Manager) noteStatusRefreshPending(address string) {
 	m.trackStatusRefreshPending(address)
 	m.scheduleStatusRecovery()
@@ -329,6 +337,11 @@ func (m *Manager) noteStatusFailureKind(address string, kind statusRetryKind) {
 		retry.channelLastAttempt = now
 		retry.channelNextAt = now.Add(m.statusRetryDelay(retry.channelFailures))
 	}
+	if kind&statusRetryMetadata != 0 {
+		retry.metadataFailures++
+		retry.metadataLastAttempt = now
+		retry.metadataNextAt = now.Add(m.statusRetryDelay(retry.metadataFailures))
+	}
 	m.statusRetries[address] = retry
 	m.statusRetryMutex.Unlock()
 	m.scheduleStatusRecovery()
@@ -358,6 +371,10 @@ func (m *Manager) deferStatusRecovery(address string, delay time.Duration) {
 		if kinds&statusRetryChannel != 0 &&
 			(retry.channelNextAt.IsZero() || retry.channelNextAt.Before(deadline)) {
 			retry.channelNextAt = deadline
+		}
+		if kinds&statusRetryMetadata != 0 &&
+			(retry.metadataNextAt.IsZero() || retry.metadataNextAt.Before(deadline)) {
+			retry.metadataNextAt = deadline
 		}
 		m.statusRetries[address] = retry
 	}
@@ -394,6 +411,11 @@ func (m *Manager) clearStatusFailureKind(address string, kind statusRetryKind) {
 			retry.channelLastAttempt = time.Time{}
 			retry.channelNextAt = time.Time{}
 		}
+		if kind&statusRetryMetadata != 0 {
+			retry.metadataFailures = 0
+			retry.metadataLastAttempt = time.Time{}
+			retry.metadataNextAt = time.Time{}
+		}
 		if retry.kinds == 0 {
 			delete(m.statusRetries, address)
 		} else {
@@ -417,26 +439,41 @@ func statusRetrySchedule(retry statusRetry, kind statusRetryKind) (int, time.Tim
 	if kind == statusRetryChannel && !retry.channelNextAt.IsZero() {
 		return retry.channelFailures, retry.channelLastAttempt, retry.channelNextAt
 	}
+	if kind == statusRetryMetadata && !retry.metadataNextAt.IsZero() {
+		return retry.metadataFailures, retry.metadataLastAttempt, retry.metadataNextAt
+	}
 	return retry.failures, retry.lastAttempt, retry.nextAt
 }
 
-func statusRetryOrder(retry statusRetry) (int, time.Time, time.Time) {
+func statusRetryOrderAndKind(retry statusRetry) (statusRetryKind, int, time.Time, time.Time) {
 	kinds := effectiveStatusRetryKinds(retry)
+	var selectedKind statusRetryKind
 	var selectedFailures int
 	var selectedLastAttempt time.Time
 	var selectedNextAt time.Time
-	for _, kind := range []statusRetryKind{statusRetryConnection, statusRetryChannel, statusRetryRefresh} {
+	for _, kind := range []statusRetryKind{
+		statusRetryConnection,
+		statusRetryChannel,
+		statusRetryMetadata,
+		statusRetryRefresh,
+	} {
 		if kinds&kind == 0 {
 			continue
 		}
 		failures, lastAttempt, nextAt := statusRetrySchedule(retry, kind)
 		if selectedNextAt.IsZero() || nextAt.Before(selectedNextAt) {
+			selectedKind = kind
 			selectedFailures = failures
 			selectedLastAttempt = lastAttempt
 			selectedNextAt = nextAt
 		}
 	}
-	return selectedFailures, selectedLastAttempt, selectedNextAt
+	return selectedKind, selectedFailures, selectedLastAttempt, selectedNextAt
+}
+
+func statusRetryOrder(retry statusRetry) (int, time.Time, time.Time) {
+	_, failures, lastAttempt, nextAt := statusRetryOrderAndKind(retry)
+	return failures, lastAttempt, nextAt
 }
 
 func (m *Manager) stopExhaustedAbsentRecovery(address string, station *bluetooth.BaseStation) {
@@ -460,6 +497,13 @@ func (m *Manager) stopExhaustedAbsentRecovery(address string, station *bluetooth
 			retry.channelFailures = 0
 			retry.channelLastAttempt = time.Time{}
 			retry.channelNextAt = time.Time{}
+			changed = true
+		}
+		if kinds&statusRetryMetadata != 0 && retry.metadataFailures >= statusAbsentRetryLimit {
+			retry.kinds &^= statusRetryMetadata
+			retry.metadataFailures = 0
+			retry.metadataLastAttempt = time.Time{}
+			retry.metadataNextAt = time.Time{}
 			changed = true
 		}
 		if retry.kinds == 0 {
@@ -498,6 +542,14 @@ func (m *Manager) recordStructuredReadResult(
 			m.noteStatusFailure(address)
 		}
 	}
+}
+
+func (m *Manager) recordMetadataReadResult(address string, metadataErr error) {
+	if metadataErr == nil || bluetooth.IsUnsupportedCapabilityError(metadataErr) {
+		m.clearStatusFailureKind(address, statusRetryMetadata)
+		return
+	}
+	m.noteMetadataFailure(address)
 }
 
 func (m *Manager) recordUnstructuredStationFailure(
@@ -1476,6 +1528,16 @@ func (m *Manager) scanAndFetchStations(ctx context.Context) ([]StationInfo, int,
 			var initialErr *bluetooth.InitialReadError
 			if errors.As(result.err, &initialErr) {
 				m.recordStructuredReadResult(result.station, result.address, initialErr.Power, initialErr.Channel)
+				m.recordMetadataReadResult(result.address, initialErr.Metadata)
+				if initialErr.Power == nil && initialErr.Channel == nil {
+					// Device information is optional. Retry it in the background
+					// without turning an otherwise healthy scan into a warning.
+					continue
+				}
+				result.err = &bluetooth.InitialReadError{
+					Power:   initialErr.Power,
+					Channel: initialErr.Channel,
+				}
 			} else {
 				m.recordUnstructuredStationFailure(result.station, result.address, result.err)
 			}
@@ -1763,7 +1825,10 @@ func (m *Manager) CheckAllStationStatuses() ([]StationInfo, error) {
 						}
 						statusErrors[item.index] = fmt.Errorf("%s: %w", address, workerErr)
 					} else {
-						m.clearStatusFailure(address)
+						m.clearStatusFailureKind(
+							address,
+							statusRetryConnection|statusRetryChannel|statusRetryRefresh,
+						)
 					}
 				}()
 			}
@@ -1946,7 +2011,7 @@ func (m *Manager) nextStatusRecoveryDelay() (time.Duration, bool) {
 		}
 		snapshot := station.Snapshot()
 		kinds := effectiveStatusRetryKinds(retries[snapshot.Address])
-		if kinds&(statusRetryChannel|statusRetryRefresh) != 0 || !snapshot.Connected {
+		if kinds&(statusRetryChannel|statusRetryMetadata|statusRetryRefresh) != 0 || !snapshot.Connected {
 			disconnected[snapshot.Address] = struct{}{}
 		}
 	}
@@ -2000,6 +2065,7 @@ func (m *Manager) runStatusRecoveryRound() time.Duration {
 		station *bluetooth.BaseStation
 		address string
 		retry   statusRetry
+		kind    statusRetryKind
 	}
 	m.statusRetryMutex.Lock()
 	retries := make(map[string]statusRetry, len(m.statusRetries))
@@ -2015,18 +2081,19 @@ func (m *Manager) runStatusRecoveryRound() time.Duration {
 		}
 		snapshot := station.Snapshot()
 		retry, tracked := retries[snapshot.Address]
-		_, _, nextAt := statusRetryOrder(retry)
+		kind, _, _, nextAt := statusRetryOrderAndKind(retry)
 		if !tracked || now.Before(nextAt) {
 			continue
 		}
 		kinds := effectiveStatusRetryKinds(retry)
-		if snapshot.Connected && kinds&(statusRetryChannel|statusRetryRefresh) == 0 {
+		if snapshot.Connected && kinds&(statusRetryChannel|statusRetryMetadata|statusRetryRefresh) == 0 {
 			continue
 		}
 		candidates = append(candidates, recoveryCandidate{
 			station: station,
 			address: snapshot.Address,
 			retry:   retry,
+			kind:    kind,
 		})
 	}
 	m.stationsMutex.RUnlock()
@@ -2056,12 +2123,16 @@ func (m *Manager) runStatusRecoveryRound() time.Duration {
 			}
 			continue
 		}
-		return m.recoverOneStation(candidate.station, candidate.address)
+		return m.recoverOneStation(candidate.station, candidate.address, candidate.kind)
 	}
 	return m.statusBusyRetry
 }
 
-func (m *Manager) recoverOneStation(station *bluetooth.BaseStation, address string) time.Duration {
+func (m *Manager) recoverOneStation(
+	station *bluetooth.BaseStation,
+	address string,
+	retryKind statusRetryKind,
+) time.Duration {
 	defer m.endRecoveryStationOperation(address)
 	if err := m.ensureReady(); err != nil {
 		m.observeBluetoothError(err)
@@ -2073,8 +2144,31 @@ func (m *Manager) recoverOneStation(station *bluetooth.BaseStation, address stri
 	if recoveryContext == nil {
 		recoveryContext = m.lifecycleContext
 	}
+	metadataTracked := effectiveStatusRetryKinds(m.statusRetrySnapshot(address))&statusRetryMetadata != 0
+	metadataAttempted := retryKind == statusRetryMetadata ||
+		(!station.Snapshot().Connected && metadataTracked)
 	readContext, cancelRead := context.WithTimeout(recoveryContext, m.initialReadTimeout)
 	defer cancelRead()
+	if retryKind == statusRetryMetadata {
+		refreshErr := runSafely("station metadata recovery", func() error {
+			_, err := m.bluetoothOps.refreshCapabilities(readContext, station)
+			return err
+		})
+		if refreshErr != nil {
+			if m.shuttingDown.Load() && errors.Is(refreshErr, context.Canceled) {
+				return 0
+			}
+			if errors.Is(refreshErr, context.Canceled) && m.lifecycleContext.Err() == nil {
+				m.deferStatusRecovery(address, m.statusBusyRetry)
+				return m.statusBusyRetry
+			}
+			m.observeBluetoothError(refreshErr)
+			m.recordUnstructuredStationFailure(station, address, refreshErr)
+			m.noteMetadataFailure(address)
+			m.stopExhaustedAbsentRecovery(address, station)
+			return 0
+		}
+	}
 	err := runSafely("station status recovery", func() error {
 		return m.bluetoothOps.fetchInitialPowerState(readContext, station)
 	})
@@ -2093,16 +2187,34 @@ func (m *Manager) recoverOneStation(station *bluetooth.BaseStation, address stri
 	var initialErr *bluetooth.InitialReadError
 	if errors.As(err, &initialErr) {
 		m.recordStructuredReadResult(station, address, initialErr.Power, initialErr.Channel)
+		if metadataAttempted || (initialErr.Metadata != nil && !metadataTracked) {
+			m.recordMetadataReadResult(address, initialErr.Metadata)
+		}
 		m.stopExhaustedAbsentRecovery(address, station)
 		return 0
 	}
 	if err != nil {
 		m.recordUnstructuredStationFailure(station, address, err)
+		if metadataAttempted {
+			m.noteMetadataFailure(address)
+		}
 		m.stopExhaustedAbsentRecovery(address, station)
 		return 0
 	}
-	m.clearStatusFailure(address)
+	m.clearStatusFailureKind(
+		address,
+		statusRetryConnection|statusRetryChannel|statusRetryRefresh,
+	)
+	if metadataAttempted {
+		m.clearStatusFailureKind(address, statusRetryMetadata)
+	}
 	return 0
+}
+
+func (m *Manager) statusRetrySnapshot(address string) statusRetry {
+	m.statusRetryMutex.Lock()
+	defer m.statusRetryMutex.Unlock()
+	return m.statusRetries[address]
 }
 
 func (m *Manager) PowerOnStation(address string) error {
@@ -2339,6 +2451,7 @@ func (m *Manager) RefreshStationCapabilities(address string) (StationInfo, error
 			return StationInfo{}, err
 		}
 		m.recordStructuredReadResult(stationPtr, canonicalAddress, readErr.Power, readErr.Channel)
+		m.recordMetadataReadResult(canonicalAddress, readErr.Metadata)
 		// Capability discovery succeeded. Keep the refreshed station visible and
 		// expose any unavailable state values through freshness and LastError
 		// instead of turning a structured partial read into a total refresh

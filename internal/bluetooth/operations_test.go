@@ -1190,6 +1190,7 @@ func TestScanCompletionErrorExplainsUnavailableRadio(t *testing.T) {
 func TestFetchInitialPowerStateReportsPartialReadErrors(t *testing.T) {
 	powerErr := errors.New("power read failed")
 	channelErr := errors.New("channel read failed")
+	metadataErr := errors.New("metadata read failed")
 	station := connectedFakeStation(
 		&fakeCharacteristic{readErr: powerErr},
 		&fakeCharacteristic{readErr: channelErr},
@@ -1201,13 +1202,15 @@ func TestFetchInitialPowerStateReportsPartialReadErrors(t *testing.T) {
 	station.Channel = 4
 	station.LastPowerReadAt = time.Now()
 	station.LastChannelReadAt = time.Now()
+	station.setMetadataErrorInternal(metadataErr)
 
 	err := FetchInitialPowerState(station)
 	var initialErr *InitialReadError
 	if !errors.As(err, &initialErr) {
 		t.Fatalf("FetchInitialPowerState() error = %v, want InitialReadError", err)
 	}
-	if !errors.Is(err, powerErr) || !errors.Is(err, channelErr) {
+	if !errors.Is(err, powerErr) || !errors.Is(err, channelErr) ||
+		initialErr.Metadata == nil || initialErr.Metadata.Error() != metadataErr.Error() {
 		t.Fatalf("InitialReadError does not preserve underlying errors: %v", err)
 	}
 	if station.PowerState != PowerStateOn || station.RawPowerState != 0x09 || station.Channel != 4 ||

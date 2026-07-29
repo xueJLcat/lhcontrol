@@ -1215,6 +1215,105 @@ func TestScanInitialReadClassifiesPartialFailures(t *testing.T) {
 	}
 }
 
+func TestScanMetadataFailureSchedulesSilentRecovery(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	manager.statusRecoveryStart.Do(func() {})
+	address := "11:22:33:44:55:67"
+	manager.bluetoothOps.scanForDurationContext = func(context.Context, time.Duration) ([]internalbluetooth.DiscoveredStation, error) {
+		return []internalbluetooth.DiscoveredStation{{
+			Name: "LHB-METADATA", Address: mustAddress(t, address),
+		}}, nil
+	}
+	metadataErr := errors.New("firmware metadata unavailable")
+	manager.bluetoothOps.fetchInitialPowerState = func(context.Context, *internalbluetooth.BaseStation) error {
+		return &internalbluetooth.InitialReadError{Metadata: metadataErr}
+	}
+
+	if _, err := manager.ScanAndFetchStations(); err != nil {
+		t.Fatalf("ScanAndFetchStations() error = %v", err)
+	}
+	if status := manager.GetScanStatus(); len(status.Warnings) != 0 {
+		t.Fatalf("metadata-only failure produced scan warnings: %+v", status)
+	}
+	manager.statusRetryMutex.Lock()
+	retry, tracked := manager.statusRetries[address]
+	manager.statusRetryMutex.Unlock()
+	if !tracked || effectiveStatusRetryKinds(retry) != statusRetryMetadata ||
+		retry.metadataFailures != 1 || retry.metadataNextAt.IsZero() {
+		t.Fatalf("metadata retry = %+v tracked=%v", retry, tracked)
+	}
+}
+
+func TestMetadataRecoveryForcesCapabilityRefresh(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	address := "11:22:33:44:55:68"
+	manager.stations[address] = &internalbluetooth.BaseStation{
+		Name: "LHB-METADATA", Address: mustAddress(t, address), Present: true,
+	}
+	manager.statusRetryMutex.Lock()
+	manager.statusRetries[address] = statusRetry{
+		kinds:            statusRetryMetadata,
+		metadataFailures: 1,
+		metadataNextAt:   time.Now().Add(-time.Second),
+	}
+	manager.statusRetryMutex.Unlock()
+	var refreshes atomic.Int32
+	var reads atomic.Int32
+	manager.bluetoothOps.refreshCapabilities = func(context.Context, *internalbluetooth.BaseStation) (internalbluetooth.Capabilities, error) {
+		refreshes.Add(1)
+		return internalbluetooth.Capabilities{}, nil
+	}
+	manager.bluetoothOps.fetchInitialPowerState = func(context.Context, *internalbluetooth.BaseStation) error {
+		reads.Add(1)
+		return nil
+	}
+
+	manager.runStatusRecoveryRound()
+
+	if refreshes.Load() != 1 || reads.Load() != 1 {
+		t.Fatalf("metadata recovery refreshes=%d reads=%d, want one of each", refreshes.Load(), reads.Load())
+	}
+	manager.statusRetryMutex.Lock()
+	_, tracked := manager.statusRetries[address]
+	manager.statusRetryMutex.Unlock()
+	if tracked {
+		t.Fatal("successful metadata recovery remained scheduled")
+	}
+}
+
+func TestMetadataRecoveryFailureKeepsIndependentBackoff(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	manager.statusRetryBase = time.Hour
+	manager.statusRetryMax = 4 * time.Hour
+	address := "11:22:33:44:55:69"
+	manager.stations[address] = &internalbluetooth.BaseStation{
+		Name: "LHB-METADATA", Address: mustAddress(t, address), Present: true,
+	}
+	manager.statusRetryMutex.Lock()
+	manager.statusRetries[address] = statusRetry{
+		kinds:            statusRetryMetadata,
+		metadataFailures: 1,
+		metadataNextAt:   time.Now().Add(-time.Second),
+	}
+	manager.statusRetryMutex.Unlock()
+	manager.bluetoothOps.refreshCapabilities = func(context.Context, *internalbluetooth.BaseStation) (internalbluetooth.Capabilities, error) {
+		return internalbluetooth.Capabilities{}, nil
+	}
+	manager.bluetoothOps.fetchInitialPowerState = func(context.Context, *internalbluetooth.BaseStation) error {
+		return &internalbluetooth.InitialReadError{Metadata: errors.New("metadata still unavailable")}
+	}
+
+	manager.runStatusRecoveryRound()
+
+	manager.statusRetryMutex.Lock()
+	retry, tracked := manager.statusRetries[address]
+	manager.statusRetryMutex.Unlock()
+	if !tracked || effectiveStatusRetryKinds(retry) != statusRetryMetadata ||
+		retry.metadataFailures != 2 || retry.metadataNextAt.Sub(retry.metadataLastAttempt) != 2*time.Hour {
+		t.Fatalf("metadata retry after failure = %+v tracked=%v", retry, tracked)
+	}
+}
+
 func TestAdapterUnavailableForcesInitializationRetry(t *testing.T) {
 	manager := NewManager(config.NewConfig())
 	manager.observeBluetoothError(tinybluetooth.ErrRadioNotAvailable)

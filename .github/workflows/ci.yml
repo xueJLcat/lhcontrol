@@ -34,24 +34,8 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
-      - name: Install Frontend Dependencies
-        working-directory: frontend
-        run: npm ci
-
-      - name: Check Frontend
-        working-directory: frontend
-        run: npm run check
-
-      - name: Test Frontend
-        working-directory: frontend
-        run: npm test
-
-      - name: Build Frontend
-        working-directory: frontend
-        run: npm run build
-
-      - name: Test Go
-        run: go test ./...
+      - name: Test Application
+        run: .\scripts\test.ps1
 
       - name: Test Go with Race Detector
         run: go test -race ./...

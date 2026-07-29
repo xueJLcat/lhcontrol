@@ -1455,8 +1455,9 @@ func connectAndDiscoverInternalContext(ctx context.Context, station *BaseStation
 // discovery succeeded. Callers can keep the station visible while showing the
 // affected values as unknown.
 type InitialReadError struct {
-	Power   error
-	Channel error
+	Power    error
+	Channel  error
+	Metadata error
 }
 
 // StatusReadError identifies which independently readable station values
@@ -1476,11 +1477,11 @@ func (e *StatusReadError) Unwrap() error {
 }
 
 func (e *InitialReadError) Error() string {
-	return fmt.Sprintf("initial station read was incomplete: %v", errors.Join(e.Power, e.Channel))
+	return fmt.Sprintf("initial station read was incomplete: %v", errors.Join(e.Power, e.Channel, e.Metadata))
 }
 
 func (e *InitialReadError) Unwrap() error {
-	return errors.Join(e.Power, e.Channel)
+	return errors.Join(e.Power, e.Channel, e.Metadata)
 }
 
 // EnsureCapabilities connects and discovers characteristics before a caller
@@ -1579,6 +1580,10 @@ func FetchInitialPowerStateContext(ctx context.Context, station *BaseStation) er
 
 	var powerReadErr error
 	var channelReadErr error
+	var metadataReadErr error
+	if station.metadataError != "" {
+		metadataReadErr = errors.New(station.metadataError)
+	}
 	if station.Capabilities.PowerRead {
 		log.Printf("Bluetooth: FetchInitialPowerState proceeding to read state for %s.", station.Name)
 		if powerReadErr = readPowerStateInternalContext(ctx, station); powerReadErr != nil {
@@ -1605,8 +1610,12 @@ func FetchInitialPowerStateContext(ctx context.Context, station *BaseStation) er
 	if contextErr := ctx.Err(); contextErr != nil {
 		return finishCancelledInitialRead(station, contextErr)
 	}
-	if powerReadErr != nil || channelReadErr != nil {
-		readErr := &InitialReadError{Power: powerReadErr, Channel: channelReadErr}
+	if powerReadErr != nil || channelReadErr != nil || metadataReadErr != nil {
+		readErr := &InitialReadError{
+			Power:    powerReadErr,
+			Channel:  channelReadErr,
+			Metadata: metadataReadErr,
+		}
 		station.setPowerErrorInternal(powerReadErr)
 		station.setChannelErrorInternal(channelReadErr)
 		return readErr
