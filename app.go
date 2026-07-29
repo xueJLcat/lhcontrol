@@ -97,7 +97,9 @@ type App struct {
 	apiCancel         context.CancelFunc
 	apiWG             sync.WaitGroup
 	listen            func(string, string) (net.Listener, error)
+	serveListener     func(net.Listener) error
 	apiRetryDelay     time.Duration
+	apiGeneration     uint64
 	externalScanID    atomic.Uint64
 	shuttingDown      atomic.Bool
 }
@@ -260,19 +262,22 @@ func registerAPIRoutes(api *fiber.App, manager apiStationManager, events scanEve
 func NewApp() *App {
 	cfg := config.NewConfig()
 	mgr := station.NewManager(cfg)
-	return &App{
+	api := fiber.New(fiber.Config{
+		ReadTimeout:  5 * time.Second,
+		WriteTimeout: 0,
+		IdleTimeout:  30 * time.Second,
+		ErrorHandler: apiErrorHandler,
+	})
+	app := &App{
 		config:         cfg,
 		stationManager: mgr,
-		api: fiber.New(fiber.Config{
-			ReadTimeout:  5 * time.Second,
-			WriteTimeout: 0,
-			IdleTimeout:  30 * time.Second,
-			ErrorHandler: apiErrorHandler,
-		}),
-		apiStatus:     APIStatus{Address: "127.0.0.1:7575"},
-		listen:        net.Listen,
-		apiRetryDelay: 2 * time.Second,
+		api:            api,
+		apiStatus:      APIStatus{Address: "127.0.0.1:7575"},
+		listen:         net.Listen,
+		apiRetryDelay:  2 * time.Second,
 	}
+	app.serveListener = api.Listener
+	return app
 }
 
 // startup is called when the app starts.
@@ -332,22 +337,24 @@ func (a *App) startAPIServer() {
 	}
 	apiContext, cancel := context.WithCancel(context.Background())
 	a.apiCancel = cancel
+	a.apiGeneration++
+	generation := a.apiGeneration
 	a.apiWG.Add(1)
 	a.apiLifecycleMutex.Unlock()
 	go func() {
-		defer a.apiWG.Done()
+		defer func() {
+			a.apiLifecycleMutex.Lock()
+			if a.apiGeneration == generation {
+				a.apiCancel = nil
+			}
+			a.apiLifecycleMutex.Unlock()
+			a.apiWG.Done()
+		}()
 		a.runAPIServer(apiContext)
 	}()
 }
 
 func (a *App) runAPIServer(ctx context.Context) {
-	defer func() {
-		if recovered := recover(); recovered != nil {
-			err := fmt.Errorf("API server panic: %v", recovered)
-			a.setAPIStatus(false, err)
-			log.Printf("Recovered API server panic: %v\n%s", recovered, debug.Stack())
-		}
-	}()
 	for {
 		select {
 		case <-ctx.Done():
@@ -382,9 +389,10 @@ func (a *App) runAPIServer(ctx context.Context) {
 			case <-listenerDone:
 			}
 		}()
-		err = a.api.Listener(listener)
+		err = a.serveAPIListener(listener)
+		_ = listener.Close()
 		close(listenerDone)
-		if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
+		if ctx.Err() != nil {
 			a.setAPIStatus(false, nil)
 			return
 		}
@@ -404,6 +412,16 @@ func (a *App) runAPIServer(ctx context.Context) {
 		case <-timer.C:
 		}
 	}
+}
+
+func (a *App) serveAPIListener(listener net.Listener) (returnErr error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			returnErr = fmt.Errorf("API server panic: %v", recovered)
+			log.Printf("Recovered API server panic: %v\n%s", recovered, debug.Stack())
+		}
+	}()
+	return a.serveListener(listener)
 }
 
 // --- Bluetooth Methods exposed to Wails --- //

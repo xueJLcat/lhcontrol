@@ -156,11 +156,16 @@
   $: actionableOn = stations.filter((station) => canSetPower(station, 'on'));
   $: actionableStandby = stations.filter((station) => canSetPower(station, 'standby'));
   $: actionableSleep = stations.filter((station) => canSetPower(station, 'sleep'));
-  $: occupiedChannels = new Map(
-    stations
+  $: occupiedChannels = (() => {
+    const occupied = new Map<number, string[]>();
+    const candidates = stations
       .filter((station) => hasCurrentChannel(station) && station.address !== selectedAddress)
-      .map((station) => [station.channel, station.name])
-  );
+      .sort((a, b) => a.name.localeCompare(b.name) || a.address.localeCompare(b.address));
+    for (const station of candidates) {
+      occupied.set(station.channel, [...(occupied.get(station.channel) ?? []), station.name]);
+    }
+    return occupied;
+  })();
   $: hasUnknownVisibleChannel = stations.some(
     (station) => station.isPresent && station.address !== selectedAddress &&
       (!station.scanFresh || !station.channelFresh || station.channel === 0)
@@ -846,9 +851,11 @@
       if (!canCommitStationOperation(operationEpoch, station.address, operationRevision)) return;
       stations = stations.map((current) => current.address === station.address ? updated : current);
       if (canCommitStatus(statusOperation)) {
-        statusMessage = updated.lastError
+        const message = updated.lastError
           ? `Capabilities refreshed for ${station.name}, but some values are unavailable: ${updated.lastError}`
           : `Capabilities refreshed for ${station.name}.`;
+        statusMessage = message;
+        if (updated.lastError) pushToast(message, 'warning');
       }
     } catch (error) {
       if (!canCommitStationOperation(operationEpoch, station.address, operationRevision)) return;

@@ -76,7 +76,7 @@ function renderModal(overrides: Record<string, unknown> = {}) {
   render(ChannelModal, {
     props: {
       station: station(),
-      occupiedChannels: new Map([[4, 'LHB-B']]),
+      occupiedChannels: new Map([[4, ['LHB-B']]]),
       hasUnknownVisibleChannel: false,
       error: '',
       warning: false,
@@ -100,6 +100,12 @@ describe('ChannelModal channel grid', () => {
     expect(cell).not.toBeDisabled();
     expect(cell).toHaveAttribute('aria-disabled', 'true');
     expect(cell).toHaveAttribute('title', 'Occupied by LHB-B');
+  });
+
+  it('lists every station occupying the same channel', () => {
+    renderModal({ occupiedChannels: new Map([[4, ['LHB-B', 'LHB-C']]]) });
+    expect(screen.getByRole('button', { name: '4' }))
+      .toHaveAttribute('title', 'Occupied by LHB-B, LHB-C');
   });
 
   it('does not select an occupied channel when clicked', async () => {
@@ -128,7 +134,7 @@ describe('ChannelModal channel grid', () => {
   it('selects the first free channel when the current channel conflicts', () => {
     renderModal({
       station: station({ channelConflict: true }),
-      occupiedChannels: new Map([[3, 'LHB-B'], [4, 'LHB-C']])
+      occupiedChannels: new Map([[3, ['LHB-B']], [4, ['LHB-C']]])
     });
 
     expect(screen.getByRole('button', { name: '1' })).toHaveAttribute('aria-pressed', 'true');

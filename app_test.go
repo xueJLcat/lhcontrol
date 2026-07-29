@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -229,6 +230,58 @@ func TestAPIServerRetriesFixedAddressAfterInitialBindFailure(t *testing.T) {
 	}
 	if status := app.GetAPIStatus(); !status.Running || status.Error != "" {
 		t.Fatalf("status after address became available = %+v", status)
+	}
+}
+
+func TestAPIServerRecoversFromUnexpectedServeExit(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		fail func() error
+	}{
+		{name: "closed listener", fail: func() error { return net.ErrClosed }},
+		{name: "panic", fail: func() error { panic("serve failed") }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			reservation, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			address := reservation.Addr().String()
+			if err := reservation.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			app := NewApp()
+			app.apiStatus.Address = address
+			app.apiRetryDelay = 5 * time.Millisecond
+			var serveCalls atomic.Int32
+			app.serveListener = func(listener net.Listener) error {
+				if serveCalls.Add(1) == 1 {
+					return test.fail()
+				}
+				return app.api.Listener(listener)
+			}
+			app.startAPIServer()
+			t.Cleanup(func() {
+				app.apiLifecycleMutex.Lock()
+				cancel := app.apiCancel
+				app.apiCancel = nil
+				app.apiLifecycleMutex.Unlock()
+				if cancel != nil {
+					cancel()
+				}
+				_ = app.api.Shutdown()
+				app.apiWG.Wait()
+			})
+
+			deadline := time.Now().Add(time.Second)
+			for (serveCalls.Load() < 2 || !app.GetAPIStatus().Running) && time.Now().Before(deadline) {
+				time.Sleep(time.Millisecond)
+			}
+			if status := app.GetAPIStatus(); serveCalls.Load() < 2 || !status.Running || status.Error != "" {
+				t.Fatalf("API did not recover after %s: calls=%d status=%+v", test.name, serveCalls.Load(), status)
+			}
+		})
 	}
 }
 

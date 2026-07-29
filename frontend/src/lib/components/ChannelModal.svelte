@@ -6,7 +6,7 @@
   import { focusTrap } from '../actions';
 
   export let station: StationInfo;
-  export let occupiedChannels: Map<number, string>;
+  export let occupiedChannels: Map<number, string[]>;
   export let hasUnknownVisibleChannel: boolean;
   export let error: string;
   export let warning = false;
@@ -16,7 +16,7 @@
   export let onSave: (channel: number, allowUnknownConflictRisk: boolean) => void;
   export let onIdentify: (station: StationInfo) => void;
 
-  function initialTargetChannel(channel: number, occupied: Map<number, string>): number {
+  function initialTargetChannel(channel: number, occupied: Map<number, string[]>): number {
     if (channel > 0 && !occupied.has(channel)) return channel;
     for (let candidate = 1; candidate <= 16; candidate += 1) {
       if (!occupied.has(candidate)) return candidate;
@@ -68,7 +68,7 @@
           class:occupied={occupiedChannels.has(channel)}
           disabled={busy || locked}
           aria-disabled={occupiedChannels.has(channel)}
-          title={occupiedChannels.has(channel) ? `Occupied by ${occupiedChannels.get(channel)}` : `Channel ${channel}`}
+          title={occupiedChannels.has(channel) ? `Occupied by ${occupiedChannels.get(channel)?.join(', ')}` : `Channel ${channel}`}
           aria-pressed={targetChannel === channel}
           on:click={() => { if (!occupiedChannels.has(channel)) targetChannel = channel; }}
         >{channel}{#if station.channel > 0 && station.channel === channel}<span class="ch-dot" aria-hidden="true"></span>{/if}</button>

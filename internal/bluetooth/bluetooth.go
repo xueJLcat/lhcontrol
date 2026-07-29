@@ -161,6 +161,11 @@ type BaseStation struct {
 	MissedScans       int
 	bootingSince      time.Time
 	presenceUncertain bool
+	connectionError   string
+	powerError        string
+	channelError      string
+	metadataError     string
+	operationError    string
 }
 
 // PossiblySentError reports that a write failed after the transport may have
@@ -323,7 +328,7 @@ func (bs *BaseStation) IsConnected() bool {
 		return true
 	}
 	if err != nil {
-		bs.LastError = err.Error()
+		bs.setConnectionErrorInternal(err)
 	}
 	_ = disconnectInternal(bs)
 	return false
@@ -348,6 +353,57 @@ func (bs *BaseStation) updateLastReadInternal(readAt time.Time) {
 	if readAt.After(bs.LastReadAt) {
 		bs.LastReadAt = readAt
 	}
+}
+
+func (bs *BaseStation) refreshLastErrorInternal() {
+	parts := make([]string, 0, 5)
+	for _, item := range []struct {
+		label string
+		value string
+	}{
+		{label: "connection", value: bs.connectionError},
+		{label: "power", value: bs.powerError},
+		{label: "channel", value: bs.channelError},
+		{label: "metadata", value: bs.metadataError},
+		{label: "operation", value: bs.operationError},
+	} {
+		if item.value != "" {
+			parts = append(parts, fmt.Sprintf("%s: %s", item.label, item.value))
+		}
+	}
+	bs.LastError = strings.Join(parts, "; ")
+}
+
+func errorText(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
+func (bs *BaseStation) setConnectionErrorInternal(err error) {
+	bs.connectionError = errorText(err)
+	bs.refreshLastErrorInternal()
+}
+
+func (bs *BaseStation) setPowerErrorInternal(err error) {
+	bs.powerError = errorText(err)
+	bs.refreshLastErrorInternal()
+}
+
+func (bs *BaseStation) setChannelErrorInternal(err error) {
+	bs.channelError = errorText(err)
+	bs.refreshLastErrorInternal()
+}
+
+func (bs *BaseStation) setMetadataErrorInternal(err error) {
+	bs.metadataError = errorText(err)
+	bs.refreshLastErrorInternal()
+}
+
+func (bs *BaseStation) setOperationErrorInternal(err error) {
+	bs.operationError = errorText(err)
+	bs.refreshLastErrorInternal()
 }
 
 // GetPowerState reads the power state safely.
@@ -523,7 +579,7 @@ func invalidateDisconnectedDevice(station *BaseStation, disconnected bluetooth.D
 	station.identifyCharacteristic = nil
 	station.LastPowerReadAt = time.Time{}
 	station.LastChannelReadAt = time.Time{}
-	station.LastError = "Bluetooth device disconnected"
+	station.setConnectionErrorInternal(errors.New("Bluetooth device disconnected"))
 	station.mutex.Unlock()
 
 	connectedStationsMutex.Lock()
@@ -720,8 +776,12 @@ func ScanForDurationContext(ctx context.Context, duration time.Duration) ([]Disc
 			return
 		}
 		localMutex.Lock()
-		if _, found := localStations[addressString]; !found {
+		previous, found := localStations[addressString]
+		if !found {
 			// log.Printf("[BT] Scan: Discovered %s (%s)", result.LocalName(), result.Address.String())
+		}
+		if localName == "" && found {
+			localName = previous.Name
 		}
 		localStations[addressString] = DiscoveredStation{
 			Name:    localName,
@@ -1011,10 +1071,13 @@ func ReadPowerStateContext(ctx context.Context, station *BaseStation) error {
 	}
 	if powerReadErr != nil || channelReadErr != nil {
 		readErr := &StatusReadError{Power: powerReadErr, Channel: channelReadErr}
-		station.LastError = readErr.Error()
+		station.setPowerErrorInternal(powerReadErr)
+		station.setChannelErrorInternal(channelReadErr)
 		return readErr
 	}
-	station.LastError = ""
+	station.setConnectionErrorInternal(nil)
+	station.setPowerErrorInternal(nil)
+	station.setChannelErrorInternal(nil)
 	return nil
 }
 
@@ -1129,6 +1192,7 @@ func connectAndDiscoverInternalContext(ctx context.Context, station *BaseStation
 	if station.isConnected && station.device != nil && station.characteristic != nil {
 		connected, err := station.device.Connected()
 		if err == nil && connected {
+			station.setConnectionErrorInternal(nil)
 			return nil // Already good
 		}
 		if err := disconnectInternal(station); err != nil {
@@ -1148,7 +1212,7 @@ func connectAndDiscoverInternalContext(ctx context.Context, station *BaseStation
 			station.LastPowerReadAt = time.Time{}
 			station.LastChannelReadAt = time.Time{}
 			if ctx.Err() == nil {
-				station.LastError = err.Error()
+				station.setConnectionErrorInternal(err)
 			}
 			return transportError("connect station", err)
 		}
@@ -1231,6 +1295,7 @@ func connectAndDiscoverInternalContext(ctx context.Context, station *BaseStation
 			metadataRecognized := 0
 			metadataSuccessful := 0
 			metadataFailure := false
+			metadataErrors := make([]error, 0)
 			controlServiceFound := false
 
 			for serviceIndex := range services {
@@ -1253,6 +1318,7 @@ func connectAndDiscoverInternalContext(ctx context.Context, station *BaseStation
 					}
 					log.Printf("Bluetooth: Optional device information discovery failed for %s: %v", station.Name, characteristicErr)
 					metadataFailure = true
+					metadataErrors = append(metadataErrors, fmt.Errorf("discover device information characteristics: %w", characteristicErr))
 					continue
 				}
 
@@ -1299,6 +1365,7 @@ func connectAndDiscoverInternalContext(ctx context.Context, station *BaseStation
 						}
 						log.Printf("Bluetooth: Optional metadata read failed for %s (%s): %v", station.Name, current.UUID(), readErr)
 						metadataFailure = true
+						metadataErrors = append(metadataErrors, fmt.Errorf("read %s: %w", current.UUID(), readErr))
 						continue
 					}
 					metadataSuccessful++
@@ -1346,6 +1413,12 @@ func connectAndDiscoverInternalContext(ctx context.Context, station *BaseStation
 				metadataFailure,
 				time.Now(),
 			)
+			if metadataFailure {
+				station.setMetadataErrorInternal(errors.Join(metadataErrors...))
+			} else {
+				station.setMetadataErrorInternal(nil)
+			}
+			station.setConnectionErrorInternal(nil)
 			err = nil
 			break
 		}
@@ -1357,7 +1430,7 @@ func connectAndDiscoverInternalContext(ctx context.Context, station *BaseStation
 				station.Capabilities = Capabilities{}
 			}
 			cleanupErr := disconnectInternal(station)
-			station.LastError = err.Error()
+			station.setConnectionErrorInternal(err)
 			if permanentlyUnsupported {
 				if cleanupErr != nil {
 					return errors.Join(err, transportError("cleanup unsupported station connection", cleanupErr))
@@ -1499,7 +1572,7 @@ func FetchInitialPowerStateContext(ctx context.Context, station *BaseStation) er
 		if contextErr := ctx.Err(); contextErr != nil {
 			return finishCancelledInitialRead(station, contextErr)
 		}
-		station.LastError = err.Error()
+		station.setConnectionErrorInternal(err)
 		log.Printf("Bluetooth: Failed to connect/discover in FetchInitialPowerState for %s: %v", station.Name, err)
 		return err
 	}
@@ -1534,10 +1607,13 @@ func FetchInitialPowerStateContext(ctx context.Context, station *BaseStation) er
 	}
 	if powerReadErr != nil || channelReadErr != nil {
 		readErr := &InitialReadError{Power: powerReadErr, Channel: channelReadErr}
-		station.LastError = readErr.Error()
+		station.setPowerErrorInternal(powerReadErr)
+		station.setChannelErrorInternal(channelReadErr)
 		return readErr
 	}
-	station.LastError = ""
+	station.setConnectionErrorInternal(nil)
+	station.setPowerErrorInternal(nil)
+	station.setChannelErrorInternal(nil)
 	log.Printf("Bluetooth: FetchInitialPowerState successful for %s. State: %d, channel: %d", station.Name, station.PowerState, station.Channel)
 	return nil
 }
@@ -1758,13 +1834,13 @@ func SetPowerState(station *BaseStation, target PowerState) (PowerControlResult,
 			errors.As(err, &protocolErr) &&
 			protocolErr == bluetooth.ErrAttValueNotAllowed {
 			station.Capabilities.Standby = false
-			station.LastError = err.Error()
+			station.setOperationErrorInternal(err)
 			return PowerControlResult{}, unsupportedCapability("standby", err)
 		}
 		if IsCapabilityUnsupported(err) {
 			station.Capabilities.PowerWrite = false
 			station.Capabilities.Standby = false
-			station.LastError = err.Error()
+			station.setOperationErrorInternal(err)
 			return PowerControlResult{}, unsupportedCapability("power control", err)
 		}
 		log.Printf("Bluetooth: Write %s failed for %s: %v. Retrying...", target, station.Name, err)
@@ -1778,7 +1854,8 @@ func SetPowerState(station *BaseStation, target PowerState) (PowerControlResult,
 		if ambiguousWrite != nil {
 			if station.Capabilities.PowerRead && !ambiguousSleepPrepare {
 				if confirmationErr := confirmPowerStateInternal(station, target); confirmationErr == nil {
-					station.LastError = ""
+					station.setPowerErrorInternal(nil)
+					station.setOperationErrorInternal(nil)
 					return PowerControlResult{State: target, Confirmed: true}, nil
 				} else {
 					err = errors.Join(ambiguousWrite, confirmationErr)
@@ -1788,7 +1865,8 @@ func SetPowerState(station *BaseStation, target PowerState) (PowerControlResult,
 			} else {
 				err = errors.Join(ambiguousWrite, fmt.Errorf("sleep prepare write was ambiguous before the final sleep command"))
 			}
-			station.LastError = err.Error()
+			station.setPowerErrorInternal(err)
+			station.setOperationErrorInternal(nil)
 			return PowerControlResult{State: station.PowerState, Confirmed: false}, &PowerConfirmationError{
 				Target: target,
 				Actual: station.PowerState,
@@ -1796,18 +1874,19 @@ func SetPowerState(station *BaseStation, target PowerState) (PowerControlResult,
 				Err:    fmt.Errorf("possibly-sent command could not be confirmed for %s: %w", station.Name, err),
 			}
 		}
-		station.LastError = err.Error()
+		station.setOperationErrorInternal(err)
 		return PowerControlResult{}, fmt.Errorf("failed to write %s command after %d retries: %w", target, maxRetries, err)
 	}
 
 	if !station.Capabilities.PowerRead {
 		station.setPowerStateInternal(PowerStateUnknown, RawPowerStateUnknown)
-		station.LastReadAt = time.Time{}
-		station.LastError = ""
+		station.setPowerErrorInternal(nil)
+		station.setOperationErrorInternal(nil)
 		return PowerControlResult{State: target, Confirmed: false}, nil
 	}
 	if err = confirmPowerStateInternal(station, target); err != nil {
-		station.LastError = err.Error()
+		station.setPowerErrorInternal(err)
+		station.setOperationErrorInternal(nil)
 		return PowerControlResult{State: station.PowerState, Confirmed: false}, &PowerConfirmationError{
 			Target: target,
 			Actual: station.PowerState,
@@ -1816,7 +1895,8 @@ func SetPowerState(station *BaseStation, target PowerState) (PowerControlResult,
 		}
 	}
 	station.LastReadAt = time.Now()
-	station.LastError = ""
+	station.setPowerErrorInternal(nil)
+	station.setOperationErrorInternal(nil)
 	return PowerControlResult{State: target, Confirmed: true}, nil
 }
 
@@ -1845,16 +1925,16 @@ func Identify(station *BaseStation) error {
 		} else if err := writeCharacteristicValueInternal(station.identifyCharacteristic, 0x01); err != nil {
 			if IsCapabilityUnsupported(err) {
 				station.Capabilities.Identify = false
-				station.LastError = err.Error()
+				station.setOperationErrorInternal(err)
 				return unsupportedCapability("identify", err)
 			}
 			lastErr = err
 			if IsPossiblySent(err) {
-				station.LastError = err.Error()
+				station.setOperationErrorInternal(err)
 				return fmt.Errorf("identify command for %s may have been sent and will not be retried: %w", station.Name, err)
 			}
 		} else {
-			station.LastError = ""
+			station.setOperationErrorInternal(nil)
 			return nil
 		}
 		if attempt == 0 {
@@ -1863,7 +1943,7 @@ func Identify(station *BaseStation) error {
 		}
 	}
 	_ = disconnectInternal(station)
-	station.LastError = lastErr.Error()
+	station.setOperationErrorInternal(lastErr)
 	return fmt.Errorf("failed to identify %s after retry: %w", station.Name, lastErr)
 }
 
@@ -1892,7 +1972,8 @@ func SetChannel(station *BaseStation, channel int) (ChannelWriteResult, error) {
 		return result, unsupportedCapability("safe channel control", nil)
 	}
 	if err := readChannelInternal(station); err != nil {
-		station.LastError = err.Error()
+		station.setChannelErrorInternal(err)
+		station.setOperationErrorInternal(nil)
 		if RequiresReconnect(err) {
 			_ = disconnectInternal(station)
 		}
@@ -1902,14 +1983,15 @@ func SetChannel(station *BaseStation, channel int) (ChannelWriteResult, error) {
 	if station.Channel == channel {
 		result.Channel = station.Channel
 		station.LastReadAt = time.Now()
-		station.LastError = ""
+		station.setChannelErrorInternal(nil)
+		station.setOperationErrorInternal(nil)
 		return result, nil
 	}
 
 	if writeErr := writeCharacteristicValueInternal(station.modeCharacteristic, byte(channel)); writeErr != nil {
 		if IsCapabilityUnsupported(writeErr) {
 			station.Capabilities.ChannelWrite = false
-			station.LastError = writeErr.Error()
+			station.setOperationErrorInternal(writeErr)
 			return result, unsupportedCapability("channel write", writeErr)
 		}
 		// Once the transport reports an ambiguous write, a failed readback
@@ -1921,7 +2003,8 @@ func SetChannel(station *BaseStation, channel int) (ChannelWriteResult, error) {
 				result.CommandSent = true
 				result.WriteWarning = fmt.Sprintf("the write call reported an error, but channel %d was confirmed by readback: %v", channel, writeErr)
 				station.LastReadAt = time.Now()
-				station.LastError = ""
+				station.setChannelErrorInternal(nil)
+				station.setOperationErrorInternal(nil)
 				return result, nil
 			}
 			writeErr = fmt.Errorf(
@@ -1934,7 +2017,7 @@ func SetChannel(station *BaseStation, channel int) (ChannelWriteResult, error) {
 			writeErr = errors.Join(writeErr, fmt.Errorf("final channel read failed: %w", readErr))
 			_ = disconnectInternal(station)
 		}
-		station.LastError = writeErr.Error()
+		station.setOperationErrorInternal(writeErr)
 		return result, fmt.Errorf("failed to write channel %d for %s: %w", channel, station.Name, writeErr)
 	}
 	result.CommandSent = true
@@ -1963,7 +2046,8 @@ func SetChannel(station *BaseStation, channel int) (ChannelWriteResult, error) {
 		result.Channel = station.Channel
 		if station.Channel == channel {
 			station.LastReadAt = time.Now()
-			station.LastError = ""
+			station.setChannelErrorInternal(nil)
+			station.setOperationErrorInternal(nil)
 			return result, nil
 		}
 		confirmationErr = fmt.Errorf("reported channel %d, expected %d", station.Channel, channel)
@@ -1973,7 +2057,8 @@ func SetChannel(station *BaseStation, channel int) (ChannelWriteResult, error) {
 		if station.Channel == channel {
 			result.WriteWarning = fmt.Sprintf("channel %d was confirmed by the final readback", channel)
 			station.LastReadAt = time.Now()
-			station.LastError = ""
+			station.setChannelErrorInternal(nil)
+			station.setOperationErrorInternal(nil)
 			return result, nil
 		}
 		confirmationErr = fmt.Errorf("reported channel %d, expected %d", station.Channel, channel)
@@ -1986,7 +2071,8 @@ func SetChannel(station *BaseStation, channel int) (ChannelWriteResult, error) {
 	if confirmationErr == nil {
 		confirmationErr = fmt.Errorf("no channel confirmation was received")
 	}
-	station.LastError = confirmationErr.Error()
+	station.setChannelErrorInternal(confirmationErr)
+	station.setOperationErrorInternal(nil)
 	return result, fmt.Errorf("channel %d was written but could not be confirmed for %s: %w", channel, station.Name, confirmationErr)
 }
 

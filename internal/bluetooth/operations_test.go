@@ -408,12 +408,18 @@ func TestSetPowerStateStableTargetsAndConfirmation(t *testing.T) {
 func TestSetPowerStateWithoutReadReportsUnconfirmed(t *testing.T) {
 	power := &fakeCharacteristic{value: []byte{0x00}, powerSemantics: true}
 	station := connectedFakeStation(power, nil, nil, Capabilities{PowerWrite: true})
+	lastChannelRead := time.Now().Add(-time.Minute)
+	station.LastChannelReadAt = lastChannelRead
+	station.LastReadAt = lastChannelRead
 	result, err := SetPowerState(station, PowerStateOn)
 	if err != nil {
 		t.Fatalf("SetPowerState() error = %v", err)
 	}
 	if result.Confirmed || station.PowerState != PowerStateUnknown {
 		t.Fatalf("result = %+v, cached state = %v", result, station.PowerState)
+	}
+	if !station.LastReadAt.Equal(lastChannelRead) {
+		t.Fatalf("unconfirmed power write discarded last successful status read: %v", station.LastReadAt)
 	}
 }
 
@@ -736,7 +742,7 @@ func TestIdentifyWritesOne(t *testing.T) {
 	identify := &fakeCharacteristic{}
 	power := &fakeCharacteristic{}
 	station := connectedFakeStation(power, nil, identify, Capabilities{Identify: true})
-	station.LastError = "old connection error"
+	station.setOperationErrorInternal(errors.New("old identify error"))
 	if err := Identify(station); err != nil {
 		t.Fatalf("Identify() error = %v", err)
 	}
@@ -745,6 +751,38 @@ func TestIdentifyWritesOne(t *testing.T) {
 	}
 	if station.LastError != "" {
 		t.Fatalf("successful identify retained stale error %q", station.LastError)
+	}
+}
+
+func TestIdentifySuccessPreservesUnresolvedPowerError(t *testing.T) {
+	identify := &fakeCharacteristic{}
+	station := connectedFakeStation(&fakeCharacteristic{}, nil, identify, Capabilities{Identify: true})
+	station.setPowerErrorInternal(errors.New("power read failed"))
+
+	if err := Identify(station); err != nil {
+		t.Fatalf("Identify() error = %v", err)
+	}
+	if !strings.Contains(station.LastError, "power read failed") {
+		t.Fatalf("successful identify cleared unresolved power error %q", station.LastError)
+	}
+}
+
+func TestErrorDomainsClearIndependently(t *testing.T) {
+	station := &BaseStation{}
+	station.setPowerErrorInternal(errors.New("power unavailable"))
+	station.setMetadataErrorInternal(errors.New("firmware read failed"))
+	station.setOperationErrorInternal(errors.New("identify failed"))
+
+	station.setOperationErrorInternal(nil)
+	if !strings.Contains(station.LastError, "power unavailable") ||
+		!strings.Contains(station.LastError, "firmware read failed") ||
+		strings.Contains(station.LastError, "identify failed") {
+		t.Fatalf("independent error aggregation = %q", station.LastError)
+	}
+	station.setPowerErrorInternal(nil)
+	if strings.Contains(station.LastError, "power unavailable") ||
+		!strings.Contains(station.LastError, "firmware read failed") {
+		t.Fatalf("clearing power error changed metadata error = %q", station.LastError)
 	}
 }
 
@@ -1448,6 +1486,58 @@ func TestScanFindsServiceOnlyAdvertisement(t *testing.T) {
 	}
 	if len(results) != 1 || results[0].Name != "" {
 		t.Fatalf("service-only scan results = %+v", results)
+	}
+}
+
+func TestScanMergesNamesAcrossDuplicateAdvertisements(t *testing.T) {
+	originalAdapter := adapter
+	t.Cleanup(func() { adapter = originalAdapter })
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+	mac, err := tinybluetooth.ParseMAC("11:22:33:44:55:67")
+	if err != nil {
+		t.Fatalf("ParseMAC() error = %v", err)
+	}
+	address := tinybluetooth.Address{MACAddress: tinybluetooth.MACAddress{MAC: mac}}
+	for _, test := range []struct {
+		name       string
+		firstName  string
+		secondName string
+		wantName   string
+	}{
+		{name: "named then blank", firstName: "LHB-NAMED", wantName: "LHB-NAMED"},
+		{name: "blank then named", secondName: "LHB-NAMED", wantName: "LHB-NAMED"},
+		{name: "new non-empty name wins", firstName: "LHB-OLD", secondName: "LHB-NEW", wantName: "LHB-NEW"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fake := newFakeBLEAdapter()
+			adapter = fake
+			fake.results = []tinybluetooth.ScanResult{
+				{
+					Address: address,
+					AdvertisementPayload: &fakeAdvertisementPayload{
+						name:     test.firstName,
+						services: []tinybluetooth.UUID{powerControlServiceUUID},
+					},
+				},
+				{
+					Address: address,
+					AdvertisementPayload: &fakeAdvertisementPayload{
+						name:     test.secondName,
+						services: []tinybluetooth.UUID{powerControlServiceUUID},
+					},
+				},
+			}
+
+			results, err := ScanForDuration(time.Millisecond)
+			if err != nil {
+				t.Fatalf("ScanForDuration() error = %v", err)
+			}
+			if len(results) != 1 || results[0].Name != test.wantName {
+				t.Fatalf("duplicate scan results = %+v, want name %q", results, test.wantName)
+			}
+		})
 	}
 }
 
