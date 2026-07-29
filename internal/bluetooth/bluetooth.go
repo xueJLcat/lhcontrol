@@ -1398,6 +1398,9 @@ func EnsureCapabilitiesContext(ctx context.Context, station *BaseStation) (Capab
 	station.mutex.Lock()
 	defer station.mutex.Unlock()
 	if err := connectAndDiscoverInternalContext(ctx, station); err != nil {
+		if contextErr := ctx.Err(); contextErr != nil {
+			return Capabilities{}, finishCancelledCapabilityDiscovery(station, contextErr)
+		}
 		return Capabilities{}, err
 	}
 	return station.Capabilities, nil
@@ -1424,9 +1427,19 @@ func RefreshCapabilitiesContext(ctx context.Context, station *BaseStation) (Capa
 	}
 	station.CapabilitiesKnown = false
 	if err := connectAndDiscoverInternalContext(ctx, station); err != nil {
+		if contextErr := ctx.Err(); contextErr != nil {
+			return Capabilities{}, finishCancelledCapabilityDiscovery(station, contextErr)
+		}
 		return Capabilities{}, err
 	}
 	return station.Capabilities, nil
+}
+
+func finishCancelledCapabilityDiscovery(station *BaseStation, contextErr error) error {
+	if cleanupErr := disconnectInternal(station); cleanupErr != nil {
+		return errors.Join(contextErr, transportError("cleanup cancelled capability discovery", cleanupErr))
+	}
+	return contextErr
 }
 
 // FetchInitialPowerState attempts to connect (if necessary) and read the initial power state.

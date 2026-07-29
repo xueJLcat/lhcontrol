@@ -163,6 +163,17 @@ type staleTrackingConnectedDevice struct {
 	trackingConnectedDevice
 }
 
+type blockingDiscoveryDevice struct {
+	trackingConnectedDevice
+	started chan struct{}
+}
+
+func (device *blockingDiscoveryDevice) DiscoverServicesContext(ctx context.Context, _ []tinybluetooth.UUID) ([]tinybluetooth.DeviceService, error) {
+	close(device.started)
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
 func (*staleTrackingConnectedDevice) Connected() (bool, error) { return false, nil }
 
 func (device *trackingConnectedDevice) Disconnect() error {
@@ -1236,6 +1247,32 @@ func TestEnsureCapabilitiesUsesConnectedDiscovery(t *testing.T) {
 	}
 	if !capabilities.PowerWrite {
 		t.Fatalf("EnsureCapabilities() = %+v, want powerWrite", capabilities)
+	}
+}
+
+func TestEnsureCapabilitiesContextCleansUpCancelledDiscovery(t *testing.T) {
+	device := &blockingDiscoveryDevice{started: make(chan struct{})}
+	station := connectedFakeStation(&fakeCharacteristic{}, nil, nil, Capabilities{})
+	station.device = device
+	station.characteristic = nil
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		_, err := EnsureCapabilitiesContext(ctx, station)
+		result <- err
+	}()
+	<-device.started
+	cancel()
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("EnsureCapabilitiesContext() error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cancelled capability discovery did not return")
+	}
+	if device.disconnects != 1 || station.Snapshot().Connected {
+		t.Fatalf("cancelled discovery cleanup: disconnects=%d connected=%v", device.disconnects, station.Snapshot().Connected)
 	}
 }
 

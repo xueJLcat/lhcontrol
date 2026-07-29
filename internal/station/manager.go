@@ -239,6 +239,7 @@ type statusRetryKind uint8
 const (
 	statusRetryConnection statusRetryKind = 1 << iota
 	statusRetryChannel
+	statusRetryRefresh
 	statusAbsentRetryLimit = 5
 )
 
@@ -291,6 +292,23 @@ func (m *Manager) noteChannelFailure(address string) {
 	m.noteStatusFailureKind(address, statusRetryChannel)
 }
 
+func (m *Manager) noteStatusRefreshPending(address string) {
+	m.trackStatusRefreshPending(address)
+	m.scheduleStatusRecovery()
+}
+
+func (m *Manager) trackStatusRefreshPending(address string) {
+	m.statusRetryMutex.Lock()
+	retry := m.statusRetries[address]
+	retry.kinds |= statusRetryRefresh
+	now := time.Now()
+	if retry.nextAt.IsZero() || retry.nextAt.After(now) {
+		retry.nextAt = now
+	}
+	m.statusRetries[address] = retry
+	m.statusRetryMutex.Unlock()
+}
+
 func (m *Manager) noteStatusFailureKind(address string, kind statusRetryKind) {
 	m.statusRetryMutex.Lock()
 	retry := m.statusRetries[address]
@@ -320,6 +338,26 @@ func (m *Manager) statusRetryDelay(failures int) time.Duration {
 		return m.statusRetryMax
 	}
 	return delay
+}
+
+func (m *Manager) deferStatusRecovery(address string, delay time.Duration) {
+	m.statusRetryMutex.Lock()
+	retry, exists := m.statusRetries[address]
+	if exists {
+		deadline := time.Now().Add(delay)
+		kinds := effectiveStatusRetryKinds(retry)
+		if kinds&(statusRetryConnection|statusRetryRefresh) != 0 &&
+			(retry.nextAt.IsZero() || retry.nextAt.Before(deadline)) {
+			retry.nextAt = deadline
+		}
+		if kinds&statusRetryChannel != 0 &&
+			(retry.channelNextAt.IsZero() || retry.channelNextAt.Before(deadline)) {
+			retry.channelNextAt = deadline
+		}
+		m.statusRetries[address] = retry
+	}
+	m.statusRetryMutex.Unlock()
+	m.wakeStatusRecovery()
 }
 
 func (m *Manager) clearStatusFailure(address string) {
@@ -382,7 +420,7 @@ func statusRetryOrder(retry statusRetry) (int, time.Time, time.Time) {
 	var selectedFailures int
 	var selectedLastAttempt time.Time
 	var selectedNextAt time.Time
-	for _, kind := range []statusRetryKind{statusRetryConnection, statusRetryChannel} {
+	for _, kind := range []statusRetryKind{statusRetryConnection, statusRetryChannel, statusRetryRefresh} {
 		if kinds&kind == 0 {
 			continue
 		}
@@ -1024,6 +1062,7 @@ func (m *Manager) beginScan(callbacks ScanCallbacks) error {
 		err = bluetooth.ErrScanCancelled
 	}
 	m.abortScanStart(lifecycle, err, cancelled, operationAcquired)
+	m.clearScanLifecycle(lifecycle)
 	return err
 }
 
@@ -1096,11 +1135,6 @@ func (m *Manager) abortScanStart(lifecycle *scanLifecycle, err error, cancelled,
 	if operationAcquired {
 		m.endForegroundGlobalOperation()
 	}
-	m.scanLifecycleMutex.Lock()
-	if m.scanLifecycle == lifecycle {
-		m.scanLifecycle = nil
-	}
-	m.scanLifecycleMutex.Unlock()
 	lifecycle.mu.Lock()
 	if cancelled {
 		lifecycle.state = "cancelled"
@@ -1113,6 +1147,14 @@ func (m *Manager) abortScanStart(lifecycle *scanLifecycle, err error, cancelled,
 	}
 	close(lifecycle.done)
 	lifecycle.mu.Unlock()
+}
+
+func (m *Manager) clearScanLifecycle(lifecycle *scanLifecycle) {
+	m.scanLifecycleMutex.Lock()
+	if m.scanLifecycle == lifecycle {
+		m.scanLifecycle = nil
+	}
+	m.scanLifecycleMutex.Unlock()
 }
 
 func (m *Manager) finishScan(stations []StationInfo, found int, err error, callbacks ScanCallbacks) func() {
@@ -1148,13 +1190,7 @@ func (m *Manager) finishScan(stations []StationInfo, found int, err error, callb
 		// StartScan begins scan processing before delivering Started. Keep terminal
 		// notifications behind that callback without making processing wait for it.
 		<-lifecycle.startedDone
-		defer func() {
-			m.scanLifecycleMutex.Lock()
-			if m.scanLifecycle == lifecycle {
-				m.scanLifecycle = nil
-			}
-			m.scanLifecycleMutex.Unlock()
-		}()
+		defer m.clearScanLifecycle(lifecycle)
 		if errors.Is(err, bluetooth.ErrScanCancelled) || errors.Is(err, context.Canceled) {
 			if callbacks.Cancelled != nil {
 				if callbackErr := runSafely("scan cancelled callback", func() error {
@@ -1294,9 +1330,10 @@ func (m *Manager) scanAndFetchStations(ctx context.Context) ([]StationInfo, int,
 		defer cancelPhase()
 		var wg sync.WaitGroup
 		type initialReadResult struct {
-			address string
-			station *bluetooth.BaseStation
-			err     error
+			address               string
+			station               *bluetooth.BaseStation
+			err                   error
+			phaseDeadlineExceeded bool
 		}
 		readResults := make([]initialReadResult, len(stationsToFetch))
 		semaphore := make(chan struct{}, 2)
@@ -1313,6 +1350,7 @@ func (m *Manager) scanAndFetchStations(ctx context.Context) ([]StationInfo, int,
 						readResults[resultIndex].err = bluetooth.ErrScanCancelled
 					} else {
 						readResults[resultIndex].err = fmt.Errorf("initial read phase deadline exceeded: %w", phaseContext.Err())
+						readResults[resultIndex].phaseDeadlineExceeded = true
 					}
 					return
 				}
@@ -1326,6 +1364,10 @@ func (m *Manager) scanAndFetchStations(ctx context.Context) ([]StationInfo, int,
 				readResults[resultIndex].err = runSafely("initial station read", func() error {
 					return m.bluetoothOps.fetchInitialPowerState(readContext, ptr)
 				})
+				if ctx.Err() == nil && errors.Is(phaseContext.Err(), context.DeadlineExceeded) &&
+					errors.Is(readResults[resultIndex].err, context.DeadlineExceeded) {
+					readResults[resultIndex].phaseDeadlineExceeded = true
+				}
 			}(index, stationToFetch)
 		}
 		wg.Wait()
@@ -1339,6 +1381,11 @@ func (m *Manager) scanAndFetchStations(ctx context.Context) ([]StationInfo, int,
 		for _, result := range readResults {
 			if result.err == nil {
 				m.clearStatusFailure(result.address)
+				continue
+			}
+			if result.phaseDeadlineExceeded {
+				m.noteStatusRefreshPending(result.address)
+				readErrors = append(readErrors, fmt.Errorf("%s: %w", result.address, result.err))
 				continue
 			}
 			m.observeBluetoothError(result.err)
@@ -1485,6 +1532,7 @@ func (m *Manager) StartScan(callbacks ScanCallbacks) error {
 			defer m.scanCallbackWg.Done()
 			<-lifecycle.startedDone
 			m.deliverAbortedScanCallback(prepareErr, cancelled, callbacks)
+			m.clearScanLifecycle(lifecycle)
 			return
 		}
 		ctx := lifecycle.ctx
@@ -1611,6 +1659,12 @@ func (m *Manager) CheckAllStationStatuses() ([]StationInfo, error) {
 							statusErrors[item.index] = fmt.Errorf("%s: status read cancelled: %w", address, workerErr)
 							return
 						}
+						if errors.Is(refreshContext.Err(), context.DeadlineExceeded) &&
+							errors.Is(workerErr, context.DeadlineExceeded) {
+							m.trackStatusRefreshPending(address)
+							statusErrors[item.index] = fmt.Errorf("%s: status refresh deadline exceeded: %w", address, workerErr)
+							return
+						}
 						m.observeBluetoothError(workerErr)
 						var readErr *bluetooth.StatusReadError
 						if errors.As(workerErr, &readErr) {
@@ -1634,6 +1688,7 @@ dispatch:
 			for skippedIndex := index; skippedIndex < len(stationsToRead); skippedIndex++ {
 				address := stationsToRead[skippedIndex].Snapshot().Address
 				statusErrors[skippedIndex] = fmt.Errorf("%s: status refresh deadline exceeded: %w", address, refreshContext.Err())
+				m.trackStatusRefreshPending(address)
 			}
 			break dispatch
 		}
@@ -1800,7 +1855,7 @@ func (m *Manager) nextStatusRecoveryDelay() (time.Duration, bool) {
 		}
 		snapshot := station.Snapshot()
 		kinds := effectiveStatusRetryKinds(retries[snapshot.Address])
-		if kinds&statusRetryChannel != 0 || !snapshot.Connected {
+		if kinds&(statusRetryChannel|statusRetryRefresh) != 0 || !snapshot.Connected {
 			disconnected[snapshot.Address] = struct{}{}
 		}
 	}
@@ -1874,7 +1929,7 @@ func (m *Manager) runStatusRecoveryRound() time.Duration {
 			continue
 		}
 		kinds := effectiveStatusRetryKinds(retry)
-		if snapshot.Connected && kinds&statusRetryChannel == 0 {
+		if snapshot.Connected && kinds&(statusRetryChannel|statusRetryRefresh) == 0 {
 			continue
 		}
 		candidates = append(candidates, recoveryCandidate{
@@ -1936,8 +1991,13 @@ func (m *Manager) recoverOneStation(station *bluetooth.BaseStation, address stri
 		return 0
 	}
 	if errors.Is(err, context.Canceled) && m.lifecycleContext.Err() == nil {
+		m.deferStatusRecovery(address, m.statusBusyRetry)
 		return m.statusBusyRetry
 	}
+	// A refresh marker represents pending work, not a failure. Once an attempt
+	// completes, consume it; any real error below will establish the appropriate
+	// connection or channel retry schedule.
+	m.clearStatusFailureKind(address, statusRetryRefresh)
 	m.observeBluetoothError(err)
 	var initialErr *bluetooth.InitialReadError
 	if errors.As(err, &initialErr) {
@@ -2505,6 +2565,18 @@ func (m *Manager) setAllStationsPowerDetailed(state string) (BulkPowerResult, er
 				return err
 			})
 			if workerErr != nil {
+				if m.shuttingDown.Load() && errors.Is(workerErr, context.Canceled) {
+					stationResult.Skipped = true
+					stationResult.Reason = "application is shutting down"
+					stationResult.CommandSent = false
+					stationResult.Error = ""
+					if info, infoErr := m.stationInfoByAddress(stationResult.Address); infoErr == nil {
+						stationResult.Station = info
+						stationResult.Name = info.Name
+					}
+					result.Results[resultIndex] = stationResult
+					return
+				}
 				m.observeStationBluetoothError(s, stationResult.Address, workerErr)
 				var confirmationErr *bluetooth.PowerConfirmationError
 				if errors.As(workerErr, &confirmationErr) {

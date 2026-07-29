@@ -922,6 +922,44 @@ func TestAsyncScanReturnsWhileWaitingAndDeliversPreStartCancellation(t *testing.
 	manager.Shutdown()
 }
 
+func TestPreStartTerminalCallbackFinishesBeforeNextScanCanStart(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	if err := manager.beginRecoveryStationOperation("RECOVERY"); err != nil {
+		t.Fatalf("begin recovery: %v", err)
+	}
+	cancelledEntered := make(chan struct{})
+	releaseCancelled := make(chan struct{})
+	if err := manager.StartScan(ScanCallbacks{Cancelled: func() {
+		close(cancelledEntered)
+		<-releaseCancelled
+	}}); err != nil {
+		t.Fatalf("StartScan() error = %v", err)
+	}
+	if err := manager.StopScan(); err != nil {
+		t.Fatalf("StopScan() error = %v", err)
+	}
+	<-cancelledEntered
+	if err := manager.StartScan(ScanCallbacks{}); !errors.Is(err, ErrOperationInProgress) {
+		t.Fatalf("overlapping StartScan() error = %v, want ErrOperationInProgress", err)
+	}
+	close(releaseCancelled)
+	manager.scanCallbackWg.Wait()
+	manager.endRecoveryStationOperation("RECOVERY")
+	manager.bluetoothOps.scanForDurationContext = func(context.Context, time.Duration) ([]internalbluetooth.DiscoveredStation, error) {
+		return nil, nil
+	}
+	completed := make(chan struct{})
+	if err := manager.StartScan(ScanCallbacks{Completed: func([]StationInfo) { close(completed) }}); err != nil {
+		t.Fatalf("StartScan() after terminal callback error = %v", err)
+	}
+	select {
+	case <-completed:
+	case <-time.After(time.Second):
+		t.Fatal("next scan did not complete")
+	}
+	manager.Shutdown()
+}
+
 func TestScanInitialReadHasPerStationTotalTimeout(t *testing.T) {
 	manager := NewManager(config.NewConfig())
 	manager.initialReadTimeout = 25 * time.Millisecond
@@ -956,6 +994,7 @@ func TestScanInitialReadHasPerStationTotalTimeout(t *testing.T) {
 
 func TestScanInitialReadPhaseTimeoutBoundsWholeFleet(t *testing.T) {
 	manager := NewManager(config.NewConfig())
+	manager.statusRecoveryStart.Do(func() {})
 	manager.initialReadTimeout = time.Hour
 	manager.initialReadPhaseTimeout = 40 * time.Millisecond
 	discovered := make([]internalbluetooth.DiscoveredStation, 0, 6)
@@ -986,6 +1025,20 @@ func TestScanInitialReadPhaseTimeoutBoundsWholeFleet(t *testing.T) {
 	}
 	if status := manager.GetScanStatus(); status.State != "completed" || len(status.Warnings) == 0 {
 		t.Fatalf("scan status = %+v, want completed with phase warning", status)
+	}
+	manager.statusRetryMutex.Lock()
+	for _, item := range discovered {
+		address := item.Address.String()
+		retry, tracked := manager.statusRetries[address]
+		if !tracked || effectiveStatusRetryKinds(retry)&statusRetryRefresh == 0 {
+			t.Fatalf("phase-limited station %s retry = %+v, tracked=%v; want refresh retry", address, retry, tracked)
+		}
+	}
+	manager.statusRetryMutex.Unlock()
+	for _, station := range stations {
+		if station.LastError != "" {
+			t.Fatalf("phase budget marked %s as a device failure: %q", station.Address, station.LastError)
+		}
 	}
 	manager.Shutdown()
 }
@@ -2500,6 +2553,7 @@ func TestStatusCheckReadsConnectedAndTracksDisconnectedStationsTogether(t *testi
 func TestStatusRefreshTimeoutBoundsWholeFleet(t *testing.T) {
 	manager := NewManager(config.NewConfig())
 	defer manager.Shutdown()
+	manager.statusRecoveryStart.Do(func() {})
 	manager.statusReadTimeout = time.Hour
 	manager.statusRefreshTimeout = 40 * time.Millisecond
 	for index := 1; index <= 5; index++ {
@@ -2522,6 +2576,17 @@ func TestStatusRefreshTimeoutBoundsWholeFleet(t *testing.T) {
 	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
 		t.Fatalf("fleet status refresh took %v, want a fleet-wide bound", elapsed)
 	}
+	manager.statusRetryMutex.Lock()
+	for address, station := range manager.stations {
+		retry, tracked := manager.statusRetries[address]
+		if !tracked || effectiveStatusRetryKinds(retry)&statusRetryRefresh == 0 {
+			t.Fatalf("phase-limited status retry for %s = %+v, tracked=%v", address, retry, tracked)
+		}
+		if station.Snapshot().LastError != "" {
+			t.Fatalf("phase budget marked %s as a device failure: %q", address, station.Snapshot().LastError)
+		}
+	}
+	manager.statusRetryMutex.Unlock()
 }
 
 func TestStatusCheckLeavesOneSlotForForegroundWork(t *testing.T) {
@@ -3038,6 +3103,25 @@ func TestForegroundCancelsReadOnlyRecoveryToAcquireSlot(t *testing.T) {
 	}
 }
 
+func TestPreemptedRecoveryMovesBehindOtherDueCandidates(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	first := "11:22:33:44:99:01"
+	second := "11:22:33:44:99:02"
+	due := time.Now().Add(-time.Second)
+	manager.statusRetries[first] = statusRetry{kinds: statusRetryConnection, nextAt: due}
+	manager.statusRetries[second] = statusRetry{kinds: statusRetryConnection, nextAt: due}
+
+	manager.deferStatusRecovery(first, 250*time.Millisecond)
+	manager.statusRetryMutex.Lock()
+	_, _, firstNext := statusRetryOrder(manager.statusRetries[first])
+	_, _, secondNext := statusRetryOrder(manager.statusRetries[second])
+	manager.statusRetryMutex.Unlock()
+	if !secondNext.Before(firstNext) {
+		t.Fatalf("preempted candidate nextAt=%v, other nextAt=%v; want other candidate first", firstNext, secondNext)
+	}
+}
+
 func TestShutdownCancelsCapabilityDiscoveryBeforePowerWrite(t *testing.T) {
 	manager := NewManager(config.NewConfig())
 	address := "11:22:33:44:88:01"
@@ -3072,6 +3156,60 @@ func TestShutdownCancelsCapabilityDiscoveryBeforePowerWrite(t *testing.T) {
 	}
 	if writes.Load() != 0 {
 		t.Fatalf("power writes = %d, want zero after cancelled discovery", writes.Load())
+	}
+	manager.Shutdown()
+}
+
+func TestBulkShutdownCancellationReturnsSkippedResults(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	addresses := []string{"11:22:33:44:AA:01", "11:22:33:44:AA:02"}
+	for _, address := range addresses {
+		manager.stations[address] = &internalbluetooth.BaseStation{
+			Name: "LHB-BULK-SHUTDOWN", Address: mustAddress(t, address), Present: true,
+		}
+	}
+	discoveryStarted := make(chan struct{})
+	var startOnce sync.Once
+	manager.bluetoothOps.ensureCapabilities = func(ctx context.Context, _ *internalbluetooth.BaseStation) (internalbluetooth.Capabilities, error) {
+		startOnce.Do(func() { close(discoveryStarted) })
+		<-ctx.Done()
+		return internalbluetooth.Capabilities{}, ctx.Err()
+	}
+	var writes atomic.Int32
+	manager.bluetoothOps.setPowerState = func(*internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
+		writes.Add(1)
+		return internalbluetooth.PowerControlResult{}, nil
+	}
+	type bulkResult struct {
+		result BulkPowerResult
+		err    error
+	}
+	done := make(chan bulkResult, 1)
+	go func() {
+		result, err := manager.SetAllStationsPowerDetailed("on")
+		done <- bulkResult{result: result, err: err}
+	}()
+	<-discoveryStarted
+	manager.BeginShutdown()
+	select {
+	case outcome := <-done:
+		if outcome.err != nil {
+			t.Fatalf("SetAllStationsPowerDetailed() error = %v", outcome.err)
+		}
+		if len(outcome.result.Results) != len(addresses) {
+			t.Fatalf("bulk results = %+v", outcome.result.Results)
+		}
+		for _, item := range outcome.result.Results {
+			if !item.Skipped || item.Reason != "application is shutting down" ||
+				item.CommandSent || item.Error != "" || item.Address == "" || item.Name == "" {
+				t.Fatalf("shutdown result = %+v, want complete skipped result", item)
+			}
+		}
+	case <-time.After(time.Second):
+		t.Fatal("bulk operation did not finish after shutdown cancellation")
+	}
+	if writes.Load() != 0 {
+		t.Fatalf("power writes = %d, want zero", writes.Load())
 	}
 	manager.Shutdown()
 }
