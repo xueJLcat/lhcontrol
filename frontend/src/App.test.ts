@@ -1018,6 +1018,36 @@ describe('App asynchronous operations', () => {
     expect(await screen.findByText('Failed · last-known sleep')).toBeInTheDocument();
   });
 
+  it('clears completed power feedback when a periodic read reports a different state', async () => {
+    vi.useFakeTimers();
+    const initial = createStation({ lastPowerReadAt: '2026-07-29T08:00:00Z' });
+    const poweredOn = createStation({
+      powerState: 1,
+      powerStateName: 'on',
+      rawPowerState: 0x0b,
+      lastPowerReadAt: '2026-07-29T08:00:01Z'
+    });
+    api.ScanAndFetchStations.mockResolvedValue([initial]);
+    api.SetStationPower.mockResolvedValue({
+      station: poweredOn,
+      commandSent: true,
+      confirmed: true,
+      confirmationError: ''
+    });
+    api.CheckAllStationStatuses.mockResolvedValue([
+      createStation({ lastPowerReadAt: '2026-07-29T08:00:02Z' })
+    ]);
+
+    render(App);
+    await vi.waitFor(() => expect(screen.getByRole('button', { name: 'Turn LHB-TEST on' })).toBeEnabled());
+    await fireEvent.click(screen.getByRole('button', { name: 'Turn LHB-TEST on' }));
+    await vi.waitFor(() => expect(screen.getByText('On confirmed')).toBeInTheDocument());
+
+    await vi.advanceTimersByTimeAsync(15_000);
+    await vi.waitFor(() => expect(api.CheckAllStationStatuses).toHaveBeenCalledOnce());
+    expect(screen.queryByText('On confirmed')).not.toBeInTheDocument();
+  });
+
   it('keeps GATT capacity available during rename but locks scan and bulk', async () => {
     const stationA = createStation({ name: 'LHB-A', address: 'AA' });
     const stationB = createStation({ name: 'LHB-B', address: 'BB' });
@@ -1061,7 +1091,7 @@ describe('App asynchronous operations', () => {
     expect(screen.getByText('Preparing external scan...')).toBeInTheDocument();
   });
 
-  it('keeps a rename draft open while periodic refresh temporarily locks commands', async () => {
+  it('keeps a rename draft open while periodic status refresh continues', async () => {
     vi.useFakeTimers();
     render(App);
     await vi.waitFor(() => expect(screen.getByText('LHB-TEST')).toBeInTheDocument());
@@ -1070,8 +1100,8 @@ describe('App asynchronous operations', () => {
     await fireEvent.input(input, { target: { value: 'Draft name' } });
 
     await vi.advanceTimersByTimeAsync(15_000);
+    await vi.waitFor(() => expect(api.CheckAllStationStatuses).toHaveBeenCalledOnce());
     expect(screen.getByDisplayValue('Draft name')).toBeInTheDocument();
-    expect(api.CheckAllStationStatuses).not.toHaveBeenCalled();
   });
 
   it('saves and cancels rename through standard keyboard button activation without blur submission', async () => {
@@ -1206,6 +1236,36 @@ describe('App asynchronous operations', () => {
     const warning = await screen.findByText(/Channel command sent but unconfirmed: readback timed out/);
     expect(warning).toHaveClass('warning');
     expect(warning).toHaveTextContent('Readback: last-known 3');
+  });
+
+  it('uses the authoritative channel result without another station-list read', async () => {
+    const updated = createStation({
+      channel: 4,
+      channelFresh: true,
+      lastChannelReadAt: '2026-07-29T08:00:00Z'
+    });
+    api.SetStationChannel.mockResolvedValue({
+      address: updated.address,
+      previousChannel: 3,
+      channel: 4,
+      warnings: [],
+      commandSent: true,
+      confirmed: false,
+      confirmationError: 'readback timed out',
+      station: updated
+    });
+    api.GetCurrentStationInfo.mockRejectedValue(new Error('fixture list failure'));
+
+    render(App);
+    await screen.findByText('LHB-TEST');
+    await fireEvent.click(screen.getByRole('button', { name: 'Details for LHB-TEST' }));
+    await fireEvent.click(await screen.findByRole('button', { name: /Change Channel/ }));
+    await fireEvent.click(within(screen.getByRole('dialog', { name: 'Change channel' })).getByRole('button', { name: '4' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Confirm change' }));
+
+    const warning = await screen.findByText(/Channel command sent but unconfirmed: readback timed out/);
+    expect(warning).toHaveTextContent('Readback: actual 4');
+    expect(api.GetCurrentStationInfo).not.toHaveBeenCalled();
   });
 
   it('does not let a pending device result overwrite a newer external scan', async () => {

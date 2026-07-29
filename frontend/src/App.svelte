@@ -24,7 +24,7 @@
   import type { PowerFeedback, PowerTarget, StationInfo } from './lib/types';
   import {
     canSetPower, channelChangeBlockedReason, hasCurrentChannel, hasVerifiedPowerState, isCurrentPowerState,
-    powerTargetLabel, stateLabel
+    powerStateValue, powerTargetLabel, stateLabel
   } from './lib/station';
   import { formatBulkResult, formatTerminalScanResult, summarizeBulkResult } from './lib/result-format';
   import { clearToasts, pushToast } from './lib/toast';
@@ -45,6 +45,8 @@
   let configOperations = new Set<string>();
   let powerTargetByAddress: Record<string, PowerTarget | undefined> = {};
   let powerFeedbackByAddress: Record<string, PowerFeedback | undefined> = {};
+  const powerFeedbackTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  const powerFeedbackRetentionMs = 20_000;
   let globalOperation: GlobalOperation = 'idle';
   let bulkTarget: PowerTarget | null = null;
   let editingAddress: string | null = null;
@@ -235,6 +237,64 @@
     configOperations = next;
   }
 
+  function clearPowerFeedbackTimer(address: string) {
+    const timer = powerFeedbackTimers.get(address);
+    if (timer) clearTimeout(timer);
+    powerFeedbackTimers.delete(address);
+  }
+
+  function clearPowerFeedback(address: string) {
+    clearPowerFeedbackTimer(address);
+    if (!powerFeedbackByAddress[address]) return;
+    const next = { ...powerFeedbackByAddress };
+    delete next[address];
+    powerFeedbackByAddress = next;
+  }
+
+  function clearAllPowerFeedback() {
+    for (const timer of powerFeedbackTimers.values()) clearTimeout(timer);
+    powerFeedbackTimers.clear();
+    powerFeedbackByAddress = {};
+  }
+
+  function setPowerFeedback(
+    address: string,
+    feedback: Omit<PowerFeedback, 'createdAt'>
+  ) {
+    clearPowerFeedbackTimer(address);
+    const createdAt = Date.now();
+    powerFeedbackByAddress = {
+      ...powerFeedbackByAddress,
+      [address]: { ...feedback, createdAt }
+    };
+    if (feedback.kind === 'pending') return;
+    powerFeedbackTimers.set(address, setTimeout(() => {
+      if (powerFeedbackByAddress[address]?.createdAt === createdAt) {
+        clearPowerFeedback(address);
+      }
+    }, powerFeedbackRetentionMs));
+  }
+
+  function reconcilePowerFeedback(updated: StationInfo[]) {
+    for (const station of updated) {
+      const feedback = powerFeedbackByAddress[station.address];
+      if (!feedback || feedback.kind === 'pending') continue;
+      const targetChanged = feedback.target !== undefined &&
+        station.powerFresh && station.powerStateConfirmed &&
+        station.powerState !== powerStateValue(feedback.target);
+      const feedbackReadAt = feedback.readAt ? Date.parse(feedback.readAt) : Number.NaN;
+      const stationReadAt = station.lastPowerReadAt ? Date.parse(station.lastPowerReadAt) : Number.NaN;
+      const newerRead = Number.isFinite(feedbackReadAt) && Number.isFinite(stationReadAt) &&
+        stationReadAt > feedbackReadAt;
+      if (targetChanged || newerRead) clearPowerFeedback(station.address);
+    }
+  }
+
+  function commitStations(updated: StationInfo[]) {
+    stations = updated;
+    reconcilePowerFeedback(updated);
+  }
+
   function gattLockedFor(address: string): boolean {
     return stationLocked || (gattCapacityReached && !gattOperations.has(address));
   }
@@ -261,7 +321,7 @@
     if (disposed || !listRevisions.isCurrent(revision)) return false;
     const incoming = updated || [];
     if (!capturedStationRevisions) {
-      stations = incoming;
+      commitStations(incoming);
       return true;
     }
     const currentByAddress = new Map(stations.map((station) => [station.address, station]));
@@ -277,7 +337,7 @@
         merged.push(current);
       }
     }
-    stations = merged;
+    commitStations(merged);
     return true;
   }
 
@@ -304,17 +364,17 @@
       configOperations = new Set();
     }
     powerTargetByAddress = {};
-    powerFeedbackByAddress = {};
+    clearAllPowerFeedback();
   }
 
   function mergeStationUpdates(updated: StationInfo[]) {
     if (!updated.length) return;
     const byAddress = new Map(updated.map((station) => [station.address, station]));
     const existingAddresses = new Set(stations.map((station) => station.address));
-    stations = [
+    commitStations([
       ...stations.map((station) => byAddress.get(station.address) ?? station),
       ...updated.filter((station) => !existingAddresses.has(station.address))
-    ];
+    ]);
   }
 
   function withStationChanges(current: StationInfo, changes: Partial<StationInfo>): StationInfo {
@@ -461,6 +521,7 @@
     endScanTimer();
     if (statusCheckInterval) clearInterval(statusCheckInterval);
     if (apiStatusInterval) clearInterval(apiStatusInterval);
+    clearAllPowerFeedback();
     cancelExternalScanListener?.();
     cancelExternalScanFailureListener?.();
     cancelExternalScanStartedListener?.();
@@ -468,7 +529,7 @@
   });
 
   async function periodicStatusCheck() {
-    if (startupPending || isStatusChecking || isLoading || isBulkLoading || anyDeviceOperation || editingAddress !== null) return;
+    if (startupPending || isStatusChecking || isLoading || isBulkLoading || anyDeviceOperation) return;
     globalOperation = 'status-refresh';
     const statusOperation = statusEpoch;
     const revision = listRevisions.next();
@@ -656,7 +717,7 @@
     if (!canCommitStationOperation(epoch, address, operationRevision)) return null;
     const station = updated?.find((item) => item.address === address) ?? null;
     if (station) {
-      stations = stations.map((current) => current.address === address ? station : current);
+      mergeStationUpdates([station]);
     }
     return station;
   }
@@ -679,23 +740,29 @@
     const operationRevision = beginStationOperationRevision(station.address);
     setGattBusy(station.address, true);
     powerTargetByAddress = { ...powerTargetByAddress, [station.address]: state };
-    powerFeedbackByAddress = {
-      ...powerFeedbackByAddress,
-      [station.address]: { kind: 'pending', text: `Switching to ${targetLabel}…` }
-    };
+    setPowerFeedback(station.address, {
+      kind: 'pending',
+      text: `Switching to ${targetLabel}…`,
+      target: state
+    });
     statusMessage = `Setting ${station.name} to ${targetLabel}…`;
     try {
       const result = await SetStationPower(station.address, state);
       if (!canCommitStationOperation(operationEpoch, station.address, operationRevision)) return;
-      stations = stations.map((current) => current.address === station.address ? result.station : current);
-      powerFeedbackByAddress = {
-        ...powerFeedbackByAddress,
-        [station.address]: result.confirmed
-          ? { kind: 'success', text: `${targetLabel} confirmed` }
-          : { kind: 'warning', text: result.confirmationError
+      mergeStationUpdates([result.station]);
+      setPowerFeedback(station.address, result.confirmed
+        ? {
+            kind: 'success', text: `${targetLabel} confirmed`, target: state,
+            readAt: result.station.lastPowerReadAt
+          }
+        : {
+            kind: 'warning',
+            text: result.confirmationError
               ? `${targetLabel} sent · confirmation failed`
-              : `${targetLabel} sent · status unavailable` }
-      };
+              : `${targetLabel} sent · status unavailable`,
+            target: state,
+            readAt: result.station.lastPowerReadAt
+          });
       if (canCommitStatus(statusOperation)) {
         statusMessage = result.confirmed
           ? `${station.name} is ${targetLabel}.`
@@ -708,10 +775,12 @@
       const errorText = String(error);
       const actual = await fetchStationUpdate(station.address, operationEpoch, operationRevision);
       if (!canCommitStationOperation(operationEpoch, station.address, operationRevision)) return;
-      powerFeedbackByAddress = {
-        ...powerFeedbackByAddress,
-        [station.address]: { kind: 'error', text: `Failed · ${powerReadbackLabel(actual)}` }
-      };
+      setPowerFeedback(station.address, {
+        kind: 'error',
+        text: `Failed · ${powerReadbackLabel(actual)}`,
+        target: state,
+        readAt: actual?.lastPowerReadAt
+      });
       if (canCommitStatus(statusOperation)) {
         statusMessage = `Power change failed for ${station.name}: ${errorText}`;
         pushToast(`Power change failed for ${station.name}: ${errorText}`);
@@ -750,9 +819,8 @@
       mergeStationUpdates(result.results.map((item) => item.station).filter((item) => Boolean(item?.address)));
       await fetchLatestList();
       if (!canCommitOperation(operationEpoch)) return;
-      const feedback = { ...powerFeedbackByAddress };
       for (const item of result.results) {
-        feedback[item.address] = item.skipped
+        const feedback: Pick<PowerFeedback, 'kind' | 'text'> = item.skipped
           ? item.success && item.confirmed
             ? { kind: 'success', text: `Already ${targetLabel}` }
             : { kind: 'warning', text: `Skipped · ${item.reason || 'not actionable'}` }
@@ -761,8 +829,12 @@
               : item.success && item.commandSent
               ? { kind: 'warning', text: `${targetLabel} sent · ${item.error || 'status unavailable'}` }
               : { kind: 'error', text: item.error || `Failed to set ${targetLabel}` };
+        setPowerFeedback(item.address, {
+          ...feedback,
+          target: state,
+          readAt: item.station?.lastPowerReadAt
+        });
       }
-      powerFeedbackByAddress = feedback;
       const summary = summarizeBulkResult(result.results);
       if (!canCommitStatus(statusOperation)) return;
       statusMessage = formatBulkResult(targetLabel, summary);
@@ -922,8 +994,13 @@
         confirmationError?: string;
       };
       if (!canCommitStationOperation(operationEpoch, address, operationRevision)) return;
-      const actual = await fetchStationUpdate(address, operationEpoch, operationRevision);
-      if (!canCommitStationOperation(operationEpoch, address, operationRevision)) return;
+      let actual = result.station?.address ? result.station : null;
+      if (actual) {
+        mergeStationUpdates([actual]);
+      } else {
+        actual = await fetchStationUpdate(address, operationEpoch, operationRevision);
+        if (!canCommitStationOperation(operationEpoch, address, operationRevision)) return;
+      }
       if (result.confirmed === false) {
         const warning = result.confirmationError || 'Channel readback is unavailable.';
         channelError = `Channel command sent but unconfirmed: ${warning} Readback: ${channelReadbackLabel(actual)}.`;
@@ -931,13 +1008,10 @@
         if (canCommitStatus(statusOperation)) statusMessage = `${selectedStation.name}: channel command sent, but confirmation failed. ${warning}`;
         return;
       }
-      const authoritative = result.station?.address ? result.station : actual;
-      if (authoritative) {
-        stations = stations.map((station) => station.address === address ? authoritative : station);
-      } else {
-        stations = stations.map((station) => station.address === address
+      if (!actual) {
+        commitStations(stations.map((station) => station.address === address
           ? withStationChanges(station, { channel: result.channel })
-          : station);
+          : station));
       }
       channelEditorOpen = false;
       if (canCommitStatus(statusOperation)) statusMessage = `Channel changed from ${result.previousChannel || 'unknown'} to ${result.channel}. ${result.warnings.join(' ')}`;

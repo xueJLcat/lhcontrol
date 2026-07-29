@@ -2820,6 +2820,144 @@ func TestStaleBootingStationIsNotSkippedByBulkSelection(t *testing.T) {
 	}
 }
 
+func TestBulkPowerRechecksQueuedStationStateBeforeWrite(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		state         internalbluetooth.PowerState
+		raw           int
+		wantReason    string
+		wantSuccess   bool
+		wantConfirmed bool
+	}{
+		{
+			name:       "booting",
+			state:      internalbluetooth.PowerStateBooting,
+			raw:        0x01,
+			wantReason: "station is booting",
+		},
+		{
+			name:          "already at target",
+			state:         internalbluetooth.PowerStateOn,
+			raw:           0x0B,
+			wantReason:    "already at target state",
+			wantSuccess:   true,
+			wantConfirmed: true,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			manager := NewManager(config.NewConfig())
+			addresses := []string{
+				"11:22:33:44:55:81",
+				"11:22:33:44:55:82",
+				"11:22:33:44:55:83",
+				"11:22:33:44:55:84",
+			}
+			stations := make(map[string]*internalbluetooth.BaseStation, len(addresses))
+			for index, address := range addresses {
+				station := &internalbluetooth.BaseStation{
+					Name:              fmt.Sprintf("LHB-%d", index+1),
+					Address:           mustAddress(t, address),
+					Present:           true,
+					PowerState:        internalbluetooth.PowerStateSleep,
+					RawPowerState:     0x00,
+					LastPowerReadAt:   time.Now(),
+					Capabilities:      internalbluetooth.Capabilities{PowerWrite: true},
+					CapabilitiesKnown: true,
+				}
+				manager.stations[address] = station
+				stations[address] = station
+			}
+
+			entered := make(chan string, 2)
+			release := make(chan struct{})
+			var writesMutex sync.Mutex
+			writes := make(map[string]int)
+			manager.bluetoothOps.setPowerState = func(
+				station *internalbluetooth.BaseStation,
+				_ internalbluetooth.PowerState,
+			) (internalbluetooth.PowerControlResult, error) {
+				address := station.Snapshot().Address
+				writesMutex.Lock()
+				writes[address]++
+				writesMutex.Unlock()
+				select {
+				case entered <- address:
+					<-release
+				default:
+				}
+				return internalbluetooth.PowerControlResult{Confirmed: true}, nil
+			}
+
+			type outcome struct {
+				result BulkPowerResult
+				err    error
+			}
+			done := make(chan outcome, 1)
+			go func() {
+				result, err := manager.SetAllStationsPowerDetailed("on")
+				done <- outcome{result: result, err: err}
+			}()
+
+			started := map[string]bool{
+				<-entered: true,
+				<-entered: true,
+			}
+			var queuedAddress string
+			for _, address := range addresses {
+				if !started[address] {
+					queuedAddress = address
+					break
+				}
+			}
+			if queuedAddress == "" {
+				t.Fatal("no queued station was available for the state transition")
+			}
+			queued := stations[queuedAddress]
+			queued.PowerState = test.state
+			queued.RawPowerState = test.raw
+			queued.LastPowerReadAt = time.Now()
+			manager.statusRetryMutex.Lock()
+			manager.statusRetries[queuedAddress] = statusRetry{
+				kinds:  statusRetryConnection,
+				nextAt: time.Now().Add(time.Hour),
+			}
+			manager.statusRetryMutex.Unlock()
+			close(release)
+
+			actual := <-done
+			if actual.err != nil {
+				t.Fatalf("SetAllStationsPowerDetailed() error = %v", actual.err)
+			}
+			var queuedResult *BulkPowerStationResult
+			for index := range actual.result.Results {
+				if actual.result.Results[index].Address == queuedAddress {
+					queuedResult = &actual.result.Results[index]
+					break
+				}
+			}
+			if queuedResult == nil {
+				t.Fatalf("result for queued station %s was missing: %+v", queuedAddress, actual.result.Results)
+			}
+			if !queuedResult.Skipped || queuedResult.Reason != test.wantReason ||
+				queuedResult.Success != test.wantSuccess || queuedResult.Confirmed != test.wantConfirmed {
+				t.Fatalf("queued result = %+v", *queuedResult)
+			}
+			writesMutex.Lock()
+			queuedWrites := writes[queuedAddress]
+			writesMutex.Unlock()
+			if queuedWrites != 0 {
+				t.Fatalf("queued station writes = %d, want 0", queuedWrites)
+			}
+			manager.statusRetryMutex.Lock()
+			_, retryPreserved := manager.statusRetries[queuedAddress]
+			manager.statusRetryMutex.Unlock()
+			if !retryPreserved {
+				t.Fatal("cached queued skip cleared connection recovery without communicating")
+			}
+		})
+	}
+}
+
 func TestStationGATTFailureInvalidatesConnectionAndRegistersRecovery(t *testing.T) {
 	manager := NewManager(config.NewConfig())
 	address := "11:22:33:44:55:61"

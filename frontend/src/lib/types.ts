@@ -10,4 +10,7 @@ export type PowerTarget = 'on' | 'standby' | 'sleep';
 export interface PowerFeedback {
   kind: 'pending' | 'success' | 'warning' | 'error';
   text: string;
+  target?: PowerTarget;
+  readAt?: string;
+  createdAt?: number;
 }

@@ -2267,12 +2267,10 @@ func (m *Manager) stationInfoByAddress(address string) (StationInfo, error) {
 // false when the firmware supports writing but does not expose power reads.
 func (m *Manager) cachedPowerOutcome(stationPtr *bluetooth.BaseStation, target bluetooth.PowerState) (PowerActionResult, error, bool) {
 	snapshot := stationPtr.Snapshot()
-	now := time.Now()
-	if snapshot.PowerState == bluetooth.PowerStateBooting && isFresh(snapshot.LastPowerReadAt, now) {
+	switch classifyCachedPower(snapshot, target, time.Now()) {
+	case cachedPowerBooting:
 		return PowerActionResult{}, fmt.Errorf("station is booting; retry after transition: %w", ErrOperationInProgress), true
-	}
-	if snapshot.PowerState != target || !isFresh(snapshot.LastPowerReadAt, now) ||
-		!bluetooth.IsPowerStateConfirmed(snapshot.PowerState, snapshot.RawPowerState) {
+	case cachedPowerActionable:
 		return PowerActionResult{}, nil, false
 	}
 	info, err := m.stationInfoByAddress(snapshot.Address)
@@ -2280,6 +2278,32 @@ func (m *Manager) cachedPowerOutcome(stationPtr *bluetooth.BaseStation, target b
 		return PowerActionResult{}, err, true
 	}
 	return PowerActionResult{Station: info, Confirmed: true}, nil, true
+}
+
+type cachedPowerDisposition uint8
+
+const (
+	cachedPowerActionable cachedPowerDisposition = iota
+	cachedPowerBooting
+	cachedPowerAtTarget
+)
+
+func classifyCachedPower(
+	snapshot bluetooth.BaseStationSnapshot,
+	target bluetooth.PowerState,
+	now time.Time,
+) cachedPowerDisposition {
+	if !isFresh(snapshot.LastPowerReadAt, now) {
+		return cachedPowerActionable
+	}
+	if snapshot.PowerState == bluetooth.PowerStateBooting {
+		return cachedPowerBooting
+	}
+	if snapshot.PowerState == target &&
+		bluetooth.IsPowerStateConfirmed(snapshot.PowerState, snapshot.RawPowerState) {
+		return cachedPowerAtTarget
+	}
+	return cachedPowerActionable
 }
 
 func (m *Manager) SetStationPower(address, state string) (PowerActionResult, error) {
@@ -2675,11 +2699,11 @@ func (m *Manager) cachedBulkPowerResult(target bluetooth.PowerState) (BulkPowerR
 	result := BulkPowerResult{Target: target.String(), Results: []BulkPowerStationResult{}}
 	for _, info := range m.GetStationInfo() {
 		item := BulkPowerStationResult{Address: info.Address, Name: info.Name, Station: info}
-		switch {
-		case info.PowerFresh && bluetooth.PowerState(info.PowerState) == bluetooth.PowerStateBooting:
+		switch classifyCachedPowerInfo(info, target) {
+		case cachedPowerBooting:
 			item.Skipped = true
 			item.Reason = "station is booting"
-		case info.PowerFresh && info.PowerStateConfirmed && bluetooth.PowerState(info.PowerState) == target:
+		case cachedPowerAtTarget:
 			item.Skipped = true
 			item.Success = true
 			item.Confirmed = true
@@ -2690,6 +2714,19 @@ func (m *Manager) cachedBulkPowerResult(target bluetooth.PowerState) (BulkPowerR
 		result.Results = append(result.Results, item)
 	}
 	return result, true
+}
+
+func classifyCachedPowerInfo(info StationInfo, target bluetooth.PowerState) cachedPowerDisposition {
+	if !info.PowerFresh {
+		return cachedPowerActionable
+	}
+	if bluetooth.PowerState(info.PowerState) == bluetooth.PowerStateBooting {
+		return cachedPowerBooting
+	}
+	if info.PowerStateConfirmed && bluetooth.PowerState(info.PowerState) == target {
+		return cachedPowerAtTarget
+	}
+	return cachedPowerActionable
 }
 
 func (m *Manager) setAllStationsPowerDetailed(state string) (BulkPowerResult, error) {
@@ -2747,13 +2784,11 @@ func (m *Manager) setAllStationsPowerDetailed(state string) (BulkPowerResult, er
 		snapshot := candidate.snapshot
 		name := candidate.name
 		stationResult := BulkPowerStationResult{Address: snapshot.Address, Name: name}
-		switch {
-		case snapshot.PowerState == bluetooth.PowerStateBooting && isFresh(snapshot.LastPowerReadAt, selectionTime):
+		switch classifyCachedPower(snapshot, target, selectionTime) {
+		case cachedPowerBooting:
 			stationResult.Skipped = true
 			stationResult.Reason = "station is booting"
-		case snapshot.PowerState == target &&
-			isFresh(snapshot.LastPowerReadAt, selectionTime) &&
-			bluetooth.IsPowerStateConfirmed(snapshot.PowerState, snapshot.RawPowerState):
+		case cachedPowerAtTarget:
 			stationResult.Skipped = true
 			stationResult.Success = true
 			stationResult.Confirmed = true
@@ -2806,10 +2841,25 @@ func (m *Manager) setAllStationsPowerDetailed(state string) (BulkPowerResult, er
 			stationResult := BulkPowerStationResult{
 				Address: s.Address.String(),
 			}
+			cachedSkip := false
 			workerErr := runSafely("bulk power worker", func() error {
 				snapshot := s.Snapshot()
 				stationResult.Address = snapshot.Address
 				stationResult.Name = snapshot.Name
+				switch classifyCachedPower(snapshot, target, time.Now()) {
+				case cachedPowerBooting:
+					cachedSkip = true
+					stationResult.Skipped = true
+					stationResult.Reason = "station is booting"
+					return nil
+				case cachedPowerAtTarget:
+					cachedSkip = true
+					stationResult.Skipped = true
+					stationResult.Success = true
+					stationResult.Confirmed = true
+					stationResult.Reason = "already at target state"
+					return nil
+				}
 				capabilities := snapshot.Capabilities
 				var err error
 				discoveryContext, cancelDiscovery := context.WithTimeout(m.lifecycleContext, m.initialReadTimeout)
@@ -2875,7 +2925,7 @@ func (m *Manager) setAllStationsPowerDetailed(state string) (BulkPowerResult, er
 				stationResult.Station = info
 				stationResult.Name = info.Name
 			}
-			communicationSucceeded := workerErr == nil || stationResult.CommandSent
+			communicationSucceeded := !cachedSkip && (workerErr == nil || stationResult.CommandSent)
 			if communicationSucceeded && !bluetooth.RequiresReconnect(workerErr) &&
 				!bluetooth.IsAdapterUnavailable(workerErr) {
 				m.clearStatusFailureKind(stationResult.Address, statusRetryConnection)
