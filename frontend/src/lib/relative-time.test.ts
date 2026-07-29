@@ -20,6 +20,11 @@ describe('relativeTime', () => {
     expect(relativeTime('2026-07-26T12:00:05Z', now)).toBe('just now');
   });
 
+  it('reports a clock mismatch for timestamps well into the future', () => {
+    expect(relativeTime('2026-07-26T12:05:00Z', now)).toBe('clock mismatch');
+    expect(relativeTime('2026-07-26T14:00:00Z', now)).toBe('clock mismatch');
+  });
+
   it('reports seconds below one minute', () => {
     expect(relativeTime('2026-07-26T11:59:15Z', now)).toBe('45s ago');
   });

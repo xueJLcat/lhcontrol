@@ -3,6 +3,7 @@ export function relativeTime(iso: string, now: number = Date.now()): string {
   const timestamp = Date.parse(iso);
   if (Number.isNaN(timestamp)) return iso;
   const elapsedSeconds = Math.floor((now - timestamp) / 1000);
+  if (elapsedSeconds < -10) return 'clock mismatch';
   if (elapsedSeconds < 10) return 'just now';
   if (elapsedSeconds < 60) return `${elapsedSeconds}s ago`;
   const minutes = Math.floor(elapsedSeconds / 60);

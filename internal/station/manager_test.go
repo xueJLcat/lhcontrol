@@ -1735,6 +1735,7 @@ func TestBulkStandbyRefreshesCachedUnsupportedCapability(t *testing.T) {
 
 func TestRefreshCapabilitiesReturnsStationAfterChannelOnlyReadFailure(t *testing.T) {
 	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
 	address := "11:22:33:44:55:83"
 	manager.stations[address] = &internalbluetooth.BaseStation{
 		Name: "LHB-CHANNEL-PARTIAL", Address: mustAddress(t, address), Present: true,
@@ -1752,6 +1753,36 @@ func TestRefreshCapabilitiesReturnsStationAfterChannelOnlyReadFailure(t *testing
 	}
 	if info.Address != address || info.Name != "LHB-CHANNEL-PARTIAL" {
 		t.Fatalf("RefreshStationCapabilities() returned zero or wrong station: %+v", info)
+	}
+}
+
+func TestRefreshCapabilitiesReturnsStationAfterPowerReadFailure(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	address := "11:22:33:44:55:84"
+	manager.stations[address] = &internalbluetooth.BaseStation{
+		Name: "LHB-POWER-PARTIAL", Address: mustAddress(t, address), Present: true,
+	}
+	manager.bluetoothOps.refreshCapabilities = func(context.Context, *internalbluetooth.BaseStation) (internalbluetooth.Capabilities, error) {
+		return internalbluetooth.Capabilities{PowerRead: true, PowerWrite: true}, nil
+	}
+	manager.bluetoothOps.fetchInitialPowerState = func(_ context.Context, station *internalbluetooth.BaseStation) error {
+		station.LastError = "power unavailable"
+		return &internalbluetooth.InitialReadError{Power: errors.New("power unavailable")}
+	}
+
+	info, err := manager.RefreshStationCapabilities(address)
+	if err != nil {
+		t.Fatalf("RefreshStationCapabilities() error = %v", err)
+	}
+	if info.Address != address || info.LastError != "power unavailable" || info.PowerFresh {
+		t.Fatalf("RefreshStationCapabilities() partial result = %+v", info)
+	}
+	manager.statusRetryMutex.Lock()
+	retry, tracked := manager.statusRetries[address]
+	manager.statusRetryMutex.Unlock()
+	if !tracked || effectiveStatusRetryKinds(retry)&statusRetryConnection == 0 {
+		t.Fatalf("power read recovery was not scheduled: %+v", retry)
 	}
 }
 

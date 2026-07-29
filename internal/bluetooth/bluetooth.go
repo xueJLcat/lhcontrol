@@ -1093,6 +1093,25 @@ func mergeMetadata(previous, discovered DeviceMetadata) DeviceMetadata {
 	return discovered
 }
 
+func reconcileMetadata(
+	previous DeviceMetadata,
+	discovered DeviceMetadata,
+	serviceFound bool,
+	recognized int,
+	successful int,
+	hadFailure bool,
+	now time.Time,
+) (DeviceMetadata, time.Time) {
+	if serviceFound && recognized > 0 && successful == recognized && !hadFailure {
+		// A complete discovery is authoritative. Replacing the snapshot also
+		// removes fields that are no longer advertised by the current firmware.
+		return discovered, now
+	}
+	// Retain useful cached values after an optional partial failure, but do not
+	// present the mixed-age snapshot as freshly read.
+	return mergeMetadata(previous, discovered), time.Time{}
+}
+
 // connectAndDiscoverInternal handles connection and discovery.
 // Assumes caller holds the write lock (station.mutex.Lock()).
 func connectAndDiscoverInternal(station *BaseStation) error {
@@ -1208,7 +1227,10 @@ func connectAndDiscoverInternalContext(ctx context.Context, station *BaseStation
 			var identifyCharacteristic characteristicIO
 			capabilities := Capabilities{}
 			metadata := DeviceMetadata{}
-			metadataRead := false
+			metadataServiceFound := false
+			metadataRecognized := 0
+			metadataSuccessful := 0
+			metadataFailure := false
 			controlServiceFound := false
 
 			for serviceIndex := range services {
@@ -1216,6 +1238,9 @@ func connectAndDiscoverInternalContext(ctx context.Context, station *BaseStation
 				serviceUUID := service.UUID()
 				if serviceUUID != powerControlServiceUUID && serviceUUID != deviceInformationServiceUUID {
 					continue
+				}
+				if serviceUUID == deviceInformationServiceUUID {
+					metadataServiceFound = true
 				}
 				chars, characteristicErr := discoverCharacteristicsContext(ctx, service)
 				if characteristicErr != nil {
@@ -1227,6 +1252,7 @@ func connectAndDiscoverInternalContext(ctx context.Context, station *BaseStation
 						break
 					}
 					log.Printf("Bluetooth: Optional device information discovery failed for %s: %v", station.Name, characteristicErr)
+					metadataFailure = true
 					continue
 				}
 
@@ -1265,30 +1291,28 @@ func connectAndDiscoverInternalContext(ctx context.Context, station *BaseStation
 					default:
 						continue
 					}
+					metadataRecognized++
 					value, readErr := readMetadataValueContext(ctx, current)
 					if readErr != nil {
 						if errors.Is(readErr, context.Canceled) || errors.Is(readErr, context.DeadlineExceeded) {
 							return readErr
 						}
 						log.Printf("Bluetooth: Optional metadata read failed for %s (%s): %v", station.Name, current.UUID(), readErr)
+						metadataFailure = true
 						continue
 					}
+					metadataSuccessful++
 					switch current.UUID() {
 					case manufacturerCharacteristicUUID:
 						metadata.Manufacturer = value
-						metadataRead = true
 					case modelCharacteristicUUID:
 						metadata.Model = value
-						metadataRead = true
 					case serialCharacteristicUUID:
 						metadata.SerialNumber = value
-						metadataRead = true
 					case hardwareCharacteristicUUID:
 						metadata.HardwareRevision = value
-						metadataRead = true
 					case firmwareCharacteristicUUID:
 						metadata.FirmwareRevision = value
-						metadataRead = true
 					}
 				}
 			}
@@ -1313,10 +1337,15 @@ func connectAndDiscoverInternalContext(ctx context.Context, station *BaseStation
 				station.Channel = ChannelUnknown
 				station.LastChannelReadAt = time.Time{}
 			}
-			station.Metadata = mergeMetadata(station.Metadata, metadata)
-			if metadataRead {
-				station.MetadataReadAt = time.Now()
-			}
+			station.Metadata, station.MetadataReadAt = reconcileMetadata(
+				station.Metadata,
+				metadata,
+				metadataServiceFound,
+				metadataRecognized,
+				metadataSuccessful,
+				metadataFailure,
+				time.Now(),
+			)
 			err = nil
 			break
 		}

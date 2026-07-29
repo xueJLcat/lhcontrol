@@ -2339,15 +2339,10 @@ func (m *Manager) RefreshStationCapabilities(address string) (StationInfo, error
 			return StationInfo{}, err
 		}
 		m.recordStructuredReadResult(stationPtr, canonicalAddress, readErr.Power, readErr.Channel)
-		if readErr.Power != nil {
-			if bluetooth.IsUnsupportedCapabilityError(readErr.Power) {
-				return m.stationInfoByAddress(address)
-			}
-			return StationInfo{}, err
-		}
-		// A channel read is optional. Keep the successfully refreshed station
-		// visible and expose the partial read through its cached status instead
-		// of reporting a zero-value successful response.
+		// Capability discovery succeeded. Keep the refreshed station visible and
+		// expose any unavailable state values through freshness and LastError
+		// instead of turning a structured partial read into a total refresh
+		// failure.
 		return m.stationInfoByAddress(address)
 	}
 	m.clearStatusFailure(canonicalAddress)

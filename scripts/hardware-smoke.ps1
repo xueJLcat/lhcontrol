@@ -125,6 +125,23 @@ function Get-VerificationExitCode {
     return 1
 }
 
+function Test-ScanTerminalState {
+    param([string]$State)
+    return $State -in @("completed", "failed", "cancelled")
+}
+
+function Test-RestoreSucceeded {
+    param($Result, [object[]]$Stations, [string]$Address, [string]$Target)
+    if ($null -eq $Result -or -not [bool]$Result.confirmed) {
+        return $false
+    }
+    $restoredStation = @($Stations | Where-Object { $_.address -eq $Address })
+    return $restoredStation.Count -eq 1 -and
+        [bool]$restoredStation[0].powerFresh -and
+        [bool]$restoredStation[0].powerStateConfirmed -and
+        ([string]$restoredStation[0].powerStateName).ToLowerInvariant() -eq $Target
+}
+
 function Invoke-SelfTest {
     $historical = @(
         [pscustomobject]@{ channel = 1; name = "Known"; address = "AA"; seenInLatestScan = $false }
@@ -198,6 +215,27 @@ function Invoke-SelfTest {
     if ((Get-VerificationExitCode $true $true) -ne 1) {
         throw "Self-test failed: a restore failure did not produce a failing exit code"
     }
+    foreach ($terminalState in @("completed", "failed", "cancelled")) {
+        if (-not (Test-ScanTerminalState $terminalState)) {
+            throw "Self-test failed: $terminalState was not recognized as a terminal scan state"
+        }
+    }
+    if (Test-ScanTerminalState "running") {
+        throw "Self-test failed: a running scan was recognized as terminal"
+    }
+    $confirmedReadback = @([pscustomobject]@{
+        address = "AA"; powerFresh = $true; powerStateConfirmed = $true; powerStateName = "sleep"
+    })
+    if (-not (Test-RestoreSucceeded ([pscustomobject]@{
+        commandSent = $false; confirmed = $true
+    }) $confirmedReadback "AA" "sleep")) {
+        throw "Self-test failed: a confirmed no-op restore was rejected"
+    }
+    if (Test-RestoreSucceeded ([pscustomobject]@{
+        commandSent = $true; confirmed = $false
+    }) $confirmedReadback "AA" "sleep") {
+        throw "Self-test failed: an unconfirmed restore was accepted"
+    }
     Write-Host "Hardware smoke self-test passed."
 }
 
@@ -225,10 +263,7 @@ function Wait-Scan {
     while ((Get-Date) -lt $deadline) {
         $status = Invoke-RestMethod -Method Get -Uri "$ApiBase/scan/status"
         $lastStatus = $status
-        if ($status.state -eq "completed") {
-            return $status
-        }
-        if ($status.state -eq "failed") {
+        if (Test-ScanTerminalState ([string]$status.state)) {
             return $status
         }
         Start-Sleep -Milliseconds 500
@@ -285,6 +320,9 @@ try {
             if ($scan.state -eq "failed") {
                 throw "Scan failed: $($scan.error)"
             }
+            if ($scan.state -eq "cancelled") {
+                throw "Scan was cancelled"
+            }
             Assert-ScanSnapshot $scan $stations $MinimumStations $ExpectedAddresses
             Write-Host "Scan $cycle/$ScanCycles completed: $($scan.found) found, $($stations.Count) known"
         }
@@ -293,7 +331,9 @@ try {
                 Set-ScanTimeoutEvidence $scanRecord $lastScanTimeoutEvidence
                 $lastScanTimeoutEvidence = $null
             }
-            $scanRecord.state = "failed"
+            if ($scanRecord.state -ne "cancelled") {
+                $scanRecord.state = "failed"
+            }
             $scanRecord.error = $_.Exception.Message
             throw
         }
@@ -365,10 +405,7 @@ finally {
                 $restoreResult = Invoke-StationPower -Address $entry.Key -Target $entry.Value
                 $readback = Get-Stations
                 $restoredStation = @($readback | Where-Object { $_.address -eq $entry.Key })
-                $restoreSucceeded = $restoreResult.commandSent -and $restoreResult.confirmed -and
-                    $restoredStation.Count -eq 1 -and $restoredStation[0].powerFresh -and
-                    $restoredStation[0].powerStateConfirmed -and
-                    ([string]$restoredStation[0].powerStateName).ToLowerInvariant() -eq $entry.Value
+                $restoreSucceeded = Test-RestoreSucceeded $restoreResult $readback $entry.Key $entry.Value
                 $results.restore += [ordered]@{
                     address = $entry.Key
                     target = $entry.Value

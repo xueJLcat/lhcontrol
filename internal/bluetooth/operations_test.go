@@ -1374,6 +1374,55 @@ func TestMergeMetadataPreservesPreviouslyReadFields(t *testing.T) {
 	}
 }
 
+func TestReconcileMetadataReplacesCompleteSnapshot(t *testing.T) {
+	previous := DeviceMetadata{Manufacturer: "Valve", SerialNumber: "old serial"}
+	discovered := DeviceMetadata{Manufacturer: "Valve", FirmwareRevision: "2.0"}
+	now := time.Now()
+
+	got, readAt := reconcileMetadata(previous, discovered, true, 2, 2, false, now)
+	if got != discovered {
+		t.Fatalf("reconcileMetadata() = %+v, want authoritative snapshot %+v", got, discovered)
+	}
+	if !readAt.Equal(now) {
+		t.Fatalf("reconcileMetadata() read time = %v, want %v", readAt, now)
+	}
+}
+
+func TestReconcileMetadataRetainsPartialValuesWithoutFreshTimestamp(t *testing.T) {
+	previous := DeviceMetadata{Manufacturer: "Valve", SerialNumber: "cached serial"}
+	discovered := DeviceMetadata{Manufacturer: "Valve", FirmwareRevision: "2.0"}
+
+	got, readAt := reconcileMetadata(previous, discovered, true, 3, 2, true, time.Now())
+	if got.SerialNumber != "cached serial" || got.FirmwareRevision != "2.0" {
+		t.Fatalf("reconcileMetadata() partial snapshot = %+v", got)
+	}
+	if !readAt.IsZero() {
+		t.Fatalf("partial metadata was marked fresh at %v", readAt)
+	}
+}
+
+func TestReconcileMetadataInvalidatesFreshnessWithoutUsableService(t *testing.T) {
+	previous := DeviceMetadata{Manufacturer: "Valve"}
+	for _, test := range []struct {
+		name         string
+		serviceFound bool
+		recognized   int
+	}{
+		{name: "service absent", serviceFound: false, recognized: 0},
+		{name: "no recognized characteristics", serviceFound: true, recognized: 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, readAt := reconcileMetadata(previous, DeviceMetadata{}, test.serviceFound, test.recognized, 0, false, time.Now())
+			if got.Manufacturer != "Valve" {
+				t.Fatalf("reconcileMetadata() discarded cached metadata: %+v", got)
+			}
+			if !readAt.IsZero() {
+				t.Fatalf("unusable metadata service was marked fresh at %v", readAt)
+			}
+		})
+	}
+}
+
 func TestScanFindsServiceOnlyAdvertisement(t *testing.T) {
 	originalAdapter := adapter
 	fake := newFakeBLEAdapter()
