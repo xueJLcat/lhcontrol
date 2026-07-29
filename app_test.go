@@ -393,6 +393,27 @@ func TestPowerActionFailureBeforeWriteReturnsErrorStatus(t *testing.T) {
 	}
 }
 
+func TestLegacyPowerActionAcceptsSentButUnconfirmedCommand(t *testing.T) {
+	confirmationErr := &bluetooth.PowerConfirmationError{
+		Target: bluetooth.PowerStateOn,
+		Actual: bluetooth.PowerStateBooting,
+		Raw:    0x01,
+		Err:    errors.New("readback timed out"),
+	}
+	if err := legacyPowerActionError(
+		"on",
+		"AA",
+		station.PowerActionResult{CommandSent: true, Confirmed: false},
+		confirmationErr,
+	); err != nil {
+		t.Fatalf("sent legacy command error = %v, want nil", err)
+	}
+	preWriteErr := errors.New("write failed")
+	if err := legacyPowerActionError("on", "AA", station.PowerActionResult{}, preWriteErr); !errors.Is(err, preWriteErr) {
+		t.Fatalf("pre-write legacy error = %v, want %v", err, preWriteErr)
+	}
+}
+
 func TestRegisteredPowerRoutePreservesConfirmationResult(t *testing.T) {
 	manager := &fakeAPIStationManager{
 		powerResult: station.PowerActionResult{
@@ -485,13 +506,33 @@ func TestChannelAPIReturnsStructuredSuccessWhenCommandWasSentButUnconfirmed(t *t
 }
 
 func TestRegisteredRoutesKeepLegacyAliases(t *testing.T) {
-	for _, path := range []string{"/allon", "/alloff"} {
-		response, err := testAPI(&fakeAPIStationManager{}).Test(httptest.NewRequest(http.MethodPost, path, nil))
+	for _, test := range []struct {
+		path   string
+		target string
+	}{
+		{path: "/allon", target: "on"},
+		{path: "/alloff", target: "sleep"},
+	} {
+		manager := &fakeAPIStationManager{bulkResult: station.BulkPowerResult{
+			Target: test.target,
+			Results: []station.BulkPowerStationResult{{
+				Address: "AA", Skipped: true, Reason: "station is booting",
+			}},
+		}}
+		response, err := testAPI(manager).Test(httptest.NewRequest(http.MethodPost, test.path, nil))
 		if err != nil {
 			t.Fatal(err)
 		}
 		if response.StatusCode != fiber.StatusOK {
-			t.Fatalf("%s status = %d, want 200", path, response.StatusCode)
+			t.Fatalf("%s status = %d, want 200", test.path, response.StatusCode)
+		}
+		var result station.BulkPowerResult
+		if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
+			t.Fatal(err)
+		}
+		if result.Target != test.target || len(result.Results) != 1 ||
+			!result.Results[0].Skipped || result.Results[0].Reason != "station is booting" {
+			t.Fatalf("%s result = %+v", test.path, result)
 		}
 		_ = response.Body.Close()
 	}

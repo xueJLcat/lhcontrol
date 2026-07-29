@@ -98,12 +98,12 @@ This application also exposes a simple HTTP API on `http://127.0.0.1:7575` for b
 *   **`POST /allon`**
     *   **Description:** Attempts to turn ON all base stations known in the current app session.
     *   **Request Body:** None
-    *   **Response:** `200 OK` when every command was sent or skipped. Use `POST /stations/power` when per-station confirmation details are required. Returns `409 Conflict` if another Bluetooth operation is active.
+    *   **Response:** `200 OK` with the detailed per-station result. Returns `409 Conflict` if another foreground Bluetooth operation is active.
 
 *   **`POST /alloff`**
     *   **Description:** Attempts to put all base stations known in the current app session into Sleep.
     *   **Request Body:** None
-    *   **Response:** `200 OK` when every command was sent or skipped. Use `POST /stations/power` when per-station confirmation details are required. Returns `409 Conflict` if another Bluetooth operation is active.
+    *   **Response:** `200 OK` with the detailed per-station result. Returns `409 Conflict` if another foreground Bluetooth operation is active.
 
 *   **`GET /status`**
     *   **Description:** Returns the current list of known base stations and their states.
@@ -131,7 +131,7 @@ This application also exposes a simple HTTP API on `http://127.0.0.1:7575` for b
         (Power States: -1 = Unknown, 0 = Sleep, 1 = On, 2 = Standby, 3 = Booting. Channel: 0 = Unknown, 1-16 = optical channel.)
 
 *   **`POST /scan`**
-    *   **Description:** Triggers a background scan for base stations (approx. 5s scan + 7s state fetch). The list returned by `/status` will update once complete.
+    *   **Description:** Triggers a background scan for base stations (approximately 5 seconds, followed by bounded per-station state reads). The list returned by `/status` will update once complete.
     *   **Request Body:** None
     *   **Response:** `202 Accepted` when the scan starts; `409 Conflict` if another Bluetooth operation is active.
 
@@ -172,6 +172,16 @@ curl -X POST http://127.0.0.1:7575/allon
 # Turn all base stations OFF
 curl -X POST http://127.0.0.1:7575/alloff
 ```
+
+The legacy `/allon` and `/alloff` aliases return the same detailed per-station
+result shape as `POST /stations/power`, including skipped and unconfirmed
+outcomes.
+
+The legacy Wails `PowerOnStation` and `PowerOffStation` methods keep their
+error-only compatibility contract: a command that was sent but could not be
+confirmed is accepted and logged. New integrations should use
+`SetStationPower` to receive `commandSent`, `confirmed`, and the confirmation
+error separately.
 
 ## Release Hardware Checklist
 

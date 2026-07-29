@@ -126,6 +126,17 @@ type fakeCharacteristic struct {
 	writeErrors                  []error
 }
 
+type blockingContextCharacteristic struct {
+	*fakeCharacteristic
+	started chan struct{}
+}
+
+func (f *blockingContextCharacteristic) ReadContext(ctx context.Context, _ []byte) (int, error) {
+	close(f.started)
+	<-ctx.Done()
+	return 0, ctx.Err()
+}
+
 type classifiedWriteError struct {
 	possiblySent bool
 }
@@ -1149,6 +1160,66 @@ func TestFetchInitialPowerStateReportsPartialReadErrors(t *testing.T) {
 	if station.PowerState != PowerStateOn || station.RawPowerState != 0x09 || station.Channel != 4 ||
 		!station.LastPowerReadAt.IsZero() || !station.LastChannelReadAt.IsZero() {
 		t.Fatalf("failed reads did not preserve stale values: %+v", station.Snapshot())
+	}
+}
+
+func TestFetchInitialPowerStateContextCancelsReadAndCleansUpConnection(t *testing.T) {
+	power := &blockingContextCharacteristic{
+		fakeCharacteristic: &fakeCharacteristic{},
+		started:            make(chan struct{}),
+	}
+	station := connectedFakeStation(power, nil, nil, Capabilities{PowerRead: true})
+	device := &trackingConnectedDevice{}
+	station.device = device
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		result <- FetchInitialPowerStateContext(ctx, station)
+	}()
+
+	select {
+	case <-power.started:
+	case <-time.After(time.Second):
+		t.Fatal("context-aware power read did not start")
+	}
+	cancel()
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("FetchInitialPowerStateContext() error = %v, want context.Canceled", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("cancelled initial read did not return within 3 seconds")
+	}
+	if device.disconnects != 1 || station.Snapshot().Connected {
+		t.Fatalf("cancelled read cleanup: disconnects=%d connected=%v", device.disconnects, station.Snapshot().Connected)
+	}
+}
+
+func TestReadPowerStateContextCancelsBlockingRead(t *testing.T) {
+	power := &blockingContextCharacteristic{
+		fakeCharacteristic: &fakeCharacteristic{},
+		started:            make(chan struct{}),
+	}
+	station := connectedFakeStation(power, nil, nil, Capabilities{PowerRead: true})
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		result <- ReadPowerStateContext(ctx, station)
+	}()
+	select {
+	case <-power.started:
+	case <-time.After(time.Second):
+		t.Fatal("context-aware status read did not start")
+	}
+	cancel()
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("ReadPowerStateContext() error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cancelled status read did not return")
 	}
 }
 

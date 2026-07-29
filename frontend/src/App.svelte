@@ -23,7 +23,7 @@
   import { Activity, CircleAlert, Radar } from 'lucide-svelte';
   import type { PowerFeedback, PowerTarget, StationInfo } from './lib/types';
   import {
-    canSetPower, hasCurrentChannel, hasVerifiedPowerState, isCurrentPowerState, maySetPower,
+    canSetPower, hasCurrentChannel, hasVerifiedPowerState, isCurrentPowerState,
     powerTargetLabel, stateLabel
   } from './lib/station';
   import { formatBulkResult, formatTerminalScanResult, summarizeBulkResult } from './lib/result-format';
@@ -97,14 +97,14 @@
   function beginExternalScan(id: number | null) {
     beginScanEpoch();
     listRevisions.next();
-    prepareForScan();
+    prepareForScan(false);
     externalScanRecoveryEpoch = null;
     externalScanRecoveryStatusEpoch = null;
     externalScanID = id;
     externalScanning = true;
     stoppingScan = false;
     beginScanTimer();
-    statusMessage = 'External scan in progress...';
+    statusMessage = 'Preparing external scan...';
   }
 
   function claimExternalScanTerminal(event: ExternalScanEvent): boolean {
@@ -153,9 +153,9 @@
   $: fleetOn = stations.filter((station) => hasVerifiedPowerState(station, 'on')).length;
   $: fleetStandby = stations.filter((station) => hasVerifiedPowerState(station, 'standby')).length;
   $: fleetSleep = stations.filter((station) => hasVerifiedPowerState(station, 'sleep')).length;
-  $: eligibleOn = stations.filter((station) => maySetPower(station, 'on'));
-  $: eligibleStandby = stations.filter((station) => maySetPower(station, 'standby'));
-  $: eligibleSleep = stations.filter((station) => maySetPower(station, 'sleep'));
+  $: actionableOn = stations.filter((station) => canSetPower(station, 'on'));
+  $: actionableStandby = stations.filter((station) => canSetPower(station, 'standby'));
+  $: actionableSleep = stations.filter((station) => canSetPower(station, 'sleep'));
   $: occupiedChannels = new Map(
     stations
       .filter((station) => hasCurrentChannel(station) && station.address !== selectedAddress)
@@ -179,7 +179,11 @@
   $: scanLocked = operationLocks.scanLocked;
   $: bulkLocked = operationLocks.bulkLocked;
   $: stationLocked = operationLocks.stationLocked;
-  $: gattCapacityReached = gattOperations.size >= 2;
+  // The periodic status reader occupies one of the backend's two device
+  // operation slots. Keep the remaining slot available to one foreground
+  // action instead of allowing a second action that will fail with Busy.
+  $: foregroundGattCapacity = isStatusChecking ? 1 : 2;
+  $: gattCapacityReached = gattOperations.size >= foregroundGattCapacity;
 
   function stationBusy(address: string): boolean {
     return gattOperations.has(address) || configOperations.has(address);
@@ -279,16 +283,18 @@
     return scanEpoch;
   }
 
-  function prepareForScan() {
+  function prepareForScan(clearOperations = true) {
     cancelRename();
     channelEditorOpen = false;
     channelError = '';
     channelWarning = false;
-    // A started scan has already acquired the backend's exclusive operation
-    // lock, so any older device/config request has finished server-side even
-    // if its Wails promise has not settled in this renderer yet.
-    gattOperations = new Set();
-    configOperations = new Set();
+    // A locally running scan has acquired the backend's exclusive operation
+    // lock. An accepted external scan may still be waiting for existing work,
+    // so preserve those visible operations until their promises settle.
+    if (clearOperations) {
+      gattOperations = new Set();
+      configOperations = new Set();
+    }
     powerTargetByAddress = {};
     powerFeedbackByAddress = {};
   }
@@ -485,6 +491,14 @@
         maybeEndScanTimer();
       } else {
         beginScanTimer();
+        if (externalScanning) {
+          const scanStatus = await GetScanStatus().catch(() => null);
+          if (!disposed && listRevisions.isCurrent(revision) && scanStatus) {
+            statusMessage = scanStatus.state === 'starting'
+              ? 'Preparing external scan...'
+              : 'External scan in progress...';
+          }
+        }
       }
     } catch (error) {
       if (disposed || !listRevisions.isCurrent(revision)) return;
@@ -691,23 +705,20 @@
     }
   }
 
-  function eligiblePowerStations(state: PowerTarget): StationInfo[] {
-    // A Lighthouse often stops advertising while connected or sleeping. Keep
-    // bulk power aligned with individual controls by including every station
-    // discovered during this app session, even if the latest scan missed it.
-    return stations.filter((station) => maySetPower(station, state));
+  function actionablePowerStations(state: PowerTarget): StationInfo[] {
+    return stations.filter((station) => canSetPower(station, state));
   }
 
-  function allEligibleAtState(state: PowerTarget): boolean {
-    const eligible = eligiblePowerStations(state);
-    return eligible.length > 0 && eligible.every((station) => isCurrentPowerState(station, state));
+  function allStationsAtState(state: PowerTarget): boolean {
+    return stations.length > 0 &&
+      stations.every((station) => isCurrentPowerState(station, state));
   }
 
   async function handleBulkPower(state: PowerTarget) {
     // Do not duplicate backend capability/state decisions here. Cached
     // frontend data can be stale after scanning, while the backend refreshes
     // capabilities and returns a result for every known station.
-    if (bulkLocked || eligiblePowerStations(state).length === 0) return;
+    if (bulkLocked || actionablePowerStations(state).length === 0) return;
     globalOperation = 'bulk-power';
     const statusOperation = beginStatusOperation();
     bulkTarget = state;
@@ -717,9 +728,9 @@
     try {
       const result = await SetAllStationsPowerDetailed(state);
       if (!canCommitOperation(operationEpoch)) return;
+      mergeStationUpdates(result.results.map((item) => item.station).filter((item) => Boolean(item?.address)));
       await fetchLatestList();
       if (!canCommitOperation(operationEpoch)) return;
-      mergeStationUpdates(result.results.map((item) => item.station).filter(Boolean));
       const feedback = { ...powerFeedbackByAddress };
       for (const item of result.results) {
         feedback[item.address] = item.skipped
@@ -933,12 +944,12 @@
     {scanLocked}
     {bulkLocked}
     {bulkTarget}
-    canOn={eligibleOn.length > 0}
-    canStandby={eligibleStandby.length > 0}
-    canSleep={eligibleSleep.length > 0}
-    allOn={allEligibleAtState('on')}
-    allStandby={allEligibleAtState('standby')}
-    allSleep={allEligibleAtState('sleep')}
+    canOn={actionableOn.length > 0}
+    canStandby={actionableStandby.length > 0}
+    canSleep={actionableSleep.length > 0}
+    allOn={allStationsAtState('on')}
+    allStandby={allStationsAtState('standby')}
+    allSleep={allStationsAtState('sleep')}
     onCount={fleetOn}
     standbyCount={fleetStandby}
     sleepCount={fleetSleep}
@@ -967,7 +978,7 @@
               pendingTarget={powerTargetByAddress[station.address]}
               gattBusy={gattOperations.has(station.address)}
               configBusy={configOperations.has(station.address)}
-              gattLocked={stationLocked || (gattOperations.size >= 2 && !gattOperations.has(station.address))}
+              gattLocked={stationLocked || (gattCapacityReached && !gattOperations.has(station.address))}
               renameLocked={stationLocked}
               onPower={setPower}
               onOpenDetails={(s) => selectedAddress = s.address}
@@ -1008,7 +1019,7 @@
   <DetailsDrawer
     station={selectedStation}
     busy={stationBusy(selectedStation.address)}
-    locked={stationLocked || (gattOperations.size >= 2 && !gattOperations.has(selectedStation.address))}
+    locked={stationLocked || (gattCapacityReached && !gattOperations.has(selectedStation.address))}
     inactive={channelEditorOpen}
     onClose={() => selectedAddress = null}
     onRefresh={refreshCapabilities}
@@ -1031,7 +1042,7 @@
       error={channelError}
       warning={channelWarning}
       busy={gattOperations.has(selectedStation.address) || configOperations.has(selectedStation.address)}
-      locked={stationLocked || (gattOperations.size >= 2 && !gattOperations.has(selectedStation.address))}
+      locked={stationLocked || (gattCapacityReached && !gattOperations.has(selectedStation.address))}
       onClose={closeChannelEditor}
       onSave={saveChannel}
       onIdentify={identify}

@@ -64,6 +64,73 @@ type characteristicIO interface {
 	Properties() uint32
 }
 
+type contextAdapter interface {
+	ConnectContext(context.Context, bluetooth.Address, bluetooth.ConnectionParams) (bluetooth.Device, error)
+}
+
+type contextDevice interface {
+	DiscoverServicesContext(context.Context, []bluetooth.UUID) ([]bluetooth.DeviceService, error)
+}
+
+type contextService interface {
+	DiscoverCharacteristicsContext(context.Context, []bluetooth.UUID) ([]bluetooth.DeviceCharacteristic, error)
+}
+
+type contextCharacteristic interface {
+	ReadContext(context.Context, []byte) (int, error)
+}
+
+func normalizeContext(ctx context.Context) context.Context {
+	if ctx == nil {
+		return context.Background()
+	}
+	return ctx
+}
+
+func connectContext(ctx context.Context, address bluetooth.Address) (bluetooth.Device, error) {
+	ctx = normalizeContext(ctx)
+	if err := ctx.Err(); err != nil {
+		return bluetooth.Device{}, err
+	}
+	if contextual, ok := adapter.(contextAdapter); ok {
+		return contextual.ConnectContext(ctx, address, bluetooth.ConnectionParams{})
+	}
+	return adapter.Connect(address, bluetooth.ConnectionParams{})
+}
+
+func discoverServicesContext(ctx context.Context, device bluetooth.GAPDevice) ([]bluetooth.DeviceService, error) {
+	ctx = normalizeContext(ctx)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if contextual, ok := device.(contextDevice); ok {
+		return contextual.DiscoverServicesContext(ctx, nil)
+	}
+	return device.DiscoverServices(nil)
+}
+
+func discoverCharacteristicsContext(ctx context.Context, service bluetooth.DeviceService) ([]bluetooth.DeviceCharacteristic, error) {
+	ctx = normalizeContext(ctx)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if contextual, ok := any(service).(contextService); ok {
+		return contextual.DiscoverCharacteristicsContext(ctx, nil)
+	}
+	return service.DiscoverCharacteristics(nil)
+}
+
+func readCharacteristicContext(ctx context.Context, characteristic characteristicIO, data []byte) (int, error) {
+	ctx = normalizeContext(ctx)
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	if contextual, ok := characteristic.(contextCharacteristic); ok {
+		return contextual.ReadContext(ctx, data)
+	}
+	return characteristic.Read(data)
+}
+
 // BaseStation represents a discovered SteamVR Base Station.
 type BaseStation struct {
 	Name              string
@@ -791,13 +858,17 @@ func scanCompletionError(scanErr error) error {
 // readPowerStateInternal performs the actual read and update.
 // Assumes caller holds the write lock (station.mutex.Lock()).
 func readPowerStateInternal(station *BaseStation) error {
+	return readPowerStateInternalContext(context.Background(), station)
+}
+
+func readPowerStateInternalContext(ctx context.Context, station *BaseStation) error {
 	if station.characteristic == nil {
 		return transportError("read power characteristic", fmt.Errorf("power characteristic is nil for %s", station.Name))
 	}
 
 	log.Printf("Bluetooth: Reading power state for %s (%s)", station.Name, station.Address)
 	buf := make([]byte, 1)
-	n, err := station.characteristic.Read(buf)
+	n, err := readCharacteristicContext(ctx, station.characteristic, buf)
 	if err != nil {
 		station.LastPowerReadAt = time.Time{}
 		if IsCapabilityUnsupported(err) {
@@ -847,6 +918,10 @@ func decodePowerStateWithHistory(raw byte, previous PowerState, bootingSince, no
 // readChannelInternal reads the Lighthouse 2.0 optical channel.
 // Assumes caller holds the write lock (station.mutex.Lock()).
 func readChannelInternal(station *BaseStation) error {
+	return readChannelInternalContext(context.Background(), station)
+}
+
+func readChannelInternalContext(ctx context.Context, station *BaseStation) error {
 	if station.modeCharacteristic == nil {
 		station.LastChannelReadAt = time.Time{}
 		return transportError("read channel characteristic", fmt.Errorf("mode characteristic is nil for %s", station.Name))
@@ -855,7 +930,7 @@ func readChannelInternal(station *BaseStation) error {
 	// Read one extra byte so an overlong value is rejected instead of being
 	// silently truncated to a seemingly valid four-byte integer.
 	buf := make([]byte, 5)
-	n, err := station.modeCharacteristic.Read(buf)
+	n, err := readCharacteristicContext(ctx, station.modeCharacteristic, buf)
 	if err != nil {
 		station.LastChannelReadAt = time.Time{}
 		if IsCapabilityUnsupported(err) {
@@ -883,8 +958,18 @@ func readChannelInternal(station *BaseStation) error {
 
 // ReadPowerState attempts to read the current power state for an already connected station.
 func ReadPowerState(station *BaseStation) error {
+	return ReadPowerStateContext(context.Background(), station)
+}
+
+// ReadPowerStateContext reads the current state of an already connected
+// station and allows read-only GATT work to be cancelled.
+func ReadPowerStateContext(ctx context.Context, station *BaseStation) error {
 	if station == nil {
 		return fmt.Errorf("station is nil")
+	}
+	ctx = normalizeContext(ctx)
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 
 	station.mutex.Lock() // Lock for the duration
@@ -900,16 +985,29 @@ func ReadPowerState(station *BaseStation) error {
 			powerReadErr = fmt.Errorf("power characteristic is unavailable for %s", station.Name)
 			station.LastPowerReadAt = time.Time{}
 		} else {
-			powerReadErr = readPowerStateInternal(station)
+			powerReadErr = readPowerStateInternalContext(ctx, station)
 		}
 	} else {
 		station.setPowerStateInternal(PowerStateUnknown, RawPowerStateUnknown)
 	}
+	if err := ctx.Err(); err != nil {
+		if powerReadErr != nil {
+			return &StatusReadError{Power: powerReadErr}
+		}
+		return &StatusReadError{Channel: err}
+	}
 	if station.Capabilities.ChannelRead {
-		channelReadErr = readChannelInternal(station)
+		channelReadErr = readChannelInternalContext(ctx, station)
 	} else {
 		station.Channel = ChannelUnknown
 		station.LastChannelReadAt = time.Time{}
+	}
+	if err := ctx.Err(); err != nil {
+		if channelReadErr == nil {
+			channelReadErr = err
+		} else {
+			channelReadErr = errors.Join(channelReadErr, err)
+		}
 	}
 	if powerReadErr != nil || channelReadErr != nil {
 		readErr := &StatusReadError{Power: powerReadErr, Channel: channelReadErr}
@@ -961,8 +1059,12 @@ func hasNotify(properties uint32) bool {
 }
 
 func readMetadataValue(characteristic characteristicIO) (string, error) {
+	return readMetadataValueContext(context.Background(), characteristic)
+}
+
+func readMetadataValueContext(ctx context.Context, characteristic characteristicIO) (string, error) {
 	buf := make([]byte, 256)
-	n, err := characteristic.Read(buf)
+	n, err := readCharacteristicContext(ctx, characteristic, buf)
 	if err != nil {
 		return "", err
 	}
@@ -994,6 +1096,14 @@ func mergeMetadata(previous, discovered DeviceMetadata) DeviceMetadata {
 // connectAndDiscoverInternal handles connection and discovery.
 // Assumes caller holds the write lock (station.mutex.Lock()).
 func connectAndDiscoverInternal(station *BaseStation) error {
+	return connectAndDiscoverInternalContext(context.Background(), station)
+}
+
+func connectAndDiscoverInternalContext(ctx context.Context, station *BaseStation) error {
+	ctx = normalizeContext(ctx)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := cleanupPendingInternal(station); err != nil {
 		return transportError("finish previous connection cleanup", err)
 	}
@@ -1009,7 +1119,7 @@ func connectAndDiscoverInternal(station *BaseStation) error {
 
 	if !station.isConnected || station.device == nil {
 		log.Printf("Bluetooth: Internal connect attempt for %s...", station.Name)
-		device, err := adapter.Connect(station.Address, bluetooth.ConnectionParams{})
+		device, err := connectContext(ctx, station.Address)
 		if err != nil {
 			station.isConnected = false
 			station.device = nil
@@ -1018,7 +1128,9 @@ func connectAndDiscoverInternal(station *BaseStation) error {
 			station.identifyCharacteristic = nil
 			station.LastPowerReadAt = time.Time{}
 			station.LastChannelReadAt = time.Time{}
-			station.LastError = err.Error()
+			if ctx.Err() == nil {
+				station.LastError = err.Error()
+			}
 			return transportError("connect station", err)
 		}
 		station.device = device
@@ -1045,14 +1157,24 @@ func connectAndDiscoverInternal(station *BaseStation) error {
 
 		const maxRetries = 3
 		for i := 0; i < maxRetries; i++ {
+			if contextErr := ctx.Err(); contextErr != nil {
+				return contextErr
+			}
 			if i > 0 {
 				log.Printf("Bluetooth: Retrying discovery for %s (attempt %d/%d)...", station.Name, i+1, maxRetries)
 				if cleanupErr := disconnectInternal(station); cleanupErr != nil {
 					return transportError("cleanup before discovery retry", cleanupErr)
 				}
-				time.Sleep(500 * time.Millisecond)
-				device, connectErr := adapter.Connect(station.Address, bluetooth.ConnectionParams{})
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(500 * time.Millisecond):
+				}
+				device, connectErr := connectContext(ctx, station.Address)
 				if connectErr != nil {
+					if errors.Is(connectErr, context.Canceled) || errors.Is(connectErr, context.DeadlineExceeded) {
+						return connectErr
+					}
 					err = transportError("retry station connection", connectErr)
 					continue
 				}
@@ -1072,7 +1194,10 @@ func connectAndDiscoverInternal(station *BaseStation) error {
 				connectedStationsMutex.Unlock()
 			}
 
-			services, discoverErr := station.device.DiscoverServices(nil)
+			services, discoverErr := discoverServicesContext(ctx, station.device)
+			if errors.Is(discoverErr, context.Canceled) || errors.Is(discoverErr, context.DeadlineExceeded) {
+				return discoverErr
+			}
 			err = transportError("discover GATT services", discoverErr)
 			if err != nil {
 				continue
@@ -1092,8 +1217,11 @@ func connectAndDiscoverInternal(station *BaseStation) error {
 				if serviceUUID != powerControlServiceUUID && serviceUUID != deviceInformationServiceUUID {
 					continue
 				}
-				chars, characteristicErr := service.DiscoverCharacteristics(nil)
+				chars, characteristicErr := discoverCharacteristicsContext(ctx, service)
 				if characteristicErr != nil {
+					if errors.Is(characteristicErr, context.Canceled) || errors.Is(characteristicErr, context.DeadlineExceeded) {
+						return characteristicErr
+					}
 					if serviceUUID == powerControlServiceUUID {
 						err = transportError("discover control characteristics", characteristicErr)
 						break
@@ -1137,8 +1265,11 @@ func connectAndDiscoverInternal(station *BaseStation) error {
 					default:
 						continue
 					}
-					value, readErr := readMetadataValue(current)
+					value, readErr := readMetadataValueContext(ctx, current)
 					if readErr != nil {
+						if errors.Is(readErr, context.Canceled) || errors.Is(readErr, context.DeadlineExceeded) {
+							return readErr
+						}
 						log.Printf("Bluetooth: Optional metadata read failed for %s (%s): %v", station.Name, current.UUID(), readErr)
 						continue
 					}
@@ -1254,12 +1385,19 @@ func (e *InitialReadError) Unwrap() error {
 // decides whether an operation is supported. This avoids rejecting a station
 // forever because an earlier transient discovery left cached capabilities empty.
 func EnsureCapabilities(station *BaseStation) (Capabilities, error) {
+	return EnsureCapabilitiesContext(context.Background(), station)
+}
+
+// EnsureCapabilitiesContext is the cancellable form of EnsureCapabilities.
+// It is safe to cancel while the operation is still connecting or discovering.
+func EnsureCapabilitiesContext(ctx context.Context, station *BaseStation) (Capabilities, error) {
 	if station == nil {
 		return Capabilities{}, fmt.Errorf("station is nil")
 	}
+	ctx = normalizeContext(ctx)
 	station.mutex.Lock()
 	defer station.mutex.Unlock()
-	if err := connectAndDiscoverInternal(station); err != nil {
+	if err := connectAndDiscoverInternalContext(ctx, station); err != nil {
 		return Capabilities{}, err
 	}
 	return station.Capabilities, nil
@@ -1269,16 +1407,23 @@ func EnsureCapabilities(station *BaseStation) (Capabilities, error) {
 // current connection. It is used when a required optional characteristic was
 // missing from an earlier, possibly incomplete discovery result.
 func RefreshCapabilities(station *BaseStation) (Capabilities, error) {
+	return RefreshCapabilitiesContext(context.Background(), station)
+}
+
+// RefreshCapabilitiesContext is the cancellable form of RefreshCapabilities.
+// Cancellation only applies before a caller starts a subsequent write.
+func RefreshCapabilitiesContext(ctx context.Context, station *BaseStation) (Capabilities, error) {
 	if station == nil {
 		return Capabilities{}, fmt.Errorf("station is nil")
 	}
+	ctx = normalizeContext(ctx)
 	station.mutex.Lock()
 	defer station.mutex.Unlock()
 	if err := disconnectInternal(station); err != nil {
 		return Capabilities{}, transportError("cleanup before capability refresh", err)
 	}
 	station.CapabilitiesKnown = false
-	if err := connectAndDiscoverInternal(station); err != nil {
+	if err := connectAndDiscoverInternalContext(ctx, station); err != nil {
 		return Capabilities{}, err
 	}
 	return station.Capabilities, nil
@@ -1286,15 +1431,32 @@ func RefreshCapabilities(station *BaseStation) (Capabilities, error) {
 
 // FetchInitialPowerState attempts to connect (if necessary) and read the initial power state.
 func FetchInitialPowerState(station *BaseStation) error {
+	return FetchInitialPowerStateContext(context.Background(), station)
+}
+
+func finishCancelledInitialRead(station *BaseStation, contextErr error) error {
+	if cleanupErr := disconnectInternal(station); cleanupErr != nil {
+		return errors.Join(contextErr, transportError("cleanup cancelled initial read", cleanupErr))
+	}
+	return contextErr
+}
+
+// FetchInitialPowerStateContext performs the full initial GATT read using one
+// context so a stopped scan can cancel connection, discovery, and reads.
+func FetchInitialPowerStateContext(ctx context.Context, station *BaseStation) error {
 	if station == nil {
 		return fmt.Errorf("station is nil")
 	}
+	ctx = normalizeContext(ctx)
 
 	station.mutex.Lock() // Lock for the whole operation
 	defer station.mutex.Unlock()
 
-	err := connectAndDiscoverInternal(station)
+	err := connectAndDiscoverInternalContext(ctx, station)
 	if err != nil {
+		if contextErr := ctx.Err(); contextErr != nil {
+			return finishCancelledInitialRead(station, contextErr)
+		}
 		station.LastError = err.Error()
 		log.Printf("Bluetooth: Failed to connect/discover in FetchInitialPowerState for %s: %v", station.Name, err)
 		return err
@@ -1304,14 +1466,18 @@ func FetchInitialPowerState(station *BaseStation) error {
 	var channelReadErr error
 	if station.Capabilities.PowerRead {
 		log.Printf("Bluetooth: FetchInitialPowerState proceeding to read state for %s.", station.Name)
-		if powerReadErr = readPowerStateInternal(station); powerReadErr != nil {
+		if powerReadErr = readPowerStateInternalContext(ctx, station); powerReadErr != nil {
 			log.Printf("Bluetooth: Failed to read state in FetchInitialPowerState for %s: %v", station.Name, powerReadErr)
 		}
 	} else {
 		station.setPowerStateInternal(PowerStateUnknown, RawPowerStateUnknown)
 	}
+	if contextErr := ctx.Err(); contextErr != nil {
+		return finishCancelledInitialRead(station, contextErr)
+	}
 	if station.Capabilities.ChannelRead {
-		if channelReadErr = readChannelInternal(station); channelReadErr != nil {
+		channelReadErr = readChannelInternalContext(ctx, station)
+		if channelReadErr != nil {
 			// Channel support is optional so power control remains usable on
 			// firmware that does not expose a readable mode characteristic.
 			log.Printf("Bluetooth: Failed to read channel in FetchInitialPowerState for %s: %v", station.Name, channelReadErr)
@@ -1321,6 +1487,9 @@ func FetchInitialPowerState(station *BaseStation) error {
 		station.LastChannelReadAt = time.Time{}
 	}
 
+	if contextErr := ctx.Err(); contextErr != nil {
+		return finishCancelledInitialRead(station, contextErr)
+	}
 	if powerReadErr != nil || channelReadErr != nil {
 		readErr := &InitialReadError{Power: powerReadErr, Channel: channelReadErr}
 		station.LastError = readErr.Error()

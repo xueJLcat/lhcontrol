@@ -109,8 +109,6 @@ type APIStatus struct {
 }
 
 type apiStationManager interface {
-	PowerOnAllStations() error
-	PowerOffAllStations() error
 	GetStationInfo() []station.StationInfo
 	StartScan(station.ScanCallbacks) error
 	StopScan() error
@@ -146,16 +144,18 @@ func registerAPIRoutes(api *fiber.App, manager apiStationManager, events scanEve
 		return c.Next()
 	})
 	api.Post("/allon", func(c *fiber.Ctx) error {
-		if err := manager.PowerOnAllStations(); err != nil {
+		result, err := manager.SetAllStationsPowerDetailed("on")
+		if err != nil {
 			return sendAPIError(c, err)
 		}
-		return c.SendStatus(fiber.StatusOK)
+		return c.JSON(result)
 	})
 	api.Post("/alloff", func(c *fiber.Ctx) error {
-		if err := manager.PowerOffAllStations(); err != nil {
+		result, err := manager.SetAllStationsPowerDetailed("sleep")
+		if err != nil {
 			return sendAPIError(c, err)
 		}
-		return c.SendStatus(fiber.StatusOK)
+		return c.JSON(result)
 	})
 	api.Get("/status", func(c *fiber.Ctx) error {
 		return c.JSON(manager.GetStationInfo())
@@ -451,12 +451,27 @@ func (a *App) GetAPIStatus() APIStatus {
 
 func (a *App) PowerOnStation(address string) error {
 	log.Printf("Requesting Power ON for address %s", address)
-	return a.stationManager.PowerOnStation(address)
+	result, err := a.stationManager.SetStationPower(address, "on")
+	return legacyPowerActionError("on", address, result, err)
 }
 
 func (a *App) PowerOffStation(address string) error {
 	log.Printf("Requesting Power OFF for address %s", address)
-	return a.stationManager.PowerOffStation(address)
+	result, err := a.stationManager.SetStationPower(address, "sleep")
+	return legacyPowerActionError("sleep", address, result, err)
+}
+
+func legacyPowerActionError(state, address string, result station.PowerActionResult, err error) error {
+	if err != nil && result.CommandSent {
+		log.Printf(
+			"Legacy %s request for %s was accepted but could not be confirmed: %v",
+			state,
+			address,
+			err,
+		)
+		return nil
+	}
+	return err
 }
 
 func (a *App) SetStationPower(address, state string) (station.PowerActionResult, error) {

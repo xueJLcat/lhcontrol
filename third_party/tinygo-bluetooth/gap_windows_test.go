@@ -82,6 +82,82 @@ func TestWaitForAsyncCompletionAcceptsPolledTerminalStatus(t *testing.T) {
 	}
 }
 
+func TestBoundedAsyncOperationContextPreservesTimeoutAndParentCancellation(t *testing.T) {
+	originalTimeout := asyncOperationTimeout
+	asyncOperationTimeout = 40 * time.Millisecond
+	t.Cleanup(func() { asyncOperationTimeout = originalTimeout })
+
+	started := time.Now()
+	bounded, cancelBounded := boundedAsyncOperationContext(context.Background())
+	defer cancelBounded()
+	<-bounded.Done()
+	if !errors.Is(bounded.Err(), context.DeadlineExceeded) {
+		t.Fatalf("bounded context error = %v, want deadline exceeded", bounded.Err())
+	}
+	if elapsed := time.Since(started); elapsed > 250*time.Millisecond {
+		t.Fatalf("bounded context elapsed = %v, want no more than 250ms", elapsed)
+	}
+
+	parent, cancelParent := context.WithCancel(context.Background())
+	child, cancelChild := boundedAsyncOperationContext(parent)
+	cancelParent()
+	defer cancelChild()
+	select {
+	case <-child.Done():
+		if !errors.Is(child.Err(), context.Canceled) {
+			t.Fatalf("child context error = %v, want parent cancellation", child.Err())
+		}
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("parent cancellation did not stop bounded context")
+	}
+}
+
+func TestGATTContextOperationsHonorPreCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	tests := []struct {
+		name string
+		run  func() error
+	}{
+		{
+			name: "connect",
+			run: func() error {
+				_, err := (&Adapter{}).ConnectContext(ctx, Address{}, ConnectionParams{})
+				return err
+			},
+		},
+		{
+			name: "service discovery",
+			run: func() error {
+				_, err := (Device{}).DiscoverServicesContext(ctx, nil)
+				return err
+			},
+		},
+		{
+			name: "characteristic discovery",
+			run: func() error {
+				_, err := (DeviceService{}).DiscoverCharacteristicsContext(ctx, nil)
+				return err
+			},
+		},
+		{
+			name: "read",
+			run: func() error {
+				_, err := (DeviceCharacteristic{}).ReadContext(ctx, make([]byte, 1))
+				return err
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if err := test.run(); !errors.Is(err, context.Canceled) {
+				t.Fatalf("context operation error = %v, want context.Canceled", err)
+			}
+		})
+	}
+}
+
 func TestWaitForScanStopReturnsStopErrorWithoutStoppedEvent(t *testing.T) {
 	originalTimeout := scanStopTimeout
 	originalPoll := scanStopPollInterval

@@ -36,10 +36,10 @@ describe('deriveOperationLocks', () => {
     }
   );
 
-  it('keeps controls available during a status refresh', () => {
+  it('locks scan and bulk while keeping station controls available during a status refresh', () => {
     expect(locks('status-refresh')).toEqual({
-      scanLocked: false,
-      bulkLocked: false,
+      scanLocked: true,
+      bulkLocked: true,
       stationLocked: false,
       anyDeviceOperation: false
     });

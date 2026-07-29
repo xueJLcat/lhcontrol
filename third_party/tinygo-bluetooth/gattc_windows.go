@@ -1,6 +1,7 @@
 package bluetooth
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"slices"
@@ -47,6 +48,17 @@ const (
 // Passing a nil slice of UUIDs will return a complete list of
 // services.
 func (d Device) DiscoverServices(filterUUIDs []UUID) ([]DeviceService, error) {
+	return d.DiscoverServicesContext(context.Background(), filterUUIDs)
+}
+
+// DiscoverServicesContext starts service discovery and allows it to be cancelled.
+func (d Device) DiscoverServicesContext(ctx context.Context, filterUUIDs []UUID) ([]DeviceService, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	state, err := d.beginOperation()
 	if err != nil {
 		return nil, err
@@ -60,7 +72,7 @@ func (d Device) DiscoverServices(filterUUIDs []UUID) ([]DeviceService, error) {
 	}
 	defer getServicesOperation.Release()
 
-	if err := awaitAsyncOperation(getServicesOperation, genericattributeprofile.SignatureGattDeviceServicesResult); err != nil {
+	if err := awaitAsyncOperationContext(ctx, getServicesOperation, genericattributeprofile.SignatureGattDeviceServicesResult); err != nil {
 		return nil, err
 	}
 
@@ -234,6 +246,17 @@ func (s DeviceService) UUID() UUID {
 // Passing a nil slice of UUIDs will return a complete
 // list of characteristics.
 func (s DeviceService) DiscoverCharacteristics(filterUUIDs []UUID) ([]DeviceCharacteristic, error) {
+	return s.DiscoverCharacteristicsContext(context.Background(), filterUUIDs)
+}
+
+// DiscoverCharacteristicsContext starts characteristic discovery and allows it to be cancelled.
+func (s DeviceService) DiscoverCharacteristicsContext(ctx context.Context, filterUUIDs []UUID) ([]DeviceCharacteristic, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if s.deviceService == nil || s.service == nil {
 		return nil, errors.New("bluetooth: service is unavailable")
 	}
@@ -249,7 +272,7 @@ func (s DeviceService) DiscoverCharacteristics(filterUUIDs []UUID) ([]DeviceChar
 	defer getCharacteristicsOp.Release()
 
 	// IAsyncOperation<GattCharacteristicsResult>
-	if err := awaitAsyncOperation(getCharacteristicsOp, genericattributeprofile.SignatureGattCharacteristicsResult); err != nil {
+	if err := awaitAsyncOperationContext(ctx, getCharacteristicsOp, genericattributeprofile.SignatureGattCharacteristicsResult); err != nil {
 		return nil, err
 	}
 
@@ -573,6 +596,17 @@ func classifyWriteFailure(mode genericattributeprofile.GattWriteOption, operatio
 
 // Read reads the current characteristic value.
 func (c DeviceCharacteristic) Read(data []byte) (int, error) {
+	return c.ReadContext(context.Background(), data)
+}
+
+// ReadContext reads the current characteristic value and allows it to be cancelled.
+func (c DeviceCharacteristic) ReadContext(ctx context.Context, data []byte) (int, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	if c.properties&genericattributeprofile.GattCharacteristicPropertiesRead == 0 {
 		return 0, errNoRead
 	}
@@ -589,7 +623,7 @@ func (c DeviceCharacteristic) Read(data []byte) (int, error) {
 	defer readOp.Release()
 
 	// IAsyncOperation<GattReadResult>
-	if err := awaitAsyncOperation(readOp, genericattributeprofile.SignatureGattReadResult); err != nil {
+	if err := awaitAsyncOperationContext(ctx, readOp, genericattributeprofile.SignatureGattReadResult); err != nil {
 		return 0, err
 	}
 

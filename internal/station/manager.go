@@ -25,8 +25,12 @@ var ErrScanRequired = errors.New("a recent successful scan is required")
 var ErrShuttingDown = errors.New("application is shutting down")
 
 const (
-	statusFreshnessWindow      = 45 * time.Second
-	channelScanFreshnessWindow = 2 * time.Minute
+	statusFreshnessWindow          = 45 * time.Second
+	channelScanFreshnessWindow     = 2 * time.Minute
+	defaultInitialReadTimeout      = 30 * time.Second
+	defaultStatusReadTimeout       = 20 * time.Second
+	defaultInitialReadPhaseTimeout = 45 * time.Second
+	defaultStatusRefreshTimeout    = 30 * time.Second
 )
 
 // StationInfo is a simplified representation of a BaseStation for the frontend.
@@ -112,10 +116,10 @@ type ScanCallbacks struct {
 
 type bluetoothOperations struct {
 	scanForDurationContext func(context.Context, time.Duration) ([]bluetooth.DiscoveredStation, error)
-	readPowerState         func(*bluetooth.BaseStation) error
-	fetchInitialPowerState func(*bluetooth.BaseStation) error
-	ensureCapabilities     func(*bluetooth.BaseStation) (bluetooth.Capabilities, error)
-	refreshCapabilities    func(*bluetooth.BaseStation) (bluetooth.Capabilities, error)
+	readPowerStateContext  func(context.Context, *bluetooth.BaseStation) error
+	fetchInitialPowerState func(context.Context, *bluetooth.BaseStation) error
+	ensureCapabilities     func(context.Context, *bluetooth.BaseStation) (bluetooth.Capabilities, error)
+	refreshCapabilities    func(context.Context, *bluetooth.BaseStation) (bluetooth.Capabilities, error)
 	setPowerState          func(*bluetooth.BaseStation, bluetooth.PowerState) (bluetooth.PowerControlResult, error)
 	identify               func(*bluetooth.BaseStation) error
 	setChannel             func(*bluetooth.BaseStation, int) (bluetooth.ChannelWriteResult, error)
@@ -134,50 +138,87 @@ type scanLifecycle struct {
 	state       string
 }
 
+type deviceOperationKind uint8
+
+const (
+	deviceOperationForeground deviceOperationKind = iota
+	deviceOperationStatus
+	deviceOperationRecovery
+)
+
+type activeDeviceOperation struct {
+	kind deviceOperationKind
+	done chan struct{}
+}
+
+type deviceOperationBusyError struct {
+	backgroundDone <-chan struct{}
+}
+
+func (e *deviceOperationBusyError) Error() string {
+	return ErrOperationInProgress.Error()
+}
+
+func (e *deviceOperationBusyError) Unwrap() error {
+	return ErrOperationInProgress
+}
+
 type Manager struct {
-	stations               map[string]*bluetooth.BaseStation
-	stationsMutex          sync.RWMutex
-	config                 *config.Config
-	operationMutex         sync.RWMutex
-	scanTransitionMutex    sync.Mutex
-	statusOperationMutex   sync.Mutex
-	channelOperationMutex  sync.Mutex
-	deviceOperationMutex   sync.Mutex
-	activeDeviceOperations map[string]struct{}
-	deviceOperationSlots   chan struct{}
-	recoveryOperationMutex sync.Mutex
-	recoveryOperationDone  chan struct{}
-	recoveryGeneration     uint64
-	foregroundSlotMissHook func()
-	scanLifecycleStartHook func()
-	scanReadyHook          func()
-	isScanning             atomic.Bool
-	scanStatusMutex        sync.RWMutex
-	scanStatus             ScanStatus
-	scanLifecycleMutex     sync.Mutex
-	scanLifecycle          *scanLifecycle
-	initializeMutex        sync.Mutex
-	initializeErr          error
-	nextInitializeAt       time.Time
-	initializeBluetooth    func() error
-	asyncScanWg            sync.WaitGroup
-	scanCallbackWg         sync.WaitGroup
-	statusRetryMutex       sync.Mutex
-	statusRetries          map[string]statusRetry
-	statusRecoveryRunning  atomic.Bool
-	statusRecoveryStart    sync.Once
-	statusRecoveryWake     chan struct{}
-	statusRecoveryWg       sync.WaitGroup
-	statusRetryBase        time.Duration
-	statusRetryMax         time.Duration
-	statusBusyRetry        time.Duration
-	shuttingDown           atomic.Bool
-	shutdownOnce           sync.Once
-	shutdownCh             chan struct{}
-	lifecycleMutex         sync.Mutex
-	lifecycleCond          *sync.Cond
-	activeOperations       int
-	bluetoothOps           bluetoothOperations
+	stations                map[string]*bluetooth.BaseStation
+	stationsMutex           sync.RWMutex
+	config                  *config.Config
+	operationMutex          sync.RWMutex
+	globalOperationMutex    sync.Mutex
+	foregroundGlobalActive  bool
+	scanTransitionMutex     sync.Mutex
+	statusOperationMutex    sync.Mutex
+	statusLifecycleMutex    sync.Mutex
+	statusOperationDone     chan struct{}
+	channelOperationMutex   sync.Mutex
+	deviceOperationMutex    sync.Mutex
+	activeDeviceOperations  map[string]activeDeviceOperation
+	deviceOperationSlots    chan struct{}
+	recoveryOperationMutex  sync.Mutex
+	recoveryOperationDone   chan struct{}
+	recoveryContext         context.Context
+	cancelRecovery          context.CancelFunc
+	recoveryGeneration      uint64
+	foregroundSlotMissHook  func()
+	scanLifecycleStartHook  func()
+	scanReadyHook           func()
+	isScanning              atomic.Bool
+	scanStatusMutex         sync.RWMutex
+	scanStatus              ScanStatus
+	scanLifecycleMutex      sync.Mutex
+	scanLifecycle           *scanLifecycle
+	initializeMutex         sync.Mutex
+	initializeErr           error
+	nextInitializeAt        time.Time
+	initializeBluetooth     func() error
+	asyncScanWg             sync.WaitGroup
+	scanCallbackWg          sync.WaitGroup
+	statusRetryMutex        sync.Mutex
+	statusRetries           map[string]statusRetry
+	statusRecoveryRunning   atomic.Bool
+	statusRecoveryStart     sync.Once
+	statusRecoveryWake      chan struct{}
+	statusRecoveryWg        sync.WaitGroup
+	statusRetryBase         time.Duration
+	statusRetryMax          time.Duration
+	statusBusyRetry         time.Duration
+	initialReadTimeout      time.Duration
+	initialReadPhaseTimeout time.Duration
+	statusReadTimeout       time.Duration
+	statusRefreshTimeout    time.Duration
+	shuttingDown            atomic.Bool
+	shutdownOnce            sync.Once
+	shutdownCh              chan struct{}
+	lifecycleContext        context.Context
+	cancelLifecycle         context.CancelFunc
+	lifecycleMutex          sync.Mutex
+	lifecycleCond           *sync.Cond
+	activeOperations        int
+	bluetoothOps            bluetoothOperations
 }
 
 type statusRetry struct {
@@ -202,25 +243,32 @@ const (
 )
 
 func NewManager(cfg *config.Config) *Manager {
+	lifecycleContext, cancelLifecycle := context.WithCancel(context.Background())
 	manager := &Manager{
-		stations:               make(map[string]*bluetooth.BaseStation),
-		config:                 cfg,
-		activeDeviceOperations: make(map[string]struct{}),
-		deviceOperationSlots:   make(chan struct{}, 2),
-		statusRetries:          make(map[string]statusRetry),
-		statusRecoveryWake:     make(chan struct{}, 1),
-		statusRetryBase:        30 * time.Second,
-		statusRetryMax:         5 * time.Minute,
-		statusBusyRetry:        250 * time.Millisecond,
-		scanStatus:             ScanStatus{State: "idle", Warnings: []string{}},
-		initializeBluetooth:    bluetooth.Initialize,
-		shutdownCh:             make(chan struct{}),
+		stations:                make(map[string]*bluetooth.BaseStation),
+		config:                  cfg,
+		activeDeviceOperations:  make(map[string]activeDeviceOperation),
+		deviceOperationSlots:    make(chan struct{}, 2),
+		statusRetries:           make(map[string]statusRetry),
+		statusRecoveryWake:      make(chan struct{}, 1),
+		statusRetryBase:         30 * time.Second,
+		statusRetryMax:          5 * time.Minute,
+		statusBusyRetry:         250 * time.Millisecond,
+		initialReadTimeout:      defaultInitialReadTimeout,
+		initialReadPhaseTimeout: defaultInitialReadPhaseTimeout,
+		statusReadTimeout:       defaultStatusReadTimeout,
+		statusRefreshTimeout:    defaultStatusRefreshTimeout,
+		scanStatus:              ScanStatus{State: "idle", Warnings: []string{}},
+		initializeBluetooth:     bluetooth.Initialize,
+		shutdownCh:              make(chan struct{}),
+		lifecycleContext:        lifecycleContext,
+		cancelLifecycle:         cancelLifecycle,
 		bluetoothOps: bluetoothOperations{
 			scanForDurationContext: bluetooth.ScanForDurationContext,
-			readPowerState:         bluetooth.ReadPowerState,
-			fetchInitialPowerState: bluetooth.FetchInitialPowerState,
-			ensureCapabilities:     bluetooth.EnsureCapabilities,
-			refreshCapabilities:    bluetooth.RefreshCapabilities,
+			readPowerStateContext:  bluetooth.ReadPowerStateContext,
+			fetchInitialPowerState: bluetooth.FetchInitialPowerStateContext,
+			ensureCapabilities:     bluetooth.EnsureCapabilitiesContext,
+			refreshCapabilities:    bluetooth.RefreshCapabilitiesContext,
 			setPowerState:          bluetooth.SetPowerState,
 			identify:               bluetooth.Identify,
 			setChannel:             bluetooth.SetChannel,
@@ -531,6 +579,93 @@ func (m *Manager) endOperation() {
 	m.unregisterOperation()
 }
 
+// beginForegroundGlobalOperation waits for manager-owned background status
+// and recovery work, while preserving immediate Busy responses for another
+// foreground global, device, or configuration operation.
+func (m *Manager) beginForegroundGlobalOperation() error {
+	return m.beginForegroundGlobalOperationContext(context.Background())
+}
+
+func (m *Manager) beginForegroundGlobalOperationContext(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		err := m.beginOperation()
+		if err == nil {
+			if contextErr := ctx.Err(); contextErr != nil {
+				m.endOperation()
+				return contextErr
+			}
+			m.globalOperationMutex.Lock()
+			m.foregroundGlobalActive = true
+			m.globalOperationMutex.Unlock()
+			return nil
+		}
+		if !errors.Is(err, ErrOperationInProgress) {
+			return err
+		}
+
+		m.globalOperationMutex.Lock()
+		foregroundActive := m.foregroundGlobalActive
+		m.globalOperationMutex.Unlock()
+		if foregroundActive {
+			return err
+		}
+
+		m.recoveryOperationMutex.Lock()
+		recoveryDone := m.recoveryOperationDone
+		m.recoveryOperationMutex.Unlock()
+		m.statusLifecycleMutex.Lock()
+		statusDone := m.statusOperationDone
+		m.statusLifecycleMutex.Unlock()
+
+		var backgroundDone <-chan struct{}
+		if recoveryDone != nil {
+			backgroundDone = recoveryDone
+		} else if statusDone != nil {
+			backgroundDone = statusDone
+		}
+		if backgroundDone == nil {
+			return err
+		}
+		select {
+		case <-backgroundDone:
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-m.shutdownCh:
+			return ErrShuttingDown
+		}
+	}
+}
+
+func (m *Manager) endForegroundGlobalOperation() {
+	m.globalOperationMutex.Lock()
+	m.foregroundGlobalActive = false
+	m.globalOperationMutex.Unlock()
+	m.endOperation()
+}
+
+func (m *Manager) beginStatusLifecycle() chan struct{} {
+	done := make(chan struct{})
+	m.statusLifecycleMutex.Lock()
+	m.statusOperationDone = done
+	m.statusLifecycleMutex.Unlock()
+	return done
+}
+
+func (m *Manager) endStatusLifecycle(done chan struct{}) {
+	m.statusLifecycleMutex.Lock()
+	if m.statusOperationDone == done {
+		m.statusOperationDone = nil
+		close(done)
+	}
+	m.statusLifecycleMutex.Unlock()
+}
+
 // beginSharedOperation participates in shutdown and excludes global operations
 // without consuming a GATT slot. It is used for short configuration writes.
 func (m *Manager) beginSharedOperation() error {
@@ -553,6 +688,10 @@ func (m *Manager) endSharedOperation() {
 // and caps independent GATT work at two devices. It never waits while holding
 // the global read lock, so a request flood cannot starve a scan.
 func (m *Manager) beginStationOperation(address string) error {
+	return m.beginStationOperationKind(address, deviceOperationForeground)
+}
+
+func (m *Manager) beginStationOperationKind(address string, kind deviceOperationKind) error {
 	if err := m.registerOperation(); err != nil {
 		return err
 	}
@@ -560,24 +699,30 @@ func (m *Manager) beginStationOperation(address string) error {
 		m.unregisterOperation()
 		return ErrOperationInProgress
 	}
+	key := strings.ToLower(address)
+	m.deviceOperationMutex.Lock()
+	if active, exists := m.activeDeviceOperations[key]; exists {
+		var backgroundDone <-chan struct{}
+		if active.kind == deviceOperationStatus || active.kind == deviceOperationRecovery {
+			backgroundDone = active.done
+		}
+		m.deviceOperationMutex.Unlock()
+		m.operationMutex.RUnlock()
+		m.unregisterOperation()
+		return &deviceOperationBusyError{backgroundDone: backgroundDone}
+	}
 	select {
 	case m.deviceOperationSlots <- struct{}{}:
 	default:
-		m.operationMutex.RUnlock()
-		m.unregisterOperation()
-		return ErrOperationInProgress
-	}
-
-	key := strings.ToLower(address)
-	m.deviceOperationMutex.Lock()
-	if _, exists := m.activeDeviceOperations[key]; exists {
 		m.deviceOperationMutex.Unlock()
-		<-m.deviceOperationSlots
 		m.operationMutex.RUnlock()
 		m.unregisterOperation()
 		return ErrOperationInProgress
 	}
-	m.activeDeviceOperations[key] = struct{}{}
+	m.activeDeviceOperations[key] = activeDeviceOperation{
+		kind: kind,
+		done: make(chan struct{}),
+	}
 	m.deviceOperationMutex.Unlock()
 	return nil
 }
@@ -585,7 +730,11 @@ func (m *Manager) beginStationOperation(address string) error {
 func (m *Manager) endStationOperation(address string) {
 	key := strings.ToLower(address)
 	m.deviceOperationMutex.Lock()
+	active, exists := m.activeDeviceOperations[key]
 	delete(m.activeDeviceOperations, key)
+	if exists {
+		close(active.done)
+	}
 	m.deviceOperationMutex.Unlock()
 	<-m.deviceOperationSlots
 	m.operationMutex.RUnlock()
@@ -599,13 +748,19 @@ func (m *Manager) beginRecoveryStationOperation(address string) error {
 		return ErrOperationInProgress
 	}
 	done := make(chan struct{})
+	recoveryContext, cancelRecovery := context.WithCancel(m.lifecycleContext)
 	m.recoveryOperationDone = done
+	m.recoveryContext = recoveryContext
+	m.cancelRecovery = cancelRecovery
 	m.recoveryGeneration++
 	m.recoveryOperationMutex.Unlock()
-	if err := m.beginStationOperation(address); err != nil {
+	if err := m.beginStationOperationKind(address, deviceOperationRecovery); err != nil {
+		cancelRecovery()
 		m.recoveryOperationMutex.Lock()
 		if m.recoveryOperationDone == done {
 			m.recoveryOperationDone = nil
+			m.recoveryContext = nil
+			m.cancelRecovery = nil
 			m.recoveryGeneration++
 			close(done)
 		}
@@ -619,7 +774,13 @@ func (m *Manager) endRecoveryStationOperation(address string) {
 	m.endStationOperation(address)
 	m.recoveryOperationMutex.Lock()
 	done := m.recoveryOperationDone
+	cancelRecovery := m.cancelRecovery
 	m.recoveryOperationDone = nil
+	m.recoveryContext = nil
+	m.cancelRecovery = nil
+	if cancelRecovery != nil {
+		cancelRecovery()
+	}
 	if done != nil {
 		m.recoveryGeneration++
 		close(done)
@@ -640,6 +801,16 @@ func (m *Manager) beginForegroundStationOperation(address string) error {
 		if !errors.Is(err, ErrOperationInProgress) {
 			return err
 		}
+		var deviceBusy *deviceOperationBusyError
+		if errors.As(err, &deviceBusy) && deviceBusy.backgroundDone != nil {
+			m.cancelRecoveryForForeground()
+			select {
+			case <-deviceBusy.backgroundDone:
+				continue
+			case <-m.shutdownCh:
+				return ErrShuttingDown
+			}
+		}
 		if m.foregroundSlotMissHook != nil {
 			m.foregroundSlotMissHook()
 		}
@@ -653,11 +824,24 @@ func (m *Manager) beginForegroundStationOperation(address string) error {
 		if done == nil {
 			return err
 		}
+		m.cancelRecoveryForForeground()
 		select {
 		case <-done:
 		case <-m.shutdownCh:
 			return ErrShuttingDown
 		}
+	}
+}
+
+// cancelRecoveryForForeground makes a read-only recovery yield its GATT slot.
+// The recovery scheduler will retry it without counting the cancellation as a
+// station failure.
+func (m *Manager) cancelRecoveryForForeground() {
+	m.recoveryOperationMutex.Lock()
+	cancel := m.cancelRecovery
+	m.recoveryOperationMutex.Unlock()
+	if cancel != nil {
+		cancel()
 	}
 }
 
@@ -819,24 +1003,42 @@ func (m *Manager) ScanAndFetchStations() ([]StationInfo, error) {
 		close(lifecycle.startedDone)
 	}
 	m.finishScan(stations, found, err, ScanCallbacks{})()
-	return stations, err
+	// finishScan releases the global operation, so a queued read-only recovery
+	// may already have produced a newer snapshot than scanAndFetchStations.
+	return m.GetStationInfo(), err
 }
 
 func (m *Manager) beginScan(callbacks ScanCallbacks) error {
+	lifecycle, err := m.reserveScan()
+	if err != nil {
+		return err
+	}
+	operationAcquired, err := m.prepareScan(lifecycle)
+	if err == nil {
+		return nil
+	}
+	cancelled := lifecycle.ctx.Err() != nil || m.shuttingDown.Load()
+	if m.shuttingDown.Load() {
+		err = ErrShuttingDown
+	} else if cancelled {
+		err = bluetooth.ErrScanCancelled
+	}
+	m.abortScanStart(lifecycle, err, cancelled, operationAcquired)
+	return err
+}
+
+func (m *Manager) reserveScan() (*scanLifecycle, error) {
 	m.scanTransitionMutex.Lock()
+	if m.shuttingDown.Load() {
+		m.scanTransitionMutex.Unlock()
+		return nil, ErrShuttingDown
+	}
 	m.scanLifecycleMutex.Lock()
 	previousLifecycle := m.scanLifecycle
 	m.scanLifecycleMutex.Unlock()
 	if previousLifecycle != nil {
 		m.scanTransitionMutex.Unlock()
-		return ErrOperationInProgress
-	}
-	if err := m.beginOperation(); err != nil {
-		m.scanTransitionMutex.Unlock()
-		return err
-	}
-	if m.scanLifecycleStartHook != nil {
-		m.scanLifecycleStartHook()
+		return nil, ErrOperationInProgress
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	lifecycle := &scanLifecycle{
@@ -850,19 +1052,23 @@ func (m *Manager) beginScan(callbacks ScanCallbacks) error {
 	m.scanLifecycleMutex.Unlock()
 	m.isScanning.Store(true)
 	m.markScanStarted()
+	// Publish the cancellable lifecycle before adapter initialization or any
+	// other potentially blocking start work. StopScan can then record the
+	// user's intent immediately instead of racing the platform scan goroutine.
+	m.scanTransitionMutex.Unlock()
+	if m.scanLifecycleStartHook != nil {
+		m.scanLifecycleStartHook()
+	}
+	return lifecycle, nil
+}
+
+func (m *Manager) prepareScan(lifecycle *scanLifecycle) (bool, error) {
+	ctx := lifecycle.ctx
+	if err := m.beginForegroundGlobalOperationContext(ctx); err != nil {
+		return false, err
+	}
 	if err := m.ensureReady(); err != nil {
-		if m.shuttingDown.Load() {
-			m.abortScanStart(lifecycle, ErrShuttingDown, true)
-			m.scanTransitionMutex.Unlock()
-			return ErrShuttingDown
-		}
-		cancelled := ctx.Err() != nil
-		m.abortScanStart(lifecycle, err, cancelled)
-		m.scanTransitionMutex.Unlock()
-		if cancelled {
-			return bluetooth.ErrScanCancelled
-		}
-		return err
+		return true, err
 	}
 	if m.scanReadyHook != nil {
 		m.scanReadyHook()
@@ -870,26 +1076,26 @@ func (m *Manager) beginScan(callbacks ScanCallbacks) error {
 	m.lifecycleMutex.Lock()
 	if m.shuttingDown.Load() {
 		m.lifecycleMutex.Unlock()
-		m.abortScanStart(lifecycle, ErrShuttingDown, true)
-		m.scanTransitionMutex.Unlock()
-		return ErrShuttingDown
+		return true, ErrShuttingDown
 	}
 	if ctx.Err() != nil {
 		m.lifecycleMutex.Unlock()
-		m.abortScanStart(lifecycle, bluetooth.ErrScanCancelled, true)
-		m.scanTransitionMutex.Unlock()
-		return bluetooth.ErrScanCancelled
+		return true, bluetooth.ErrScanCancelled
 	}
 	m.lifecycleMutex.Unlock()
-	m.scanTransitionMutex.Unlock()
-	return nil
+	m.markScanRunning()
+	return true, nil
 }
 
 // abortScanStart publishes a terminal lifecycle state before scan processing
 // starts, allowing StopScan to wait safely during adapter initialization.
-func (m *Manager) abortScanStart(lifecycle *scanLifecycle, err error, cancelled bool) {
+func (m *Manager) abortScanStart(lifecycle *scanLifecycle, err error, cancelled, operationAcquired bool) {
+	m.scanTransitionMutex.Lock()
+	defer m.scanTransitionMutex.Unlock()
 	m.isScanning.Store(false)
-	m.endOperation()
+	if operationAcquired {
+		m.endForegroundGlobalOperation()
+	}
 	m.scanLifecycleMutex.Lock()
 	if m.scanLifecycle == lifecycle {
 		m.scanLifecycle = nil
@@ -912,7 +1118,7 @@ func (m *Manager) abortScanStart(lifecycle *scanLifecycle, err error, cancelled 
 func (m *Manager) finishScan(stations []StationInfo, found int, err error, callbacks ScanCallbacks) func() {
 	m.scanTransitionMutex.Lock()
 	m.isScanning.Store(false)
-	m.endOperation()
+	m.endForegroundGlobalOperation()
 	m.markScanFinished(stations, found, err)
 
 	m.scanLifecycleMutex.Lock()
@@ -969,7 +1175,9 @@ func (m *Manager) finishScan(stations []StationInfo, found int, err error, callb
 			}
 		} else if callbacks.Completed != nil {
 			if callbackErr := runSafely("scan completion callback", func() error {
-				callbacks.Completed(stations)
+				// Use the latest authoritative cache after releasing the scan
+				// lock instead of the snapshot captured before recovery could run.
+				callbacks.Completed(m.GetStationInfo())
 				return nil
 			}); callbackErr != nil {
 				log.Printf("Scan completion callback failed: %v", callbackErr)
@@ -1082,6 +1290,8 @@ func (m *Manager) scanAndFetchStations(ctx context.Context) ([]StationInfo, int,
 	m.stationsMutex.Unlock()
 
 	if len(stationsToFetch) > 0 {
+		phaseContext, cancelPhase := context.WithTimeout(ctx, m.initialReadPhaseTimeout)
+		defer cancelPhase()
 		var wg sync.WaitGroup
 		type initialReadResult struct {
 			address string
@@ -1094,10 +1304,16 @@ func (m *Manager) scanAndFetchStations(ctx context.Context) ([]StationInfo, int,
 			wg.Add(1)
 			go func(resultIndex int, ptr *bluetooth.BaseStation) {
 				defer wg.Done()
+				readResults[resultIndex].address = ptr.Snapshot().Address
+				readResults[resultIndex].station = ptr
 				select {
 				case semaphore <- struct{}{}:
-				case <-ctx.Done():
-					readResults[resultIndex].err = bluetooth.ErrScanCancelled
+				case <-phaseContext.Done():
+					if ctx.Err() != nil {
+						readResults[resultIndex].err = bluetooth.ErrScanCancelled
+					} else {
+						readResults[resultIndex].err = fmt.Errorf("initial read phase deadline exceeded: %w", phaseContext.Err())
+					}
 					return
 				}
 				defer func() { <-semaphore }()
@@ -1105,13 +1321,11 @@ func (m *Manager) scanAndFetchStations(ctx context.Context) ([]StationInfo, int,
 					readResults[resultIndex].err = err
 					return
 				}
-				readResults[resultIndex] = initialReadResult{
-					address: ptr.Snapshot().Address,
-					station: ptr,
-					err: runSafely("initial station read", func() error {
-						return m.bluetoothOps.fetchInitialPowerState(ptr)
-					}),
-				}
+				readContext, cancelRead := context.WithTimeout(phaseContext, m.initialReadTimeout)
+				defer cancelRead()
+				readResults[resultIndex].err = runSafely("initial station read", func() error {
+					return m.bluetoothOps.fetchInitialPowerState(readContext, ptr)
+				})
 			}(index, stationToFetch)
 		}
 		wg.Wait()
@@ -1168,16 +1382,26 @@ func (m *Manager) currentScanContext() context.Context {
 // finished. Terminal callbacks are delivered afterwards so callbacks can
 // safely call StopScan themselves. Repeated and no-op calls are safe.
 func (m *Manager) StopScan() error {
-	m.scanTransitionMutex.Lock()
 	m.scanLifecycleMutex.Lock()
 	lifecycle := m.scanLifecycle
 	m.scanLifecycleMutex.Unlock()
 	if lifecycle == nil {
+		// A scan may have acquired the transition lock but not yet published
+		// its lifecycle. Wait for that short publication window, then recheck.
+		m.scanTransitionMutex.Lock()
+		m.scanLifecycleMutex.Lock()
+		lifecycle = m.scanLifecycle
+		m.scanLifecycleMutex.Unlock()
+		if lifecycle != nil {
+			lifecycle.cancel()
+		}
 		m.scanTransitionMutex.Unlock()
-		return nil
+		if lifecycle == nil {
+			return nil
+		}
+	} else {
+		lifecycle.cancel()
 	}
-	lifecycle.cancel()
-	m.scanTransitionMutex.Unlock()
 	<-lifecycle.done
 	lifecycle.mu.Lock()
 	result := lifecycle.result
@@ -1192,9 +1416,17 @@ func (m *Manager) IsScanning() bool {
 func (m *Manager) markScanStarted() {
 	m.scanStatusMutex.Lock()
 	m.scanStatus = ScanStatus{
-		State:     "running",
+		State:     "starting",
 		StartedAt: time.Now().Format(time.RFC3339Nano),
 		Warnings:  []string{},
+	}
+	m.scanStatusMutex.Unlock()
+}
+
+func (m *Manager) markScanRunning() {
+	m.scanStatusMutex.Lock()
+	if m.scanStatus.State == "starting" {
+		m.scanStatus.State = "running"
 	}
 	m.scanStatusMutex.Unlock()
 }
@@ -1233,22 +1465,35 @@ func (m *Manager) GetScanStatus() ScanStatus {
 // StartScan reserves the Bluetooth adapter, starts scan processing, then emits
 // Started synchronously. Terminal callbacks run after processing has finished.
 func (m *Manager) StartScan(callbacks ScanCallbacks) error {
-	if err := m.beginScan(callbacks); err != nil {
+	lifecycle, err := m.reserveScan()
+	if err != nil {
 		return err
 	}
 	m.asyncScanWg.Add(1)
 	m.scanCallbackWg.Add(1)
 	go func() {
-		ctx := m.currentScanContext()
+		operationAcquired, prepareErr := m.prepareScan(lifecycle)
+		if prepareErr != nil {
+			cancelled := lifecycle.ctx.Err() != nil || m.shuttingDown.Load()
+			if m.shuttingDown.Load() {
+				prepareErr = ErrShuttingDown
+			} else if cancelled {
+				prepareErr = bluetooth.ErrScanCancelled
+			}
+			m.abortScanStart(lifecycle, prepareErr, cancelled, operationAcquired)
+			m.asyncScanWg.Done()
+			defer m.scanCallbackWg.Done()
+			<-lifecycle.startedDone
+			m.deliverAbortedScanCallback(prepareErr, cancelled, callbacks)
+			return
+		}
+		ctx := lifecycle.ctx
 		stations, found, err := m.scanAndFetchStationsSafely(ctx)
 		deliverTerminal := m.finishScan(stations, found, err, callbacks)
 		m.asyncScanWg.Done()
 		defer m.scanCallbackWg.Done()
 		deliverTerminal()
 	}()
-	m.scanLifecycleMutex.Lock()
-	lifecycle := m.scanLifecycle
-	m.scanLifecycleMutex.Unlock()
 	if callbacks.Started != nil {
 		if callbackErr := runSafely("scan started callback", func() error {
 			callbacks.Started()
@@ -1257,13 +1502,39 @@ func (m *Manager) StartScan(callbacks ScanCallbacks) error {
 			log.Printf("Scan started callback failed: %v", callbackErr)
 		}
 	}
-	if lifecycle != nil {
-		close(lifecycle.startedDone)
-	}
+	close(lifecycle.startedDone)
 	return nil
 }
 
+func (m *Manager) deliverAbortedScanCallback(err error, cancelled bool, callbacks ScanCallbacks) {
+	if cancelled {
+		if callbacks.Cancelled != nil {
+			if callbackErr := runSafely("scan cancelled callback", func() error {
+				callbacks.Cancelled()
+				return nil
+			}); callbackErr != nil {
+				log.Printf("Scan cancelled callback failed: %v", callbackErr)
+			}
+		}
+		return
+	}
+	if callbacks.Failed != nil {
+		if callbackErr := runSafely("scan failure callback", func() error {
+			callbacks.Failed(err)
+			return nil
+		}); callbackErr != nil {
+			log.Printf("Scan failure callback failed: %v", callbackErr)
+		}
+	}
+}
+
 func (m *Manager) CheckAllStationStatuses() ([]StationInfo, error) {
+	if !m.statusOperationMutex.TryLock() {
+		return m.GetStationInfo(), fmt.Errorf("status refresh already in progress: %w", ErrOperationInProgress)
+	}
+	defer m.statusOperationMutex.Unlock()
+	statusDone := m.beginStatusLifecycle()
+	defer m.endStatusLifecycle(statusDone)
 	if err := m.beginSharedOperation(); err != nil {
 		return m.GetStationInfo(), err
 	}
@@ -1271,10 +1542,6 @@ func (m *Manager) CheckAllStationStatuses() ([]StationInfo, error) {
 	if err := m.ensureReady(); err != nil {
 		return m.GetStationInfo(), err
 	}
-	if !m.statusOperationMutex.TryLock() {
-		return m.GetStationInfo(), fmt.Errorf("status refresh already in progress: %w", ErrOperationInProgress)
-	}
-	defer m.statusOperationMutex.Unlock()
 	stationsToRead := make([]*bluetooth.BaseStation, 0)
 	disconnectedAddresses := make([]string, 0)
 	m.stationsMutex.RLock()
@@ -1312,6 +1579,8 @@ func (m *Manager) CheckAllStationStatuses() ([]StationInfo, error) {
 	}
 	statusErrors := make([]error, len(stationsToRead))
 	work := make(chan statusReadWork)
+	refreshContext, cancelRefresh := context.WithTimeout(m.lifecycleContext, m.statusRefreshTimeout)
+	defer cancelRefresh()
 	// Keep one GATT slot available for foreground commands while the periodic
 	// refresh reads connected stations.
 	workerCount := 1
@@ -1326,16 +1595,22 @@ func (m *Manager) CheckAllStationStatuses() ([]StationInfo, error) {
 			for item := range work {
 				ptr := item.station
 				address := ptr.Snapshot().Address
-				if err := m.beginStationOperation(address); err != nil {
+				if err := m.beginStationOperationKind(address, deviceOperationStatus); err != nil {
 					statusErrors[item.index] = fmt.Errorf("%s: status read skipped: %w", address, err)
 					continue
 				}
 				func() {
 					defer m.endStationOperation(address)
+					readContext, cancelRead := context.WithTimeout(refreshContext, m.statusReadTimeout)
+					defer cancelRead()
 					workerErr := runSafely("station status worker", func() error {
-						return m.bluetoothOps.readPowerState(ptr)
+						return m.bluetoothOps.readPowerStateContext(readContext, ptr)
 					})
 					if workerErr != nil {
+						if m.shuttingDown.Load() && errors.Is(workerErr, context.Canceled) {
+							statusErrors[item.index] = fmt.Errorf("%s: status read cancelled: %w", address, workerErr)
+							return
+						}
 						m.observeBluetoothError(workerErr)
 						var readErr *bluetooth.StatusReadError
 						if errors.As(workerErr, &readErr) {
@@ -1351,8 +1626,17 @@ func (m *Manager) CheckAllStationStatuses() ([]StationInfo, error) {
 			}
 		}()
 	}
+dispatch:
 	for index, station := range stationsToRead {
-		work <- statusReadWork{index: index, station: station}
+		select {
+		case work <- statusReadWork{index: index, station: station}:
+		case <-refreshContext.Done():
+			for skippedIndex := index; skippedIndex < len(stationsToRead); skippedIndex++ {
+				address := stationsToRead[skippedIndex].Snapshot().Address
+				statusErrors[skippedIndex] = fmt.Errorf("%s: status refresh deadline exceeded: %w", address, refreshContext.Err())
+			}
+			break dispatch
+		}
 	}
 	close(work)
 	wg.Wait()
@@ -1637,9 +1921,23 @@ func (m *Manager) recoverOneStation(station *bluetooth.BaseStation, address stri
 		m.observeBluetoothError(err)
 		return m.initializationRetryDelay()
 	}
+	m.recoveryOperationMutex.Lock()
+	recoveryContext := m.recoveryContext
+	m.recoveryOperationMutex.Unlock()
+	if recoveryContext == nil {
+		recoveryContext = m.lifecycleContext
+	}
+	readContext, cancelRead := context.WithTimeout(recoveryContext, m.initialReadTimeout)
+	defer cancelRead()
 	err := runSafely("station status recovery", func() error {
-		return m.bluetoothOps.fetchInitialPowerState(station)
+		return m.bluetoothOps.fetchInitialPowerState(readContext, station)
 	})
+	if m.shuttingDown.Load() && errors.Is(err, context.Canceled) {
+		return 0
+	}
+	if errors.Is(err, context.Canceled) && m.lifecycleContext.Err() == nil {
+		return m.statusBusyRetry
+	}
 	m.observeBluetoothError(err)
 	var initialErr *bluetooth.InitialReadError
 	if errors.As(err, &initialErr) {
@@ -1709,24 +2007,50 @@ func (m *Manager) SetStationPower(address, state string) (PowerActionResult, err
 		return PowerActionResult{}, err
 	}
 	defer m.endStationOperation(canonicalAddress)
+	snapshot := stationPtr.Snapshot()
+	now := time.Now()
+	if snapshot.PowerState == bluetooth.PowerStateBooting &&
+		isFresh(snapshot.LastPowerReadAt, now) {
+		return PowerActionResult{}, fmt.Errorf(
+			"station is booting; retry after transition: %w",
+			ErrOperationInProgress,
+		)
+	}
+	if snapshot.PowerState == target &&
+		isFresh(snapshot.LastPowerReadAt, now) &&
+		bluetooth.IsPowerStateConfirmed(snapshot.PowerState, snapshot.RawPowerState) {
+		info, infoErr := m.stationInfoByAddress(canonicalAddress)
+		if infoErr != nil {
+			return PowerActionResult{}, infoErr
+		}
+		return PowerActionResult{
+			Station:     info,
+			CommandSent: false,
+			Confirmed:   true,
+		}, nil
+	}
 	if err := m.ensureReady(); err != nil {
 		return PowerActionResult{}, err
 	}
-	snapshot := stationPtr.Snapshot()
 	capabilities := snapshot.Capabilities
 	if !snapshot.CapabilitiesKnown ||
 		!capabilities.PowerWrite ||
 		(target == bluetooth.PowerStateStandby && !capabilities.Standby) {
 		err = runSafely("power capability refresh", func() error {
+			discoveryContext, cancelDiscovery := context.WithTimeout(m.lifecycleContext, m.initialReadTimeout)
+			defer cancelDiscovery()
 			var refreshErr error
 			if snapshot.CapabilitiesKnown {
-				capabilities, refreshErr = m.bluetoothOps.refreshCapabilities(stationPtr)
+				capabilities, refreshErr = m.bluetoothOps.refreshCapabilities(discoveryContext, stationPtr)
 			} else {
-				capabilities, refreshErr = m.bluetoothOps.ensureCapabilities(stationPtr)
+				capabilities, refreshErr = m.bluetoothOps.ensureCapabilities(discoveryContext, stationPtr)
 			}
 			return refreshErr
 		})
 		if err != nil {
+			if m.shuttingDown.Load() && errors.Is(err, context.Canceled) {
+				return PowerActionResult{}, ErrShuttingDown
+			}
 			m.observeStationBluetoothError(stationPtr, canonicalAddress, err)
 			return PowerActionResult{}, err
 		}
@@ -1789,11 +2113,16 @@ func (m *Manager) IdentifyStation(address string) error {
 	capabilities := stationPtr.Snapshot().Capabilities
 	if !capabilities.Identify {
 		err = runSafely("identify capability refresh", func() error {
+			discoveryContext, cancelDiscovery := context.WithTimeout(m.lifecycleContext, m.initialReadTimeout)
+			defer cancelDiscovery()
 			var refreshErr error
-			capabilities, refreshErr = m.bluetoothOps.refreshCapabilities(stationPtr)
+			capabilities, refreshErr = m.bluetoothOps.refreshCapabilities(discoveryContext, stationPtr)
 			return refreshErr
 		})
 		if err != nil {
+			if m.shuttingDown.Load() && errors.Is(err, context.Canceled) {
+				return ErrShuttingDown
+			}
 			m.observeStationBluetoothError(stationPtr, canonicalAddress, err)
 			return err
 		}
@@ -1828,15 +2157,25 @@ func (m *Manager) RefreshStationCapabilities(address string) (StationInfo, error
 		return StationInfo{}, err
 	}
 	if err := runSafely("capability refresh", func() error {
-		_, refreshErr := m.bluetoothOps.refreshCapabilities(stationPtr)
+		discoveryContext, cancelDiscovery := context.WithTimeout(m.lifecycleContext, m.initialReadTimeout)
+		defer cancelDiscovery()
+		_, refreshErr := m.bluetoothOps.refreshCapabilities(discoveryContext, stationPtr)
 		return refreshErr
 	}); err != nil {
+		if m.shuttingDown.Load() && errors.Is(err, context.Canceled) {
+			return StationInfo{}, ErrShuttingDown
+		}
 		m.observeStationBluetoothError(stationPtr, canonicalAddress, err)
 		return StationInfo{}, err
 	}
 	if err := runSafely("capability refresh state read", func() error {
-		return m.bluetoothOps.fetchInitialPowerState(stationPtr)
+		readContext, cancelRead := context.WithTimeout(m.lifecycleContext, m.initialReadTimeout)
+		defer cancelRead()
+		return m.bluetoothOps.fetchInitialPowerState(readContext, stationPtr)
 	}); err != nil {
+		if m.shuttingDown.Load() && errors.Is(err, context.Canceled) {
+			return StationInfo{}, ErrShuttingDown
+		}
 		m.observeBluetoothError(err)
 		var readErr *bluetooth.InitialReadError
 		if !errors.As(err, &readErr) {
@@ -1873,6 +2212,15 @@ func (m *Manager) SetStationChannel(address string, channel int, allowUnknownCon
 		return result, err
 	}
 	defer m.endStationOperation(canonicalAddress)
+	targetSnapshot := stationPtr.Snapshot()
+	result.Address = targetSnapshot.Address
+	if targetSnapshot.Channel == channel &&
+		isFresh(targetSnapshot.LastChannelReadAt, time.Now()) {
+		result.PreviousChannel = channel
+		result.Channel = channel
+		result.Confirmed = true
+		return result, nil
+	}
 	if err := m.ensureReady(); err != nil {
 		return result, err
 	}
@@ -1880,7 +2228,7 @@ func (m *Manager) SetStationChannel(address string, channel int, allowUnknownCon
 		return result, ErrOperationInProgress
 	}
 	defer m.channelOperationMutex.Unlock()
-	targetSnapshot := stationPtr.Snapshot()
+	targetSnapshot = stationPtr.Snapshot()
 	result.Address = targetSnapshot.Address
 	if !targetSnapshot.Present || targetSnapshot.MissedScans > 0 || targetSnapshot.PresenceUncertain {
 		return result, fmt.Errorf("%w: station %s was not seen in the latest scan", ErrNotFound, address)
@@ -1891,11 +2239,16 @@ func (m *Manager) SetStationChannel(address string, channel int, allowUnknownCon
 	capabilities := targetSnapshot.Capabilities
 	if !capabilities.ChannelRead || !capabilities.ChannelWrite {
 		err = runSafely("channel capability refresh", func() error {
+			discoveryContext, cancelDiscovery := context.WithTimeout(m.lifecycleContext, m.initialReadTimeout)
+			defer cancelDiscovery()
 			var refreshErr error
-			capabilities, refreshErr = m.bluetoothOps.refreshCapabilities(stationPtr)
+			capabilities, refreshErr = m.bluetoothOps.refreshCapabilities(discoveryContext, stationPtr)
 			return refreshErr
 		})
 		if err != nil {
+			if m.shuttingDown.Load() && errors.Is(err, context.Canceled) {
+				return result, ErrShuttingDown
+			}
 			m.observeStationBluetoothError(stationPtr, canonicalAddress, err)
 			return result, err
 		}
@@ -2012,13 +2365,10 @@ func (m *Manager) setAllStationsPowerDetailed(state string) (BulkPowerResult, er
 	if err != nil {
 		return result, fmt.Errorf("%w: %v", ErrInvalidArgument, err)
 	}
-	if err := m.beginOperation(); err != nil {
+	if err := m.beginForegroundGlobalOperation(); err != nil {
 		return result, err
 	}
-	defer m.endOperation()
-	if err := m.ensureReady(); err != nil {
-		return result, err
-	}
+	defer m.endForegroundGlobalOperation()
 
 	type bulkPowerWork struct {
 		station     *bluetooth.BaseStation
@@ -2087,6 +2437,12 @@ func (m *Manager) setAllStationsPowerDetailed(state string) (BulkPowerResult, er
 			result.Results[index].Name = info.Name
 		}
 	}
+	if len(work) == 0 {
+		return result, nil
+	}
+	if err := m.ensureReady(); err != nil {
+		return result, err
+	}
 
 	var wg sync.WaitGroup
 	semaphore := make(chan struct{}, 2)
@@ -2117,12 +2473,14 @@ func (m *Manager) setAllStationsPowerDetailed(state string) (BulkPowerResult, er
 				stationResult.Name = snapshot.Name
 				capabilities := snapshot.Capabilities
 				var err error
+				discoveryContext, cancelDiscovery := context.WithTimeout(m.lifecycleContext, m.initialReadTimeout)
+				defer cancelDiscovery()
 				if snapshot.CapabilitiesKnown &&
 					(!capabilities.PowerWrite ||
 						(target == bluetooth.PowerStateStandby && !capabilities.Standby)) {
-					capabilities, err = m.bluetoothOps.refreshCapabilities(s)
+					capabilities, err = m.bluetoothOps.refreshCapabilities(discoveryContext, s)
 				} else if !snapshot.CapabilitiesKnown {
-					capabilities, err = m.bluetoothOps.ensureCapabilities(s)
+					capabilities, err = m.bluetoothOps.ensureCapabilities(discoveryContext, s)
 				}
 				if err == nil && !capabilities.PowerWrite {
 					stationResult.Skipped = true
@@ -2225,6 +2583,7 @@ func (m *Manager) BeginShutdown() {
 	m.shutdownOnce.Do(func() {
 		m.lifecycleMutex.Lock()
 		m.shuttingDown.Store(true)
+		m.cancelLifecycle()
 		close(m.shutdownCh)
 		m.lifecycleMutex.Unlock()
 	})

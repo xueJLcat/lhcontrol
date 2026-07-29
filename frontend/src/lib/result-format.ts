@@ -52,6 +52,7 @@ export function formatTerminalScanResult(result: TerminalScanResult): string {
 export interface BulkResultSummary {
   confirmed: number;
   unconfirmed: number;
+  alreadyAtTarget: number;
   skipped: number;
   failed: station.BulkPowerStationResult[];
 }
@@ -61,13 +62,14 @@ export function summarizeBulkResult(results: station.BulkPowerStationResult[]): 
   return {
     confirmed: results.filter((item) => item.success && !item.skipped && item.confirmed).length,
     unconfirmed: results.filter((item) => item.success && !item.skipped && !item.confirmed).length,
-    skipped: results.filter((item) => item.skipped).length,
+    alreadyAtTarget: results.filter((item) => item.skipped && item.success && item.confirmed).length,
+    skipped: results.filter((item) => item.skipped && !(item.success && item.confirmed)).length,
     failed
   };
 }
 
 export function formatBulkResult(target: string, summary: BulkResultSummary): string {
-  const counts = `${summary.confirmed} confirmed; ${summary.unconfirmed} sent but unconfirmed; ${summary.skipped} skipped`;
+  const counts = `${summary.confirmed} confirmed; ${summary.unconfirmed} sent but unconfirmed; ${summary.alreadyAtTarget} already at target; ${summary.skipped} skipped`;
   return summary.failed.length
     ? `${counts}; ${summary.failed.length} failed for ${target}: ${summary.failed.map((item) => `${item.name || item.address}: ${item.error || 'command failed'}`).join(' | ')}`
     : `${counts} for ${target}.`;

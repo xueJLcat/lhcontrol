@@ -91,15 +91,22 @@ func (a *Adapter) Enable() error {
 }
 
 func awaitAsyncOperation(asyncOperation *foundation.IAsyncOperation, genericParamSignature string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), asyncOperationTimeout)
-	defer cancel()
-	return awaitAsyncOperationContext(ctx, asyncOperation, genericParamSignature)
+	return awaitAsyncOperationContext(context.Background(), asyncOperation, genericParamSignature)
+}
+
+func boundedAsyncOperationContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithTimeout(ctx, asyncOperationTimeout)
 }
 
 func awaitAsyncOperationContext(ctx context.Context, asyncOperation *foundation.IAsyncOperation, genericParamSignature string) error {
 	if asyncOperation == nil {
 		return errors.New("async operation is nil")
 	}
+	operationCtx, cancel := boundedAsyncOperationContext(ctx)
+	defer cancel()
 
 	// We need to obtain the GUID of the AsyncOperationCompletedHandler, but its a generic delegate
 	// so we also need the generic parameter type's signature:
@@ -125,14 +132,14 @@ func awaitAsyncOperationContext(ctx context.Context, asyncOperation *foundation.
 		select {
 		case status := <-completed:
 			return asyncCompletionError(asyncOperation, status)
-		case <-ctx.Done():
+		case <-operationCtx.Done():
 			_ = asyncOperation.SetCompleted(nil)
-			return &AsyncOperationTimeoutError{Cause: ctx.Err()}
+			return &AsyncOperationTimeoutError{Cause: operationCtx.Err()}
 		}
 	}
 	defer asyncInfo.Release()
 
-	status, err := waitForAsyncCompletion(ctx, completed, asyncInfo.Cancel, asyncInfo.GetStatus)
+	status, err := waitForAsyncCompletion(operationCtx, completed, asyncInfo.Cancel, asyncInfo.GetStatus)
 	if err != nil {
 		// Detaching is best-effort. If WinRT rejects it, the operation retains
 		// its COM reference until the caller releases the operation.

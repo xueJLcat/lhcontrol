@@ -18,7 +18,8 @@ export function deriveOperationLocks(state: OperationState): OperationLocks {
   const anyDeviceOperation = state.gattAddresses.size > 0 || state.configAddresses.size > 0;
   const exclusiveGlobalOperation = state.global === 'scanning' ||
     state.global === 'bulk-power';
-  const bluetoothBusy = exclusiveGlobalOperation || state.externalScanning || anyDeviceOperation;
+  const globalActionBusy = state.global !== 'idle';
+  const bluetoothBusy = globalActionBusy || state.externalScanning || anyDeviceOperation;
   return {
     scanLocked: bluetoothBusy,
     bulkLocked: bluetoothBusy,

@@ -748,6 +748,17 @@ func (d Device) registerNotification(registration notificationRegistration) erro
 //
 // On Linux and Windows, the IsRandom part of the address is ignored.
 func (a *Adapter) Connect(address Address, params ConnectionParams) (result Device, returnErr error) {
+	return a.ConnectContext(context.Background(), address, params)
+}
+
+// ConnectContext starts a connection attempt that can be cancelled through ctx.
+func (a *Adapter) ConnectContext(ctx context.Context, address Address, params ConnectionParams) (result Device, returnErr error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return Device{}, err
+	}
 	leaveThread, threadErr := enterWinRTThread()
 	if threadErr != nil {
 		return Device{}, threadErr
@@ -768,7 +779,7 @@ func (a *Adapter) Connect(address Address, params ConnectionParams) (result Devi
 
 	// We need to pass the signature of the parameter returned by the async operation:
 	// IAsyncOperation<BluetoothLEDevice>
-	if err := awaitAsyncOperation(bleDeviceOp, bluetooth.SignatureBluetoothLEDevice); err != nil {
+	if err := awaitAsyncOperationContext(ctx, bleDeviceOp, bluetooth.SignatureBluetoothLEDevice); err != nil {
 		return Device{}, fmt.Errorf("error connecting to device: %w", err)
 	}
 
@@ -810,7 +821,7 @@ func (a *Adapter) Connect(address Address, params ConnectionParams) (result Devi
 	}
 	defer gattSessionOp.Release()
 
-	if err := awaitAsyncOperation(gattSessionOp, genericattributeprofile.SignatureGattSession); err != nil {
+	if err := awaitAsyncOperationContext(ctx, gattSessionOp, genericattributeprofile.SignatureGattSession); err != nil {
 		return Device{}, fmt.Errorf("error getting gatt session: %w", err)
 	}
 
