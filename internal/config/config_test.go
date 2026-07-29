@@ -52,6 +52,30 @@ func TestRenameRollsBackInMemoryWhenPersistenceFails(t *testing.T) {
 	if got, _ := cfg.GetRenamedStation("LHB-OLD"); got != "Before" {
 		t.Fatalf("in-memory name = %q, want rollback value", got)
 	}
+	if err := cfg.PersistenceError(); err == nil || !strings.Contains(err.Error(), "disk full") {
+		t.Fatalf("PersistenceError() = %v, want write failure", err)
+	}
+}
+
+func TestSuccessfulSaveClearsPreviousPersistenceFailure(t *testing.T) {
+	t.Setenv("AppData", t.TempDir())
+	originalWriter := configFileWriter
+	configFileWriter = func(string, []byte, os.FileMode) error {
+		return errors.New("disk full")
+	}
+	t.Cleanup(func() { configFileWriter = originalWriter })
+
+	cfg := NewConfig()
+	if err := cfg.Save(); err == nil {
+		t.Fatal("Save() unexpectedly succeeded")
+	}
+	configFileWriter = originalWriter
+	if err := cfg.Save(); err != nil {
+		t.Fatalf("second Save() error = %v", err)
+	}
+	if err := cfg.PersistenceError(); err != nil {
+		t.Fatalf("successful save retained persistence error: %v", err)
+	}
 }
 
 func TestAddressRenameTakesPriorityOverLegacyName(t *testing.T) {

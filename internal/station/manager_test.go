@@ -1314,6 +1314,39 @@ func TestMetadataRecoveryFailureKeepsIndependentBackoff(t *testing.T) {
 	}
 }
 
+func TestUnsupportedMetadataFailureDoesNotScheduleRecovery(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	address := "11:22:33:44:55:6A"
+
+	manager.recordMetadataReadResult(address, &internalbluetooth.UnsupportedCapabilityError{
+		Capability: "metadata read",
+		Err:        tinybluetooth.ErrAttReadNotPermitted,
+	})
+
+	manager.statusRetryMutex.Lock()
+	_, tracked := manager.statusRetries[address]
+	manager.statusRetryMutex.Unlock()
+	if tracked {
+		t.Fatal("permanently unsupported metadata read scheduled recovery")
+	}
+}
+
+func TestMetadataRecoveryStopsAfterBoundedFailures(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	manager.statusRecoveryStart.Do(func() {})
+	address := "11:22:33:44:55:6B"
+	for attempt := 0; attempt < metadataRetryLimit; attempt++ {
+		manager.recordMetadataReadResult(address, errors.New("metadata unavailable"))
+	}
+
+	manager.statusRetryMutex.Lock()
+	_, tracked := manager.statusRetries[address]
+	manager.statusRetryMutex.Unlock()
+	if tracked {
+		t.Fatalf("metadata recovery remained scheduled after %d failures", metadataRetryLimit)
+	}
+}
+
 func TestAdapterUnavailableForcesInitializationRetry(t *testing.T) {
 	manager := NewManager(config.NewConfig())
 	manager.observeBluetoothError(tinybluetooth.ErrRadioNotAvailable)
@@ -1570,7 +1603,9 @@ func TestSetStationChannelMapsConfirmedWriteResult(t *testing.T) {
 			ChannelRead: true, ChannelWrite: true,
 		},
 	}
-	manager.bluetoothOps.setChannel = func(*internalbluetooth.BaseStation, int) (internalbluetooth.ChannelWriteResult, error) {
+	manager.bluetoothOps.setChannel = func(station *internalbluetooth.BaseStation, _ int) (internalbluetooth.ChannelWriteResult, error) {
+		station.Channel = 5
+		station.LastChannelReadAt = time.Now()
 		return internalbluetooth.ChannelWriteResult{
 			PreviousChannel: 3,
 			Channel:         5,
@@ -1584,8 +1619,44 @@ func TestSetStationChannelMapsConfirmedWriteResult(t *testing.T) {
 		t.Fatalf("SetStationChannel() error = %v", err)
 	}
 	if result.PreviousChannel != 3 || result.Channel != 5 || !result.CommandSent || !result.Confirmed ||
-		result.ConfirmationError != "" || len(result.Warnings) != 1 {
+		result.ConfirmationError != "" || len(result.Warnings) != 1 ||
+		result.Station.Address != address || result.Station.Channel != 5 {
 		t.Fatalf("confirmed channel result = %+v", result)
+	}
+}
+
+func TestSetStationChannelRejectsFreshBootingStation(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	address := "AA:BB:CC:DD:EE:0A"
+	now := time.Now()
+	manager.stations[address] = &internalbluetooth.BaseStation{
+		Address:           mustAddress(t, address),
+		Name:              "LHB-BOOTING",
+		Channel:           3,
+		Present:           true,
+		LastSeenAt:        now,
+		LastChannelReadAt: now,
+		PowerState:        internalbluetooth.PowerStateBooting,
+		LastPowerReadAt:   now,
+		Capabilities: internalbluetooth.Capabilities{
+			ChannelRead: true, ChannelWrite: true,
+		},
+	}
+	manager.bluetoothOps.refreshCapabilities = func(context.Context, *internalbluetooth.BaseStation) (internalbluetooth.Capabilities, error) {
+		t.Fatal("capability refresh was attempted while station was booting")
+		return internalbluetooth.Capabilities{}, nil
+	}
+	manager.bluetoothOps.setChannel = func(*internalbluetooth.BaseStation, int) (internalbluetooth.ChannelWriteResult, error) {
+		t.Fatal("channel write was attempted while station was booting")
+		return internalbluetooth.ChannelWriteResult{}, nil
+	}
+
+	result, err := manager.SetStationChannel(address, 5, false)
+	if !errors.Is(err, ErrOperationInProgress) || !strings.Contains(err.Error(), "station is booting") {
+		t.Fatalf("SetStationChannel() error = %v, want booting conflict", err)
+	}
+	if result.CommandSent || result.Station.Address != address {
+		t.Fatalf("booting channel result = %+v", result)
 	}
 }
 

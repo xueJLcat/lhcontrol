@@ -20,13 +20,17 @@ export function hasVerifiedPowerState(station: StationInfo, state: PowerTarget):
   return station.powerFresh && station.powerStateConfirmed && station.powerState === powerStateValue(state);
 }
 
+export function isFreshBooting(station: StationInfo): boolean {
+  return station.powerFresh && station.powerState === 3;
+}
+
 export function maySetPower(station: StationInfo, state: PowerTarget): boolean {
   // Capability data is cached from the last GATT discovery and can become
   // incomplete after a rescan. The backend refreshes missing capabilities
   // before every power operation, so the frontend must not block that recovery
   // path. It will return a structured unsupported error if the refreshed
   // device genuinely cannot perform the target operation.
-  if (station.powerFresh && station.powerState === 3) return false;
+  if (isFreshBooting(station)) return false;
   return true;
 }
 

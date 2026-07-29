@@ -7,6 +7,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -206,6 +208,39 @@ func TestConfigLoadWarningIsExposedAndDefensivelyCopied(t *testing.T) {
 	status.Warnings[0] = "changed"
 	if current := app.GetAPIStatus(); current.Warnings[0] == "changed" {
 		t.Fatal("GetAPIStatus returned mutable warning storage")
+	}
+}
+
+func TestConfigPersistenceFailureUpdatesStatusAndEmptyWarningsStayArrays(t *testing.T) {
+	app := NewApp()
+	app.setConfigPersistenceStatus()
+	status := app.GetAPIStatus()
+	encoded, err := json.Marshal(status)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), `"warnings":[]`) {
+		t.Fatalf("empty warnings encoded as %s, want JSON array", encoded)
+	}
+
+	blockedRoot := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(blockedRoot, []byte("occupied"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AppData", blockedRoot)
+	if err := app.SaveConfig(); err == nil {
+		t.Fatal("App.SaveConfig() unexpectedly succeeded")
+	}
+	if current := app.GetAPIStatus(); current.ConfigWritable || len(current.Warnings) != 1 {
+		t.Fatalf("failed persistence status = %+v", current)
+	}
+
+	t.Setenv("AppData", t.TempDir())
+	if err := app.SaveConfig(); err != nil {
+		t.Fatalf("recovery App.SaveConfig() error = %v", err)
+	}
+	if current := app.GetAPIStatus(); !current.ConfigWritable || len(current.Warnings) != 0 {
+		t.Fatalf("successful persistence status = %+v", current)
 	}
 }
 
@@ -620,6 +655,8 @@ func TestRegisteredRoutesMapFunctionalErrors(t *testing.T) {
 		{"identify unsupported", http.MethodPost, "/stations/AA/identify", "", station.ErrUnsupported, fiber.StatusUnprocessableEntity},
 		{"refresh missing", http.MethodPost, "/stations/AA/refresh", "", station.ErrNotFound, fiber.StatusNotFound},
 		{"channel conflict", http.MethodPut, "/stations/AA/channel", `{"channel":4}`, station.ErrChannelConflict, fiber.StatusConflict},
+		{"channel booting", http.MethodPut, "/stations/AA/channel", `{"channel":4}`,
+			fmt.Errorf("station is booting: %w", station.ErrOperationInProgress), fiber.StatusConflict},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

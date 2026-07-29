@@ -23,7 +23,7 @@
   import { Activity, CircleAlert, Radar } from 'lucide-svelte';
   import type { PowerFeedback, PowerTarget, StationInfo } from './lib/types';
   import {
-    canSetPower, hasCurrentChannel, hasVerifiedPowerState, isCurrentPowerState,
+    canSetPower, hasCurrentChannel, hasVerifiedPowerState, isCurrentPowerState, isFreshBooting,
     powerTargetLabel, stateLabel
   } from './lib/station';
   import { formatBulkResult, formatTerminalScanResult, summarizeBulkResult } from './lib/result-format';
@@ -817,6 +817,7 @@
         pushToast(`Error renaming: ${error}`);
       }
     } finally {
+      refreshAPIStatus();
       if (canCommitStationOperation(operationEpoch, station.address, operationRevision)) {
         setConfigBusy(station.address, false);
       }
@@ -894,7 +895,7 @@
   }
 
   async function saveChannel(targetChannel: number, allowUnknownConflictRisk: boolean) {
-    if (!selectedStation || !selectedStation.scanFresh ||
+    if (!selectedStation || !selectedStation.scanFresh || isFreshBooting(selectedStation) ||
       stationBusy(selectedStation.address) || gattLockedFor(selectedStation.address) ||
       (hasCurrentChannel(selectedStation) && selectedStation.channel === targetChannel)) return;
     const address = selectedStation.address;
@@ -920,9 +921,14 @@
         if (canCommitStatus(statusOperation)) statusMessage = `${selectedStation.name}: channel command sent, but confirmation failed. ${warning}`;
         return;
       }
-      stations = stations.map((station) => station.address === address
-        ? withStationChanges(station, { channel: result.channel, channelFresh: true, lastError: '' })
-        : station);
+      const authoritative = result.station?.address ? result.station : actual;
+      if (authoritative) {
+        stations = stations.map((station) => station.address === address ? authoritative : station);
+      } else {
+        stations = stations.map((station) => station.address === address
+          ? withStationChanges(station, { channel: result.channel })
+          : station);
+      }
       channelEditorOpen = false;
       if (canCommitStatus(statusOperation)) statusMessage = `Channel changed from ${result.previousChannel || 'unknown'} to ${result.channel}. ${result.warnings.join(' ')}`;
     } catch (error) {

@@ -14,6 +14,7 @@ type Config struct {
 	RenamedStations          map[string]string `json:"renamedStations"`
 	RenamedStationsByAddress map[string]string `json:"renamedStationsByAddress"`
 	persistenceBlockedErr    error
+	lastPersistenceErr       error
 	mutex                    sync.RWMutex
 }
 
@@ -64,10 +65,15 @@ func (c *Config) Load() error {
 			c.RenamedStations = make(map[string]string)
 			c.RenamedStationsByAddress = make(map[string]string)
 			c.persistenceBlockedErr = nil
+			c.lastPersistenceErr = nil
 			c.mutex.Unlock()
 			return nil // No config file yet, which is fine
 		}
-		return fmt.Errorf("error reading config file '%s': %w", configFilePath, err)
+		loadErr := fmt.Errorf("error reading config file '%s': %w", configFilePath, err)
+		c.mutex.Lock()
+		c.lastPersistenceErr = loadErr
+		c.mutex.Unlock()
+		return loadErr
 	}
 
 	var loaded persistedConfig
@@ -77,6 +83,7 @@ func (c *Config) Load() error {
 		if renameErr := configFileRenamer(configFilePath, invalidPath); renameErr != nil {
 			c.mutex.Lock()
 			c.persistenceBlockedErr = fmt.Errorf("invalid config could not be preserved: %w", renameErr)
+			c.lastPersistenceErr = c.persistenceBlockedErr
 			c.mutex.Unlock()
 			return fmt.Errorf("error unmarshalling config (failed to preserve invalid file: %v): %w", renameErr, err)
 		}
@@ -84,6 +91,7 @@ func (c *Config) Load() error {
 		c.RenamedStations = make(map[string]string)
 		c.RenamedStationsByAddress = make(map[string]string)
 		c.persistenceBlockedErr = nil
+		c.lastPersistenceErr = nil
 		c.mutex.Unlock()
 		return fmt.Errorf("error unmarshalling config; invalid file preserved as '%s': %w", invalidPath, err)
 	}
@@ -97,6 +105,7 @@ func (c *Config) Load() error {
 	c.RenamedStations = loaded.RenamedStations
 	c.RenamedStationsByAddress = loaded.RenamedStationsByAddress
 	c.persistenceBlockedErr = nil
+	c.lastPersistenceErr = nil
 	c.mutex.Unlock()
 	return nil
 }
@@ -114,7 +123,10 @@ func (c *Config) Save() error {
 func (c *Config) PersistenceError() error {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
-	return c.persistenceBlockedErr
+	if c.persistenceBlockedErr != nil {
+		return c.persistenceBlockedErr
+	}
+	return c.lastPersistenceErr
 }
 
 // saveLocked persists exactly the state protected by mutex. Keeping mutation
@@ -126,6 +138,7 @@ func (c *Config) saveLocked() error {
 	}
 	configFilePath, err := getConfigPath()
 	if err != nil {
+		c.lastPersistenceErr = err
 		return err
 	}
 
@@ -142,14 +155,19 @@ func (c *Config) saveLocked() error {
 
 	configFile, err := json.MarshalIndent(snapshot, "", "  ")
 	if err != nil {
-		return fmt.Errorf("error marshalling config: %w", err)
+		saveErr := fmt.Errorf("error marshalling config: %w", err)
+		c.lastPersistenceErr = saveErr
+		return saveErr
 	}
 
 	log.Printf("Saving config to: %s", configFilePath)
 	err = configFileWriter(configFilePath, configFile, 0644)
 	if err != nil {
-		return fmt.Errorf("failed to write config file '%s': %w", configFilePath, err)
+		saveErr := fmt.Errorf("failed to write config file '%s': %w", configFilePath, err)
+		c.lastPersistenceErr = saveErr
+		return saveErr
 	}
+	c.lastPersistenceErr = nil
 	return nil
 }
 

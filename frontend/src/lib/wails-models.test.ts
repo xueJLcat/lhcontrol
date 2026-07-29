@@ -51,7 +51,19 @@ describe('generated Wails result models', () => {
       commandSent: true,
       confirmed: false,
       confirmationError: 'readback timed out',
-      warnings: ['command was sent']
+      warnings: ['command was sent'],
+      station: {
+        name: 'LHB-TEST',
+        originalName: 'LHB-TEST',
+        address: '11:22:33:44:55:66',
+        powerState: 1,
+        powerStateName: 'on',
+        powerStateConfirmed: true,
+        rawPowerState: 1,
+        channel: 3,
+        capabilities: { channelRead: true, channelWrite: true },
+        metadata: {}
+      }
     });
     const scan = station.ScanStatus.createFrom({
       state: 'failed',
@@ -68,6 +80,8 @@ describe('generated Wails result models', () => {
       confirmationError: 'readback timed out',
       warnings: ['command was sent']
     });
+    expect(channel.station).toBeInstanceOf(station.StationInfo);
+    expect(channel.station.channel).toBe(3);
     expect(scan).toMatchObject({
       state: 'failed',
       error: 'adapter unavailable',

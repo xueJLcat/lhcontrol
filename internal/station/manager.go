@@ -90,13 +90,14 @@ type BulkPowerResult struct {
 }
 
 type ChannelChangeResult struct {
-	Address           string   `json:"address"`
-	PreviousChannel   int      `json:"previousChannel"`
-	Channel           int      `json:"channel"`
-	CommandSent       bool     `json:"commandSent"`
-	Confirmed         bool     `json:"confirmed"`
-	ConfirmationError string   `json:"confirmationError"`
-	Warnings          []string `json:"warnings"`
+	Address           string      `json:"address"`
+	PreviousChannel   int         `json:"previousChannel"`
+	Channel           int         `json:"channel"`
+	CommandSent       bool        `json:"commandSent"`
+	Confirmed         bool        `json:"confirmed"`
+	ConfirmationError string      `json:"confirmationError"`
+	Warnings          []string    `json:"warnings"`
+	Station           StationInfo `json:"station"`
 }
 
 type ScanStatus struct {
@@ -250,6 +251,7 @@ const (
 	statusRetryMetadata
 	statusRetryRefresh
 	statusAbsentRetryLimit = 5
+	metadataRetryLimit     = 5
 )
 
 func NewManager(cfg *config.Config) *Manager {
@@ -341,8 +343,18 @@ func (m *Manager) noteStatusFailureKind(address string, kind statusRetryKind) {
 		retry.metadataFailures++
 		retry.metadataLastAttempt = now
 		retry.metadataNextAt = now.Add(m.statusRetryDelay(retry.metadataFailures))
+		if retry.metadataFailures >= metadataRetryLimit {
+			retry.kinds &^= statusRetryMetadata
+			retry.metadataFailures = 0
+			retry.metadataLastAttempt = time.Time{}
+			retry.metadataNextAt = time.Time{}
+		}
 	}
-	m.statusRetries[address] = retry
+	if retry.kinds == 0 {
+		delete(m.statusRetries, address)
+	} else {
+		m.statusRetries[address] = retry
+	}
 	m.statusRetryMutex.Unlock()
 	m.scheduleStatusRecovery()
 }
@@ -497,13 +509,6 @@ func (m *Manager) stopExhaustedAbsentRecovery(address string, station *bluetooth
 			retry.channelFailures = 0
 			retry.channelLastAttempt = time.Time{}
 			retry.channelNextAt = time.Time{}
-			changed = true
-		}
-		if kinds&statusRetryMetadata != 0 && retry.metadataFailures >= statusAbsentRetryLimit {
-			retry.kinds &^= statusRetryMetadata
-			retry.metadataFailures = 0
-			retry.metadataLastAttempt = time.Time{}
-			retry.metadataNextAt = time.Time{}
 			changed = true
 		}
 		if retry.kinds == 0 {
@@ -2462,8 +2467,12 @@ func (m *Manager) RefreshStationCapabilities(address string) (StationInfo, error
 	return m.stationInfoByAddress(address)
 }
 
-func (m *Manager) SetStationChannel(address string, channel int, allowUnknownConflictRisk bool) (ChannelChangeResult, error) {
-	result := ChannelChangeResult{Address: address, Warnings: []string{}}
+func (m *Manager) SetStationChannel(
+	address string,
+	channel int,
+	allowUnknownConflictRisk bool,
+) (result ChannelChangeResult, returnErr error) {
+	result = ChannelChangeResult{Address: address, Warnings: []string{}}
 	if channel < 1 || channel > 16 {
 		return result, fmt.Errorf("%w: channel must be between 1 and 16", ErrInvalidArgument)
 	}
@@ -2475,6 +2484,11 @@ func (m *Manager) SetStationChannel(address string, channel int, allowUnknownCon
 		return result, ErrShuttingDown
 	}
 	canonicalAddress := stationPtr.Snapshot().Address
+	defer func() {
+		if info, err := m.stationInfoByAddress(canonicalAddress); err == nil {
+			result.Station = info
+		}
+	}()
 	initialSnapshot := stationPtr.Snapshot()
 	if initialSnapshot.Channel == channel && isFresh(initialSnapshot.LastChannelReadAt, time.Now()) {
 		return ChannelChangeResult{
@@ -2493,6 +2507,13 @@ func (m *Manager) SetStationChannel(address string, channel int, allowUnknownCon
 		result.Channel = channel
 		result.Confirmed = true
 		return result, nil
+	}
+	if targetSnapshot.PowerState == bluetooth.PowerStateBooting &&
+		isFresh(targetSnapshot.LastPowerReadAt, time.Now()) {
+		return result, fmt.Errorf(
+			"station is booting; retry channel change after transition: %w",
+			ErrOperationInProgress,
+		)
 	}
 	if err := m.ensureReady(); err != nil {
 		return result, err

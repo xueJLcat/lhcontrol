@@ -82,6 +82,7 @@ func sendChannelActionResponse(c *fiber.Ctx, result station.ChannelChangeResult,
 		"confirmed":         result.Confirmed,
 		"confirmationError": result.ConfirmationError,
 		"warnings":          result.Warnings,
+		"station":           result.Station,
 	})
 }
 
@@ -93,6 +94,8 @@ type App struct {
 	api               *fiber.App
 	apiStatusMutex    sync.RWMutex
 	apiStatus         APIStatus
+	configLoadWarning string
+	configSaveWarning string
 	apiLifecycleMutex sync.Mutex
 	apiCancel         context.CancelFunc
 	apiWG             sync.WaitGroup
@@ -472,19 +475,41 @@ func (a *App) setAPIStatus(running bool, err error) {
 func (a *App) setConfigLoadStatus(err error) {
 	a.apiStatusMutex.Lock()
 	defer a.apiStatusMutex.Unlock()
-	a.apiStatus.ConfigWritable = a.config.PersistenceError() == nil
 	if err == nil {
-		a.apiStatus.Warnings = []string{}
-		return
+		a.configLoadWarning = ""
+	} else {
+		a.configLoadWarning = fmt.Sprintf("Configuration could not be loaded: %v", err)
 	}
-	a.apiStatus.Warnings = []string{fmt.Sprintf("Configuration could not be loaded: %v", err)}
+	a.refreshConfigStatusLocked()
+}
+
+func (a *App) setConfigPersistenceStatus() {
+	a.apiStatusMutex.Lock()
+	defer a.apiStatusMutex.Unlock()
+	if err := a.config.PersistenceError(); err != nil {
+		a.configSaveWarning = fmt.Sprintf("Configuration changes could not be saved: %v", err)
+	} else {
+		a.configSaveWarning = ""
+	}
+	a.refreshConfigStatusLocked()
+}
+
+func (a *App) refreshConfigStatusLocked() {
+	a.apiStatus.ConfigWritable = a.config.PersistenceError() == nil
+	a.apiStatus.Warnings = make([]string, 0, 2)
+	if a.configLoadWarning != "" {
+		a.apiStatus.Warnings = append(a.apiStatus.Warnings, a.configLoadWarning)
+	}
+	if a.configSaveWarning != "" && a.configSaveWarning != a.configLoadWarning {
+		a.apiStatus.Warnings = append(a.apiStatus.Warnings, a.configSaveWarning)
+	}
 }
 
 func (a *App) GetAPIStatus() APIStatus {
 	a.apiStatusMutex.RLock()
 	defer a.apiStatusMutex.RUnlock()
 	status := a.apiStatus
-	status.Warnings = append([]string(nil), a.apiStatus.Warnings...)
+	status.Warnings = append([]string{}, a.apiStatus.Warnings...)
 	return status
 }
 
@@ -569,16 +594,22 @@ func (a *App) SetAllStationsPowerDetailed(state string) (station.BulkPowerResult
 
 func (a *App) RenameStation(originalName string, newName string) error {
 	log.Printf("Renaming %s to %s", originalName, newName)
-	return a.stationManager.RenameStation(originalName, newName)
+	err := a.stationManager.RenameStation(originalName, newName)
+	a.setConfigPersistenceStatus()
+	return err
 }
 
 func (a *App) RenameStationByAddress(address string, newName string) error {
 	log.Printf("Renaming station at %s to %s", address, newName)
-	return a.stationManager.RenameStationByAddress(address, newName)
+	err := a.stationManager.RenameStationByAddress(address, newName)
+	a.setConfigPersistenceStatus()
+	return err
 }
 
 func (a *App) SaveConfig() error {
-	return a.stationManager.SaveConfig()
+	err := a.stationManager.SaveConfig()
+	a.setConfigPersistenceStatus()
+	return err
 }
 
 // shutdown is called when the app terminates.

@@ -1140,6 +1140,50 @@ describe('App asynchronous operations', () => {
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Change channel' })).not.toBeInTheDocument());
   });
 
+  it('keeps unrelated backend errors after a confirmed channel change', async () => {
+    const initial = createStation({ lastError: 'metadata: firmware read failed' });
+    const updated = createStation({
+      channel: 4,
+      channelFresh: true,
+      lastError: 'metadata: firmware read failed'
+    });
+    api.ScanAndFetchStations.mockResolvedValue([initial]);
+    api.GetCurrentStationInfo.mockResolvedValue([updated]);
+    api.SetStationChannel.mockResolvedValue({
+      address: updated.address,
+      previousChannel: 3,
+      channel: 4,
+      commandSent: true,
+      confirmed: true,
+      confirmationError: '',
+      warnings: [],
+      station: updated
+    });
+
+    render(App);
+    await screen.findByText('LHB-TEST');
+    await fireEvent.click(screen.getByRole('button', { name: 'Details for LHB-TEST' }));
+    await fireEvent.click(await screen.findByRole('button', { name: /Change Channel/ }));
+    await fireEvent.click(within(screen.getByRole('dialog', { name: 'Change channel' })).getByRole('button', { name: '4' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Confirm change' }));
+
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Change channel' })).not.toBeInTheDocument());
+    expect(screen.getByText('metadata: firmware read failed')).toBeInTheDocument();
+  });
+
+  it('disables channel changes while a station is freshly booting', async () => {
+    api.ScanAndFetchStations.mockResolvedValue([
+      createStation({ powerState: 3, powerStateName: 'booting', powerFresh: true })
+    ]);
+
+    render(App);
+    await screen.findByText('LHB-TEST');
+    await fireEvent.click(screen.getByRole('button', { name: 'Details for LHB-TEST' }));
+
+    expect(await screen.findByRole('button', { name: /Change Channel/ })).toBeDisabled();
+    expect(screen.getByText(/Wait for the station to finish booting before changing its channel/)).toBeInTheDocument();
+  });
+
   it('allows submitting the same last-known channel from App and keeps an unconfirmed result open', async () => {
     api.ScanAndFetchStations.mockResolvedValue([createStation({ channelFresh: false })]);
     api.SetStationChannel.mockResolvedValue({
@@ -1409,6 +1453,28 @@ describe('App asynchronous operations', () => {
 
     expect(await screen.findByText('Config read-only')).toHaveAttribute('title', warning);
     expect(pushToast).toHaveBeenCalledWith(warning, 'warning');
+  });
+
+  it('refreshes configuration health immediately after a rename failure', async () => {
+    const warning = 'Configuration changes could not be saved: disk full';
+    api.RenameStationByAddress.mockRejectedValue(new Error('disk full'));
+    api.GetAPIStatus
+      .mockResolvedValueOnce({
+        running: true, address: '127.0.0.1:7575', error: '', warnings: [], configWritable: true
+      })
+      .mockResolvedValueOnce({
+        running: true, address: '127.0.0.1:7575', error: '', warnings: [warning], configWritable: false
+      });
+
+    render(App);
+    await screen.findByText('LHB-TEST');
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Scan' })).toBeEnabled());
+    await fireEvent.click(screen.getByRole('button', { name: 'Rename LHB-TEST' }));
+    const input = screen.getByRole('textbox', { name: 'Station name' });
+    await fireEvent.input(input, { target: { value: 'New name' } });
+    await fireEvent.click(screen.getByTitle('Save name'));
+
+    expect(await screen.findByText('Config read-only')).toHaveAttribute('title', warning);
   });
 
   it('does not let a stale periodic fallback overwrite a newer scan event', async () => {

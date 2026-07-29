@@ -1209,8 +1209,7 @@ func TestFetchInitialPowerStateReportsPartialReadErrors(t *testing.T) {
 	if !errors.As(err, &initialErr) {
 		t.Fatalf("FetchInitialPowerState() error = %v, want InitialReadError", err)
 	}
-	if !errors.Is(err, powerErr) || !errors.Is(err, channelErr) ||
-		initialErr.Metadata == nil || initialErr.Metadata.Error() != metadataErr.Error() {
+	if !errors.Is(err, powerErr) || !errors.Is(err, channelErr) || !errors.Is(err, metadataErr) {
 		t.Fatalf("InitialReadError does not preserve underlying errors: %v", err)
 	}
 	if station.PowerState != PowerStateOn || station.RawPowerState != 0x09 || station.Channel != 4 ||

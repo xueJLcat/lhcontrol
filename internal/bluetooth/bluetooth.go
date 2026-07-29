@@ -165,6 +165,7 @@ type BaseStation struct {
 	powerError        string
 	channelError      string
 	metadataError     string
+	metadataReadError error
 	operationError    string
 }
 
@@ -398,6 +399,7 @@ func (bs *BaseStation) setChannelErrorInternal(err error) {
 
 func (bs *BaseStation) setMetadataErrorInternal(err error) {
 	bs.metadataError = errorText(err)
+	bs.metadataReadError = err
 	bs.refreshLastErrorInternal()
 }
 
@@ -1580,10 +1582,7 @@ func FetchInitialPowerStateContext(ctx context.Context, station *BaseStation) er
 
 	var powerReadErr error
 	var channelReadErr error
-	var metadataReadErr error
-	if station.metadataError != "" {
-		metadataReadErr = errors.New(station.metadataError)
-	}
+	metadataReadErr := station.metadataReadError
 	if station.Capabilities.PowerRead {
 		log.Printf("Bluetooth: FetchInitialPowerState proceeding to read state for %s.", station.Name)
 		if powerReadErr = readPowerStateInternalContext(ctx, station); powerReadErr != nil {

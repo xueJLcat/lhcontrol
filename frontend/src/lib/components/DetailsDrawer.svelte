@@ -4,7 +4,7 @@
   import { fly } from 'svelte/transition';
   import { CircleCheck, Eye, RefreshCw, Settings2, X } from 'lucide-svelte';
   import type { Capabilities, StationInfo } from '../types';
-  import { stateLabel } from '../station';
+  import { isFreshBooting, stateLabel } from '../station';
   import { relativeTime } from '../relative-time';
   import { focusTrap } from '../actions';
   import StateBadge from './StateBadge.svelte';
@@ -91,10 +91,18 @@
     <div class="drawer-actions">
       <button class="btn" on:click={() => onRefresh(station)} disabled={busy || locked}><RefreshCw size={15} /> Refresh capabilities</button>
       <button class="btn" on:click={() => onIdentify(station)} disabled={busy || locked} title={station.capabilities.identify ? 'Send the identify signal' : 'Recheck support and identify'}><Eye size={15} /> Identify</button>
-      <button class="btn primary" on:click={() => onOpenChannelEditor(station)} disabled={!station.scanFresh || busy || locked} title={station.scanFresh ? 'Recheck support and change Channel safely' : 'Run a new scan before changing Channel'}><Settings2 size={15} /> Change Channel</button>
+      <button
+        class="btn primary"
+        on:click={() => onOpenChannelEditor(station)}
+        disabled={!station.scanFresh || isFreshBooting(station) || busy || locked}
+        title={isFreshBooting(station)
+          ? 'Wait for the station to finish booting'
+          : station.scanFresh ? 'Recheck support and change Channel safely' : 'Run a new scan before changing Channel'}
+      ><Settings2 size={15} /> Change Channel</button>
     </div>
     {#if station.capabilities.identify}<p class="hint">Identify may wake a sleeping base station.</p>{/if}
     {#if !station.scanFresh}<p class="hint warning-text">Run a new scan before changing Channel so conflicts are checked against the current room.</p>{/if}
+    {#if isFreshBooting(station)}<p class="hint warning-text">Wait for the station to finish booting before changing its channel.</p>{/if}
   </section>
 
   <section>
