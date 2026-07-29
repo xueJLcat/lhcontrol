@@ -992,7 +992,7 @@ func ReadPowerStateContext(ctx context.Context, station *BaseStation) error {
 	}
 	if err := ctx.Err(); err != nil {
 		if powerReadErr != nil {
-			return &StatusReadError{Power: powerReadErr}
+			return &StatusReadError{Power: errors.Join(powerReadErr, err)}
 		}
 		return &StatusReadError{Channel: err}
 	}

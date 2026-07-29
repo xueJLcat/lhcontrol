@@ -155,6 +155,25 @@ describe('DetailsDrawer actions', () => {
     expect(screen.getByRole('button', { name: /Change Channel/i })).toBeEnabled();
   });
 
+  it('distinguishes stale cached metadata from unavailable metadata', async () => {
+    const stale = station();
+    stale.metadataReadAt = '2026-07-20T10:00:00Z';
+    stale.metadata.firmwareRevision = '1.2.3';
+    const view = render(DetailsDrawer, {
+      props: {
+        station: stale, busy: false, locked: false, inactive: false,
+        onClose: vi.fn(), onRefresh: vi.fn(), onIdentify: vi.fn(), onOpenChannelEditor: vi.fn()
+      }
+    });
+    expect(screen.getByText(/cached, stale/)).toBeInTheDocument();
+
+    await view.rerender({
+      station: station(), busy: false, locked: false, inactive: false,
+      onClose: vi.fn(), onRefresh: vi.fn(), onIdentify: vi.fn(), onOpenChannelEditor: vi.fn()
+    });
+    expect(screen.getByText(/unavailable · never/)).toBeInTheDocument();
+  });
+
   it('uses modal semantics and becomes inert under a child modal', async () => {
     const view = render(DetailsDrawer, {
       props: {

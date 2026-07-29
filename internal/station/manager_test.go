@@ -236,6 +236,41 @@ func TestShutdownRejectsNewOperations(t *testing.T) {
 	}
 }
 
+func TestShutdownRejectsCachedNoOpOperations(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	now := time.Now()
+	address := "11:22:33:44:55:85"
+	manager.stations[address] = &internalbluetooth.BaseStation{
+		Name:              "LHB-NOOP",
+		Address:           mustAddress(t, address),
+		PowerState:        internalbluetooth.PowerStateOn,
+		RawPowerState:     0x0B,
+		LastPowerReadAt:   now,
+		Channel:           6,
+		LastChannelReadAt: now,
+	}
+	manager.BeginShutdown()
+
+	if _, err := manager.SetStationPower(address, "on"); !errors.Is(err, ErrShuttingDown) {
+		t.Fatalf("SetStationPower() error = %v, want ErrShuttingDown", err)
+	}
+	if _, err := manager.SetStationChannel(address, 6, false); !errors.Is(err, ErrShuttingDown) {
+		t.Fatalf("SetStationChannel() error = %v, want ErrShuttingDown", err)
+	}
+	if _, err := manager.SetAllStationsPowerDetailed("on"); !errors.Is(err, ErrShuttingDown) {
+		t.Fatalf("SetAllStationsPowerDetailed() error = %v, want ErrShuttingDown", err)
+	}
+}
+
+func TestShutdownRejectsEmptyBulkNoOp(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	manager.BeginShutdown()
+
+	if _, err := manager.SetAllStationsPowerDetailed("on"); !errors.Is(err, ErrShuttingDown) {
+		t.Fatalf("SetAllStationsPowerDetailed() error = %v, want ErrShuttingDown", err)
+	}
+}
+
 func TestShutdownWaitsForActiveOperation(t *testing.T) {
 	manager := NewManager(config.NewConfig())
 	if err := manager.beginOperation(); err != nil {
@@ -496,6 +531,56 @@ func TestAsyncScanEventsCannotOvertakePreviousCompletion(t *testing.T) {
 	}
 	if startedCount != wantStarted || completedCount != wantCompleted {
 		t.Fatalf("events = %v, want %d started and %d completed", events, wantStarted, wantCompleted)
+	}
+}
+
+func TestAsyncScanRejectsForegroundOperationsBeforeStarted(t *testing.T) {
+	tests := []struct {
+		name    string
+		acquire func(*Manager) error
+		release func(*Manager)
+	}{
+		{
+			name: "device",
+			acquire: func(manager *Manager) error {
+				return manager.beginForegroundStationOperation("11:22:33:44:55:90")
+			},
+			release: func(manager *Manager) {
+				manager.endStationOperation("11:22:33:44:55:90")
+			},
+		},
+		{
+			name:    "configuration",
+			acquire: func(manager *Manager) error { return manager.beginForegroundSharedOperation() },
+			release: func(manager *Manager) { manager.endForegroundSharedOperation() },
+		},
+		{
+			name:    "global",
+			acquire: func(manager *Manager) error { return manager.beginBulkGlobalOperation() },
+			release: func(manager *Manager) { manager.endForegroundGlobalOperation() },
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			manager := NewManager(config.NewConfig())
+			if err := test.acquire(manager); err != nil {
+				t.Fatalf("acquire foreground operation: %v", err)
+			}
+			defer test.release(manager)
+			var started atomic.Int32
+
+			err := manager.StartScan(ScanCallbacks{Started: func() { started.Add(1) }})
+			if !errors.Is(err, ErrOperationInProgress) {
+				t.Fatalf("StartScan() error = %v, want ErrOperationInProgress", err)
+			}
+			if got := started.Load(); got != 0 {
+				t.Fatalf("Started callbacks = %d, want 0", got)
+			}
+			if manager.IsScanning() {
+				t.Fatal("rejected scan remained active")
+			}
+		})
 	}
 }
 

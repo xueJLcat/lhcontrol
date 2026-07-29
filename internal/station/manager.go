@@ -173,6 +173,7 @@ type Manager struct {
 	operationMutex          sync.RWMutex
 	globalOperationMutex    sync.Mutex
 	foregroundGlobalActive  bool
+	foregroundSharedActive  int
 	scanTransitionMutex     sync.Mutex
 	statusOperationMutex    sync.Mutex
 	statusLifecycleMutex    sync.Mutex
@@ -729,6 +730,28 @@ func (m *Manager) endSharedOperation() {
 	m.unregisterOperation()
 }
 
+func (m *Manager) beginForegroundSharedOperation() error {
+	m.scanTransitionMutex.Lock()
+	defer m.scanTransitionMutex.Unlock()
+	if m.isScanning.Load() {
+		return ErrOperationInProgress
+	}
+	if err := m.beginSharedOperation(); err != nil {
+		return err
+	}
+	m.globalOperationMutex.Lock()
+	m.foregroundSharedActive++
+	m.globalOperationMutex.Unlock()
+	return nil
+}
+
+func (m *Manager) endForegroundSharedOperation() {
+	m.globalOperationMutex.Lock()
+	m.foregroundSharedActive--
+	m.globalOperationMutex.Unlock()
+	m.endSharedOperation()
+}
+
 // beginStationOperation rejects duplicate requests for one physical station
 // and caps independent GATT work at two devices. It never waits while holding
 // the global read lock, so a request flood cannot starve a scan.
@@ -843,6 +866,11 @@ func (m *Manager) endRecoveryStationOperation(address string) {
 // while preventing a hidden recovery task from making a UI-permitted second
 // device action fail with Busy.
 func (m *Manager) beginForegroundStationOperation(address string) error {
+	m.scanTransitionMutex.Lock()
+	defer m.scanTransitionMutex.Unlock()
+	if m.isScanning.Load() {
+		return ErrOperationInProgress
+	}
 	for {
 		m.recoveryOperationMutex.Lock()
 		generationBefore := m.recoveryGeneration
@@ -885,6 +913,32 @@ func (m *Manager) beginForegroundStationOperation(address string) error {
 			return ErrShuttingDown
 		}
 	}
+}
+
+func (m *Manager) beginBulkGlobalOperation() error {
+	m.scanTransitionMutex.Lock()
+	defer m.scanTransitionMutex.Unlock()
+	if m.isScanning.Load() {
+		return ErrOperationInProgress
+	}
+	return m.beginForegroundGlobalOperation()
+}
+
+func (m *Manager) hasForegroundOperation() bool {
+	m.globalOperationMutex.Lock()
+	active := m.foregroundGlobalActive || m.foregroundSharedActive > 0
+	m.globalOperationMutex.Unlock()
+	if active {
+		return true
+	}
+	m.deviceOperationMutex.Lock()
+	defer m.deviceOperationMutex.Unlock()
+	for _, operation := range m.activeDeviceOperations {
+		if operation.kind == deviceOperationForeground {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *Manager) cancelBackgroundReadsForForeground() {
@@ -1097,6 +1151,10 @@ func (m *Manager) reserveScan() (*scanLifecycle, error) {
 	if m.shuttingDown.Load() {
 		m.scanTransitionMutex.Unlock()
 		return nil, ErrShuttingDown
+	}
+	if m.hasForegroundOperation() {
+		m.scanTransitionMutex.Unlock()
+		return nil, ErrOperationInProgress
 	}
 	m.scanLifecycleMutex.Lock()
 	previousLifecycle := m.scanLifecycle
@@ -2112,6 +2170,9 @@ func (m *Manager) SetStationPower(address, state string) (PowerActionResult, err
 	if err != nil {
 		return PowerActionResult{}, err
 	}
+	if m.shuttingDown.Load() {
+		return PowerActionResult{}, ErrShuttingDown
+	}
 	canonicalAddress := stationPtr.Snapshot().Address
 	if result, outcomeErr, handled := m.cachedPowerOutcome(stationPtr, target); handled {
 		return result, outcomeErr
@@ -2301,6 +2362,9 @@ func (m *Manager) SetStationChannel(address string, channel int, allowUnknownCon
 	stationPtr, err := m.stationByAddress(address)
 	if err != nil {
 		return result, err
+	}
+	if m.shuttingDown.Load() {
+		return result, ErrShuttingDown
 	}
 	canonicalAddress := stationPtr.Snapshot().Address
 	initialSnapshot := stationPtr.Snapshot()
@@ -2501,10 +2565,13 @@ func (m *Manager) setAllStationsPowerDetailed(state string) (BulkPowerResult, er
 	if err != nil {
 		return result, fmt.Errorf("%w: %v", ErrInvalidArgument, err)
 	}
+	if m.shuttingDown.Load() {
+		return result, ErrShuttingDown
+	}
 	if cached, complete := m.cachedBulkPowerResult(target); complete {
 		return cached, nil
 	}
-	if err := m.beginForegroundGlobalOperation(); err != nil {
+	if err := m.beginBulkGlobalOperation(); err != nil {
 		return result, err
 	}
 	defer m.endForegroundGlobalOperation()
@@ -2688,10 +2755,10 @@ func (m *Manager) setAllStationsPowerDetailed(state string) (BulkPowerResult, er
 }
 
 func (m *Manager) RenameStation(originalName string, newName string) error {
-	if err := m.beginSharedOperation(); err != nil {
+	if err := m.beginForegroundSharedOperation(); err != nil {
 		return err
 	}
-	defer m.endSharedOperation()
+	defer m.endForegroundSharedOperation()
 	addresses := make([]string, 0)
 	m.stationsMutex.RLock()
 	for _, stationPtr := range m.stations {
@@ -2711,10 +2778,10 @@ func (m *Manager) RenameStation(originalName string, newName string) error {
 }
 
 func (m *Manager) RenameStationByAddress(address, newName string) error {
-	if err := m.beginSharedOperation(); err != nil {
+	if err := m.beginForegroundSharedOperation(); err != nil {
 		return err
 	}
-	defer m.endSharedOperation()
+	defer m.endForegroundSharedOperation()
 	station, err := m.stationByAddress(address)
 	if err != nil {
 		return err
@@ -2724,10 +2791,10 @@ func (m *Manager) RenameStationByAddress(address, newName string) error {
 }
 
 func (m *Manager) SaveConfig() error {
-	if err := m.beginSharedOperation(); err != nil {
+	if err := m.beginForegroundSharedOperation(); err != nil {
 		return err
 	}
-	defer m.endSharedOperation()
+	defer m.endForegroundSharedOperation()
 	return m.config.Save()
 }
 

@@ -128,12 +128,16 @@ type fakeCharacteristic struct {
 
 type blockingContextCharacteristic struct {
 	*fakeCharacteristic
-	started chan struct{}
+	started     chan struct{}
+	terminalErr error
 }
 
 func (f *blockingContextCharacteristic) ReadContext(ctx context.Context, _ []byte) (int, error) {
 	close(f.started)
 	<-ctx.Done()
+	if f.terminalErr != nil {
+		return 0, f.terminalErr
+	}
 	return 0, ctx.Err()
 }
 
@@ -1231,6 +1235,30 @@ func TestReadPowerStateContextCancelsBlockingRead(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("cancelled status read did not return")
+	}
+}
+
+func TestReadPowerStateContextPreservesCancellationWhenTransportReturnsTerminalError(t *testing.T) {
+	power := &blockingContextCharacteristic{
+		fakeCharacteristic: &fakeCharacteristic{},
+		started:            make(chan struct{}),
+		terminalErr:        errors.New("WinRT operation ended with canceled status"),
+	}
+	station := connectedFakeStation(power, nil, nil, Capabilities{PowerRead: true})
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		result <- ReadPowerStateContext(ctx, station)
+	}()
+	<-power.started
+	cancel()
+
+	err := <-result
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("ReadPowerStateContext() error = %v, want context.Canceled", err)
+	}
+	if !strings.Contains(err.Error(), power.terminalErr.Error()) {
+		t.Fatalf("ReadPowerStateContext() error = %v, want terminal transport detail", err)
 	}
 }
 

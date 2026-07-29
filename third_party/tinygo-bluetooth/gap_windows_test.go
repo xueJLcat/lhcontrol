@@ -82,6 +82,16 @@ func TestWaitForAsyncCompletionAcceptsPolledTerminalStatus(t *testing.T) {
 	}
 }
 
+func TestContextualAsyncCompletionErrorPreservesCancellationIdentity(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := contextualAsyncCompletionError(ctx, nil, foundation.AsyncStatusCanceled)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("contextualAsyncCompletionError() error = %v, want context.Canceled", err)
+	}
+}
+
 func TestBoundedAsyncOperationContextPreservesTimeoutAndParentCancellation(t *testing.T) {
 	originalTimeout := asyncOperationTimeout
 	asyncOperationTimeout = 40 * time.Millisecond

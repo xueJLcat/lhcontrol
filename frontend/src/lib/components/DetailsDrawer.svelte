@@ -32,6 +32,18 @@
     { label: 'Channel', entries: [['channelRead', 'read'], ['channelWrite', 'write'], ['channelNotify', 'notify']] },
     { label: 'Other', entries: [['identify', 'identify'], ['deviceInformation', 'device info']] }
   ];
+
+  $: hasCachedMetadata = Boolean(
+    station.metadataReadAt ||
+    station.metadata.manufacturer ||
+    station.metadata.model ||
+    station.metadata.serialNumber ||
+    station.metadata.hardwareRevision ||
+    station.metadata.firmwareRevision
+  );
+  $: metadataStatus = station.metadataFresh
+    ? 'loaded and fresh'
+    : hasCachedMetadata ? 'cached, stale' : 'unavailable';
 </script>
 
 <div
@@ -90,7 +102,7 @@
     <dl>
       <dt>Original name</dt><dd>{station.originalName}</dd>
       <dt>Address</dt><dd class="mono">{station.address}</dd>
-      <dt>Metadata</dt><dd title={station.metadataReadAt || undefined}>{station.metadataFresh ? 'loaded and cached' : 'unavailable'} · {relativeTime(station.metadataReadAt, now) || 'never'}</dd>
+      <dt>Metadata</dt><dd title={station.metadataReadAt || undefined}>{metadataStatus} · {relativeTime(station.metadataReadAt, now) || 'never'}</dd>
     </dl>
   </section>
 

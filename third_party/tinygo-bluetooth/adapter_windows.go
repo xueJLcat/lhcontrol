@@ -131,7 +131,7 @@ func awaitAsyncOperationContext(ctx context.Context, asyncOperation *foundation.
 	if queryErr != nil {
 		select {
 		case status := <-completed:
-			return asyncCompletionError(asyncOperation, status)
+			return contextualAsyncCompletionError(operationCtx, asyncOperation, status)
 		case <-operationCtx.Done():
 			_ = asyncOperation.SetCompleted(nil)
 			return &AsyncOperationTimeoutError{Cause: operationCtx.Err()}
@@ -145,6 +145,13 @@ func awaitAsyncOperationContext(ctx context.Context, asyncOperation *foundation.
 		// its COM reference until the caller releases the operation.
 		_ = asyncOperation.SetCompleted(nil)
 		return err
+	}
+	return contextualAsyncCompletionError(operationCtx, asyncOperation, status)
+}
+
+func contextualAsyncCompletionError(ctx context.Context, asyncOperation *foundation.IAsyncOperation, status foundation.AsyncStatus) error {
+	if ctx != nil && ctx.Err() != nil && status != foundation.AsyncStatusCompleted {
+		return fmt.Errorf("async operation ended with status %d after cancellation: %w", status, ctx.Err())
 	}
 	return asyncCompletionError(asyncOperation, status)
 }
