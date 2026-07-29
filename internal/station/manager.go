@@ -31,6 +31,7 @@ const (
 	defaultStatusReadTimeout       = 20 * time.Second
 	defaultInitialReadPhaseTimeout = 45 * time.Second
 	defaultStatusRefreshTimeout    = 30 * time.Second
+	metadataFreshnessWindow        = 24 * time.Hour
 )
 
 // StationInfo is a simplified representation of a BaseStation for the frontend.
@@ -147,12 +148,14 @@ const (
 )
 
 type activeDeviceOperation struct {
-	kind deviceOperationKind
-	done chan struct{}
+	kind   deviceOperationKind
+	done   chan struct{}
+	cancel context.CancelFunc
 }
 
 type deviceOperationBusyError struct {
-	backgroundDone <-chan struct{}
+	backgroundDone   <-chan struct{}
+	cancelBackground context.CancelFunc
 }
 
 func (e *deviceOperationBusyError) Error() string {
@@ -174,6 +177,7 @@ type Manager struct {
 	statusOperationMutex    sync.Mutex
 	statusLifecycleMutex    sync.Mutex
 	statusOperationDone     chan struct{}
+	cancelStatusOperation   context.CancelFunc
 	channelOperationMutex   sync.Mutex
 	deviceOperationMutex    sync.Mutex
 	activeDeviceOperations  map[string]activeDeviceOperation
@@ -670,6 +674,7 @@ func (m *Manager) beginForegroundGlobalOperationContext(ctx context.Context) err
 		if backgroundDone == nil {
 			return err
 		}
+		m.cancelBackgroundReadsForForeground()
 		select {
 		case <-backgroundDone:
 		case <-ctx.Done():
@@ -687,10 +692,11 @@ func (m *Manager) endForegroundGlobalOperation() {
 	m.endOperation()
 }
 
-func (m *Manager) beginStatusLifecycle() chan struct{} {
+func (m *Manager) beginStatusLifecycle(cancel context.CancelFunc) chan struct{} {
 	done := make(chan struct{})
 	m.statusLifecycleMutex.Lock()
 	m.statusOperationDone = done
+	m.cancelStatusOperation = cancel
 	m.statusLifecycleMutex.Unlock()
 	return done
 }
@@ -699,6 +705,7 @@ func (m *Manager) endStatusLifecycle(done chan struct{}) {
 	m.statusLifecycleMutex.Lock()
 	if m.statusOperationDone == done {
 		m.statusOperationDone = nil
+		m.cancelStatusOperation = nil
 		close(done)
 	}
 	m.statusLifecycleMutex.Unlock()
@@ -730,6 +737,10 @@ func (m *Manager) beginStationOperation(address string) error {
 }
 
 func (m *Manager) beginStationOperationKind(address string, kind deviceOperationKind) error {
+	return m.beginStationOperationKindContext(address, kind, nil)
+}
+
+func (m *Manager) beginStationOperationKindContext(address string, kind deviceOperationKind, cancel context.CancelFunc) error {
 	if err := m.registerOperation(); err != nil {
 		return err
 	}
@@ -747,7 +758,7 @@ func (m *Manager) beginStationOperationKind(address string, kind deviceOperation
 		m.deviceOperationMutex.Unlock()
 		m.operationMutex.RUnlock()
 		m.unregisterOperation()
-		return &deviceOperationBusyError{backgroundDone: backgroundDone}
+		return &deviceOperationBusyError{backgroundDone: backgroundDone, cancelBackground: active.cancel}
 	}
 	select {
 	case m.deviceOperationSlots <- struct{}{}:
@@ -758,8 +769,9 @@ func (m *Manager) beginStationOperationKind(address string, kind deviceOperation
 		return ErrOperationInProgress
 	}
 	m.activeDeviceOperations[key] = activeDeviceOperation{
-		kind: kind,
-		done: make(chan struct{}),
+		kind:   kind,
+		done:   make(chan struct{}),
+		cancel: cancel,
 	}
 	m.deviceOperationMutex.Unlock()
 	return nil
@@ -792,7 +804,7 @@ func (m *Manager) beginRecoveryStationOperation(address string) error {
 	m.cancelRecovery = cancelRecovery
 	m.recoveryGeneration++
 	m.recoveryOperationMutex.Unlock()
-	if err := m.beginStationOperationKind(address, deviceOperationRecovery); err != nil {
+	if err := m.beginStationOperationKindContext(address, deviceOperationRecovery, cancelRecovery); err != nil {
 		cancelRecovery()
 		m.recoveryOperationMutex.Lock()
 		if m.recoveryOperationDone == done {
@@ -841,7 +853,11 @@ func (m *Manager) beginForegroundStationOperation(address string) error {
 		}
 		var deviceBusy *deviceOperationBusyError
 		if errors.As(err, &deviceBusy) && deviceBusy.backgroundDone != nil {
-			m.cancelRecoveryForForeground()
+			if deviceBusy.cancelBackground != nil {
+				deviceBusy.cancelBackground()
+			} else {
+				m.cancelRecoveryForForeground()
+			}
 			select {
 			case <-deviceBusy.backgroundDone:
 				continue
@@ -869,6 +885,16 @@ func (m *Manager) beginForegroundStationOperation(address string) error {
 			return ErrShuttingDown
 		}
 	}
+}
+
+func (m *Manager) cancelBackgroundReadsForForeground() {
+	m.statusLifecycleMutex.Lock()
+	cancelStatus := m.cancelStatusOperation
+	m.statusLifecycleMutex.Unlock()
+	if cancelStatus != nil {
+		cancelStatus()
+	}
+	m.cancelRecoveryForForeground()
 }
 
 // cancelRecoveryForForeground makes a read-only recovery yield its GATT slot.
@@ -934,7 +960,7 @@ func (m *Manager) GetStationInfo() []StationInfo {
 			!snapshot.LastSeenAt.IsZero()
 		scanFresh := seenInLatestScan &&
 			isRecent(snapshot.LastSeenAt, now, channelScanFreshnessWindow)
-		metadataFresh := !snapshot.MetadataReadAt.IsZero()
+		metadataFresh := isRecent(snapshot.MetadataReadAt, now, metadataFreshnessWindow)
 		stationInfos = append(stationInfos, StationInfo{
 			Name:                name,
 			OriginalName:        snapshot.Name,
@@ -1581,7 +1607,9 @@ func (m *Manager) CheckAllStationStatuses() ([]StationInfo, error) {
 		return m.GetStationInfo(), fmt.Errorf("status refresh already in progress: %w", ErrOperationInProgress)
 	}
 	defer m.statusOperationMutex.Unlock()
-	statusDone := m.beginStatusLifecycle()
+	refreshContext, cancelRefresh := context.WithTimeout(m.lifecycleContext, m.statusRefreshTimeout)
+	defer cancelRefresh()
+	statusDone := m.beginStatusLifecycle(cancelRefresh)
 	defer m.endStatusLifecycle(statusDone)
 	if err := m.beginSharedOperation(); err != nil {
 		return m.GetStationInfo(), err
@@ -1627,8 +1655,6 @@ func (m *Manager) CheckAllStationStatuses() ([]StationInfo, error) {
 	}
 	statusErrors := make([]error, len(stationsToRead))
 	work := make(chan statusReadWork)
-	refreshContext, cancelRefresh := context.WithTimeout(m.lifecycleContext, m.statusRefreshTimeout)
-	defer cancelRefresh()
 	// Keep one GATT slot available for foreground commands while the periodic
 	// refresh reads connected stations.
 	workerCount := 1
@@ -1643,13 +1669,14 @@ func (m *Manager) CheckAllStationStatuses() ([]StationInfo, error) {
 			for item := range work {
 				ptr := item.station
 				address := ptr.Snapshot().Address
-				if err := m.beginStationOperationKind(address, deviceOperationStatus); err != nil {
+				readContext, cancelRead := context.WithTimeout(refreshContext, m.statusReadTimeout)
+				if err := m.beginStationOperationKindContext(address, deviceOperationStatus, cancelRead); err != nil {
+					cancelRead()
 					statusErrors[item.index] = fmt.Errorf("%s: status read skipped: %w", address, err)
 					continue
 				}
 				func() {
 					defer m.endStationOperation(address)
-					readContext, cancelRead := context.WithTimeout(refreshContext, m.statusReadTimeout)
 					defer cancelRead()
 					workerErr := runSafely("station status worker", func() error {
 						return m.bluetoothOps.readPowerStateContext(readContext, ptr)
@@ -1657,6 +1684,10 @@ func (m *Manager) CheckAllStationStatuses() ([]StationInfo, error) {
 					if workerErr != nil {
 						if m.shuttingDown.Load() && errors.Is(workerErr, context.Canceled) {
 							statusErrors[item.index] = fmt.Errorf("%s: status read cancelled: %w", address, workerErr)
+							return
+						}
+						if errors.Is(workerErr, context.Canceled) && m.lifecycleContext.Err() == nil {
+							m.trackStatusRefreshPending(address)
 							return
 						}
 						if errors.Is(refreshContext.Err(), context.DeadlineExceeded) &&
@@ -1687,8 +1718,10 @@ dispatch:
 		case <-refreshContext.Done():
 			for skippedIndex := index; skippedIndex < len(stationsToRead); skippedIndex++ {
 				address := stationsToRead[skippedIndex].Snapshot().Address
-				statusErrors[skippedIndex] = fmt.Errorf("%s: status refresh deadline exceeded: %w", address, refreshContext.Err())
 				m.trackStatusRefreshPending(address)
+				if !errors.Is(refreshContext.Err(), context.Canceled) || m.lifecycleContext.Err() != nil {
+					statusErrors[skippedIndex] = fmt.Errorf("%s: status refresh deadline exceeded: %w", address, refreshContext.Err())
+				}
 			}
 			break dispatch
 		}
@@ -2053,6 +2086,23 @@ func (m *Manager) stationInfoByAddress(address string) (StationInfo, error) {
 
 // SetStationPower sets one of the three stable target states. Confirmed is
 // false when the firmware supports writing but does not expose power reads.
+func (m *Manager) cachedPowerOutcome(stationPtr *bluetooth.BaseStation, target bluetooth.PowerState) (PowerActionResult, error, bool) {
+	snapshot := stationPtr.Snapshot()
+	now := time.Now()
+	if snapshot.PowerState == bluetooth.PowerStateBooting && isFresh(snapshot.LastPowerReadAt, now) {
+		return PowerActionResult{}, fmt.Errorf("station is booting; retry after transition: %w", ErrOperationInProgress), true
+	}
+	if snapshot.PowerState != target || !isFresh(snapshot.LastPowerReadAt, now) ||
+		!bluetooth.IsPowerStateConfirmed(snapshot.PowerState, snapshot.RawPowerState) {
+		return PowerActionResult{}, nil, false
+	}
+	info, err := m.stationInfoByAddress(snapshot.Address)
+	if err != nil {
+		return PowerActionResult{}, err, true
+	}
+	return PowerActionResult{Station: info, Confirmed: true}, nil, true
+}
+
 func (m *Manager) SetStationPower(address, state string) (PowerActionResult, error) {
 	target, err := bluetooth.ParsePowerTarget(state)
 	if err != nil {
@@ -2063,32 +2113,17 @@ func (m *Manager) SetStationPower(address, state string) (PowerActionResult, err
 		return PowerActionResult{}, err
 	}
 	canonicalAddress := stationPtr.Snapshot().Address
+	if result, outcomeErr, handled := m.cachedPowerOutcome(stationPtr, target); handled {
+		return result, outcomeErr
+	}
 	if err := m.beginForegroundStationOperation(canonicalAddress); err != nil {
 		return PowerActionResult{}, err
 	}
 	defer m.endStationOperation(canonicalAddress)
+	if result, outcomeErr, handled := m.cachedPowerOutcome(stationPtr, target); handled {
+		return result, outcomeErr
+	}
 	snapshot := stationPtr.Snapshot()
-	now := time.Now()
-	if snapshot.PowerState == bluetooth.PowerStateBooting &&
-		isFresh(snapshot.LastPowerReadAt, now) {
-		return PowerActionResult{}, fmt.Errorf(
-			"station is booting; retry after transition: %w",
-			ErrOperationInProgress,
-		)
-	}
-	if snapshot.PowerState == target &&
-		isFresh(snapshot.LastPowerReadAt, now) &&
-		bluetooth.IsPowerStateConfirmed(snapshot.PowerState, snapshot.RawPowerState) {
-		info, infoErr := m.stationInfoByAddress(canonicalAddress)
-		if infoErr != nil {
-			return PowerActionResult{}, infoErr
-		}
-		return PowerActionResult{
-			Station:     info,
-			CommandSent: false,
-			Confirmed:   true,
-		}, nil
-	}
 	if err := m.ensureReady(); err != nil {
 		return PowerActionResult{}, err
 	}
@@ -2268,6 +2303,12 @@ func (m *Manager) SetStationChannel(address string, channel int, allowUnknownCon
 		return result, err
 	}
 	canonicalAddress := stationPtr.Snapshot().Address
+	initialSnapshot := stationPtr.Snapshot()
+	if initialSnapshot.Channel == channel && isFresh(initialSnapshot.LastChannelReadAt, time.Now()) {
+		return ChannelChangeResult{
+			Address: initialSnapshot.Address, PreviousChannel: channel, Channel: channel, Confirmed: true, Warnings: []string{},
+		}, nil
+	}
 	if err := m.beginForegroundStationOperation(canonicalAddress); err != nil {
 		return result, err
 	}
@@ -2315,6 +2356,20 @@ func (m *Manager) SetStationChannel(address string, channel int, allowUnknownCon
 	}
 	if !capabilities.ChannelRead || !capabilities.ChannelWrite {
 		return result, fmt.Errorf("%w: safe channel changes require read and write support", ErrUnsupported)
+	}
+	targetSnapshot = stationPtr.Snapshot()
+	result.Address = targetSnapshot.Address
+	if !targetSnapshot.Present || targetSnapshot.MissedScans > 0 || targetSnapshot.PresenceUncertain {
+		return result, fmt.Errorf("%w: station %s was not seen in the latest scan", ErrNotFound, address)
+	}
+	if !isRecent(targetSnapshot.LastSeenAt, time.Now(), channelScanFreshnessWindow) {
+		return result, fmt.Errorf("%w before changing a channel", ErrScanRequired)
+	}
+	if targetSnapshot.Channel == channel && isFresh(targetSnapshot.LastChannelReadAt, time.Now()) {
+		result.PreviousChannel = channel
+		result.Channel = channel
+		result.Confirmed = true
+		return result, nil
 	}
 
 	hasUnknown := false
@@ -2419,11 +2474,35 @@ func (m *Manager) SetAllStationsPowerDetailed(state string) (BulkPowerResult, er
 	return m.setAllStationsPowerDetailed(state)
 }
 
+func (m *Manager) cachedBulkPowerResult(target bluetooth.PowerState) (BulkPowerResult, bool) {
+	result := BulkPowerResult{Target: target.String(), Results: []BulkPowerStationResult{}}
+	for _, info := range m.GetStationInfo() {
+		item := BulkPowerStationResult{Address: info.Address, Name: info.Name, Station: info}
+		switch {
+		case info.PowerFresh && bluetooth.PowerState(info.PowerState) == bluetooth.PowerStateBooting:
+			item.Skipped = true
+			item.Reason = "station is booting"
+		case info.PowerFresh && info.PowerStateConfirmed && bluetooth.PowerState(info.PowerState) == target:
+			item.Skipped = true
+			item.Success = true
+			item.Confirmed = true
+			item.Reason = "already at target state"
+		default:
+			return BulkPowerResult{}, false
+		}
+		result.Results = append(result.Results, item)
+	}
+	return result, true
+}
+
 func (m *Manager) setAllStationsPowerDetailed(state string) (BulkPowerResult, error) {
 	target, err := bluetooth.ParsePowerTarget(state)
 	result := BulkPowerResult{Target: target.String(), Results: []BulkPowerStationResult{}}
 	if err != nil {
 		return result, fmt.Errorf("%w: %v", ErrInvalidArgument, err)
+	}
+	if cached, complete := m.cachedBulkPowerResult(target); complete {
+		return cached, nil
 	}
 	if err := m.beginForegroundGlobalOperation(); err != nil {
 		return result, err
@@ -2625,6 +2704,9 @@ func (m *Manager) RenameStation(originalName string, newName string) error {
 		}
 	}
 	m.stationsMutex.RUnlock()
+	if len(addresses) == 0 {
+		return fmt.Errorf("%w: no station has original name %q", ErrNotFound, originalName)
+	}
 	return m.config.SetRenamedStationForAddresses(originalName, newName, addresses)
 }
 

@@ -1287,6 +1287,14 @@ func TestSetStationChannelRejectsVisibleConflictBeforeWrite(t *testing.T) {
 
 func TestSetStationChannelAlreadyAtFreshTargetIsNoOp(t *testing.T) {
 	manager := NewManager(config.NewConfig())
+	if err := manager.beginStationOperation("busy-1"); err != nil {
+		t.Fatalf("beginStationOperation(busy-1) error = %v", err)
+	}
+	defer manager.endStationOperation("busy-1")
+	if err := manager.beginStationOperation("busy-2"); err != nil {
+		t.Fatalf("beginStationOperation(busy-2) error = %v", err)
+	}
+	defer manager.endStationOperation("busy-2")
 	manager.initializeErr = errors.New("adapter unavailable")
 	manager.nextInitializeAt = time.Now().Add(time.Hour)
 	manager.initializeBluetooth = func() error {
@@ -1840,6 +1848,10 @@ func TestBulkPowerIncludesAbsentKnownStations(t *testing.T) {
 
 func TestBulkPowerPureSkipsDoNotRequireBluetoothReadiness(t *testing.T) {
 	manager := NewManager(config.NewConfig())
+	if err := manager.beginStationOperation("busy"); err != nil {
+		t.Fatalf("beginStationOperation() error = %v", err)
+	}
+	defer manager.endStationOperation("busy")
 	manager.initializeErr = errors.New("adapter unavailable")
 	manager.nextInitializeAt = time.Now().Add(time.Hour)
 	manager.initializeBluetooth = func() error {
@@ -2182,6 +2194,14 @@ func TestSinglePowerConfirmationUnsupportedReadPreservesCommandSent(t *testing.T
 
 func TestSinglePowerAlreadyAtConfirmedTargetIsNoOp(t *testing.T) {
 	manager := NewManager(config.NewConfig())
+	if err := manager.beginStationOperation("busy-1"); err != nil {
+		t.Fatalf("beginStationOperation(busy-1) error = %v", err)
+	}
+	defer manager.endStationOperation("busy-1")
+	if err := manager.beginStationOperation("busy-2"); err != nil {
+		t.Fatalf("beginStationOperation(busy-2) error = %v", err)
+	}
+	defer manager.endStationOperation("busy-2")
 	manager.initializeErr = errors.New("adapter unavailable")
 	manager.nextInitializeAt = time.Now().Add(time.Hour)
 	manager.initializeBluetooth = func() error {
@@ -2720,8 +2740,9 @@ func TestStatusCheckReportsBusyStationAndContinuesOtherReads(t *testing.T) {
 	}
 }
 
-func TestForegroundWaitsForStatusReadOnSameStation(t *testing.T) {
+func TestForegroundCancelsStatusReadOnSameStation(t *testing.T) {
 	manager := NewManager(config.NewConfig())
+	manager.statusRecoveryStart.Do(func() {})
 	address := "11:22:33:44:55:60"
 	manager.stations[address] = &internalbluetooth.BaseStation{
 		Name:    "LHB-60",
@@ -2732,11 +2753,10 @@ func TestForegroundWaitsForStatusReadOnSameStation(t *testing.T) {
 		return true
 	}
 	statusStarted := make(chan struct{})
-	statusRelease := make(chan struct{})
-	manager.bluetoothOps.readPowerStateContext = func(context.Context, *internalbluetooth.BaseStation) error {
+	manager.bluetoothOps.readPowerStateContext = func(ctx context.Context, _ *internalbluetooth.BaseStation) error {
 		close(statusStarted)
-		<-statusRelease
-		return nil
+		<-ctx.Done()
+		return ctx.Err()
 	}
 
 	statusDone := make(chan error, 1)
@@ -2754,15 +2774,14 @@ func TestForegroundWaitsForStatusReadOnSameStation(t *testing.T) {
 		}
 		foregroundDone <- err
 	}()
-	select {
-	case err := <-foregroundDone:
-		t.Fatalf("foreground operation returned before the status read completed: %v", err)
-	case <-time.After(25 * time.Millisecond):
-	}
-
-	close(statusRelease)
 	if err := <-statusDone; err != nil {
 		t.Fatalf("CheckAllStationStatuses() error = %v", err)
+	}
+	manager.statusRetryMutex.Lock()
+	retry := manager.statusRetries[address]
+	manager.statusRetryMutex.Unlock()
+	if retry.kinds&statusRetryRefresh == 0 {
+		t.Fatalf("preempted status read retry kinds = %v, want refresh retry", retry.kinds)
 	}
 	select {
 	case err := <-foregroundDone:
@@ -2774,19 +2793,19 @@ func TestForegroundWaitsForStatusReadOnSameStation(t *testing.T) {
 	}
 }
 
-func TestForegroundGlobalOperationWaitsForStatusRefresh(t *testing.T) {
+func TestForegroundGlobalOperationCancelsStatusRefresh(t *testing.T) {
 	manager := NewManager(config.NewConfig())
+	manager.statusRecoveryStart.Do(func() {})
 	address := "11:22:33:44:55:64"
 	manager.stations[address] = &internalbluetooth.BaseStation{
 		Name: "LHB-64", Address: mustAddress(t, address), Present: true,
 	}
 	manager.bluetoothOps.stationConnected = func(*internalbluetooth.BaseStation) bool { return true }
 	statusStarted := make(chan struct{})
-	statusRelease := make(chan struct{})
-	manager.bluetoothOps.readPowerStateContext = func(context.Context, *internalbluetooth.BaseStation) error {
+	manager.bluetoothOps.readPowerStateContext = func(ctx context.Context, _ *internalbluetooth.BaseStation) error {
 		close(statusStarted)
-		<-statusRelease
-		return nil
+		<-ctx.Done()
+		return ctx.Err()
 	}
 	statusResult := make(chan error, 1)
 	go func() {
@@ -2803,14 +2822,14 @@ func TestForegroundGlobalOperationWaitsForStatusRefresh(t *testing.T) {
 		}
 		globalResult <- err
 	}()
-	select {
-	case err := <-globalResult:
-		t.Fatalf("global foreground operation returned before status refresh completed: %v", err)
-	case <-time.After(25 * time.Millisecond):
-	}
-	close(statusRelease)
 	if err := <-statusResult; err != nil {
 		t.Fatalf("CheckAllStationStatuses() error = %v", err)
+	}
+	manager.statusRetryMutex.Lock()
+	retry := manager.statusRetries[address]
+	manager.statusRetryMutex.Unlock()
+	if retry.kinds&statusRetryRefresh == 0 {
+		t.Fatalf("preempted status refresh retry kinds = %v, want refresh retry", retry.kinds)
 	}
 	select {
 	case err := <-globalResult:
@@ -3342,5 +3361,72 @@ func TestShutdownWaitsForActiveStatusRecovery(t *testing.T) {
 	case <-shutdownDone:
 	case <-time.After(time.Second):
 		t.Fatal("Shutdown did not finish after status recovery returned")
+	}
+}
+
+func TestChannelChangeRevalidatesPresenceAfterCapabilityRefresh(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	address := "11:22:33:44:55:81"
+	station := &internalbluetooth.BaseStation{
+		Name:       "LHB-MOVED",
+		Address:    mustAddress(t, address),
+		Channel:    3,
+		Present:    true,
+		LastSeenAt: time.Now(),
+	}
+	manager.stations[address] = station
+	manager.bluetoothOps.refreshCapabilities = func(context.Context, *internalbluetooth.BaseStation) (internalbluetooth.Capabilities, error) {
+		station.SetPresent(false)
+		return internalbluetooth.Capabilities{ChannelRead: true, ChannelWrite: true}, nil
+	}
+	var writes atomic.Int32
+	manager.bluetoothOps.setChannel = func(*internalbluetooth.BaseStation, int) (internalbluetooth.ChannelWriteResult, error) {
+		writes.Add(1)
+		return internalbluetooth.ChannelWriteResult{}, nil
+	}
+
+	_, err := manager.SetStationChannel(address, 4, false)
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("SetStationChannel() error = %v, want ErrNotFound", err)
+	}
+	if got := writes.Load(); got != 0 {
+		t.Fatalf("channel writes = %d, want 0", got)
+	}
+}
+
+func TestMetadataFreshnessExpires(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	now := time.Now()
+	manager.stations["fresh"] = &internalbluetooth.BaseStation{
+		Name: "fresh", Address: mustAddress(t, "11:22:33:44:55:82"), MetadataReadAt: now,
+	}
+	manager.stations["stale"] = &internalbluetooth.BaseStation{
+		Name: "stale", Address: mustAddress(t, "11:22:33:44:55:83"),
+		Metadata:       internalbluetooth.DeviceMetadata{FirmwareRevision: "1.2.3"},
+		MetadataReadAt: now.Add(-metadataFreshnessWindow - time.Minute),
+	}
+
+	infos := manager.GetStationInfo()
+	freshness := make(map[string]bool, len(infos))
+	for _, info := range infos {
+		freshness[info.Name] = info.MetadataFresh
+	}
+	if !freshness["fresh"] {
+		t.Fatal("recent metadata was marked stale")
+	}
+	if freshness["stale"] {
+		t.Fatal("expired metadata was marked fresh")
+	}
+}
+
+func TestRenameStationReturnsNotFoundForUnknownOriginalName(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	manager.stations["known"] = &internalbluetooth.BaseStation{
+		Name: "LHB-KNOWN", Address: mustAddress(t, "11:22:33:44:55:84"),
+	}
+
+	err := manager.RenameStation("LHB-MISSING", "Desk")
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("RenameStation() error = %v, want ErrNotFound", err)
 	}
 }
