@@ -4,7 +4,7 @@
   import { fly } from 'svelte/transition';
   import { CircleCheck, Eye, RefreshCw, Settings2, X } from 'lucide-svelte';
   import type { Capabilities, StationInfo } from '../types';
-  import { isFreshBooting, stateLabel } from '../station';
+  import { channelChangeBlockedReason, stateLabel } from '../station';
   import { relativeTime } from '../relative-time';
   import { focusTrap } from '../actions';
   import StateBadge from './StateBadge.svelte';
@@ -44,6 +44,7 @@
   $: metadataStatus = station.metadataFresh
     ? 'loaded and fresh'
     : hasCachedMetadata ? 'cached, stale' : 'unavailable';
+  $: channelBlockedReason = channelChangeBlockedReason(station);
 </script>
 
 <div
@@ -94,15 +95,12 @@
       <button
         class="btn primary"
         on:click={() => onOpenChannelEditor(station)}
-        disabled={!station.scanFresh || isFreshBooting(station) || busy || locked}
-        title={isFreshBooting(station)
-          ? 'Wait for the station to finish booting'
-          : station.scanFresh ? 'Recheck support and change Channel safely' : 'Run a new scan before changing Channel'}
+        disabled={Boolean(channelBlockedReason) || busy || locked}
+        title={channelBlockedReason || 'Recheck support and change Channel safely'}
       ><Settings2 size={15} /> Change Channel</button>
     </div>
     {#if station.capabilities.identify}<p class="hint">Identify may wake a sleeping base station.</p>{/if}
-    {#if !station.scanFresh}<p class="hint warning-text">Run a new scan before changing Channel so conflicts are checked against the current room.</p>{/if}
-    {#if isFreshBooting(station)}<p class="hint warning-text">Wait for the station to finish booting before changing its channel.</p>{/if}
+    {#if channelBlockedReason}<p class="hint warning-text">{channelBlockedReason}</p>{/if}
   </section>
 
   <section>

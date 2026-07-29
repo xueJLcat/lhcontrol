@@ -148,4 +148,37 @@ describe('ChannelModal channel grid', () => {
     await fireEvent.click(confirm);
     expect(onSave).toHaveBeenCalledWith(3, false);
   });
+
+  it('blocks submission if the station starts booting while the modal is open', async () => {
+    const onSave = vi.fn();
+    const baseProps = {
+      occupiedChannels: new Map<number, string[]>(),
+      hasUnknownVisibleChannel: false,
+      error: '',
+      warning: false,
+      busy: false,
+      locked: false,
+      onClose: vi.fn(),
+      onSave,
+      onIdentify: vi.fn()
+    };
+    const view = render(ChannelModal, {
+      props: { ...baseProps, station: station() }
+    });
+    await fireEvent.click(screen.getByRole('button', { name: '5' }));
+    expect(screen.getByRole('button', { name: 'Confirm change' })).toBeEnabled();
+
+    await view.rerender({
+      ...baseProps,
+      station: station({ powerState: 3, powerStateName: 'booting', powerFresh: true })
+    });
+    const confirm = screen.getByRole('button', { name: 'Confirm change' });
+    expect(confirm).toBeDisabled();
+    expect(screen.getByText(/Wait for the station to finish booting/)).toBeInTheDocument();
+    await fireEvent.click(confirm);
+    expect(onSave).not.toHaveBeenCalled();
+
+    await view.rerender({ ...baseProps, station: station() });
+    expect(screen.getByRole('button', { name: 'Confirm change' })).toBeEnabled();
+  });
 });

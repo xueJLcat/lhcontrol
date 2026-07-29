@@ -1797,6 +1797,10 @@ func (m *Manager) CheckAllStationStatuses() ([]StationInfo, error) {
 				readContext, cancelRead := context.WithTimeout(refreshContext, m.statusReadTimeout)
 				if err := m.beginStationOperationKindContext(address, deviceOperationStatus, cancelRead); err != nil {
 					cancelRead()
+					if errors.Is(err, ErrOperationInProgress) {
+						m.trackStatusRefreshPending(address)
+						continue
+					}
 					statusErrors[item.index] = fmt.Errorf("%s: status read skipped: %w", address, err)
 					continue
 				}
@@ -2871,7 +2875,8 @@ func (m *Manager) setAllStationsPowerDetailed(state string) (BulkPowerResult, er
 				stationResult.Station = info
 				stationResult.Name = info.Name
 			}
-			if stationResult.Confirmed && !bluetooth.RequiresReconnect(workerErr) &&
+			communicationSucceeded := workerErr == nil || stationResult.CommandSent
+			if communicationSucceeded && !bluetooth.RequiresReconnect(workerErr) &&
 				!bluetooth.IsAdapterUnavailable(workerErr) {
 				m.clearStatusFailureKind(stationResult.Address, statusRetryConnection)
 			}

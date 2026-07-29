@@ -1455,6 +1455,36 @@ describe('App asynchronous operations', () => {
     expect(pushToast).toHaveBeenCalledWith(warning, 'warning');
   });
 
+  it('reports the same configuration warning again after it clears and recurs', async () => {
+    vi.useFakeTimers();
+    const warning = 'Configuration changes could not be saved: disk full';
+    const failed = {
+      running: true, address: '127.0.0.1:7575', error: '', warnings: [warning], configWritable: false
+    };
+    const healthy = {
+      running: true, address: '127.0.0.1:7575', error: '', warnings: [], configWritable: true
+    };
+    api.GetAPIStatus
+      .mockResolvedValueOnce(failed)
+      .mockResolvedValueOnce(failed)
+      .mockResolvedValueOnce(healthy)
+      .mockResolvedValueOnce(failed);
+
+    render(App);
+    await vi.waitFor(() => expect(api.GetAPIStatus).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(pushToast).toHaveBeenCalledWith(warning, 'warning'));
+
+    await vi.advanceTimersByTimeAsync(15_000);
+    await vi.waitFor(() => expect(api.GetAPIStatus).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(pushToast).mock.calls.filter(([message]) => message === warning)).toHaveLength(1);
+
+    await vi.advanceTimersByTimeAsync(15_000);
+    await vi.waitFor(() => expect(api.GetAPIStatus).toHaveBeenCalledTimes(3));
+    await vi.advanceTimersByTimeAsync(15_000);
+    await vi.waitFor(() => expect(api.GetAPIStatus).toHaveBeenCalledTimes(4));
+    expect(vi.mocked(pushToast).mock.calls.filter(([message]) => message === warning)).toHaveLength(2);
+  });
+
   it('refreshes configuration health immediately after a rename failure', async () => {
     const warning = 'Configuration changes could not be saved: disk full';
     api.RenameStationByAddress.mockRejectedValue(new Error('disk full'));

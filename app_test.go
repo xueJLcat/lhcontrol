@@ -244,6 +244,26 @@ func TestConfigPersistenceFailureUpdatesStatusAndEmptyWarningsStayArrays(t *test
 	}
 }
 
+func TestConfigPathLoadFailureMarksStatusReadOnly(t *testing.T) {
+	blockedRoot := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(blockedRoot, []byte("occupied"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AppData", blockedRoot)
+
+	app := NewApp()
+	loadErr := app.config.Load()
+	if loadErr == nil {
+		t.Fatal("config Load() unexpectedly succeeded")
+	}
+	app.setConfigLoadStatus(loadErr)
+	status := app.GetAPIStatus()
+	if status.ConfigWritable || len(status.Warnings) != 1 ||
+		!strings.Contains(status.Warnings[0], "failed to resolve config path") {
+		t.Fatalf("config path failure status = %+v", status)
+	}
+}
+
 func TestAPIServerRetriesFixedAddressAfterInitialBindFailure(t *testing.T) {
 	blocker, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

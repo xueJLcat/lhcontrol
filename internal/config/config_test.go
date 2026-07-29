@@ -78,6 +78,24 @@ func TestSuccessfulSaveClearsPreviousPersistenceFailure(t *testing.T) {
 	}
 }
 
+func TestLoadPathFailureMarksPersistenceUnavailable(t *testing.T) {
+	blockedRoot := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(blockedRoot, []byte("occupied"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AppData", blockedRoot)
+
+	cfg := NewConfig()
+	loadErr := cfg.Load()
+	if loadErr == nil {
+		t.Fatal("Load() unexpectedly succeeded")
+	}
+	persistenceErr := cfg.PersistenceError()
+	if persistenceErr == nil || !errors.Is(persistenceErr, loadErr) {
+		t.Fatalf("PersistenceError() = %v, want load path error %v", persistenceErr, loadErr)
+	}
+}
+
 func TestAddressRenameTakesPriorityOverLegacyName(t *testing.T) {
 	cfg := NewConfig()
 	cfg.RenamedStations["LHB-OLD"] = "Legacy name"

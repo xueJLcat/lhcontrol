@@ -24,6 +24,16 @@ export function isFreshBooting(station: StationInfo): boolean {
   return station.powerFresh && station.powerState === 3;
 }
 
+export function channelChangeBlockedReason(station: StationInfo): string {
+  if (!station.scanFresh) {
+    return 'Run a new scan before changing the channel.';
+  }
+  if (isFreshBooting(station)) {
+    return 'Wait for the station to finish booting before changing its channel.';
+  }
+  return '';
+}
+
 export function maySetPower(station: StationInfo, state: PowerTarget): boolean {
   // Capability data is cached from the last GATT discovery and can become
   // incomplete after a rescan. The backend refreshes missing capabilities

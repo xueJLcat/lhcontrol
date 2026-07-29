@@ -2601,6 +2601,82 @@ func TestBulkPowerConfirmationUnsupportedReadIsNotSkipped(t *testing.T) {
 	}
 }
 
+func TestBulkUnconfirmedSuccessClearsOnlyConnectionRecovery(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	address := "11:22:33:44:55:78"
+	manager.stations[address] = &internalbluetooth.BaseStation{
+		Name: "LHB-BULK-WRITE-ONLY", Address: mustAddress(t, address), Present: true,
+		Capabilities:      internalbluetooth.Capabilities{PowerWrite: true},
+		CapabilitiesKnown: true,
+	}
+	manager.statusRetryMutex.Lock()
+	manager.statusRetries[address] = statusRetry{
+		kinds:         statusRetryConnection | statusRetryChannel,
+		failures:      3,
+		nextAt:        time.Now().Add(time.Hour),
+		channelNextAt: time.Now().Add(time.Hour),
+	}
+	manager.statusRetryMutex.Unlock()
+	manager.bluetoothOps.setPowerState = func(*internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
+		return internalbluetooth.PowerControlResult{State: internalbluetooth.PowerStateOn, Confirmed: false}, nil
+	}
+
+	result, err := manager.SetAllStationsPowerDetailed("on")
+	if err != nil {
+		t.Fatalf("SetAllStationsPowerDetailed() error = %v", err)
+	}
+	if len(result.Results) != 1 || !result.Results[0].Success ||
+		!result.Results[0].CommandSent || result.Results[0].Confirmed {
+		t.Fatalf("bulk write-only result = %+v", result.Results)
+	}
+	manager.statusRetryMutex.Lock()
+	retry, tracked := manager.statusRetries[address]
+	manager.statusRetryMutex.Unlock()
+	if !tracked || effectiveStatusRetryKinds(retry) != statusRetryChannel {
+		t.Fatalf("retry after unconfirmed bulk success = %+v, tracked=%v; want channel-only", retry, tracked)
+	}
+}
+
+func TestBulkConfirmationFailureClearsOnlyConnectionRecovery(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	address := "11:22:33:44:55:76"
+	manager.stations[address] = &internalbluetooth.BaseStation{
+		Name: "LHB-BULK-UNCONFIRMED", Address: mustAddress(t, address), Present: true,
+		Capabilities:      internalbluetooth.Capabilities{PowerRead: true, PowerWrite: true},
+		CapabilitiesKnown: true,
+	}
+	manager.statusRetryMutex.Lock()
+	manager.statusRetries[address] = statusRetry{
+		kinds:         statusRetryConnection | statusRetryChannel,
+		failures:      2,
+		nextAt:        time.Now().Add(time.Hour),
+		channelNextAt: time.Now().Add(time.Hour),
+	}
+	manager.statusRetryMutex.Unlock()
+	manager.bluetoothOps.setPowerState = func(*internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
+		return internalbluetooth.PowerControlResult{State: internalbluetooth.PowerStateUnknown, Confirmed: false},
+			&internalbluetooth.PowerConfirmationError{
+				Target: internalbluetooth.PowerStateOn,
+				Err:    errors.New("readback timed out"),
+			}
+	}
+
+	result, err := manager.SetAllStationsPowerDetailed("on")
+	if err != nil {
+		t.Fatalf("SetAllStationsPowerDetailed() error = %v", err)
+	}
+	if len(result.Results) != 1 || !result.Results[0].Success ||
+		!result.Results[0].CommandSent || result.Results[0].Confirmed || result.Results[0].Error == "" {
+		t.Fatalf("bulk confirmation failure result = %+v", result.Results)
+	}
+	manager.statusRetryMutex.Lock()
+	retry, tracked := manager.statusRetries[address]
+	manager.statusRetryMutex.Unlock()
+	if !tracked || effectiveStatusRetryKinds(retry) != statusRetryChannel {
+		t.Fatalf("retry after bulk confirmation failure = %+v, tracked=%v; want channel-only", retry, tracked)
+	}
+}
+
 func TestRecoverySchedulerIncludesKnownAbsentStation(t *testing.T) {
 	manager := NewManager(config.NewConfig())
 	manager.statusRetryBase = time.Millisecond
@@ -2982,8 +3058,9 @@ func TestShutdownCannotMissScanAfterReadinessCheck(t *testing.T) {
 	manager.Shutdown()
 }
 
-func TestStatusCheckReportsBusyStationAndContinuesOtherReads(t *testing.T) {
+func TestStatusCheckDefersBusyStationAndContinuesOtherReads(t *testing.T) {
 	manager := NewManager(config.NewConfig())
+	manager.statusRecoveryStart.Do(func() {})
 	addresses := []string{"11:22:33:44:55:61", "11:22:33:44:55:62"}
 	for _, address := range addresses {
 		manager.stations[address] = &internalbluetooth.BaseStation{
@@ -3007,22 +3084,35 @@ func TestStatusCheckReportsBusyStationAndContinuesOtherReads(t *testing.T) {
 	if err := manager.beginStationOperation(addresses[0]); err != nil {
 		t.Fatalf("reserve busy station: %v", err)
 	}
-	defer manager.endStationOperation(addresses[0])
 
-	_, err := manager.CheckAllStationStatuses()
-	if !errors.Is(err, ErrOperationInProgress) {
-		t.Fatalf("CheckAllStationStatuses() error = %v, want ErrOperationInProgress", err)
+	if _, err := manager.CheckAllStationStatuses(); err != nil {
+		t.Fatalf("CheckAllStationStatuses() error = %v", err)
 	}
 	readAddressesMutex.Lock()
-	defer readAddressesMutex.Unlock()
 	if len(readAddresses) != 1 || readAddresses[0] != addresses[1] {
+		readAddressesMutex.Unlock()
 		t.Fatalf("status reads = %v, want only %s", readAddresses, addresses[1])
 	}
+	readAddressesMutex.Unlock()
 	manager.statusRetryMutex.Lock()
-	_, busyTracked := manager.statusRetries[addresses[0]]
+	retry, busyTracked := manager.statusRetries[addresses[0]]
 	manager.statusRetryMutex.Unlock()
-	if busyTracked {
-		t.Fatal("busy station was incorrectly added to connection recovery")
+	if !busyTracked || effectiveStatusRetryKinds(retry) != statusRetryRefresh {
+		t.Fatalf("busy station retry = %+v, tracked=%v; want refresh-only", retry, busyTracked)
+	}
+
+	manager.endStationOperation(addresses[0])
+	var recovered atomic.Int32
+	manager.bluetoothOps.fetchInitialPowerState = func(context.Context, *internalbluetooth.BaseStation) error {
+		recovered.Add(1)
+		return nil
+	}
+	manager.runStatusRecoveryRound()
+	manager.statusRetryMutex.Lock()
+	_, busyTracked = manager.statusRetries[addresses[0]]
+	manager.statusRetryMutex.Unlock()
+	if recovered.Load() != 1 || busyTracked {
+		t.Fatalf("deferred refresh recovered=%d, still tracked=%v", recovered.Load(), busyTracked)
 	}
 }
 

@@ -3,6 +3,7 @@
   import { scale } from 'svelte/transition';
   import { Eye, X } from 'lucide-svelte';
   import type { StationInfo } from '../types';
+  import { channelChangeBlockedReason } from '../station';
   import { focusTrap } from '../actions';
 
   export let station: StationInfo;
@@ -29,8 +30,13 @@
 
   $: unchanged = station.isPresent && station.scanFresh && station.channelFresh &&
     station.channel > 0 && station.channel === targetChannel;
-  $: saveDisabled = !station.scanFresh || unchanged || occupiedChannels.has(targetChannel) ||
+  $: blockedReason = channelChangeBlockedReason(station);
+  $: saveDisabled = Boolean(blockedReason) || unchanged || occupiedChannels.has(targetChannel) ||
     (hasUnknownVisibleChannel && !confirmUnknownChannelRisk) || busy || locked;
+
+  function save() {
+    if (!saveDisabled) onSave(targetChannel, confirmUnknownChannelRisk);
+  }
 </script>
 
 <!-- svelte-ignore a11y_click_events_have_key_events -->
@@ -79,11 +85,12 @@
   {#if hasUnknownVisibleChannel}
     <label class="risk"><input type="checkbox" bind:checked={confirmUnknownChannelRisk} disabled={busy || locked} /> I understand that a visible station has an unknown channel, so a conflict cannot be fully ruled out.</label>
   {/if}
+  {#if blockedReason}<div class="alert warning">{blockedReason}</div>{/if}
   {#if error}<div class="alert" class:danger={!warning} class:warning>{error}</div>{/if}
   <p class="hint">The value is only accepted after the base station reads back the requested channel. Failure will not trigger an automatic rollback.</p>
   <div class="modal-actions">
     <button class="btn" on:click={() => onIdentify(station)} disabled={busy || locked}><Eye size={15} /> Identify this station</button>
-    <button class="btn primary" on:click={() => onSave(targetChannel, confirmUnknownChannelRisk)} disabled={saveDisabled}>Confirm change</button>
+    <button class="btn primary" on:click={save} disabled={saveDisabled}>Confirm change</button>
   </div>
 </div>
 

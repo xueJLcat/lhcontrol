@@ -54,7 +54,11 @@ func getConfigPath() (string, error) {
 func (c *Config) Load() error {
 	configFilePath, err := getConfigPath()
 	if err != nil {
-		return err
+		loadErr := fmt.Errorf("failed to resolve config path: %w", err)
+		c.mutex.Lock()
+		c.lastPersistenceErr = loadErr
+		c.mutex.Unlock()
+		return loadErr
 	}
 
 	log.Printf("Loading config from: %s", configFilePath)

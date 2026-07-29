@@ -23,7 +23,7 @@
   import { Activity, CircleAlert, Radar } from 'lucide-svelte';
   import type { PowerFeedback, PowerTarget, StationInfo } from './lib/types';
   import {
-    canSetPower, hasCurrentChannel, hasVerifiedPowerState, isCurrentPowerState, isFreshBooting,
+    canSetPower, channelChangeBlockedReason, hasCurrentChannel, hasVerifiedPowerState, isCurrentPowerState,
     powerTargetLabel, stateLabel
   } from './lib/station';
   import { formatBulkResult, formatTerminalScanResult, summarizeBulkResult } from './lib/result-format';
@@ -437,6 +437,10 @@
       apiError = status.error;
       configWarnings = status.warnings ?? [];
       configWritable = status.configWritable ?? true;
+      const currentWarnings = new Set(configWarnings);
+      for (const warning of reportedConfigWarnings) {
+        if (!currentWarnings.has(warning)) reportedConfigWarnings.delete(warning);
+      }
       for (const warning of configWarnings) {
         if (reportedConfigWarnings.has(warning)) continue;
         reportedConfigWarnings.add(warning);
@@ -895,8 +899,14 @@
   }
 
   async function saveChannel(targetChannel: number, allowUnknownConflictRisk: boolean) {
-    if (!selectedStation || !selectedStation.scanFresh || isFreshBooting(selectedStation) ||
-      stationBusy(selectedStation.address) || gattLockedFor(selectedStation.address) ||
+    if (!selectedStation) return;
+    const blockedReason = channelChangeBlockedReason(selectedStation);
+    if (blockedReason) {
+      channelError = blockedReason;
+      channelWarning = true;
+      return;
+    }
+    if (stationBusy(selectedStation.address) || gattLockedFor(selectedStation.address) ||
       (hasCurrentChannel(selectedStation) && selectedStation.channel === targetChannel)) return;
     const address = selectedStation.address;
     const statusOperation = beginStatusOperation();
