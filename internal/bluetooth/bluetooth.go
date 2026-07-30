@@ -87,6 +87,19 @@ func normalizeContext(ctx context.Context) context.Context {
 	return ctx
 }
 
+// sleepContext waits for delay or returns early when ctx is done. Long poll
+// and retry waits use it so application shutdown can interrupt them.
+func sleepContext(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
 func connectContext(ctx context.Context, address bluetooth.Address) (bluetooth.Device, error) {
 	ctx = normalizeContext(ctx)
 	if err := ctx.Err(); err != nil {
@@ -151,22 +164,28 @@ type BaseStation struct {
 	isConnected            bool
 	// Add Mutex for thread-safe access
 	mutex             sync.RWMutex
-	LastStateUpdate   time.Time // Track when state was last read
-	LastSeenAt        time.Time
-	LastReadAt        time.Time
-	LastPowerReadAt   time.Time
-	LastChannelReadAt time.Time
-	MetadataReadAt    time.Time
-	LastError         string
-	MissedScans       int
-	bootingSince      time.Time
-	presenceUncertain bool
-	connectionError   string
-	powerError        string
-	channelError      string
-	metadataError     string
-	metadataReadError error
-	operationError    string
+	invalidationMutex sync.Mutex
+	// pendingInvalidation coalesces OS disconnect notifications into at most
+	// one in-flight invalidation goroutine per station; only the latest
+	// disconnected device is kept because invalidation is identity-checked.
+	pendingInvalidation *bluetooth.Device
+	invalidationRunning bool
+	LastStateUpdate     time.Time // Track when state was last read
+	LastSeenAt          time.Time
+	LastReadAt          time.Time
+	LastPowerReadAt     time.Time
+	LastChannelReadAt   time.Time
+	MetadataReadAt      time.Time
+	LastError           string
+	MissedScans         int
+	bootingSince        time.Time
+	presenceUncertain   bool
+	connectionError     string
+	powerError          string
+	channelError        string
+	metadataError       string
+	metadataReadError   error
+	operationError      string
 }
 
 // PossiblySentError reports that a write failed after the transport may have
@@ -562,7 +581,37 @@ func handleAdapterConnectionChange(device bluetooth.Device, connected bool) {
 		if station.Address != device.Address {
 			continue
 		}
-		go invalidateDisconnectedDevice(station, device)
+		station.queueDeviceInvalidation(device)
+	}
+}
+
+// queueDeviceInvalidation schedules invalidation for a disconnected device.
+// Rapid connect/disconnect flapping coalesces into a single worker per
+// station instead of accumulating one goroutine per OS notification.
+func (bs *BaseStation) queueDeviceInvalidation(device bluetooth.Device) {
+	bs.invalidationMutex.Lock()
+	bs.pendingInvalidation = &device
+	if bs.invalidationRunning {
+		bs.invalidationMutex.Unlock()
+		return
+	}
+	bs.invalidationRunning = true
+	bs.invalidationMutex.Unlock()
+	go bs.drainDeviceInvalidations()
+}
+
+func (bs *BaseStation) drainDeviceInvalidations() {
+	for {
+		bs.invalidationMutex.Lock()
+		device := bs.pendingInvalidation
+		bs.pendingInvalidation = nil
+		if device == nil {
+			bs.invalidationRunning = false
+			bs.invalidationMutex.Unlock()
+			return
+		}
+		bs.invalidationMutex.Unlock()
+		invalidateDisconnectedDevice(bs, *device)
 	}
 }
 
@@ -917,12 +966,8 @@ func scanCompletionError(scanErr error) error {
 	return nil
 }
 
-// readPowerStateInternal performs the actual read and update.
+// readPowerStateInternalContext performs the actual read and update.
 // Assumes caller holds the write lock (station.mutex.Lock()).
-func readPowerStateInternal(station *BaseStation) error {
-	return readPowerStateInternalContext(context.Background(), station)
-}
-
 func readPowerStateInternalContext(ctx context.Context, station *BaseStation) error {
 	if station.characteristic == nil {
 		return transportError("read power characteristic", fmt.Errorf("power characteristic is nil for %s", station.Name))
@@ -1681,10 +1726,10 @@ func writePowerValueInternal(station *BaseStation, value byte) error {
 	return writeCharacteristicValueInternal(station.characteristic, value)
 }
 
-// confirmPowerStateInternal polls briefly because Lighthouse state transitions
-// are not always visible immediately after a successful GATT write.
+// confirmPowerStateInternalContext polls briefly because Lighthouse state
+// transitions are not always visible immediately after a successful GATT write.
 // Assumes caller holds station.mutex.
-func confirmPowerStateInternal(station *BaseStation, expectedState PowerState) error {
+func confirmPowerStateInternalContext(ctx context.Context, station *BaseStation, expectedState PowerState) error {
 	attempts := 15
 	if expectedState == PowerStateOn {
 		attempts = 51
@@ -1692,19 +1737,35 @@ func confirmPowerStateInternal(station *BaseStation, expectedState PowerState) e
 	var lastErr error
 	consecutiveReadErrors := 0
 	for attempt := 0; attempt < attempts; attempt++ {
-		if attempt > 0 {
-			time.Sleep(200 * time.Millisecond)
+		if contextErr := ctx.Err(); contextErr != nil {
+			if lastErr != nil {
+				return errors.Join(lastErr, contextErr)
+			}
+			return contextErr
 		}
-		if err := readPowerStateInternal(station); err != nil {
+		if attempt > 0 {
+			if err := sleepContext(ctx, 200*time.Millisecond); err != nil {
+				if lastErr != nil {
+					return errors.Join(lastErr, err)
+				}
+				return err
+			}
+		}
+		if err := readPowerStateInternalContext(ctx, station); err != nil {
 			lastErr = err
 			if IsUnsupportedCapabilityError(err) {
+				return err
+			}
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				return err
 			}
 			consecutiveReadErrors++
 			if consecutiveReadErrors >= 2 && attempt < attempts-1 {
 				_ = disconnectInternal(station)
-				time.Sleep(250 * time.Millisecond)
-				if reconnectErr := connectAndDiscoverInternal(station); reconnectErr != nil {
+				if sleepErr := sleepContext(ctx, 250*time.Millisecond); sleepErr != nil {
+					return errors.Join(lastErr, sleepErr)
+				}
+				if reconnectErr := connectAndDiscoverInternalContext(ctx, station); reconnectErr != nil {
 					lastErr = errors.Join(lastErr, fmt.Errorf("confirmation reconnect failed: %w", reconnectErr))
 					break
 				}
@@ -1774,11 +1835,23 @@ func (e *PowerConfirmationError) Unwrap() error {
 // SetPowerState writes a stable target state and confirms it when the firmware
 // exposes a readable power characteristic.
 func SetPowerState(station *BaseStation, target PowerState) (PowerControlResult, error) {
+	return SetPowerStateContext(context.Background(), station, target)
+}
+
+// SetPowerStateContext is the cancellable form of SetPowerState. Cancellation
+// before the command write aborts the operation; once the write has been
+// issued the outcome is still reported (confirmed or confirmation error) so a
+// possibly-sent command is never silently dropped.
+func SetPowerStateContext(ctx context.Context, station *BaseStation, target PowerState) (PowerControlResult, error) {
 	if station == nil {
 		return PowerControlResult{}, fmt.Errorf("station is nil")
 	}
 	if target != PowerStateOn && target != PowerStateStandby && target != PowerStateSleep {
 		return PowerControlResult{}, fmt.Errorf("invalid stable target state %s", target)
+	}
+	ctx = normalizeContext(ctx)
+	if err := ctx.Err(); err != nil {
+		return PowerControlResult{}, err
 	}
 	station.mutex.Lock()
 	defer station.mutex.Unlock()
@@ -1799,13 +1872,18 @@ func SetPowerState(station *BaseStation, target PowerState) (PowerControlResult,
 
 	for i := 0; i < maxRetries; i++ {
 		sleepFinalAttempted := false
-		if err = connectAndDiscoverInternal(station); err != nil {
+		if contextErr := ctx.Err(); contextErr != nil {
+			return PowerControlResult{}, contextErr
+		}
+		if err = connectAndDiscoverInternalContext(ctx, station); err != nil {
 			log.Printf("Bluetooth: connect/discover failed during power attempt %d/%d for %s: %v", i+1, maxRetries, station.Name, err)
 			if i == maxRetries-1 {
 				return PowerControlResult{}, fmt.Errorf("failed to connect/discover before power command: %w", err)
 			}
 			_ = disconnectInternal(station)
-			time.Sleep(500 * time.Millisecond)
+			if waitErr := sleepContext(ctx, 500*time.Millisecond); waitErr != nil {
+				return PowerControlResult{}, waitErr
+			}
 			continue
 		}
 		if !station.Capabilities.PowerWrite {
@@ -1817,7 +1895,9 @@ func SetPowerState(station *BaseStation, target PowerState) (PowerControlResult,
 			// Some Lighthouse 2.0 firmware expects wake/prepare then sleep.
 			err = writePowerValueInternal(station, 0x01)
 			if err == nil {
-				time.Sleep(50 * time.Millisecond)
+				if err = sleepContext(ctx, 50*time.Millisecond); err != nil {
+					return PowerControlResult{}, err
+				}
 				sleepFinalAttempted = true
 				err = writePowerValueInternal(station, command)
 			}
@@ -1833,7 +1913,7 @@ func SetPowerState(station *BaseStation, target PowerState) (PowerControlResult,
 			if ambiguousSleepPrepare {
 				// The final sleep command was not attempted, so observing the old
 				// sleeping state cannot confirm completion of the sequence.
-				_ = readPowerStateInternal(station)
+				_ = readPowerStateInternalContext(ctx, station)
 			}
 			break
 		}
@@ -1854,14 +1934,16 @@ func SetPowerState(station *BaseStation, target PowerState) (PowerControlResult,
 		log.Printf("Bluetooth: Write %s failed for %s: %v. Retrying...", target, station.Name, err)
 		_ = disconnectInternal(station)
 		if i < maxRetries-1 {
-			time.Sleep(500 * time.Millisecond)
+			if waitErr := sleepContext(ctx, 500*time.Millisecond); waitErr != nil {
+				return PowerControlResult{}, waitErr
+			}
 		}
 	}
 
 	if err != nil {
 		if ambiguousWrite != nil {
 			if station.Capabilities.PowerRead && !ambiguousSleepPrepare {
-				if confirmationErr := confirmPowerStateInternal(station, target); confirmationErr == nil {
+				if confirmationErr := confirmPowerStateInternalContext(ctx, station, target); confirmationErr == nil {
 					station.setPowerErrorInternal(nil)
 					station.setOperationErrorInternal(nil)
 					return PowerControlResult{State: target, Confirmed: true}, nil
@@ -1892,7 +1974,7 @@ func SetPowerState(station *BaseStation, target PowerState) (PowerControlResult,
 		station.setOperationErrorInternal(nil)
 		return PowerControlResult{State: target, Confirmed: false}, nil
 	}
-	if err = confirmPowerStateInternal(station, target); err != nil {
+	if err = confirmPowerStateInternalContext(ctx, station, target); err != nil {
 		station.setPowerErrorInternal(err)
 		station.setOperationErrorInternal(nil)
 		return PowerControlResult{State: station.PowerState, Confirmed: false}, &PowerConfirmationError{
@@ -1919,14 +2001,28 @@ func PowerOff(station *BaseStation) error {
 }
 
 func Identify(station *BaseStation) error {
+	return IdentifyContext(context.Background(), station)
+}
+
+// IdentifyContext is the cancellable form of Identify. Cancellation before
+// the write aborts the request; a possibly-sent identify signal is never
+// retried, matching Identify.
+func IdentifyContext(ctx context.Context, station *BaseStation) error {
 	if station == nil {
 		return fmt.Errorf("station is nil")
+	}
+	ctx = normalizeContext(ctx)
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	station.mutex.Lock()
 	defer station.mutex.Unlock()
 	var lastErr error
 	for attempt := 0; attempt < 2; attempt++ {
-		if err := connectAndDiscoverInternal(station); err != nil {
+		if contextErr := ctx.Err(); contextErr != nil {
+			return contextErr
+		}
+		if err := connectAndDiscoverInternalContext(ctx, station); err != nil {
 			lastErr = err
 		} else if !station.Capabilities.Identify || station.identifyCharacteristic == nil {
 			return unsupportedCapability("identify", nil)
@@ -1947,7 +2043,9 @@ func Identify(station *BaseStation) error {
 		}
 		if attempt == 0 {
 			_ = disconnectInternal(station)
-			time.Sleep(250 * time.Millisecond)
+			if err := sleepContext(ctx, 250*time.Millisecond); err != nil {
+				return err
+			}
 		}
 	}
 	_ = disconnectInternal(station)
@@ -1963,6 +2061,13 @@ type ChannelWriteResult struct {
 }
 
 func SetChannel(station *BaseStation, channel int) (ChannelWriteResult, error) {
+	return SetChannelContext(context.Background(), station, channel)
+}
+
+// SetChannelContext is the cancellable form of SetChannel. Cancellation before
+// the write aborts the operation with CommandSent false; cancellation during
+// readback keeps CommandSent true and surfaces a confirmation failure.
+func SetChannelContext(ctx context.Context, station *BaseStation, channel int) (ChannelWriteResult, error) {
 	result := ChannelWriteResult{PreviousChannel: ChannelUnknown, Channel: ChannelUnknown}
 	if station == nil {
 		return result, fmt.Errorf("station is nil")
@@ -1970,16 +2075,20 @@ func SetChannel(station *BaseStation, channel int) (ChannelWriteResult, error) {
 	if channel < 1 || channel > 16 {
 		return result, fmt.Errorf("channel %d is outside the supported range 1-16", channel)
 	}
+	ctx = normalizeContext(ctx)
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
 
 	station.mutex.Lock()
 	defer station.mutex.Unlock()
-	if err := connectAndDiscoverInternal(station); err != nil {
+	if err := connectAndDiscoverInternalContext(ctx, station); err != nil {
 		return result, err
 	}
 	if !station.Capabilities.ChannelWrite || !station.Capabilities.ChannelRead || station.modeCharacteristic == nil {
 		return result, unsupportedCapability("safe channel control", nil)
 	}
-	if err := readChannelInternal(station); err != nil {
+	if err := readChannelInternalContext(ctx, station); err != nil {
 		station.setChannelErrorInternal(err)
 		station.setOperationErrorInternal(nil)
 		if RequiresReconnect(err) {
@@ -2005,7 +2114,7 @@ func SetChannel(station *BaseStation, channel int) (ChannelWriteResult, error) {
 		// Once the transport reports an ambiguous write, a failed readback
 		// cannot turn it back into a definitely-unsent command.
 		result.CommandSent = IsPossiblySent(writeErr)
-		if readErr := readChannelInternal(station); readErr == nil {
+		if readErr := readChannelInternalContext(ctx, station); readErr == nil {
 			result.Channel = station.Channel
 			if station.Channel == channel {
 				result.CommandSent = true
@@ -2032,17 +2141,26 @@ func SetChannel(station *BaseStation, channel int) (ChannelWriteResult, error) {
 	var confirmationErr error
 	consecutiveReadErrors := 0
 	for attempt := 0; attempt < 5; attempt++ {
-		time.Sleep(250 * time.Millisecond)
-		if err := readChannelInternal(station); err != nil {
+		if sleepErr := sleepContext(ctx, 250*time.Millisecond); sleepErr != nil {
+			confirmationErr = sleepErr
+			break
+		}
+		if err := readChannelInternalContext(ctx, station); err != nil {
 			confirmationErr = err
 			if IsUnsupportedCapabilityError(err) {
+				break
+			}
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				break
 			}
 			consecutiveReadErrors++
 			if consecutiveReadErrors >= 2 && attempt < 4 {
 				_ = disconnectInternal(station)
-				time.Sleep(250 * time.Millisecond)
-				if reconnectErr := connectAndDiscoverInternal(station); reconnectErr != nil {
+				if sleepErr := sleepContext(ctx, 250*time.Millisecond); sleepErr != nil {
+					confirmationErr = errors.Join(confirmationErr, sleepErr)
+					break
+				}
+				if reconnectErr := connectAndDiscoverInternalContext(ctx, station); reconnectErr != nil {
 					confirmationErr = errors.Join(confirmationErr, fmt.Errorf("channel confirmation reconnect failed: %w", reconnectErr))
 					break
 				}
@@ -2060,7 +2178,7 @@ func SetChannel(station *BaseStation, channel int) (ChannelWriteResult, error) {
 		}
 		confirmationErr = fmt.Errorf("reported channel %d, expected %d", station.Channel, channel)
 	}
-	if err := readChannelInternal(station); err == nil {
+	if err := readChannelInternalContext(ctx, station); err == nil {
 		result.Channel = station.Channel
 		if station.Channel == channel {
 			result.WriteWarning = fmt.Sprintf("channel %d was confirmed by the final readback", channel)

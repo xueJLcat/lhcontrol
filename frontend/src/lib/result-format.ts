@@ -1,19 +1,5 @@
 import type { station } from '../../wailsjs/go/models';
 
-interface ScanResult {
-  found: number;
-  warnings?: string[];
-}
-
-export function formatScanResult(result: ScanResult, known: number, external = false): string {
-  const summary = result.found
-    ? `found ${result.found}; ${known} known station(s).`
-    : 'no stations found in this scan.';
-  const warnings = result.warnings?.filter(Boolean).join(' ') ?? '';
-  const message = external ? `External scan completed: ${summary}` : `${summary[0].toUpperCase()}${summary.slice(1)}`;
-  return warnings ? `${message} ${warnings}` : message;
-}
-
 export interface TerminalScanResult {
   state: string;
   found?: number;

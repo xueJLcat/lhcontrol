@@ -122,4 +122,21 @@ describe('ChannelMap', () => {
       name: 'CH 3 — LHB-A · on, LHB-B · on · last-known'
     })).not.toHaveClass('conflict');
   });
+
+  it('groups stations by the injected channel resolver so wiped channels stay stale', () => {
+    const wiped = station({ channel: 0, channelFresh: false });
+    render(ChannelMap, {
+      props: {
+        stations: [wiped],
+        onSelect: vi.fn(),
+        channelOf: () => 3
+      }
+    });
+    // Without the resolver the cell would drop to free/disabled; with it the
+    // occupant renders as last-known (stale) instead.
+    const cell = screen.getByRole('button', { name: 'CH 3 — LHB-A · on · last-known' });
+    expect(cell).toBeEnabled();
+    expect(cell).toHaveClass('stale');
+    expect(cell).not.toHaveClass('conflict');
+  });
 });

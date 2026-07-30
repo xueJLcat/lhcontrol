@@ -4,6 +4,11 @@
 
   export let stations: StationInfo[];
   export let onSelect: (address: string) => void;
+  // Display-only channel resolver. The parent injects a short-lived memory so
+  // transient backend channel wipes do not flip cells between occupied and
+  // free/disabled. `current` still uses the live station data, so a resolved
+  // occupant without fresh data renders as last-known (stale).
+  export let channelOf: (station: StationInfo) => number = (station) => station.channel;
 
   interface Occupant {
     name: string;
@@ -13,8 +18,9 @@
   }
 
   $: byChannel = stations.reduce((map, station) => {
-    if (station.channel > 0) {
-      const list = map.get(station.channel) ?? [];
+    const channel = channelOf(station);
+    if (channel > 0) {
+      const list = map.get(channel) ?? [];
       list.push({
         name: station.name,
         state: stateLabel(station),
@@ -22,7 +28,7 @@
         current: hasCurrentChannel(station)
       });
       list.sort((left, right) => Number(right.current) - Number(left.current));
-      map.set(station.channel, list);
+      map.set(channel, list);
     }
     return map;
   }, new Map<number, Occupant[]>());

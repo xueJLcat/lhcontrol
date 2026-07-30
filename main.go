@@ -26,13 +26,19 @@ const instanceMutexName = `Local\FlameInTheDark.LighthouseControl`
 
 const maxLogSize = 5 * 1024 * 1024
 
+// maxRotationFailures bounds consecutive rotation attempts before the writer
+// falls back to truncating in place, so a persistently blocked backup file
+// cannot let the diagnostic log grow without limit.
+const maxRotationFailures = 3
+
 type rotatingLogFile struct {
-	mutex      sync.Mutex
-	path       string
-	backupPath string
-	maxSize    int64
-	file       *os.File
-	size       int64
+	mutex            sync.Mutex
+	path             string
+	backupPath       string
+	maxSize          int64
+	file             *os.File
+	size             int64
+	rotationFailures int
 }
 
 func openRotatingLogFile(path string, maxSize int64) (*rotatingLogFile, error) {
@@ -150,6 +156,28 @@ func (writer *rotatingLogFile) rotateLocked() error {
 	return nil
 }
 
+// truncateLocked enforces the size cap in place when the backup cannot be
+// produced (for example because the backup file is locked by another
+// process). Oldest content is dropped, but the log stays bounded.
+func (writer *rotatingLogFile) truncateLocked() error {
+	if writer.file != nil {
+		if err := writer.file.Close(); err != nil {
+			return err
+		}
+		writer.file = nil
+	}
+	file, err := os.OpenFile(writer.path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
+	if err != nil {
+		return err
+	}
+	writer.file = file
+	writer.size = 0
+	notice := "lhcontrol: log rotated in place after repeated backup failures; older entries were dropped\n"
+	written, _ := writer.file.Write([]byte(notice))
+	writer.size += int64(written)
+	return nil
+}
+
 func (writer *rotatingLogFile) Write(value []byte) (int, error) {
 	writer.mutex.Lock()
 	defer writer.mutex.Unlock()
@@ -162,8 +190,15 @@ func (writer *rotatingLogFile) Write(value []byte) (int, error) {
 	}
 	if writer.size > 0 && writer.size+int64(len(value)) > writer.maxSize {
 		if err := writer.rotateLocked(); err != nil {
-			return 0, err
+			writer.rotationFailures++
+			if writer.rotationFailures < maxRotationFailures {
+				return 0, err
+			}
+			if truncateErr := writer.truncateLocked(); truncateErr != nil {
+				return 0, errors.Join(err, fmt.Errorf("fallback truncation: %w", truncateErr))
+			}
 		}
+		writer.rotationFailures = 0
 	}
 	written, err := writer.file.Write(value)
 	writer.size += int64(written)

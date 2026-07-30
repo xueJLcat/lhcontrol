@@ -1529,7 +1529,7 @@ func TestSetStationChannelAlreadyAtFreshTargetIsNoOp(t *testing.T) {
 		t.Fatal("capability refresh was attempted for a channel no-op")
 		return internalbluetooth.Capabilities{}, nil
 	}
-	manager.bluetoothOps.setChannel = func(*internalbluetooth.BaseStation, int) (internalbluetooth.ChannelWriteResult, error) {
+	manager.bluetoothOps.setChannel = func(context.Context, *internalbluetooth.BaseStation, int) (internalbluetooth.ChannelWriteResult, error) {
 		t.Fatal("channel read/write operation was attempted for a channel no-op")
 		return internalbluetooth.ChannelWriteResult{}, nil
 	}
@@ -1558,7 +1558,7 @@ func TestSetStationChannelPreservesPostWriteConfirmationError(t *testing.T) {
 			ChannelRead: true, ChannelWrite: true,
 		},
 	}
-	manager.bluetoothOps.setChannel = func(*internalbluetooth.BaseStation, int) (internalbluetooth.ChannelWriteResult, error) {
+	manager.bluetoothOps.setChannel = func(context.Context, *internalbluetooth.BaseStation, int) (internalbluetooth.ChannelWriteResult, error) {
 		return internalbluetooth.ChannelWriteResult{
 				PreviousChannel: 3,
 				Channel:         internalbluetooth.ChannelUnknown,
@@ -1603,7 +1603,7 @@ func TestSetStationChannelMapsConfirmedWriteResult(t *testing.T) {
 			ChannelRead: true, ChannelWrite: true,
 		},
 	}
-	manager.bluetoothOps.setChannel = func(station *internalbluetooth.BaseStation, _ int) (internalbluetooth.ChannelWriteResult, error) {
+	manager.bluetoothOps.setChannel = func(_ context.Context, station *internalbluetooth.BaseStation, _ int) (internalbluetooth.ChannelWriteResult, error) {
 		station.Channel = 5
 		station.LastChannelReadAt = time.Now()
 		return internalbluetooth.ChannelWriteResult{
@@ -1646,7 +1646,7 @@ func TestSetStationChannelRejectsFreshBootingStation(t *testing.T) {
 		t.Fatal("capability refresh was attempted while station was booting")
 		return internalbluetooth.Capabilities{}, nil
 	}
-	manager.bluetoothOps.setChannel = func(*internalbluetooth.BaseStation, int) (internalbluetooth.ChannelWriteResult, error) {
+	manager.bluetoothOps.setChannel = func(context.Context, *internalbluetooth.BaseStation, int) (internalbluetooth.ChannelWriteResult, error) {
 		t.Fatal("channel write was attempted while station was booting")
 		return internalbluetooth.ChannelWriteResult{}, nil
 	}
@@ -1674,7 +1674,7 @@ func TestSetStationChannelMapsPreWriteUnsupportedCapability(t *testing.T) {
 			ChannelRead: true, ChannelWrite: true,
 		},
 	}
-	manager.bluetoothOps.setChannel = func(*internalbluetooth.BaseStation, int) (internalbluetooth.ChannelWriteResult, error) {
+	manager.bluetoothOps.setChannel = func(context.Context, *internalbluetooth.BaseStation, int) (internalbluetooth.ChannelWriteResult, error) {
 		return internalbluetooth.ChannelWriteResult{},
 			&internalbluetooth.UnsupportedCapabilityError{
 				Capability: "channel write",
@@ -1866,7 +1866,7 @@ func TestSingleStandbyRefreshesCachedUnsupportedCapability(t *testing.T) {
 		refreshes.Add(1)
 		return internalbluetooth.Capabilities{PowerWrite: true, Standby: true}, nil
 	}
-	manager.bluetoothOps.setPowerState = func(*internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
+	manager.bluetoothOps.setPowerState = func(context.Context, *internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
 		return internalbluetooth.PowerControlResult{State: internalbluetooth.PowerStateStandby, Confirmed: true}, nil
 	}
 
@@ -1890,7 +1890,7 @@ func TestBulkStandbyRefreshesCachedUnsupportedCapability(t *testing.T) {
 		refreshes.Add(1)
 		return internalbluetooth.Capabilities{PowerWrite: true, Standby: true}, nil
 	}
-	manager.bluetoothOps.setPowerState = func(*internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
+	manager.bluetoothOps.setPowerState = func(context.Context, *internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
 		return internalbluetooth.PowerControlResult{State: internalbluetooth.PowerStateStandby, Confirmed: true}, nil
 	}
 
@@ -2044,6 +2044,42 @@ func TestStopScanPreventsPlatformScanAfterConnectionRelease(t *testing.T) {
 	}
 }
 
+func TestStopScanDoesNotReportScanFailure(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	manager.bluetoothOps.scanForDurationContext = func(context.Context, time.Duration) ([]internalbluetooth.DiscoveredStation, error) {
+		return nil, errors.New("radio exploded")
+	}
+	failedEntered := make(chan struct{})
+	releaseFailed := make(chan struct{})
+	if err := manager.StartScan(ScanCallbacks{Failed: func(error) {
+		close(failedEntered)
+		<-releaseFailed
+	}}); err != nil {
+		t.Fatalf("StartScan() error = %v", err)
+	}
+	// The scan has failed and its lifecycle is still published while the
+	// terminal callback is blocked. Stopping in this window must succeed:
+	// the scan's own failure is reported via status and callbacks, not as a
+	// stop failure.
+	<-failedEntered
+	stopDone := make(chan error, 1)
+	go func() { stopDone <- manager.StopScan() }()
+	select {
+	case err := <-stopDone:
+		if err != nil {
+			t.Fatalf("StopScan() error = %v, want nil even though the scan failed", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("StopScan() did not finish")
+	}
+	close(releaseFailed)
+	manager.scanCallbackWg.Wait()
+	if status := manager.GetScanStatus(); status.State != "failed" {
+		t.Fatalf("scan status = %+v, want failed", status)
+	}
+	manager.Shutdown()
+}
+
 func TestScanResumesPresenceTrackingAfterConnectionReleaseRecovers(t *testing.T) {
 	manager := NewManager(config.NewConfig())
 	address := "11:22:33:44:55:84"
@@ -2160,7 +2196,7 @@ func TestBulkPowerPureSkipsDoNotRequireBluetoothReadiness(t *testing.T) {
 		RawPowerState:   0x01,
 		LastPowerReadAt: time.Now(),
 	}
-	manager.bluetoothOps.setPowerState = func(*internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
+	manager.bluetoothOps.setPowerState = func(context.Context, *internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
 		t.Fatal("power write was attempted for a pure-skip batch")
 		return internalbluetooth.PowerControlResult{}, nil
 	}
@@ -2196,7 +2232,7 @@ func TestBulkPowerDoesNotStartQueuedWorkAfterShutdown(t *testing.T) {
 			CapabilitiesKnown: true,
 		}
 	}
-	manager.bluetoothOps.setPowerState = func(*internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
+	manager.bluetoothOps.setPowerState = func(context.Context, *internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
 		started <- struct{}{}
 		<-release
 		writes.Add(1)
@@ -2347,7 +2383,7 @@ func TestBulkPowerReportsConfirmedUnsupportedCapabilitiesAsSkipped(t *testing.T)
 	manager.bluetoothOps.ensureCapabilities = func(context.Context, *internalbluetooth.BaseStation) (internalbluetooth.Capabilities, error) {
 		return internalbluetooth.Capabilities{}, nil
 	}
-	manager.bluetoothOps.setPowerState = func(*internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
+	manager.bluetoothOps.setPowerState = func(context.Context, *internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
 		t.Fatal("power write was attempted for an unsupported station")
 		return internalbluetooth.PowerControlResult{}, nil
 	}
@@ -2393,7 +2429,7 @@ func TestBulkPowerLateUnsupportedCapabilityIsSkipped(t *testing.T) {
 	manager.bluetoothOps.ensureCapabilities = func(context.Context, *internalbluetooth.BaseStation) (internalbluetooth.Capabilities, error) {
 		return internalbluetooth.Capabilities{PowerWrite: true}, nil
 	}
-	manager.bluetoothOps.setPowerState = func(*internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
+	manager.bluetoothOps.setPowerState = func(context.Context, *internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
 		return internalbluetooth.PowerControlResult{}, &internalbluetooth.UnsupportedCapabilityError{
 			Capability: "power control",
 			Err:        tinybluetooth.ErrAttWriteNotPermitted,
@@ -2420,7 +2456,7 @@ func TestBulkConfirmationTransportFailureKeepsRecoveryScheduled(t *testing.T) {
 		Capabilities: internalbluetooth.Capabilities{PowerWrite: true}, CapabilitiesKnown: true,
 	}
 	manager.stations[address] = station
-	manager.bluetoothOps.setPowerState = func(*internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
+	manager.bluetoothOps.setPowerState = func(context.Context, *internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
 		return internalbluetooth.PowerControlResult{}, &internalbluetooth.PowerConfirmationError{
 			Target: internalbluetooth.PowerStateOn,
 			Err:    tinybluetooth.ErrGATTUnreachable,
@@ -2462,7 +2498,7 @@ func TestSinglePowerConfirmationUnsupportedReadPreservesCommandSent(t *testing.T
 			Err:        tinybluetooth.ErrAttReadNotPermitted,
 		},
 	}
-	manager.bluetoothOps.setPowerState = func(*internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
+	manager.bluetoothOps.setPowerState = func(context.Context, *internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
 		return internalbluetooth.PowerControlResult{State: internalbluetooth.PowerStateUnknown}, confirmationErr
 	}
 
@@ -2512,7 +2548,7 @@ func TestSinglePowerAlreadyAtConfirmedTargetIsNoOp(t *testing.T) {
 		t.Fatal("capability refresh was attempted for a confirmed no-op")
 		return internalbluetooth.Capabilities{}, nil
 	}
-	manager.bluetoothOps.setPowerState = func(*internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
+	manager.bluetoothOps.setPowerState = func(context.Context, *internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
 		t.Fatal("power write was attempted for a confirmed no-op")
 		return internalbluetooth.PowerControlResult{}, nil
 	}
@@ -2552,7 +2588,7 @@ func TestSinglePowerRejectsFreshBootingStation(t *testing.T) {
 		t.Fatal("capability refresh was attempted while station was booting")
 		return internalbluetooth.Capabilities{}, nil
 	}
-	manager.bluetoothOps.setPowerState = func(*internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
+	manager.bluetoothOps.setPowerState = func(context.Context, *internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
 		t.Fatal("power write was attempted while station was booting")
 		return internalbluetooth.PowerControlResult{}, nil
 	}
@@ -2571,7 +2607,7 @@ func TestBulkPowerConfirmationUnsupportedReadIsNotSkipped(t *testing.T) {
 		Capabilities:      internalbluetooth.Capabilities{PowerRead: true, PowerWrite: true},
 		CapabilitiesKnown: true,
 	}
-	manager.bluetoothOps.setPowerState = func(*internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
+	manager.bluetoothOps.setPowerState = func(context.Context, *internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
 		return internalbluetooth.PowerControlResult{State: internalbluetooth.PowerStateUnknown}, &internalbluetooth.PowerConfirmationError{
 			Target: internalbluetooth.PowerStateOn,
 			Err: &internalbluetooth.UnsupportedCapabilityError{
@@ -2617,7 +2653,7 @@ func TestBulkUnconfirmedSuccessClearsOnlyConnectionRecovery(t *testing.T) {
 		channelNextAt: time.Now().Add(time.Hour),
 	}
 	manager.statusRetryMutex.Unlock()
-	manager.bluetoothOps.setPowerState = func(*internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
+	manager.bluetoothOps.setPowerState = func(context.Context, *internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
 		return internalbluetooth.PowerControlResult{State: internalbluetooth.PowerStateOn, Confirmed: false}, nil
 	}
 
@@ -2653,7 +2689,7 @@ func TestBulkConfirmationFailureClearsOnlyConnectionRecovery(t *testing.T) {
 		channelNextAt: time.Now().Add(time.Hour),
 	}
 	manager.statusRetryMutex.Unlock()
-	manager.bluetoothOps.setPowerState = func(*internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
+	manager.bluetoothOps.setPowerState = func(context.Context, *internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
 		return internalbluetooth.PowerControlResult{State: internalbluetooth.PowerStateUnknown, Confirmed: false},
 			&internalbluetooth.PowerConfirmationError{
 				Target: internalbluetooth.PowerStateOn,
@@ -2716,7 +2752,7 @@ func TestSuccessfulPowerOperationPreservesPendingChannelRecovery(t *testing.T) {
 	manager.bluetoothOps.ensureCapabilities = func(context.Context, *internalbluetooth.BaseStation) (internalbluetooth.Capabilities, error) {
 		return internalbluetooth.Capabilities{PowerWrite: true}, nil
 	}
-	manager.bluetoothOps.setPowerState = func(*internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
+	manager.bluetoothOps.setPowerState = func(context.Context, *internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
 		return internalbluetooth.PowerControlResult{Confirmed: true}, nil
 	}
 
@@ -2873,6 +2909,7 @@ func TestBulkPowerRechecksQueuedStationStateBeforeWrite(t *testing.T) {
 			var writesMutex sync.Mutex
 			writes := make(map[string]int)
 			manager.bluetoothOps.setPowerState = func(
+				_ context.Context,
 				station *internalbluetooth.BaseStation,
 				_ internalbluetooth.PowerState,
 			) (internalbluetooth.PowerControlResult, error) {
@@ -2969,7 +3006,7 @@ func TestStationGATTFailureInvalidatesConnectionAndRegistersRecovery(t *testing.
 		CapabilitiesKnown: true,
 	}
 	manager.stations[address] = station
-	manager.bluetoothOps.setPowerState = func(*internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
+	manager.bluetoothOps.setPowerState = func(context.Context, *internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
 		return internalbluetooth.PowerControlResult{}, tinybluetooth.ErrGATTUnreachable
 	}
 	var disconnects atomic.Int32
@@ -3668,7 +3705,7 @@ func TestShutdownCancelsCapabilityDiscoveryBeforePowerWrite(t *testing.T) {
 		return internalbluetooth.Capabilities{}, ctx.Err()
 	}
 	var writes atomic.Int32
-	manager.bluetoothOps.setPowerState = func(*internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
+	manager.bluetoothOps.setPowerState = func(context.Context, *internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
 		writes.Add(1)
 		return internalbluetooth.PowerControlResult{}, nil
 	}
@@ -3709,7 +3746,7 @@ func TestBulkShutdownCancellationReturnsSkippedResults(t *testing.T) {
 		return internalbluetooth.Capabilities{}, ctx.Err()
 	}
 	var writes atomic.Int32
-	manager.bluetoothOps.setPowerState = func(*internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
+	manager.bluetoothOps.setPowerState = func(context.Context, *internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
 		writes.Add(1)
 		return internalbluetooth.PowerControlResult{}, nil
 	}
@@ -3894,7 +3931,7 @@ func TestChannelChangeRevalidatesPresenceAfterCapabilityRefresh(t *testing.T) {
 		return internalbluetooth.Capabilities{ChannelRead: true, ChannelWrite: true}, nil
 	}
 	var writes atomic.Int32
-	manager.bluetoothOps.setChannel = func(*internalbluetooth.BaseStation, int) (internalbluetooth.ChannelWriteResult, error) {
+	manager.bluetoothOps.setChannel = func(context.Context, *internalbluetooth.BaseStation, int) (internalbluetooth.ChannelWriteResult, error) {
 		writes.Add(1)
 		return internalbluetooth.ChannelWriteResult{}, nil
 	}

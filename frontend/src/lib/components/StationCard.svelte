@@ -11,6 +11,9 @@
   import StateBadge from './StateBadge.svelte';
 
   export let station: StationInfo;
+  // Display-only fallback for the channel chip, bridging transient backend
+  // channel wipes. All interaction logic keeps using the live station data.
+  export let channelDisplay: number | undefined = undefined;
   export let renaming: boolean;
   export let feedback: PowerFeedback | undefined = undefined;
   export let pendingTarget: PowerTarget | undefined = undefined;
@@ -54,6 +57,8 @@
   $: hasKnownPower = station.powerState >= 0;
   $: stalePower = hasKnownPower && !station.powerFresh;
   $: unverified = hasKnownPower && station.powerFresh && !station.powerStateConfirmed;
+  $: shownChannel = station.channel > 0 ? station.channel : (channelDisplay ?? 0);
+  $: channelLastKnown = station.channel <= 0 && shownChannel > 0;
 
   function openDetails() {
     if (!renaming) onOpenDetails(station);
@@ -104,7 +109,12 @@
       ><SquarePen size={13} /></button>
       <span class="spacer"></span>
       {#if station.channelConflict}<TriangleAlert size={13} class="conflict-icon" />{/if}
-      <span class="channel-chip mono" class:warn={station.channelConflict}>{channelLabel(station.channel)}</span>
+      <span
+        class="channel-chip mono"
+        class:warn={station.channelConflict}
+        class:stale={channelLastKnown}
+        title={channelLastKnown ? 'Last known channel' : undefined}
+      >{channelLabel(shownChannel)}</span>
     </div>
     <div class="card-sub">
       <Bluetooth size={12} />
@@ -232,6 +242,7 @@
 
   .channel-chip { color: var(--text-secondary); text-transform: none; letter-spacing: 0.02em; }
   .channel-chip.warn { color: var(--fb-error); border-color: color-mix(in srgb, var(--color-danger) 55%, transparent); }
+  .channel-chip.stale { opacity: 0.65; border-bottom: 1px dashed var(--color-border-strong); }
   .conflict-icon { color: var(--color-danger); flex-shrink: 0; }
 
   .card-sub {

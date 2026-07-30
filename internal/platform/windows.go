@@ -4,6 +4,9 @@ package platform
 
 import (
 	"log"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -11,14 +14,17 @@ import (
 )
 
 var (
-	user32                  = syscall.NewLazyDLL("user32.dll")
-	procFindWindowW         = user32.NewProc("FindWindowW")
-	procSetForegroundWindow = user32.NewProc("SetForegroundWindow")
-	procShowWindow          = user32.NewProc("ShowWindow")
-	procFlashWindowEx       = user32.NewProc("FlashWindowEx")
-	kernel32                = syscall.NewLazyDLL("kernel32.dll")
-	procCreateMutexW        = kernel32.NewProc("CreateMutexW")
-	procCloseHandle         = kernel32.NewProc("CloseHandle")
+	user32                         = syscall.NewLazyDLL("user32.dll")
+	procFindWindowW                = user32.NewProc("FindWindowW")
+	procSetForegroundWindow        = user32.NewProc("SetForegroundWindow")
+	procShowWindow                 = user32.NewProc("ShowWindow")
+	procFlashWindowEx              = user32.NewProc("FlashWindowEx")
+	procGetWindowThreadProcessId   = user32.NewProc("GetWindowThreadProcessId")
+	kernel32                       = syscall.NewLazyDLL("kernel32.dll")
+	procCreateMutexW               = kernel32.NewProc("CreateMutexW")
+	procCloseHandle                = kernel32.NewProc("CloseHandle")
+	procOpenProcess                = kernel32.NewProc("OpenProcess")
+	procQueryFullProcessImageNameW = kernel32.NewProc("QueryFullProcessImageNameW")
 )
 
 // AcquireSingleInstance owns a named Windows mutex until the returned release
@@ -145,6 +151,48 @@ func activateWindow(
 	return false
 }
 
+const processQueryLimitedInformation = 0x1000
+
+// Injectable in tests.
+var windowOwnerProcessName = queryWindowOwnerProcessName
+var ownProcessImageBaseName = defaultOwnProcessImageBaseName
+
+// queryWindowOwnerProcessName returns the base name of the executable that
+// owns hwnd, so a same-titled foreign window is never activated by mistake.
+func queryWindowOwnerProcessName(hwnd syscall.Handle) (string, error) {
+	var pid uint32
+	ret, _, _ := procGetWindowThreadProcessId.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&pid)))
+	if ret == 0 || pid == 0 {
+		return "", syscall.EINVAL
+	}
+	//nolint:gosec // PROCESS_QUERY_LIMITED_INFORMATION on an existing PID.
+	handle, _, callErr := procOpenProcess.Call(processQueryLimitedInformation, 0, uintptr(pid))
+	if handle == 0 {
+		return "", callErr
+	}
+	defer procCloseHandle.Call(handle)
+	buf := make([]uint16, syscall.MAX_PATH)
+	size := uint32(len(buf))
+	ret, _, callErr = procQueryFullProcessImageNameW.Call(
+		handle,
+		0,
+		uintptr(unsafe.Pointer(&buf[0])),
+		uintptr(unsafe.Pointer(&size)),
+	)
+	if ret == 0 {
+		return "", callErr
+	}
+	return filepath.Base(syscall.UTF16ToString(buf[:size])), nil
+}
+
+func defaultOwnProcessImageBaseName() (string, error) {
+	executable, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Base(executable), nil
+}
+
 // BringWindowToFront finds the existing window, tries to set foreground, and flashes it (Windows specific)
 func BringWindowToFront(appTitle string) bool {
 	hwnd, err := waitForWindow(appTitle, 5*time.Second, 250*time.Millisecond, findWindow, time.Sleep)
@@ -155,6 +203,14 @@ func BringWindowToFront(appTitle string) bool {
 	if hwnd == 0 {
 		log.Println("Existing instance owns the mutex, but its window did not appear within 5 seconds.")
 		return false
+	}
+
+	if expected, nameErr := ownProcessImageBaseName(); nameErr == nil {
+		if actual, ownerErr := windowOwnerProcessName(hwnd); ownerErr == nil &&
+			!strings.EqualFold(actual, expected) {
+			log.Printf("Window titled %q belongs to %q, not %q; leaving the foreign window alone", appTitle, actual, expected)
+			return false
+		}
 	}
 
 	if !activateWindow(hwnd, showWindow, setForegroundWindow, flashWindowEx) {

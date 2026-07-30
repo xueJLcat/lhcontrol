@@ -1,4 +1,4 @@
-import type { PowerTarget, StationInfo } from './types';
+import type { Capabilities, Metadata, PowerTarget, StationInfo } from './types';
 
 export function powerStateValue(state: PowerTarget): number {
   return state === 'sleep' ? 0 : state === 'on' ? 1 : 2;
@@ -55,4 +55,63 @@ export function stateLabel(station: StationInfo): string {
 
 export function channelLabel(channel: number): string {
   return channel > 0 ? `CH ${String(channel).padStart(2, '0')}` : 'CH --';
+}
+
+function sameCapabilities(left: Capabilities | undefined, right: Capabilities | undefined): boolean {
+  if (left === right) return true;
+  if (!left || !right) return false;
+  return left.powerRead === right.powerRead &&
+    left.powerWrite === right.powerWrite &&
+    left.powerNotify === right.powerNotify &&
+    left.standby === right.standby &&
+    left.channelRead === right.channelRead &&
+    left.channelWrite === right.channelWrite &&
+    left.channelNotify === right.channelNotify &&
+    left.identify === right.identify &&
+    left.deviceInformation === right.deviceInformation;
+}
+
+function sameMetadata(left: Metadata | undefined, right: Metadata | undefined): boolean {
+  if (left === right) return true;
+  if (!left || !right) return false;
+  return left.manufacturer === right.manufacturer &&
+    left.model === right.model &&
+    left.serialNumber === right.serialNumber &&
+    left.hardwareRevision === right.hardwareRevision &&
+    left.firmwareRevision === right.firmwareRevision;
+}
+
+// sameStationInfo reports whether two snapshots carry identical displayable
+// values. It lets list commits reuse the previous object reference for
+// unchanged stations so no-op background refreshes do not re-render cards or
+// retrigger CSS transitions.
+export function sameStationInfo(left: StationInfo, right: StationInfo): boolean {
+  if (left === right) return true;
+  return left.name === right.name &&
+    left.originalName === right.originalName &&
+    left.address === right.address &&
+    left.powerState === right.powerState &&
+    left.powerStateName === right.powerStateName &&
+    left.powerStateConfirmed === right.powerStateConfirmed &&
+    left.rawPowerState === right.rawPowerState &&
+    left.channel === right.channel &&
+    left.channelConflict === right.channelConflict &&
+    left.isPresent === right.isPresent &&
+    left.seenInLatestScan === right.seenInLatestScan &&
+    left.scanFresh === right.scanFresh &&
+    left.missedScans === right.missedScans &&
+    left.lastSeenAt === right.lastSeenAt &&
+    left.lastReadAt === right.lastReadAt &&
+    left.lastPowerReadAt === right.lastPowerReadAt &&
+    left.lastChannelReadAt === right.lastChannelReadAt &&
+    left.metadataReadAt === right.metadataReadAt &&
+    left.lastError === right.lastError &&
+    left.statusFresh === right.statusFresh &&
+    left.powerFresh === right.powerFresh &&
+    left.channelFresh === right.channelFresh &&
+    left.metadataFresh === right.metadataFresh &&
+    left.connectionState === right.connectionState &&
+    left.capabilitiesKnown === right.capabilitiesKnown &&
+    sameCapabilities(left.capabilities, right.capabilities) &&
+    sameMetadata(left.metadata, right.metadata);
 }

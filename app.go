@@ -592,6 +592,9 @@ func (a *App) SetAllStationsPowerDetailed(state string) (station.BulkPowerResult
 	return a.stationManager.SetAllStationsPowerDetailed(state)
 }
 
+// RenameStation is the legacy name-based rename kept for compatibility: it
+// renames every station sharing the same original factory name. New
+// integrations should call RenameStationByAddress instead.
 func (a *App) RenameStation(originalName string, newName string) error {
 	log.Printf("Renaming %s to %s", originalName, newName)
 	err := a.stationManager.RenameStation(originalName, newName)

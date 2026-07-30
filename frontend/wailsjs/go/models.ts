@@ -1,5 +1,5 @@
 export namespace bluetooth {
-	
+
 	export class Capabilities {
 	    powerRead: boolean;
 	    powerWrite: boolean;
@@ -10,11 +10,11 @@ export namespace bluetooth {
 	    channelNotify: boolean;
 	    identify: boolean;
 	    deviceInformation: boolean;
-	
+
 	    static createFrom(source: any = {}) {
 	        return new Capabilities(source);
 	    }
-	
+
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.powerRead = source["powerRead"];
@@ -34,11 +34,10 @@ export namespace bluetooth {
 	    serialNumber: string;
 	    hardwareRevision: string;
 	    firmwareRevision: string;
-	
 	    static createFrom(source: any = {}) {
 	        return new DeviceMetadata(source);
 	    }
-	
+
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.manufacturer = source["manufacturer"];
@@ -50,9 +49,7 @@ export namespace bluetooth {
 	}
 
 }
-
 export namespace main {
-	
 	export class APIStatus {
 	    running: boolean;
 	    address: string;
@@ -264,6 +261,7 @@ export namespace station {
 	        this.warnings = source["warnings"];
 	        this.station = this.convertValues(source["station"], StationInfo);
 	    }
+
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
 		    if (!a) {
 		        return a;

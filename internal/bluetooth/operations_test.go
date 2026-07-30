@@ -124,6 +124,7 @@ type fakeCharacteristic struct {
 	writeWithoutResponseAttempts int
 	writes                       [][]byte
 	writeErrors                  []error
+	onWrite                      func([]byte)
 }
 
 type blockingContextCharacteristic struct {
@@ -315,6 +316,9 @@ func (f *fakeCharacteristic) write(value []byte) (int, error) {
 		return 0, writeErr
 	}
 	f.writes = append(f.writes, append([]byte(nil), value...))
+	if f.onWrite != nil {
+		f.onWrite(value)
+	}
 	if !f.ignoreWrite && len(value) == 1 {
 		raw := value[0]
 		if f.powerSemantics && raw == 0x01 {
@@ -516,6 +520,26 @@ func TestSleepDoesNotContinueAfterAmbiguousPrepareWrite(t *testing.T) {
 	}
 }
 
+func TestSleepContextDoesNotSendFinalCommandAfterPrepareCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	power := &fakeCharacteristic{value: []byte{0x00}}
+	power.onWrite = func(value []byte) {
+		if len(value) == 1 && value[0] == 0x01 {
+			cancel()
+		}
+	}
+	station := connectedFakeStation(power, nil, nil, Capabilities{PowerRead: true, PowerWrite: true})
+
+	_, err := SetPowerStateContext(ctx, station, PowerStateSleep)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("SetPowerStateContext() error = %v, want context.Canceled", err)
+	}
+	if len(power.writes) != 1 || power.writes[0][0] != 0x01 {
+		t.Fatalf("sleep writes = %v, want prepare only", power.writes)
+	}
+}
+
 func TestSleepDoesNotReplayAfterAmbiguousFinalWrite(t *testing.T) {
 	power := &fakeCharacteristic{
 		value:                      []byte{0x00},
@@ -694,6 +718,50 @@ func TestStandbyValueNotAllowedOnlyDisablesStandby(t *testing.T) {
 	}
 	if !snapshot.Connected || device.disconnected {
 		t.Fatal("standby value rejection discarded a healthy connection")
+	}
+}
+
+func TestSetPowerStateContextRejectsCancelledContext(t *testing.T) {
+	power := &fakeCharacteristic{value: []byte{0x00}, powerSemantics: true}
+	station := connectedFakeStation(power, nil, nil, Capabilities{PowerRead: true, PowerWrite: true})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := SetPowerStateContext(ctx, station, PowerStateOn); !errors.Is(err, context.Canceled) {
+		t.Fatalf("SetPowerStateContext() error = %v, want context.Canceled", err)
+	}
+	if len(power.writes) != 0 {
+		t.Fatalf("writes after cancellation = %v, want none", power.writes)
+	}
+}
+
+func TestSetPowerStateContextCancellationDuringConfirmationKeepsCommandSent(t *testing.T) {
+	// Reads never confirm the On target (raw 0x01 decodes as booting), so the
+	// confirmation loop would poll for ~10s without cancellation.
+	power := &fakeCharacteristic{value: []byte{0x00}}
+	station := connectedFakeStation(power, nil, nil, Capabilities{PowerRead: true, PowerWrite: true})
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		cancel()
+	}()
+	start := time.Now()
+	result, err := SetPowerStateContext(ctx, station, PowerStateOn)
+	elapsed := time.Since(start)
+	if result.Confirmed {
+		t.Fatalf("result = %+v, want unconfirmed", result)
+	}
+	var confirmationErr *PowerConfirmationError
+	if !errors.As(err, &confirmationErr) {
+		t.Fatalf("error = %v, want PowerConfirmationError for the sent command", err)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want wrapped context.Canceled", err)
+	}
+	if elapsed > 5*time.Second {
+		t.Fatalf("cancellation took %v; confirmation polling was not interrupted", elapsed)
+	}
+	if len(power.writes) != 1 || power.writes[0][0] != 0x01 {
+		t.Fatalf("writes = %v, want a single 0x01 command", power.writes)
 	}
 }
 

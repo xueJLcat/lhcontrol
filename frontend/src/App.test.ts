@@ -1296,6 +1296,90 @@ describe('App asynchronous operations', () => {
     expect(screen.queryByText('On confirmed')).not.toBeInTheDocument();
   });
 
+  it('releases device busy state when an operation settles during an external scan', async () => {
+    let resolvePower!: (value: unknown) => void;
+    api.SetStationPower.mockReturnValue(new Promise((resolve) => {
+      resolvePower = resolve;
+    }));
+
+    render(App);
+    await screen.findByText('LHB-TEST');
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Scan' })).not.toBeDisabled());
+    const onButton = screen.getByRole('button', { name: 'Turn LHB-TEST on' });
+    await fireEvent.click(onButton);
+    await waitFor(() => expect(api.SetStationPower).toHaveBeenCalledOnce());
+    expect(onButton).toHaveClass('pending');
+
+    runtime.handlers.get('external-scan-started')?.(externalScanEvent(1));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Stop' })).toBeEnabled());
+
+    resolvePower({
+      station: createStation({ powerState: 1, powerStateName: 'on', rawPowerState: 0x0b }),
+      commandSent: true,
+      confirmed: true,
+      confirmationError: ''
+    });
+    await waitFor(() => expect(onButton).not.toHaveClass('pending'));
+    // The result commit stays epoch-gated: no stale success note mid-scan.
+    expect(screen.queryByText('On confirmed')).not.toBeInTheDocument();
+  });
+
+  it('expires a stale pending power feedback that never settles', async () => {
+    vi.useFakeTimers();
+    api.SetStationPower.mockReturnValue(new Promise(() => {}));
+
+    render(App);
+    await screen.findByText('LHB-TEST');
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Scan' })).not.toBeDisabled());
+    await fireEvent.click(screen.getByRole('button', { name: 'Turn LHB-TEST on' }));
+    await waitFor(() => expect(api.SetStationPower).toHaveBeenCalledOnce());
+    expect(await screen.findByText('Switching to On…')).toBeInTheDocument();
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(screen.queryByText('Switching to On…')).not.toBeInTheDocument();
+  });
+
+  it('keeps the channel display stable across transient channel wipes', async () => {
+    vi.useFakeTimers();
+    api.IsScanning.mockResolvedValue(false);
+    render(App);
+    await screen.findByText('LHB-TEST');
+
+    // Initial scan: channel 3 is occupied and the card chip shows it.
+    expect(screen.getByRole('button', { name: 'CH 3 — LHB-TEST · sleep' })).toBeEnabled();
+    expect(screen.getByText('CH 03')).toBeInTheDocument();
+
+    // A later background poll reports the channel wiped (transient capability
+    // loss), alongside a second station whose channel is genuinely unknown.
+    const wipedA = createStation({ channel: 0, channelFresh: false, statusFresh: false });
+    const unknownB = createStation({ name: 'LHB-B', address: 'BB', channel: 0, channelFresh: false });
+    api.CheckAllStationStatuses.mockResolvedValue([wipedA, unknownB]);
+    api.GetCurrentStationInfo.mockResolvedValue([wipedA, unknownB]);
+    await vi.advanceTimersByTimeAsync(15_000);
+
+    // Display hysteresis: the cell stays occupied as last-known and the card
+    // chip keeps CH 03 instead of flipping to free/CH --.
+    const staleCell = screen.getByRole('button', { name: 'CH 3 — LHB-TEST · sleep · last-known' });
+    expect(staleCell).toBeEnabled();
+    expect(staleCell).toHaveClass('stale');
+    expect(screen.getByText('CH 03')).toBeInTheDocument();
+
+    // Safety logic is untouched: the channel modal still uses the live data
+    // and demands explicit risk confirmation for the genuinely unknown station.
+    await fireEvent.click(screen.getByRole('button', { name: 'Details for LHB-TEST' }));
+    await fireEvent.click(await screen.findByRole('button', { name: /Change Channel/ }));
+    const dialog = await screen.findByRole('dialog', { name: 'Change channel' });
+    expect(within(dialog).getByText(/unknown channel/)).toBeInTheDocument();
+    await fireEvent.click(within(dialog).getByRole('button', { name: 'Close' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+
+    // Once the memory window expires with the channel still unknown, the
+    // display falls back to the live value.
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(screen.getByRole('button', { name: 'CH 3 — free' })).toBeDisabled();
+    expect(screen.queryByText('CH 03')).not.toBeInTheDocument();
+  });
+
   it('clears stale device busy state when an external scan supersedes a settled backend operation', async () => {
     let resolvePower!: (value: unknown) => void;
     api.SetStationPower.mockReturnValue(new Promise((resolve) => {

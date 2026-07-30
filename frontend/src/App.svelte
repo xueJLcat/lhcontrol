@@ -24,7 +24,7 @@
   import type { PowerFeedback, PowerTarget, StationInfo } from './lib/types';
   import {
     canSetPower, channelChangeBlockedReason, hasCurrentChannel, hasVerifiedPowerState, isCurrentPowerState,
-    powerStateValue, powerTargetLabel, stateLabel
+    powerStateValue, powerTargetLabel, sameStationInfo, stateLabel
   } from './lib/station';
   import { formatBulkResult, formatTerminalScanResult, summarizeBulkResult } from './lib/result-format';
   import { clearToasts, pushToast } from './lib/toast';
@@ -47,6 +47,10 @@
   let powerFeedbackByAddress: Record<string, PowerFeedback | undefined> = {};
   const powerFeedbackTimers = new Map<string, ReturnType<typeof setTimeout>>();
   const powerFeedbackRetentionMs = 20_000;
+  // Pending feedback is normally replaced when its operation settles. If that
+  // commit is legitimately dropped (a scan epoch superseded it), expire the
+  // stale pending note instead of showing "Switching..." forever.
+  const powerFeedbackPendingRetentionMs = 60_000;
   let globalOperation: GlobalOperation = 'idle';
   let bulkTarget: PowerTarget | null = null;
   let editingAddress: string | null = null;
@@ -81,6 +85,11 @@
   let scanEpoch = 0;
   let nextStationRevision = 0;
   let stationRevisions = new Map<string, number>();
+  // Operation ownership tokens survive a scan-epoch bump (unlike
+  // stationRevisions), so an operation settling mid-scan can still release the
+  // busy flags it owns. A newer operation on the same station overwrites the
+  // token and protects its own flags from the older operation's cleanup.
+  const stationOpTokens = new Map<string, number>();
   let disposed = false;
   let startupPending = true;
 
@@ -113,7 +122,6 @@
   }
 
   function claimExternalScanTerminal(event: ExternalScanEvent): boolean {
-    if (!externalScanning) return false;
     if (!externalScanning || (externalScanID !== null && event.id !== externalScanID)) return false;
     latestExternalScanID = Math.max(latestExternalScanID, event.id);
     externalScanning = false;
@@ -137,9 +145,36 @@
     return !disposed && epoch === statusEpoch;
   }
 
+  // Display-only channel memory. The backend deliberately wipes a station's
+  // channel on transient capability loss (rediscovery, read errors), which
+  // made the channel bar, card chip, and card ordering flap between
+  // enabled/disabled on every background refresh. The cache bridges those
+  // dropouts for display only; conflict checks, freshness gates, and the
+  // channel modal always use the live station.channel.
+  const channelMemory = new Map<string, { channel: number; at: number }>();
+  const channelMemoryMs = 45_000;
+
+  function displayChannel(station: StationInfo): number {
+    if (station.channel > 0) return station.channel;
+    const cached = channelMemory.get(station.address);
+    return cached && Date.now() - cached.at <= channelMemoryMs ? cached.channel : 0;
+  }
+
+  // Keep the memory current before any derived list recomputes. This block
+  // must stay above $: sortedStations so the cache is fresh when sort keys
+  // and child props are evaluated.
+  $: {
+    const now = Date.now();
+    for (const station of stations) {
+      if (station.channel > 0) {
+        channelMemory.set(station.address, { channel: station.channel, at: now });
+      }
+    }
+  }
+
   $: sortedStations = [...stations].sort((a, b) => {
-    const ac = a.channel > 0 ? a.channel : Number.MAX_SAFE_INTEGER;
-    const bc = b.channel > 0 ? b.channel : Number.MAX_SAFE_INTEGER;
+    const ac = displayChannel(a) || Number.MAX_SAFE_INTEGER;
+    const bc = displayChannel(b) || Number.MAX_SAFE_INTEGER;
     return ac - bc || a.name.localeCompare(b.name) || a.address.localeCompare(b.address);
   });
   $: selectedStation = stations.find((station) => station.address === selectedAddress) ?? null;
@@ -267,12 +302,14 @@
       ...powerFeedbackByAddress,
       [address]: { ...feedback, createdAt }
     };
-    if (feedback.kind === 'pending') return;
+    const retentionMs = feedback.kind === 'pending'
+      ? powerFeedbackPendingRetentionMs
+      : powerFeedbackRetentionMs;
     powerFeedbackTimers.set(address, setTimeout(() => {
       if (powerFeedbackByAddress[address]?.createdAt === createdAt) {
         clearPowerFeedback(address);
       }
-    }, powerFeedbackRetentionMs));
+    }, retentionMs));
   }
 
   function reconcilePowerFeedback(updated: StationInfo[]) {
@@ -291,8 +328,14 @@
   }
 
   function commitStations(updated: StationInfo[]) {
-    stations = updated;
-    reconcilePowerFeedback(updated);
+    // Reuse the previous object for unchanged stations so no-op background
+    // refreshes do not re-render cards or retrigger CSS transitions.
+    const previousByAddress = new Map(stations.map((station) => [station.address, station]));
+    stations = updated.map((station) => {
+      const previous = previousByAddress.get(station.address);
+      return previous && sameStationInfo(previous, station) ? previous : station;
+    });
+    reconcilePowerFeedback(stations);
   }
 
   function gattLockedFor(address: string): boolean {
@@ -306,11 +349,16 @@
   function beginStationOperationRevision(address: string): number {
     const revision = ++nextStationRevision;
     stationRevisions = new Map(stationRevisions).set(address, revision);
+    stationOpTokens.set(address, revision);
     return revision;
   }
 
   function canCommitStationOperation(epoch: number, address: string, revision: number): boolean {
     return canCommitOperation(epoch) && stationRevision(address) === revision;
+  }
+
+  function canCleanupStationOperation(address: string, revision: number): boolean {
+    return !disposed && stationOpTokens.get(address) === revision;
   }
 
   function applyStationList(
@@ -362,6 +410,7 @@
     if (clearOperations) {
       gattOperations = new Set();
       configOperations = new Set();
+      stationOpTokens.clear();
     }
     powerTargetByAddress = {};
     clearAllPowerFeedback();
@@ -786,7 +835,7 @@
         pushToast(`Power change failed for ${station.name}: ${errorText}`);
       }
     } finally {
-      if (canCommitStationOperation(operationEpoch, station.address, operationRevision)) {
+      if (canCleanupStationOperation(station.address, operationRevision)) {
         powerTargetByAddress = { ...powerTargetByAddress, [station.address]: undefined };
         setGattBusy(station.address, false);
       }
@@ -894,7 +943,7 @@
       }
     } finally {
       refreshAPIStatus();
-      if (canCommitStationOperation(operationEpoch, station.address, operationRevision)) {
+      if (canCleanupStationOperation(station.address, operationRevision)) {
         setConfigBusy(station.address, false);
       }
     }
@@ -921,7 +970,7 @@
         pushToast(`Identify failed for ${station.name}: ${error}`);
       }
     } finally {
-      if (canCommitStationOperation(operationEpoch, station.address, operationRevision)) {
+      if (canCleanupStationOperation(station.address, operationRevision)) {
         setGattBusy(station.address, false);
       }
     }
@@ -953,7 +1002,7 @@
         pushToast(`Capability refresh failed for ${station.name}: ${error}`);
       }
     } finally {
-      if (canCommitStationOperation(operationEpoch, station.address, operationRevision)) {
+      if (canCleanupStationOperation(station.address, operationRevision)) {
         setGattBusy(station.address, false);
       }
     }
@@ -1026,7 +1075,7 @@
         pushToast(statusMessage);
       }
     } finally {
-      if (canCommitStationOperation(operationEpoch, address, operationRevision)) {
+      if (canCleanupStationOperation(address, operationRevision)) {
         setGattBusy(address, false);
       }
     }
@@ -1071,7 +1120,7 @@
       <div class="alert danger" title={conflictDetails}><CircleAlert size={18} /> <span class="alert-text">Channel conflict: {conflictDetails}</span></div>
     {/if}
     {#if sortedStations.length}
-      <ChannelMap stations={sortedStations} onSelect={(address) => selectedAddress = address} />
+      <ChannelMap stations={sortedStations} channelOf={displayChannel} onSelect={(address) => selectedAddress = address} />
       <div class="station-grid">
         {#each sortedStations as station, index (station.address)}
           <div
@@ -1080,6 +1129,7 @@
           >
             <StationCard
               {station}
+              channelDisplay={displayChannel(station)}
               renaming={editingAddress === station.address}
               feedback={powerFeedbackByAddress[station.address]}
               pendingTarget={powerTargetByAddress[station.address]}
