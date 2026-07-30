@@ -520,7 +520,7 @@ func TestSleepDoesNotContinueAfterAmbiguousPrepareWrite(t *testing.T) {
 	}
 }
 
-func TestSleepContextDoesNotSendFinalCommandAfterPrepareCancellation(t *testing.T) {
+func TestSleepContextCompletesFinalCommandAfterPrepareCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	power := &fakeCharacteristic{value: []byte{0x00}}
@@ -531,12 +531,16 @@ func TestSleepContextDoesNotSendFinalCommandAfterPrepareCancellation(t *testing.
 	}
 	station := connectedFakeStation(power, nil, nil, Capabilities{PowerRead: true, PowerWrite: true})
 
-	_, err := SetPowerStateContext(ctx, station, PowerStateSleep)
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("SetPowerStateContext() error = %v, want context.Canceled", err)
+	result, err := SetPowerStateContext(ctx, station, PowerStateSleep)
+	var confirmationErr *PowerConfirmationError
+	if !errors.As(err, &confirmationErr) || !errors.Is(err, context.Canceled) {
+		t.Fatalf("SetPowerStateContext() result=%+v error=%v, want cancelled confirmation error", result, err)
 	}
-	if len(power.writes) != 1 || power.writes[0][0] != 0x01 {
-		t.Fatalf("sleep writes = %v, want prepare only", power.writes)
+	if result.Confirmed {
+		t.Fatalf("result = %+v, want unconfirmed command", result)
+	}
+	if len(power.writes) != 2 || power.writes[0][0] != 0x01 || power.writes[1][0] != 0x00 {
+		t.Fatalf("sleep writes = %v, want prepare then final sleep", power.writes)
 	}
 }
 

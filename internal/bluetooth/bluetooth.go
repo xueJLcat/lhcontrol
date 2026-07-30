@@ -1895,9 +1895,9 @@ func SetPowerStateContext(ctx context.Context, station *BaseStation, target Powe
 			// Some Lighthouse 2.0 firmware expects wake/prepare then sleep.
 			err = writePowerValueInternal(station, 0x01)
 			if err == nil {
-				if err = sleepContext(ctx, 50*time.Millisecond); err != nil {
-					return PowerControlResult{}, err
-				}
+				// Once prepare has been sent, complete this paired write even when
+				// shutdown cancels ctx. Leaving a sleeping station prepared can wake it.
+				time.Sleep(50 * time.Millisecond)
 				sleepFinalAttempted = true
 				err = writePowerValueInternal(station, command)
 			}
