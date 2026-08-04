@@ -1433,6 +1433,58 @@ func TestStrictPowerConfirmationDoesNotAcceptTransitionalRawState(t *testing.T) 
 	}
 }
 
+func TestPowerStateVerifiedFollowsHistoryAwareDecode(t *testing.T) {
+	for _, test := range []struct {
+		decoded PowerState
+		raw     int
+		want    bool
+	}{
+		{PowerStateOn, 0x09, true},
+		{PowerStateOn, 0x0B, true},
+		{PowerStateOn, 0x01, true},
+		{PowerStateOn, 0x00, false},
+		{PowerStateSleep, 0x00, true},
+		{PowerStateSleep, 0x01, false},
+		{PowerStateStandby, 0x02, true},
+		{PowerStateStandby, 0x01, false},
+		{PowerStateBooting, 0x01, false},
+		{PowerStateUnknown, 0x01, false},
+	} {
+		if got := IsPowerStateVerified(test.decoded, test.raw); got != test.want {
+			t.Errorf("IsPowerStateVerified(%v, %#x) = %v, want %v", test.decoded, test.raw, got, test.want)
+		}
+	}
+}
+
+func TestPowerConfirmationAcceptsSteadyBootRawWhenAlreadyOn(t *testing.T) {
+	power := &fakeCharacteristic{value: []byte{0x01}}
+	station := connectedFakeStation(power, nil, nil, Capabilities{PowerRead: true, PowerWrite: true})
+	station.PowerState = PowerStateOn
+
+	result, err := SetPowerState(station, PowerStateOn)
+	if err != nil || !result.Confirmed {
+		t.Fatalf("SetPowerState() result=%+v error=%v, want confirmed steady-boot station", result, err)
+	}
+	if station.PowerState != PowerStateOn || station.RawPowerState != 0x01 {
+		t.Fatalf("station state = %v raw %#x, want On with steady raw 0x01", station.PowerState, station.RawPowerState)
+	}
+}
+
+func TestPowerConfirmationKeepsPollingDuringGenuineBoot(t *testing.T) {
+	power := &fakeCharacteristic{value: []byte{0x01}}
+	station := connectedFakeStation(power, nil, nil, Capabilities{PowerRead: true, PowerWrite: true})
+	station.PowerState = PowerStateSleep
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if err := confirmPowerStateInternalContext(ctx, station, PowerStateOn); err == nil {
+		t.Fatal("confirmation unexpectedly accepted a booting station as On")
+	}
+	if station.PowerState != PowerStateBooting {
+		t.Fatalf("station state = %v, want Booting while raw 0x01 is transitional", station.PowerState)
+	}
+}
+
 func TestMarkMissedRequiresTwoConsecutiveScans(t *testing.T) {
 	now := time.Now()
 	station := &BaseStation{Present: true}

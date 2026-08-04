@@ -1088,7 +1088,7 @@ func (m *Manager) GetStationInfo() []StationInfo {
 			Address:             snapshot.Address,
 			PowerState:          int(snapshot.PowerState),
 			PowerStateName:      snapshot.PowerState.String(),
-			PowerStateConfirmed: powerFresh && bluetooth.IsPowerStateConfirmed(snapshot.PowerState, snapshot.RawPowerState),
+			PowerStateConfirmed: powerFresh && bluetooth.IsPowerStateVerified(snapshot.PowerState, snapshot.RawPowerState),
 			RawPowerState:       snapshot.RawPowerState,
 			Channel:             snapshot.Channel,
 			ChannelConflict: snapshot.Present && scanFresh && channelFresh &&
@@ -2148,13 +2148,16 @@ func (m *Manager) recoverOneStation(
 	metadataTracked := effectiveStatusRetryKinds(m.statusRetrySnapshot(address))&statusRetryMetadata != 0
 	metadataAttempted := retryKind == statusRetryMetadata ||
 		(!station.Snapshot().Connected && metadataTracked)
-	readContext, cancelRead := context.WithTimeout(recoveryContext, m.initialReadTimeout)
-	defer cancelRead()
 	if retryKind == statusRetryMetadata {
+		// The refresh phase gets its own budget so a slow capability discovery
+		// cannot starve the subsequent status read into a deadline failure,
+		// which would be misclassified as a connection failure.
+		refreshContext, cancelRefresh := context.WithTimeout(recoveryContext, m.initialReadTimeout)
 		refreshErr := runSafely("station metadata recovery", func() error {
-			_, err := m.bluetoothOps.refreshCapabilities(readContext, station)
+			_, err := m.bluetoothOps.refreshCapabilities(refreshContext, station)
 			return err
 		})
+		cancelRefresh()
 		if refreshErr != nil {
 			if m.shuttingDown.Load() && errors.Is(refreshErr, context.Canceled) {
 				return 0
@@ -2170,6 +2173,8 @@ func (m *Manager) recoverOneStation(
 			return 0
 		}
 	}
+	readContext, cancelRead := context.WithTimeout(recoveryContext, m.initialReadTimeout)
+	defer cancelRead()
 	err := runSafely("station status recovery", func() error {
 		return m.bluetoothOps.fetchInitialPowerState(readContext, station)
 	})
@@ -2292,7 +2297,7 @@ func classifyCachedPower(
 		return cachedPowerBooting
 	}
 	if snapshot.PowerState == target &&
-		bluetooth.IsPowerStateConfirmed(snapshot.PowerState, snapshot.RawPowerState) {
+		bluetooth.IsPowerStateVerified(snapshot.PowerState, snapshot.RawPowerState) {
 		return cachedPowerAtTarget
 	}
 	return cachedPowerActionable

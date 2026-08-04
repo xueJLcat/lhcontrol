@@ -1314,6 +1314,48 @@ func TestMetadataRecoveryFailureKeepsIndependentBackoff(t *testing.T) {
 	}
 }
 
+func TestMetadataRecoveryKeepsIndependentStatusReadBudget(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	manager.statusRetryBase = time.Hour
+	manager.initialReadTimeout = 300 * time.Millisecond
+	address := "11:22:33:44:55:85"
+	manager.stations[address] = &internalbluetooth.BaseStation{
+		Name: "LHB-META-BUDGET", Address: mustAddress(t, address), Present: true,
+	}
+	manager.statusRetryMutex.Lock()
+	manager.statusRetries[address] = statusRetry{
+		kinds:          statusRetryMetadata,
+		metadataNextAt: time.Now().Add(-time.Second),
+	}
+	manager.statusRetryMutex.Unlock()
+	var reads atomic.Int32
+	manager.bluetoothOps.refreshCapabilities = func(context.Context, *internalbluetooth.BaseStation) (internalbluetooth.Capabilities, error) {
+		time.Sleep(200 * time.Millisecond)
+		return internalbluetooth.Capabilities{DeviceInformation: true}, nil
+	}
+	manager.bluetoothOps.fetchInitialPowerState = func(ctx context.Context, _ *internalbluetooth.BaseStation) error {
+		reads.Add(1)
+		deadline, ok := ctx.Deadline()
+		if !ok || time.Until(deadline) < 250*time.Millisecond {
+			return context.DeadlineExceeded
+		}
+		return nil
+	}
+
+	manager.runStatusRecoveryRound()
+
+	if reads.Load() != 1 {
+		t.Fatalf("status reads = %d, want 1", reads.Load())
+	}
+	manager.statusRetryMutex.Lock()
+	retry, tracked := manager.statusRetries[address]
+	manager.statusRetryMutex.Unlock()
+	if tracked {
+		t.Fatalf("slow metadata refresh poisoned the status read budget: %+v", retry)
+	}
+}
+
 func TestUnsupportedMetadataFailureDoesNotScheduleRecovery(t *testing.T) {
 	manager := NewManager(config.NewConfig())
 	address := "11:22:33:44:55:6A"
@@ -1851,6 +1893,39 @@ func TestSetAllStationsPowerSkipsIneligibleStations(t *testing.T) {
 		if stationResult.Station.Name == "" {
 			t.Fatalf("skipped result is missing station data: %+v", stationResult)
 		}
+	}
+}
+
+func TestSteadyBootRawStateIsConfirmedAndSkippedByBulkPower(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	address := "11:22:33:44:55:84"
+	manager.stations[address] = &internalbluetooth.BaseStation{
+		Name: "LHB-STEADY-BOOT", Address: mustAddress(t, address), Present: true,
+		PowerState: internalbluetooth.PowerStateOn, RawPowerState: 0x01,
+		Capabilities: internalbluetooth.Capabilities{PowerWrite: true}, CapabilitiesKnown: true,
+		LastPowerReadAt: time.Now(),
+	}
+
+	infos := manager.GetStationInfo()
+	if len(infos) != 1 || !infos[0].PowerFresh || !infos[0].PowerStateConfirmed {
+		t.Fatalf("station info = %+v, want fresh steady-boot On state reported as confirmed", infos)
+	}
+
+	var powerCalls atomic.Int32
+	manager.bluetoothOps.setPowerState = func(context.Context, *internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
+		powerCalls.Add(1)
+		return internalbluetooth.PowerControlResult{State: internalbluetooth.PowerStateOn, Confirmed: true}, nil
+	}
+	result, err := manager.SetAllStationsPowerDetailed("on")
+	if err != nil {
+		t.Fatalf("SetAllStationsPowerDetailed() error = %v", err)
+	}
+	if powerCalls.Load() != 0 {
+		t.Fatalf("bulk power writes = %d, want the steady-boot station skipped", powerCalls.Load())
+	}
+	if len(result.Results) != 1 || !result.Results[0].Skipped || !result.Results[0].Success || !result.Results[0].Confirmed {
+		t.Fatalf("bulk result = %+v, want skipped success already at target", result.Results)
 	}
 }
 

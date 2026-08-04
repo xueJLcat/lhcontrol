@@ -1774,7 +1774,7 @@ func confirmPowerStateInternalContext(ctx context.Context, station *BaseStation,
 			continue
 		}
 		consecutiveReadErrors = 0
-		if IsPowerStateConfirmed(expectedState, station.RawPowerState) {
+		if station.PowerState == expectedState {
 			return nil
 		}
 		lastErr = fmt.Errorf(
@@ -1798,6 +1798,18 @@ func IsPowerStateConfirmed(expectedState PowerState, raw int) bool {
 	default:
 		return false
 	}
+}
+
+// IsPowerStateVerified reports whether a decoded state is backed by a raw
+// value that decodePowerStateWithHistory accepts as that stable state. Some
+// Lighthouse 2.0 firmware keeps reporting 0x01 while already awake, and the
+// decode history falls back to On for it, so verification follows the
+// displayed state instead of raw values such firmware never produces.
+func IsPowerStateVerified(decoded PowerState, raw int) bool {
+	if IsPowerStateConfirmed(decoded, raw) {
+		return true
+	}
+	return decoded == PowerStateOn && raw == 0x01
 }
 
 type PowerControlResult struct {

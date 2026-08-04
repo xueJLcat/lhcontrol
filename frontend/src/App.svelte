@@ -1063,7 +1063,9 @@
           : station));
       }
       channelEditorOpen = false;
-      if (canCommitStatus(statusOperation)) statusMessage = `Channel changed from ${result.previousChannel || 'unknown'} to ${result.channel}. ${result.warnings.join(' ')}`;
+      if (canCommitStatus(statusOperation)) statusMessage = result.commandSent
+        ? `Channel changed from ${result.previousChannel || 'unknown'} to ${result.channel}. ${result.warnings.join(' ')}`
+        : `Channel already set to ${result.channel}; no command was sent. ${result.warnings.join(' ')}`;
     } catch (error) {
       if (!canCommitStationOperation(operationEpoch, address, operationRevision)) return;
       const actual = await fetchStationUpdate(address, operationEpoch, operationRevision);
