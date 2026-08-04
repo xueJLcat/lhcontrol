@@ -1339,7 +1339,7 @@ func connectAndDiscoverInternalContext(ctx context.Context, station *BaseStation
 				connectedStationsMutex.Lock()
 				found := false
 				for _, connected := range connectedStations {
-					if connected == station {
+					if connected.Address == station.Address {
 						found = true
 						break
 					}

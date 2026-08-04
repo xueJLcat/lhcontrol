@@ -96,6 +96,72 @@ func TestLoadPathFailureMarksPersistenceUnavailable(t *testing.T) {
 	}
 }
 
+func TestLoadReadFailureBlocksSavesToProtectExistingConfig(t *testing.T) {
+	t.Setenv("AppData", t.TempDir())
+
+	originalReader := configFileReader
+	originalWriter := configFileWriter
+	readErr := errors.New("file locked by backup software")
+	configFileReader = func(string) ([]byte, error) { return nil, readErr }
+	writeCalls := 0
+	configFileWriter = func(string, []byte, os.FileMode) error {
+		writeCalls++
+		return nil
+	}
+	t.Cleanup(func() {
+		configFileReader = originalReader
+		configFileWriter = originalWriter
+	})
+
+	cfg := NewConfig()
+	cfg.RenamedStations["LHB-EXISTING"] = "Kept in memory"
+	loadErr := cfg.Load()
+	if loadErr == nil {
+		t.Fatal("Load() unexpectedly succeeded")
+	}
+	if got, _ := cfg.GetRenamedStation("LHB-EXISTING"); got != "Kept in memory" {
+		t.Fatalf("read failure wiped in-memory renames: %q", got)
+	}
+
+	// While the file is unreadable, saves must be blocked instead of
+	// overwriting it with the sparse in-memory state.
+	if err := cfg.SetRenamedStation("LHB-OLD", "After"); err == nil {
+		t.Fatal("SetRenamedStation() unexpectedly succeeded while blocked")
+	}
+	if err := cfg.Save(); err == nil {
+		t.Fatal("Save() unexpectedly succeeded while blocked")
+	}
+	if writeCalls != 0 {
+		t.Fatalf("writer invoked %d time(s) while persistence was blocked", writeCalls)
+	}
+	if got, _ := cfg.GetRenamedStation("LHB-OLD"); got == "After" {
+		t.Fatal("blocked rename leaked into in-memory state")
+	}
+	if err := cfg.PersistenceError(); err == nil || !errors.Is(err, loadErr) {
+		t.Fatalf("PersistenceError() = %v, want the load failure", err)
+	}
+
+	// A successful load lifts the block and restores renames.
+	configFileReader = func(string) ([]byte, error) {
+		return []byte(`{"renamedStations":{"LHB-OLD":"Earlier"}}`), nil
+	}
+	if err := cfg.Load(); err != nil {
+		t.Fatalf("recovery Load() error = %v", err)
+	}
+	if err := cfg.SetRenamedStation("LHB-OLD", "After"); err != nil {
+		t.Fatalf("SetRenamedStation() after recovery error = %v", err)
+	}
+	if got, _ := cfg.GetRenamedStation("LHB-OLD"); got != "After" {
+		t.Fatalf("renamed name after recovery = %q, want %q", got, "After")
+	}
+	if writeCalls != 1 {
+		t.Fatalf("writer calls after recovery = %d, want 1", writeCalls)
+	}
+	if err := cfg.PersistenceError(); err != nil {
+		t.Fatalf("recovered config retained persistence error: %v", err)
+	}
+}
+
 func TestAddressRenameTakesPriorityOverLegacyName(t *testing.T) {
 	cfg := NewConfig()
 	cfg.RenamedStations["LHB-OLD"] = "Legacy name"

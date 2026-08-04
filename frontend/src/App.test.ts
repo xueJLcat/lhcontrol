@@ -1380,6 +1380,48 @@ describe('App asynchronous operations', () => {
     expect(screen.queryByText('CH 03')).not.toBeInTheDocument();
   });
 
+  it('clears selection and channel editor state when a status refresh drops the selected station', async () => {
+    vi.useFakeTimers();
+    // flip queries running animations when a card leaves the grid; jsdom has
+    // none, and without a stub the removed card's ghost never detaches.
+    Object.defineProperty(Element.prototype, 'getAnimations', {
+      configurable: true,
+      value: vi.fn(() => [])
+    });
+    api.IsScanning.mockResolvedValue(false);
+    render(App);
+    await screen.findByText('LHB-TEST');
+    await vi.waitFor(() => expect(screen.getByRole('button', { name: 'Scan' })).toBeEnabled());
+    await fireEvent.click(screen.getByRole('button', { name: 'Details for LHB-TEST' }));
+    await fireEvent.click(await screen.findByRole('button', { name: /Change Channel/ }));
+    expect(screen.getByRole('dialog', { name: 'Change channel' })).toBeInTheDocument();
+
+    // A periodic list replacement that no longer contains the station must
+    // drop the selection together with the stale channel-editor state.
+    const replacement = createStation({ name: 'LHB-OTHER', address: 'AA:BB:CC:DD:EE:FF' });
+    api.CheckAllStationStatuses.mockResolvedValue([replacement]);
+    api.GetCurrentStationInfo.mockResolvedValue([replacement]);
+    await vi.advanceTimersByTimeAsync(15_000);
+
+    await vi.waitFor(() => expect(screen.queryByRole('dialog', { name: 'Change channel' })).not.toBeInTheDocument());
+    await vi.waitFor(() => expect(screen.queryByRole('dialog', { name: 'Station details' })).not.toBeInTheDocument());
+    expect(screen.queryByText('LHB-TEST')).not.toBeInTheDocument();
+
+    // When the station reappears, the drawer must not silently reopen,
+    // and a fresh details action must show an active drawer without the
+    // channel modal that belonged to the stale selection.
+    api.CheckAllStationStatuses.mockResolvedValue([replacement, createStation()]);
+    api.GetCurrentStationInfo.mockResolvedValue([replacement, createStation()]);
+    await vi.advanceTimersByTimeAsync(15_000);
+    await screen.findByText('LHB-TEST');
+    expect(screen.queryByRole('dialog', { name: 'Station details' })).not.toBeInTheDocument();
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Details for LHB-TEST' }));
+    const drawer = await screen.findByRole('dialog', { name: 'Station details' });
+    expect(drawer).toHaveAttribute('aria-modal', 'true');
+    expect(screen.queryByRole('dialog', { name: 'Change channel' })).not.toBeInTheDocument();
+  });
+
   it('clears stale device busy state when an external scan supersedes a settled backend operation', async () => {
     let resolvePower!: (value: unknown) => void;
     api.SetStationPower.mockReturnValue(new Promise((resolve) => {

@@ -2146,8 +2146,12 @@ func (m *Manager) recoverOneStation(
 		recoveryContext = m.lifecycleContext
 	}
 	metadataTracked := effectiveStatusRetryKinds(m.statusRetrySnapshot(address))&statusRetryMetadata != 0
+	// When the station is already connected, the status fetch takes the
+	// "already good" fast path and performs no discovery, so any metadata
+	// error it reports is stale cache rather than fresh evidence.
+	stationConnected := m.bluetoothOps.stationConnected(station)
 	metadataAttempted := retryKind == statusRetryMetadata ||
-		(!station.Snapshot().Connected && metadataTracked)
+		(!stationConnected && metadataTracked)
 	if retryKind == statusRetryMetadata {
 		// The refresh phase gets its own budget so a slow capability discovery
 		// cannot starve the subsequent status read into a deadline failure,
@@ -2193,7 +2197,12 @@ func (m *Manager) recoverOneStation(
 	var initialErr *bluetooth.InitialReadError
 	if errors.As(err, &initialErr) {
 		m.recordStructuredReadResult(station, address, initialErr.Power, initialErr.Channel)
-		if metadataAttempted || (initialErr.Metadata != nil && !metadataTracked) {
+		// The revival branch re-registers a metadata failure observed by a
+		// fresh reconnect/discovery on a station whose metadata retries were
+		// previously exhausted. Require a disconnected start so a stale
+		// cached error from a connected "already good" fetch cannot relight
+		// the retry loop indefinitely.
+		if metadataAttempted || (initialErr.Metadata != nil && !metadataTracked && !stationConnected) {
 			m.recordMetadataReadResult(address, initialErr.Metadata)
 		}
 		m.stopExhaustedAbsentRecovery(address, station)

@@ -31,6 +31,7 @@ var (
 	errNoNotifyOrIndicate        = errors.New("bluetooth: notify or indicate not supported")
 	errInvalidNotificationMode   = errors.New("bluetooth: invalid notification mode")
 	errEnableNotificationsFailed = errors.New("bluetooth: enable notifications failed")
+	errCharacteristicUnavailable = errors.New("bluetooth: characteristic is unavailable")
 )
 
 type NotificationMode = genericattributeprofile.GattCharacteristicProperties
@@ -421,6 +422,16 @@ type deviceCharacteristic struct {
 	service DeviceService
 }
 
+// available guards zero-value characteristics. DeviceCharacteristic embeds a
+// pointer, so any method that reads a field would panic on an uninitialized
+// value instead of returning an error like the other guarded entry points.
+func (c DeviceCharacteristic) available() error {
+	if c.deviceCharacteristic == nil || c.characteristic == nil {
+		return errCharacteristicUnavailable
+	}
+	return nil
+}
+
 // UUID returns the UUID for this DeviceCharacteristic.
 func (c DeviceCharacteristic) UUID() UUID {
 	return c.uuidWrapper
@@ -432,6 +443,9 @@ func (c DeviceCharacteristic) Properties() uint32 {
 
 // GetMTU returns the MTU for the characteristic.
 func (c DeviceCharacteristic) GetMTU() (uint16, error) {
+	if err := c.available(); err != nil {
+		return 0, err
+	}
 	state, err := c.service.device.beginOperation()
 	if err != nil {
 		return 0, err
@@ -443,6 +457,9 @@ func (c DeviceCharacteristic) GetMTU() (uint16, error) {
 // Write replaces the characteristic value with a new value. The
 // call will return after all data has been written.
 func (c DeviceCharacteristic) Write(p []byte) (n int, err error) {
+	if err := c.available(); err != nil {
+		return 0, err
+	}
 	if c.properties&genericattributeprofile.GattCharacteristicPropertiesWrite == 0 {
 		return 0, errNoWrite
 	}
@@ -455,6 +472,9 @@ func (c DeviceCharacteristic) Write(p []byte) (n int, err error) {
 // writes can be in flight at any given time. This call is also known as a
 // "write command" (as opposed to a write request).
 func (c DeviceCharacteristic) WriteWithoutResponse(p []byte) (n int, err error) {
+	if err := c.available(); err != nil {
+		return 0, err
+	}
 	if c.properties&genericattributeprofile.GattCharacteristicPropertiesWriteWithoutResponse == 0 {
 		return 0, errNoWriteWithoutResponse
 	}
@@ -607,6 +627,9 @@ func (c DeviceCharacteristic) ReadContext(ctx context.Context, data []byte) (int
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
+	if err := c.available(); err != nil {
+		return 0, err
+	}
 	if c.properties&genericattributeprofile.GattCharacteristicPropertiesRead == 0 {
 		return 0, errNoRead
 	}
@@ -750,6 +773,9 @@ func (c DeviceCharacteristic) EnableNotifications(callback func(buf []byte)) err
 // notification with a new value every time the value of the characteristic
 // changes. And you can select the notify/indicate mode as you need.
 func (c DeviceCharacteristic) EnableNotificationsWithMode(mode NotificationMode, callback func(buf []byte)) error {
+	if err := c.available(); err != nil {
+		return err
+	}
 	if _, err := c.service.device.beginOperation(); err != nil {
 		return err
 	}

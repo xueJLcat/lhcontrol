@@ -122,6 +122,30 @@ func TestBoundedAsyncOperationContextPreservesTimeoutAndParentCancellation(t *te
 	}
 }
 
+func TestBoundedAsyncOperationContextKeepsLongerCallerDeadline(t *testing.T) {
+	originalTimeout := asyncOperationTimeout
+	asyncOperationTimeout = 40 * time.Millisecond
+	t.Cleanup(func() { asyncOperationTimeout = originalTimeout })
+
+	parent, cancelParent := context.WithTimeout(context.Background(), time.Minute)
+	defer cancelParent()
+	child, cancelChild := boundedAsyncOperationContext(parent)
+	defer cancelChild()
+
+	select {
+	case <-child.Done():
+		t.Fatalf("bounded context expired early: %v", child.Err())
+	case <-time.After(120 * time.Millisecond):
+	}
+	deadline, ok := child.Deadline()
+	if !ok {
+		t.Fatal("bounded context lost the caller deadline")
+	}
+	if remaining := time.Until(deadline); remaining < 30*time.Second {
+		t.Fatalf("caller deadline was shortened: %v remaining", remaining)
+	}
+}
+
 func TestGATTContextOperationsHonorPreCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

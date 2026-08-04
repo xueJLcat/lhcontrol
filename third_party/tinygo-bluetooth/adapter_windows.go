@@ -94,9 +94,16 @@ func awaitAsyncOperation(asyncOperation *foundation.IAsyncOperation, genericPara
 	return awaitAsyncOperationContext(context.Background(), asyncOperation, genericParamSignature)
 }
 
+// boundedAsyncOperationContext applies the default WinRT budget only when the
+// caller did not provide a deadline. A caller that granted itself more time
+// (for example a slow cold-connect) must not be cut short by this guard; the
+// guard only protects callers that would otherwise wait indefinitely.
 func boundedAsyncOperationContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	if _, hasDeadline := ctx.Deadline(); hasDeadline {
+		return ctx, func() {}
 	}
 	return context.WithTimeout(ctx, asyncOperationTimeout)
 }

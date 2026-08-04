@@ -212,7 +212,8 @@ func (a *Adapter) Scan(callback func(*Adapter, ScanResult)) (err error) {
 }
 
 // ScanWithStart is the Windows scan implementation with an optional callback
-// that runs only after the watcher has successfully entered the Started state.
+// that runs after watcher.Start() has been accepted. The watcher may still
+// abort afterwards; readiness is not guaranteed by the Start call alone.
 // Applications that implement a fixed scan duration should start their timer
 // from this callback, not before WinRT watcher setup.
 func (a *Adapter) ScanWithStart(callback func(*Adapter, ScanResult), started func()) (err error) {
@@ -422,8 +423,13 @@ func waitForScanStop(stopped <-chan error, stopRequests <-chan error, stop func(
 			}
 			return originalErr
 		case <-ticker.C:
-			if retryErr := stop(); originalErr == nil && retryErr != nil {
-				originalErr = retryErr
+			// Retry the stop only when the initial attempt failed. A
+			// watcher that was stopped successfully can stay in the
+			// intermediate Stopping state for a while, and WinRT may reject
+			// a redundant Stop call; recording that rejection would poison
+			// an otherwise clean scan.
+			if originalErr != nil {
+				_ = stop()
 			}
 		case <-deadline.C:
 			timeoutErr := error(&ScanStopTimeoutError{})
@@ -739,6 +745,21 @@ func (d Device) registerCharacteristic(characteristic *genericattributeprofile.G
 func (d Device) registerNotification(registration notificationRegistration) error {
 	if d.state == nil || d.state.closed.Load() {
 		return errors.New("bluetooth: device is disconnected")
+	}
+	// Re-enabling notifications for a characteristic must replace the previous
+	// registration. Keeping both would invoke one callback per prior
+	// registration for every value change.
+	for index, existing := range d.state.notifications {
+		if existing.characteristic == registration.characteristic {
+			if existing.characteristic != nil {
+				_ = existing.characteristic.RemoveValueChanged(existing.token)
+			}
+			if existing.handler != nil {
+				existing.handler.Release()
+			}
+			d.state.notifications[index] = registration
+			return nil
+		}
 	}
 	d.state.notifications = append(d.state.notifications, registration)
 	return nil

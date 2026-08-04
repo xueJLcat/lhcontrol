@@ -180,13 +180,23 @@
   $: selectedStation = stations.find((station) => station.address === selectedAddress) ?? null;
   // A station can drop out of the list while its drawer is open (backend
   // list replacement). Clear the stale selection so the drawer does not
-  // silently reopen if the same address reappears later. Only the station
-  // list drives this guard; the address itself is read untracked to avoid a
-  // reactive cycle with selectedStation.
+  // silently reopen if the same address reappears later, and drop the
+  // channel-editor state with it: leaving channelEditorOpen true would make
+  // the next selected station open an inert drawer plus a channel modal that
+  // belongs to the previous selection. Only the station list drives this
+  // guard; the addresses are read untracked to avoid a reactive cycle with
+  // selectedStation.
   $: {
     const address = untrack(() => selectedAddress);
     if (address !== null && !stations.some((station) => station.address === address)) {
       selectedAddress = null;
+      channelEditorOpen = false;
+      channelError = '';
+      channelWarning = false;
+    }
+    const renaming = untrack(() => editingAddress);
+    if (renaming !== null && !stations.some((station) => station.address === renaming)) {
+      editingAddress = null;
     }
   }
   $: conflictStations = stations.filter((station) => station.channelConflict);
@@ -1041,6 +1051,10 @@
     if (stationBusy(selectedStation.address) || gattLockedFor(selectedStation.address) ||
       (hasCurrentChannel(selectedStation) && selectedStation.channel === targetChannel)) return;
     const address = selectedStation.address;
+    // Capture the display name: the station can drop out of the list while
+    // the write is in flight, and the post-await status messages must not
+    // dereference a null selectedStation.
+    const stationName = selectedStation.name;
     const statusOperation = beginStatusOperation();
     const operationEpoch = scanEpoch;
     const operationRevision = beginStationOperationRevision(address);
@@ -1065,7 +1079,7 @@
         const warning = result.confirmationError || 'Channel readback is unavailable.';
         channelError = `Channel command sent but unconfirmed: ${warning} Readback: ${channelReadbackLabel(actual)}.`;
         channelWarning = true;
-        if (canCommitStatus(statusOperation)) statusMessage = `${selectedStation.name}: channel command sent, but confirmation failed. ${warning}`;
+        if (canCommitStatus(statusOperation)) statusMessage = `${stationName}: channel command sent, but confirmation failed. ${warning}`;
         return;
       }
       if (!actual) {

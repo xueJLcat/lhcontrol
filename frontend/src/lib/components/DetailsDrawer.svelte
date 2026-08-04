@@ -67,6 +67,7 @@
         <StateBadge
           label={stateLabel(station)}
           unverified={station.powerState >= 0 && station.powerFresh && !station.powerStateConfirmed}
+          stale={station.powerState >= 0 && !station.powerFresh}
           booting={station.powerFresh && station.powerState === 3}
         />
       </div>

@@ -1394,6 +1394,72 @@ func TestMetadataRecoveryStopsAfterBoundedFailures(t *testing.T) {
 	}
 }
 
+func TestConnectedStaleMetadataErrorDoesNotRelightExhaustedRecovery(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	manager.statusRecoveryStart.Do(func() {})
+	address := "11:22:33:44:55:6C"
+	manager.stations[address] = &internalbluetooth.BaseStation{
+		Name: "LHB-STALE", Address: mustAddress(t, address), Present: true,
+	}
+	// Metadata retries were previously exhausted and dropped; a channel
+	// retry is due. The station stays connected, so the fetch takes the
+	// "already good" path and can only report the stale cached metadata
+	// error of an old discovery — it must not relight metadata recovery.
+	manager.bluetoothOps.stationConnected = func(*internalbluetooth.BaseStation) bool { return true }
+	manager.statusRetryMutex.Lock()
+	manager.statusRetries[address] = statusRetry{
+		kinds:           statusRetryChannel,
+		channelFailures: 1,
+		channelNextAt:   time.Now().Add(-time.Second),
+	}
+	manager.statusRetryMutex.Unlock()
+	manager.bluetoothOps.fetchInitialPowerState = func(context.Context, *internalbluetooth.BaseStation) error {
+		return &internalbluetooth.InitialReadError{Metadata: errors.New("stale metadata error")}
+	}
+
+	manager.runStatusRecoveryRound()
+
+	manager.statusRetryMutex.Lock()
+	retry, tracked := manager.statusRetries[address]
+	manager.statusRetryMutex.Unlock()
+	if tracked && effectiveStatusRetryKinds(retry)&statusRetryMetadata != 0 {
+		t.Fatalf("stale metadata error relight metadata recovery: %+v", retry)
+	}
+}
+
+func TestDisconnectedFreshMetadataErrorStillRelightsRecovery(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	manager.statusRecoveryStart.Do(func() {})
+	address := "11:22:33:44:55:6D"
+	manager.stations[address] = &internalbluetooth.BaseStation{
+		Name: "LHB-FRESH", Address: mustAddress(t, address), Present: true,
+	}
+	// Disconnected start: the fetch reconnects and performs a fresh
+	// discovery, so its metadata error is new evidence and still relights
+	// metadata recovery after the previous schedule was exhausted.
+	manager.bluetoothOps.stationConnected = func(*internalbluetooth.BaseStation) bool { return false }
+	manager.statusRetryMutex.Lock()
+	manager.statusRetries[address] = statusRetry{
+		kinds:           statusRetryChannel,
+		channelFailures: 1,
+		channelNextAt:   time.Now().Add(-time.Second),
+	}
+	manager.statusRetryMutex.Unlock()
+	manager.bluetoothOps.fetchInitialPowerState = func(context.Context, *internalbluetooth.BaseStation) error {
+		return &internalbluetooth.InitialReadError{Metadata: errors.New("fresh metadata error")}
+	}
+
+	manager.runStatusRecoveryRound()
+
+	manager.statusRetryMutex.Lock()
+	retry, tracked := manager.statusRetries[address]
+	manager.statusRetryMutex.Unlock()
+	if !tracked || effectiveStatusRetryKinds(retry)&statusRetryMetadata == 0 ||
+		retry.metadataFailures != 1 {
+		t.Fatalf("fresh metadata error did not relight recovery: %+v tracked=%v", retry, tracked)
+	}
+}
+
 func TestAdapterUnavailableForcesInitializationRetry(t *testing.T) {
 	manager := NewManager(config.NewConfig())
 	manager.observeBluetoothError(tinybluetooth.ErrRadioNotAvailable)

@@ -24,6 +24,7 @@ type persistedConfig struct {
 }
 
 var (
+	configFileReader  = os.ReadFile
 	configFileWriter  = writeFileAtomically
 	configFileRenamer = os.Rename
 )
@@ -62,7 +63,7 @@ func (c *Config) Load() error {
 	}
 
 	log.Printf("Loading config from: %s", configFilePath)
-	configFile, err := os.ReadFile(configFilePath)
+	configFile, err := configFileReader(configFilePath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			c.mutex.Lock()
@@ -73,8 +74,13 @@ func (c *Config) Load() error {
 			c.mutex.Unlock()
 			return nil // No config file yet, which is fine
 		}
+		// The in-memory state is empty or stale here. Block persistence so
+		// the first rename cannot overwrite the unreadable file with a
+		// partial config and destroy previously stored aliases; a later
+		// successful Load clears the block.
 		loadErr := fmt.Errorf("error reading config file '%s': %w", configFilePath, err)
 		c.mutex.Lock()
+		c.persistenceBlockedErr = loadErr
 		c.lastPersistenceErr = loadErr
 		c.mutex.Unlock()
 		return loadErr
