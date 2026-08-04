@@ -1,32 +1,41 @@
 :root {
-  /* Colors — deep space base */
-  --bg-app: #070b12;
-  --bg-surface: rgba(17, 26, 41, 0.88);
-  --bg-surface-solid: #111a29;
-  --bg-surface-hover: #1a2637;
-  --bg-input: #0b1220;
+  /* Colors — light, colorful canvas */
+  --bg-app: #f4f6fc;
+  --bg-surface: rgba(255, 255, 255, 0.78);
+  --bg-surface-solid: #ffffff;
+  --bg-surface-hover: #f0f4fb;
+  --bg-input: #f5f7fc;
+  --bg-inset: #edf0f9;
 
-  --text-primary: #e6edf7;
-  --text-secondary: #9aa8bd;
-  --text-muted: #8593a9;
+  --text-primary: #101828;
+  --text-secondary: #475467;
+  /* #64748b keeps micro captions above WCAG AA (4.5:1) on white surfaces. */
+  --text-muted: #64748b;
 
-  --color-primary: #4c8dff;
-  --color-primary-hover: #6ba1ff;
-  --color-on: #34d399;
-  --color-standby: #fbbf24;
-  --color-sleep: #8fa3c0;
-  --color-booting: #60a5fa;
-  --color-danger: #f87171;
-  --color-warning: #fb923c;
+  --color-primary: #3b82f6;
+  --color-primary-hover: #2563eb;
+  --color-primary-deep: #1d4ed8;
+  --color-on: #10b981;
+  --color-on-deep: #047857;
+  --color-standby: #f59e0b;
+  --color-standby-deep: #b45309;
+  --color-sleep: #8b5cf6;
+  --color-sleep-deep: #6d28d9;
+  --color-booting: #0ea5e9;
+  --color-booting-deep: #0369a1;
+  --color-danger: #f43f5e;
+  --color-danger-deep: #be123c;
+  --color-warning: #f97316;
+  --color-warning-deep: #c2410c;
 
   /* Feedback (operation results) */
-  --fb-pending: #93c5fd;
-  --fb-success: #86efac;
-  --fb-warning: var(--color-warning);
-  --fb-error: #fca5a5;
+  --fb-pending: var(--color-primary-deep);
+  --fb-success: var(--color-on-deep);
+  --fb-warning: var(--color-warning-deep);
+  --fb-error: var(--color-danger-deep);
 
-  --color-border: rgba(148, 163, 184, 0.14);
-  --color-border-strong: rgba(148, 163, 184, 0.28);
+  --color-border: rgba(16, 24, 40, 0.08);
+  --color-border-strong: rgba(16, 24, 40, 0.15);
 
   /* Spacing */
   --spacing-xs: 0.25rem;
@@ -36,21 +45,22 @@
   --spacing-xl: 1.5rem;
 
   /* UI */
-  --radius-xs: 4px;
-  --radius-sm: 6px;
-  --radius-md: 10px;
-  --radius-lg: 14px;
+  --radius-xs: 5px;
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
   --radius-pill: 999px;
-  --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.25);
-  --shadow-md: 0 4px 12px -2px rgb(0 0 0 / 0.4), 0 2px 4px -2px rgb(0 0 0 / 0.3);
-  --shadow-lg: 0 18px 48px -12px rgb(0 0 0 / 0.6), 0 6px 16px -6px rgb(0 0 0 / 0.4);
-  --glow-primary: 0 4px 18px rgba(76, 141, 255, 0.35);
+  --shadow-sm: 0 1px 2px rgba(16, 24, 40, 0.05), 0 1px 4px rgba(16, 24, 40, 0.04);
+  --shadow-md: 0 6px 16px -6px rgba(16, 24, 40, 0.12), 0 2px 6px -2px rgba(16, 24, 40, 0.06);
+  --shadow-lg: 0 24px 48px -12px rgba(16, 24, 40, 0.2), 0 8px 20px -8px rgba(16, 24, 40, 0.1);
+  --glow-primary: 0 8px 20px -6px rgba(59, 130, 246, 0.55);
 
   /* Motion */
   --dur-1: 120ms;
   --dur-2: 200ms;
   --dur-3: 320ms;
   --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --ease-spring: cubic-bezier(0.34, 1.4, 0.44, 1);
 
   /* Typography */
   --fs-micro: 0.7rem;
@@ -75,9 +85,12 @@ body {
   font-size: 14px;
   line-height: 1.45;
   background:
-    radial-gradient(900px 520px at 15% -10%, rgba(76, 141, 255, 0.13), transparent 60%),
-    radial-gradient(720px 520px at 110% 110%, rgba(52, 211, 153, 0.06), transparent 55%),
+    radial-gradient(900px 480px at 12% -8%, rgba(59, 130, 246, 0.13), transparent 60%),
+    radial-gradient(720px 420px at 108% -4%, rgba(244, 114, 182, 0.1), transparent 55%),
+    radial-gradient(820px 560px at 112% 108%, rgba(16, 185, 129, 0.11), transparent 55%),
+    radial-gradient(600px 420px at -6% 100%, rgba(245, 158, 11, 0.09), transparent 60%),
     var(--bg-app);
+  background-attachment: fixed;
   -webkit-font-smoothing: antialiased;
 }
 
@@ -96,6 +109,10 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
+::selection {
+  background: color-mix(in srgb, var(--color-primary) 22%, transparent);
+}
+
 /* Scrollbar styling */
 ::-webkit-scrollbar {
   width: 8px;
@@ -106,12 +123,12 @@ body {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: var(--bg-surface-hover);
+  background: #d5deee;
   border-radius: var(--radius-xs);
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: var(--text-muted);
+  background: #b9c7de;
 }
 
 /* Reduced motion */
@@ -129,34 +146,43 @@ body {
 /* ------------------------------------------------------------------ */
 
 .btn {
-  min-height: 32px;
+  min-height: 34px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 0.35rem;
-  padding: 0.4rem 0.7rem;
-  border: 1px solid var(--color-border);
+  gap: 0.4rem;
+  padding: 0.45rem 0.8rem;
+  border: 1px solid var(--color-border-strong);
   border-radius: var(--radius-md);
-  background: var(--bg-surface);
+  background: var(--bg-surface-solid);
   color: var(--text-primary);
   font-family: var(--font-sans);
   font-size: var(--fs-sm);
   font-weight: 700;
   line-height: 1;
   cursor: pointer;
+  box-shadow: var(--shadow-sm);
   transition: background-color var(--dur-1) var(--ease), color var(--dur-1) var(--ease),
-    filter var(--dur-1) var(--ease), transform 80ms var(--ease), box-shadow var(--dur-2) var(--ease);
+    border-color var(--dur-1) var(--ease), filter var(--dur-1) var(--ease),
+    transform var(--dur-1) var(--ease-spring), box-shadow var(--dur-2) var(--ease);
 }
+.btn:hover:not(:disabled) {
+  background: var(--bg-surface-hover);
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-md);
+}
+.btn:active:not(:disabled) { transform: translateY(0) scale(0.985); box-shadow: var(--shadow-sm); }
+.btn:disabled { opacity: 0.55; cursor: not-allowed; box-shadow: none; }
 .btn.primary {
-  background: linear-gradient(180deg, var(--color-primary-hover), var(--color-primary));
-  color: #fff;
+  background: linear-gradient(135deg, #4f8cff, #6366f1);
   border-color: transparent;
-  box-shadow: var(--glow-primary);
+  color: #fff;
+  box-shadow: var(--glow-primary), inset 0 1px 0 rgba(255, 255, 255, 0.28);
 }
-.btn:hover:not(:disabled) { background: var(--bg-surface-hover); }
-.btn.primary:hover:not(:disabled) { filter: brightness(1.1); background: linear-gradient(180deg, var(--color-primary-hover), var(--color-primary)); }
-.btn:active:not(:disabled) { transform: translateY(1px); }
-.btn:disabled { opacity: 0.5; cursor: not-allowed; box-shadow: none; }
+.btn.primary:hover:not(:disabled) {
+  background: linear-gradient(135deg, #3b82f6, #4f46e5);
+  box-shadow: var(--glow-primary), inset 0 1px 0 rgba(255, 255, 255, 0.28);
+}
 
 .icon-btn {
   min-width: 28px;
@@ -170,15 +196,16 @@ body {
   color: var(--text-secondary);
   padding: 0.25rem;
   cursor: pointer;
-  transition: background-color var(--dur-1) var(--ease), color var(--dur-1) var(--ease), transform 80ms var(--ease);
+  transition: background-color var(--dur-1) var(--ease), color var(--dur-1) var(--ease),
+    transform 80ms var(--ease);
 }
-.icon-btn:hover:not(:disabled) { background: var(--bg-surface-hover); color: var(--text-primary); }
+.icon-btn:hover:not(:disabled) { background: var(--bg-inset); color: var(--text-primary); }
 .icon-btn:active:not(:disabled) { transform: translateY(1px); }
 .icon-btn:disabled { opacity: 0.42; cursor: not-allowed; }
 
 select, input {
   background: var(--bg-input);
-  border: 1px solid var(--color-border);
+  border: 1px solid var(--color-border-strong);
   color: var(--text-primary);
   border-radius: var(--radius-sm);
   padding: 0.4rem 0.5rem;
@@ -187,7 +214,7 @@ select, input {
 }
 select:focus-visible, input:focus-visible,
 button:focus-visible, [tabindex]:focus-visible {
-  outline: 2px solid var(--color-primary);
+  outline: 2px solid color-mix(in srgb, var(--color-primary) 75%, transparent);
   outline-offset: 2px;
 }
 
@@ -198,7 +225,8 @@ button:focus-visible, [tabindex]:focus-visible {
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   overflow: hidden;
-  background: rgba(7, 11, 18, 0.5);
+  background: var(--bg-inset);
+  box-shadow: inset 0 1px 2px rgba(16, 24, 40, 0.04);
 }
 .power-segment button, .bulk-power button {
   min-height: 32px;
@@ -213,7 +241,7 @@ button:focus-visible, [tabindex]:focus-visible {
   font-family: var(--font-sans);
   padding: 0.35rem 0.55rem;
   font-size: 0.72rem;
-  font-weight: 700;
+  font-weight: 800;
   line-height: 1;
   cursor: pointer;
   transition: background-color var(--dur-1) var(--ease), color var(--dur-1) var(--ease),
@@ -221,12 +249,12 @@ button:focus-visible, [tabindex]:focus-visible {
 }
 .power-segment button:first-child, .bulk-power button:first-of-type { border-left: 0; }
 .power-segment button:hover:not(:disabled), .bulk-power button:hover:not(:disabled) {
-  background: var(--bg-surface-hover);
+  background: rgba(255, 255, 255, 0.75);
   color: var(--text-primary);
 }
 .power-segment button:active:not(:disabled), .bulk-power button:active:not(:disabled) { transform: translateY(1px); }
 .power-segment button:disabled, .bulk-power button:disabled { cursor: not-allowed; opacity: 0.38; }
-.power-segment button.active, .bulk-power button.active { opacity: 1; color: #fff; cursor: default; }
+.power-segment button.active, .bulk-power button.active { opacity: 1; cursor: default; }
 /* Keep the active-state inset ring concentric with the rounded segment
    container: inner radius = outer radius - container border (1px). */
 .power-segment button.active:first-child, .bulk-power button.active:first-of-type {
@@ -238,16 +266,19 @@ button:focus-visible, [tabindex]:focus-visible {
   border-bottom-right-radius: calc(var(--radius-md) - 1px);
 }
 .power-segment button.seg-on.active, .bulk-power button.seg-on.active {
-  background: color-mix(in srgb, var(--color-on) 30%, #05070c);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-on) 50%, transparent);
+  background: color-mix(in srgb, var(--color-on) 16%, white);
+  color: var(--color-on-deep);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-on) 45%, transparent);
 }
 .power-segment button.seg-standby.active, .bulk-power button.seg-standby.active {
-  background: color-mix(in srgb, var(--color-standby) 30%, #05070c);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-standby) 50%, transparent);
+  background: color-mix(in srgb, var(--color-standby) 16%, white);
+  color: var(--color-standby-deep);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-standby) 45%, transparent);
 }
 .power-segment button.seg-sleep.active, .bulk-power button.seg-sleep.active {
-  background: color-mix(in srgb, var(--color-sleep) 30%, #05070c);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-sleep) 50%, transparent);
+  background: color-mix(in srgb, var(--color-sleep) 16%, white);
+  color: var(--color-sleep-deep);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-sleep) 45%, transparent);
 }
 .power-segment button.pending, .bulk-power button.pending {
   opacity: 1;
@@ -261,14 +292,16 @@ button:focus-visible, [tabindex]:focus-visible {
   box-sizing: border-box;
   display: flex;
   align-items: center;
-  gap: 0.25rem;
-  padding: 0.35rem 0.5rem;
+  gap: 0.3rem;
+  padding: 0.35rem 0.55rem;
   color: var(--text-muted);
   font-size: var(--fs-micro);
   font-weight: 800;
   text-transform: uppercase;
   letter-spacing: 0.06em;
+  white-space: nowrap;
 }
+.bulk-label svg { color: var(--color-standby); }
 
 /* Badges & chips */
 .state-badge, .muted-badge, .channel-chip {
@@ -280,40 +313,41 @@ button:focus-visible, [tabindex]:focus-visible {
   border-radius: var(--radius-pill);
   padding: 0.1rem 0.45rem;
   white-space: nowrap;
+  background: var(--bg-surface-solid);
 }
 .state-badge { display: inline-flex; align-items: center; gap: 0.2rem; }
 .state-badge.state-on {
-  color: var(--color-on);
-  border-color: color-mix(in srgb, var(--color-on) 45%, transparent);
-  background: color-mix(in srgb, var(--color-on) 11%, transparent);
+  color: var(--color-on-deep);
+  border-color: color-mix(in srgb, var(--color-on) 42%, transparent);
+  background: color-mix(in srgb, var(--color-on) 12%, white);
 }
 .state-badge.state-standby {
-  color: var(--color-standby);
-  border-color: color-mix(in srgb, var(--color-standby) 45%, transparent);
-  background: color-mix(in srgb, var(--color-standby) 11%, transparent);
+  color: var(--color-standby-deep);
+  border-color: color-mix(in srgb, var(--color-standby) 42%, transparent);
+  background: color-mix(in srgb, var(--color-standby) 12%, white);
 }
 .state-badge.state-sleep {
-  color: var(--color-sleep);
+  color: var(--color-sleep-deep);
   border-color: color-mix(in srgb, var(--color-sleep) 40%, transparent);
-  background: color-mix(in srgb, var(--color-sleep) 10%, transparent);
+  background: color-mix(in srgb, var(--color-sleep) 11%, white);
 }
 .state-badge.state-booting {
-  color: var(--color-booting);
-  border-color: color-mix(in srgb, var(--color-booting) 45%, transparent);
-  background: color-mix(in srgb, var(--color-booting) 11%, transparent);
+  color: var(--color-booting-deep);
+  border-color: color-mix(in srgb, var(--color-booting) 42%, transparent);
+  background: color-mix(in srgb, var(--color-booting) 12%, white);
 }
 .state-badge.state-unknown { color: var(--text-muted); }
 /* Stale data is last-known, not current: show the badge in the same muted
    grayscale as offline instead of a confident state color. */
 .state-badge.stale {
   color: var(--text-muted);
-  border-color: var(--color-border);
+  border-color: var(--color-border-strong);
   background: transparent;
 }
 .state-badge.unverified {
-  color: var(--color-warning);
-  border-color: color-mix(in srgb, var(--color-warning) 50%, transparent);
-  background: color-mix(in srgb, var(--color-warning) 10%, transparent);
+  color: var(--color-warning-deep);
+  border-color: color-mix(in srgb, var(--color-warning) 48%, transparent);
+  background: color-mix(in srgb, var(--color-warning) 10%, white);
 }
 .muted-badge { color: var(--text-muted); }
 
@@ -324,19 +358,22 @@ button:focus-visible, [tabindex]:focus-visible {
   align-items: center;
   padding: 0.55rem 0.65rem;
   border-radius: var(--radius-md);
-  border: 1px solid var(--color-border);
+  border: 1px solid var(--color-border-strong);
+  background: var(--bg-surface-solid);
   margin-bottom: 0.6rem;
   font-size: 0.8rem;
+  font-weight: 600;
   color: var(--text-secondary);
+  box-shadow: var(--shadow-sm);
 }
 .alert.danger {
-  background: color-mix(in srgb, var(--color-danger) 10%, transparent);
-  border-color: color-mix(in srgb, var(--color-danger) 45%, transparent);
+  background: color-mix(in srgb, var(--color-danger) 7%, white);
+  border-color: color-mix(in srgb, var(--color-danger) 38%, transparent);
   color: var(--fb-error);
 }
 .alert.warning {
-  background: color-mix(in srgb, var(--color-warning) 10%, transparent);
-  border-color: color-mix(in srgb, var(--color-warning) 45%, transparent);
+  background: color-mix(in srgb, var(--color-warning) 8%, white);
+  border-color: color-mix(in srgb, var(--color-warning) 40%, transparent);
   color: var(--fb-warning);
 }
 .alert > svg { flex-shrink: 0; }
@@ -350,4 +387,4 @@ button:focus-visible, [tabindex]:focus-visible {
 /* Animations */
 .spin { animation: spin 1s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
-@keyframes pulse { 50% { filter: brightness(1.25); } }
+@keyframes pulse { 50% { filter: brightness(1.18); } }

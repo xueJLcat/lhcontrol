@@ -1,7 +1,7 @@
 <script lang="ts">
   import { cubicOut } from 'svelte/easing';
   import { scale } from 'svelte/transition';
-  import { Eye, X } from 'lucide-svelte';
+  import { Eye, LoaderCircle, X } from 'lucide-svelte';
   import type { StationInfo } from '../types';
   import { channelChangeBlockedReason } from '../station';
   import { focusTrap } from '../actions';
@@ -87,6 +87,9 @@
   {/if}
   {#if blockedReason}<div class="alert warning">{blockedReason}</div>{/if}
   {#if error}<div class="alert" class:danger={!warning} class:warning>{error}</div>{/if}
+  {#if busy}
+    <p class="busy-note"><LoaderCircle class="spin" size={12} /> Writing channel and verifying the readback...</p>
+  {/if}
   <p class="hint">The value is only accepted after the base station reads back the requested channel. Failure will not trigger an automatic rollback.</p>
   <div class="modal-actions">
     <button class="btn" on:click={() => onIdentify(station)} disabled={busy || locked}><Eye size={15} /> Identify this station</button>
@@ -104,27 +107,38 @@
     border: 1px solid var(--color-border);
     border-radius: var(--radius-lg);
     padding: 1rem;
-    box-shadow: var(--shadow-lg);
+    box-shadow: var(--shadow-lg), inset 0 1px 0 rgba(255, 255, 255, 0.9);
   }
   .drawer-head { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; }
   .drawer-head small {
-    color: var(--text-muted);
+    color: var(--color-primary-deep);
     font-size: var(--fs-micro);
     font-weight: 800;
     text-transform: uppercase;
     letter-spacing: 0.08em;
   }
   .drawer-head h2 { margin: 0.1rem 0 0; font-size: var(--fs-h2); font-weight: 800; color: var(--text-primary); overflow-wrap: anywhere; }
-  dl { display: grid; grid-template-columns: 7.5rem minmax(0, 1fr); gap: 0.4rem; margin: 0.8rem 0 0; font-size: var(--fs-sm); }
-  dt { color: var(--text-muted); }
-  dd { margin: 0; color: var(--text-primary); overflow-wrap: anywhere; }
+  dl { display: grid; grid-template-columns: 7.5rem minmax(0, 1fr); gap: 0.42rem; margin: 0.8rem 0 0; font-size: var(--fs-sm); }
+  dt { color: var(--text-muted); font-weight: 600; }
+  dd { margin: 0; color: var(--text-primary); font-weight: 700; overflow-wrap: anywhere; }
 
-  .ch-field { border: 0; padding: 0; margin: 0.9rem 0 0; min-width: 0; }
+  .ch-field { border: 0; padding: 0; margin: 0.95rem 0 0; min-width: 0; }
   .ch-field legend {
     padding: 0;
     margin-bottom: 0.45rem;
     font-size: 0.8rem;
+    font-weight: 800;
     color: var(--text-secondary);
+  }
+  .ch-field legend::before {
+    content: '';
+    display: inline-block;
+    width: 3px;
+    height: 11px;
+    margin-right: 0.35rem;
+    vertical-align: -1px;
+    border-radius: 2px;
+    background: linear-gradient(180deg, var(--color-primary), var(--color-sleep));
   }
   .ch-grid {
     display: grid;
@@ -133,36 +147,44 @@
   }
   .ch-cell {
     position: relative;
-    min-height: 38px;
+    min-height: 40px;
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    border: 1px solid var(--color-border);
+    border: 1px solid var(--color-border-strong);
     border-radius: var(--radius-sm);
     background: var(--bg-input);
     color: var(--text-primary);
     font-size: 0.85rem;
-    font-weight: 700;
+    font-weight: 800;
     cursor: pointer;
+    box-shadow: var(--shadow-sm);
     transition: background-color var(--dur-1) var(--ease), border-color var(--dur-1) var(--ease),
-      color var(--dur-1) var(--ease), box-shadow var(--dur-1) var(--ease), transform 80ms var(--ease);
+      color var(--dur-1) var(--ease), box-shadow var(--dur-1) var(--ease),
+      transform 80ms var(--ease);
   }
   .ch-cell:hover:not(:disabled):not(.occupied) {
     background: var(--bg-surface-hover);
-    border-color: var(--color-border-strong);
+    border-color: color-mix(in srgb, var(--color-primary) 35%, var(--color-border-strong));
+    transform: translateY(-1px);
+    box-shadow: var(--shadow-md);
   }
-  .ch-cell:active:not(:disabled):not(.occupied) { transform: translateY(1px); }
+  .ch-cell:active:not(:disabled):not(.occupied) { transform: translateY(1px); box-shadow: none; }
   .ch-cell.selected {
     border-color: var(--color-primary);
-    background: color-mix(in srgb, var(--color-primary) 20%, var(--bg-input));
-    color: #fff;
-    box-shadow: 0 0 12px color-mix(in srgb, var(--color-primary) 30%, transparent);
+    background: color-mix(in srgb, var(--color-primary) 12%, white);
+    color: var(--color-primary-deep);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-primary) 16%, transparent), var(--shadow-sm);
   }
-  .ch-cell.current:not(.selected) { border-color: var(--color-border-strong); }
+  .ch-cell.current:not(.selected) {
+    border-color: var(--color-border-strong);
+    background: var(--bg-surface-hover);
+  }
   .ch-cell:disabled, .ch-cell.occupied {
     cursor: not-allowed;
-    opacity: 0.35;
+    opacity: 0.4;
     text-decoration: line-through;
+    box-shadow: none;
   }
   .ch-dot {
     position: absolute;
@@ -172,12 +194,23 @@
     height: 5px;
     border-radius: var(--radius-pill);
     background: var(--color-primary);
-    box-shadow: 0 0 5px color-mix(in srgb, var(--color-primary) 70%, transparent);
+    box-shadow: 0 0 5px color-mix(in srgb, var(--color-primary) 75%, transparent);
   }
   .ch-hint { margin: 0.5rem 0 0; }
 
-  .risk { display: flex; gap: 0.5rem; align-items: flex-start; margin-top: 0.8rem; font-size: 0.75rem; line-height: 1.4; color: var(--color-warning); }
-  .risk input { margin-top: 0.15rem; }
+  .busy-note {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    margin: 0.8rem 0 0;
+    font-size: var(--fs-sm);
+    font-weight: 800;
+    color: var(--color-primary-deep);
+  }
+  .busy-note > :global(svg) { flex-shrink: 0; }
+
+  .risk { display: flex; gap: 0.5rem; align-items: flex-start; margin-top: 0.8rem; font-size: 0.75rem; font-weight: 700; line-height: 1.4; color: var(--color-warning-deep); }
+  .risk input { margin-top: 0.15rem; accent-color: var(--color-warning); }
   .hint { font-size: var(--fs-sm); color: var(--text-muted); line-height: 1.45; }
   .modal-actions { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; justify-content: flex-end; margin-top: 0.8rem; }
 </style>

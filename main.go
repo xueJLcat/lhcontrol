@@ -26,19 +26,21 @@ const instanceMutexName = `Local\FlameInTheDark.LighthouseControl`
 
 const maxLogSize = 5 * 1024 * 1024
 
-// maxRotationFailures bounds consecutive rotation attempts before the writer
-// falls back to truncating in place, so a persistently blocked backup file
-// cannot let the diagnostic log grow without limit.
-const maxRotationFailures = 3
-
 type rotatingLogFile struct {
-	mutex            sync.Mutex
-	path             string
-	backupPath       string
-	maxSize          int64
-	file             *os.File
-	size             int64
-	rotationFailures int
+	mutex      sync.Mutex
+	path       string
+	backupPath string
+	maxSize    int64
+	file       *os.File
+	size       int64
+	// rotationDropped counts bytes discarded while the backup could not be
+	// published. Because an oversized log makes every subsequent write retry
+	// the rotation immediately, failures are always consecutive. Budgeting
+	// by dropped bytes (instead of failure count) keeps a short-lived
+	// backup lock from sacrificing the whole log: in-place truncation only
+	// happens after discarding has already lost as much data as the
+	// truncation itself would drop.
+	rotationDropped int64
 }
 
 func openRotatingLogFile(path string, maxSize int64) (*rotatingLogFile, error) {
@@ -55,8 +57,11 @@ func openRotatingLogFile(path string, maxSize int64) (*rotatingLogFile, error) {
 		return nil, err
 	}
 	if err == nil && info.Size() >= maxSize {
-		if err := writer.rotateClosedFile(); err != nil {
-			return nil, err
+		if rotateErr := writer.rotateClosedFile(); rotateErr != nil {
+			// A transient problem with the backup target must not disable
+			// file logging for the whole session. Keep the oversized file;
+			// the writer retries the rotation on the next write.
+			log.Printf("Deferring diagnostic log rotation after startup failure: %v", rotateErr)
 		}
 	}
 	file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
@@ -124,7 +129,17 @@ func (writer *rotatingLogFile) rotateClosedFile() error {
 	if err := os.Rename(tempPath, writer.backupPath); err != nil {
 		return fmt.Errorf("publish diagnostic log backup: %w", err)
 	}
-	return os.Remove(writer.path)
+	if err := os.Remove(writer.path); err != nil && !os.IsNotExist(err) {
+		// The archived tail is already published. Blank the original in
+		// place so the next rotation does not re-archive the same bytes;
+		// report the failure only when neither removal works.
+		if truncated, truncErr := os.OpenFile(writer.path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600); truncErr == nil {
+			_ = truncated.Close()
+			return nil
+		}
+		return fmt.Errorf("remove rotated diagnostic log: %w", err)
+	}
+	return nil
 }
 
 func (writer *rotatingLogFile) rotateLocked() error {
@@ -190,15 +205,17 @@ func (writer *rotatingLogFile) Write(value []byte) (int, error) {
 	}
 	if writer.size > 0 && writer.size+int64(len(value)) > writer.maxSize {
 		if err := writer.rotateLocked(); err != nil {
-			writer.rotationFailures++
-			if writer.rotationFailures < maxRotationFailures {
+			writer.rotationDropped += int64(len(value))
+			if writer.rotationDropped < writer.maxSize {
 				return 0, err
 			}
 			if truncateErr := writer.truncateLocked(); truncateErr != nil {
 				return 0, errors.Join(err, fmt.Errorf("fallback truncation: %w", truncateErr))
 			}
+			writer.rotationDropped = 0
+		} else {
+			writer.rotationDropped = 0
 		}
-		writer.rotationFailures = 0
 	}
 	written, err := writer.file.Write(value)
 	writer.size += int64(written)
@@ -321,7 +338,7 @@ func main() {
 		AssetServer: &assetserver.Options{
 			Assets: assets,
 		},
-		BackgroundColour: &options.RGBA{R: 27, G: 38, B: 54, A: 1},
+		BackgroundColour: &options.RGBA{R: 244, G: 246, B: 252, A: 1},
 		OnStartup:        app.startup,
 		OnShutdown:       app.shutdown,
 		Bind: []interface{}{

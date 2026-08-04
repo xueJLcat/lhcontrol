@@ -30,15 +30,16 @@
     display: flex;
     align-items: center;
     gap: 0.4rem;
-    min-height: 26px;
+    min-height: 28px;
     border-top: 1px solid var(--color-border);
     background: var(--bg-surface);
-    backdrop-filter: blur(12px);
+    backdrop-filter: blur(14px);
     font-size: var(--fs-micro);
+    font-weight: 600;
     color: var(--text-secondary);
-    padding: 0.1rem 0.6rem;
+    padding: 0.15rem 0.6rem;
   }
-  footer > :global(svg) { flex-shrink: 0; }
+  footer > :global(svg) { flex-shrink: 0; color: var(--color-primary); }
   .status-text {
     min-width: 0;
     overflow: hidden;
@@ -50,13 +51,13 @@
     display: inline-flex;
     align-items: center;
     gap: 0.3rem;
-    font-weight: 700;
+    font-weight: 800;
     color: var(--fb-error);
   }
   .config-status {
     margin-left: auto;
     flex-shrink: 0;
-    font-weight: 700;
+    font-weight: 800;
     color: var(--fb-warning);
   }
   .config-status + .api-status { margin-left: 0.4rem; }
@@ -67,10 +68,14 @@
     height: 6px;
     border-radius: var(--radius-pill);
     background: var(--color-danger);
-    box-shadow: 0 0 6px color-mix(in srgb, var(--color-danger) 60%, transparent);
+    box-shadow: 0 0 6px color-mix(in srgb, var(--color-danger) 65%, transparent);
   }
   .api-status.ok .api-dot {
     background: var(--color-on);
-    box-shadow: 0 0 6px color-mix(in srgb, var(--color-on) 60%, transparent);
+    box-shadow: 0 0 6px color-mix(in srgb, var(--color-on) 65%, transparent);
+    animation: glow-breath 2.4s ease-in-out infinite;
+  }
+  @keyframes glow-breath {
+    50% { box-shadow: 0 0 9px color-mix(in srgb, var(--color-on) 85%, transparent); }
   }
 </style>

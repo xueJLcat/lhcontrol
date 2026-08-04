@@ -825,6 +825,8 @@ func TestScanCancellationSkipsPostScanInitialization(t *testing.T) {
 	manager.bluetoothOps.scanForDurationContext = func(ctx context.Context, _ time.Duration) ([]internalbluetooth.DiscoveredStation, error) {
 		close(scanReturned)
 		<-ctx.Done()
+		// A full-duration scan that was cancelled during the stop handshake
+		// reports its results with a nil error; the discovery must survive.
 		return []internalbluetooth.DiscoveredStation{{
 			Name: "LHB-TEST", Address: mustAddress(t, "11:22:33:44:55:66"),
 		}}, nil
@@ -838,12 +840,15 @@ func TestScanCancellationSkipsPostScanInitialization(t *testing.T) {
 		_ = manager.StopScan()
 	}()
 
-	_, err := manager.ScanAndFetchStations()
-	if !errors.Is(err, internalbluetooth.ErrScanCancelled) {
-		t.Fatalf("ScanAndFetchStations() error = %v, want ErrScanCancelled", err)
+	stations, err := manager.ScanAndFetchStations()
+	if err != nil {
+		t.Fatalf("ScanAndFetchStations() error = %v, want the completed scan results", err)
 	}
 	if initialReads.Load() != 0 {
 		t.Fatalf("initial station reads after cancellation = %d, want 0", initialReads.Load())
+	}
+	if len(stations) != 1 || stations[0].Name != "LHB-TEST" || !stations[0].IsPresent {
+		t.Fatalf("completed scan stations = %+v, want the merged discovery", stations)
 	}
 }
 

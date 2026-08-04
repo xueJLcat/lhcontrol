@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy, onMount } from 'svelte';
+  import { onDestroy, onMount, untrack } from 'svelte';
   import { flip } from 'svelte/animate';
   import { cubicOut } from 'svelte/easing';
   import { fade } from 'svelte/transition';
@@ -178,6 +178,17 @@
     return ac - bc || a.name.localeCompare(b.name) || a.address.localeCompare(b.address);
   });
   $: selectedStation = stations.find((station) => station.address === selectedAddress) ?? null;
+  // A station can drop out of the list while its drawer is open (backend
+  // list replacement). Clear the stale selection so the drawer does not
+  // silently reopen if the same address reappears later. Only the station
+  // list drives this guard; the address itself is read untracked to avoid a
+  // reactive cycle with selectedStation.
+  $: {
+    const address = untrack(() => selectedAddress);
+    if (address !== null && !stations.some((station) => station.address === address)) {
+      selectedAddress = null;
+    }
+  }
   $: conflictStations = stations.filter((station) => station.channelConflict);
   $: conflictDetails = (() => {
     const byChannel = new Map<number, string[]>();
@@ -1119,7 +1130,7 @@
 
   <main>
     {#if conflictStations.length}
-      <div class="alert danger" title={conflictDetails}><CircleAlert size={18} /> <span class="alert-text">Channel conflict: {conflictDetails}</span></div>
+      <div class="alert danger" title={conflictDetails} transition:fade={{ duration: 180 }}><CircleAlert size={18} /> <span class="alert-text">Channel conflict: {conflictDetails}</span></div>
     {/if}
     {#if sortedStations.length}
       <ChannelMap stations={sortedStations} channelOf={displayChannel} onSelect={(address) => selectedAddress = address} />
@@ -1213,24 +1224,24 @@
 
 <style>
   .app-container { display: flex; flex-direction: column; height: 100vh; }
-  main { flex: 1; padding: var(--spacing-md); overflow: auto; }
+  main { flex: 1; padding: var(--spacing-md) var(--spacing-md) var(--spacing-lg); overflow: auto; }
   .station-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-    gap: 0.75rem;
+    gap: 0.8rem;
   }
   .scrim {
     position: fixed;
     inset: 0;
-    background: rgba(3, 6, 12, 0.6);
-    backdrop-filter: blur(2px);
+    background: rgba(16, 24, 40, 0.38);
+    backdrop-filter: blur(3px);
     z-index: 10;
   }
   .modal-scrim {
     position: fixed;
     inset: 0;
-    background: rgba(3, 6, 12, 0.6);
-    backdrop-filter: blur(2px);
+    background: rgba(16, 24, 40, 0.42);
+    backdrop-filter: blur(3px);
     z-index: 20;
     display: flex;
     align-items: center;
@@ -1248,23 +1259,24 @@
   }
   .empty-icon {
     position: relative;
-    width: 88px;
-    height: 88px;
+    width: 92px;
+    height: 92px;
     display: flex;
     align-items: center;
     justify-content: center;
     border-radius: var(--radius-pill);
-    border: 1px solid var(--color-border);
-    background: var(--bg-surface);
-    color: var(--color-primary);
-    box-shadow: 0 0 32px rgba(76, 141, 255, 0.15);
+    border: 1px solid color-mix(in srgb, var(--color-primary) 25%, transparent);
+    background:
+      linear-gradient(135deg, color-mix(in srgb, var(--color-primary) 10%, white), color-mix(in srgb, var(--color-sleep) 12%, white));
+    color: var(--color-primary-deep);
+    box-shadow: 0 14px 34px -14px color-mix(in srgb, var(--color-primary) 45%, transparent), var(--shadow-sm);
   }
   .empty-icon::after {
     content: '';
     position: absolute;
     inset: -1px;
     border-radius: var(--radius-pill);
-    border: 1px solid color-mix(in srgb, var(--color-primary) 55%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-primary) 40%, transparent);
     animation: ping-ring 2.2s var(--ease) infinite;
   }
   @keyframes ping-ring {
@@ -1272,6 +1284,6 @@
     70% { transform: scale(1.35); opacity: 0; }
     100% { transform: scale(1.35); opacity: 0; }
   }
-  .empty p { margin: 0; font-size: 0.85rem; }
-  .empty .scan-sub { font-size: var(--fs-sm); color: var(--text-muted); }
+  .empty p { margin: 0; font-size: 0.85rem; font-weight: 700; }
+  .empty .scan-sub { font-size: var(--fs-sm); font-weight: 600; color: var(--text-muted); }
 </style>

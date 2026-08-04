@@ -148,15 +148,20 @@
     z-index: 11;
     right: 0; top: 0; bottom: 0;
     width: min(390px, 92vw);
-    background: var(--bg-surface-solid);
+    /* Colorful signature edge pinned to the box so it does not scroll
+       away with the drawer content. */
+    background:
+      linear-gradient(180deg, var(--color-primary), var(--color-on), var(--color-standby), var(--color-sleep))
+        0 0 / 3px 100% no-repeat,
+      var(--bg-surface-solid);
     border-left: 1px solid var(--color-border);
-    padding: 1rem;
+    padding: 1rem 1rem 1.25rem;
     overflow: auto;
     box-shadow: var(--shadow-lg);
   }
   .drawer-head { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; }
   .drawer-head small {
-    color: var(--text-muted);
+    color: var(--color-primary-deep);
     font-size: var(--fs-micro);
     font-weight: 800;
     text-transform: uppercase;
@@ -164,27 +169,37 @@
   }
   .drawer-head h2 { margin: 0.1rem 0 0; font-size: var(--fs-h2); font-weight: 800; color: var(--text-primary); overflow-wrap: anywhere; }
   .drawer-title { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
-  section { border-top: 1px solid var(--color-border); padding-top: 0.8rem; margin-top: 0.8rem; }
+  section { border-top: 1px solid var(--color-border); padding-top: 0.85rem; margin-top: 0.85rem; }
   h4 {
     margin: 0 0 0.55rem;
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
     font-size: var(--fs-micro);
     font-weight: 800;
     text-transform: uppercase;
     letter-spacing: 0.08em;
     color: var(--text-muted);
   }
-  dl { display: grid; grid-template-columns: 7.5rem minmax(0, 1fr); gap: 0.4rem; margin: 0.5rem 0; font-size: var(--fs-sm); }
-  dt { color: var(--text-muted); }
-  dd { margin: 0; color: var(--text-primary); overflow-wrap: anywhere; }
-  .state-text { font-weight: 700; text-transform: capitalize; }
-  .state-text-on { color: var(--color-on); }
-  .state-text-standby { color: var(--color-standby); }
-  .state-text-sleep { color: var(--color-sleep); }
-  .state-text-booting { color: var(--color-booting); }
+  h4::before {
+    content: '';
+    width: 3px;
+    height: 11px;
+    border-radius: 2px;
+    background: linear-gradient(180deg, var(--color-primary), var(--color-sleep));
+  }
+  dl { display: grid; grid-template-columns: 7.5rem minmax(0, 1fr); gap: 0.42rem; margin: 0.5rem 0; font-size: var(--fs-sm); }
+  dt { color: var(--text-muted); font-weight: 600; }
+  dd { margin: 0; color: var(--text-primary); font-weight: 700; overflow-wrap: anywhere; }
+  .state-text { font-weight: 800; text-transform: capitalize; }
+  .state-text-on { color: var(--color-on-deep); }
+  .state-text-standby { color: var(--color-standby-deep); }
+  .state-text-sleep { color: var(--color-sleep-deep); }
+  .state-text-booting { color: var(--color-booting-deep); }
   .drawer-actions {
     display: flex;
     align-items: center;
-    gap: 0.25rem;
+    gap: 0.3rem;
     flex-wrap: nowrap;
     margin-top: 0.8rem;
   }
@@ -193,31 +208,32 @@
     min-width: 0;
     min-height: 30px;
     gap: 0.25rem;
-    padding: 0.35rem 0.4rem;
+    padding: 0.35rem 0.45rem;
     font-size: var(--fs-micro);
     white-space: nowrap;
   }
   .drawer-actions .btn :global(svg) { flex: 0 0 auto; }
   .hint { font-size: var(--fs-sm); color: var(--text-muted); line-height: 1.45; }
-  .warning-text { color: var(--color-warning); }
+  .warning-text { color: var(--color-warning-deep); font-weight: 700; }
   .capability-groups { display: flex; flex-direction: column; gap: 0.55rem; }
   .capability-group { display: flex; align-items: baseline; gap: 0.5rem; }
-  .group-label { min-width: 3.6rem; font-size: var(--fs-micro); font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.06em; }
+  .group-label { min-width: 3.6rem; font-size: var(--fs-micro); font-weight: 800; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.06em; }
   .capabilities { display: flex; flex-wrap: wrap; gap: 0.35rem; }
   .capabilities span {
     display: inline-flex;
     align-items: center;
     gap: 0.2rem;
     font-size: var(--fs-micro);
-    font-weight: 600;
+    font-weight: 700;
     padding: 0.2rem 0.45rem;
     border: 1px solid var(--color-border);
     border-radius: var(--radius-pill);
+    background: var(--bg-input);
     color: var(--text-muted);
   }
   .capabilities span.supported {
     color: var(--fb-success);
-    border-color: color-mix(in srgb, var(--color-on) 45%, transparent);
-    background: color-mix(in srgb, var(--color-on) 8%, transparent);
+    border-color: color-mix(in srgb, var(--color-on) 42%, transparent);
+    background: color-mix(in srgb, var(--color-on) 10%, white);
   }
 </style>

@@ -251,6 +251,12 @@ type scanSession struct {
 	stopStarted bool
 	stopDone    chan struct{}
 	stopErr     error
+	// durationStopIssued records that the duration timer requested the stop
+	// before any cancellation was recorded. Cancellation overwrites reason
+	// afterwards, so this latch is what lets a scan that already ran its
+	// full duration keep its results when StopScan lands during the
+	// stop-handshake window.
+	durationStopIssued bool
 }
 
 func newScanSession() *scanSession {
@@ -277,6 +283,13 @@ func (s *scanSession) requestStopAsync(reason scanStopReason) {
 	s.mutex.Lock()
 	currentReason := scanStopReason(s.reason.Load())
 	if currentReason == scanStopNone || reason == scanStopCancelled {
+		// The latch is set in the same critical section that stores the
+		// duration reason, under the mutex that cancellation also takes, so
+		// a racing cancel either lands first (no latch) or after (latch
+		// survives the reason overwrite).
+		if reason == scanStopDuration && currentReason == scanStopNone {
+			s.durationStopIssued = true
+		}
 		s.reason.Store(uint32(reason))
 	}
 	shouldStop := s.started && !s.finished
@@ -334,6 +347,12 @@ func (s *scanSession) waitForIssuedStop() {
 
 func (s *scanSession) stopReason() scanStopReason {
 	return scanStopReason(s.reason.Load())
+}
+
+func (s *scanSession) durationStopIssuedFlag() bool {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	return s.durationStopIssued
 }
 
 // IsConnected returns the current connection status safely.
@@ -886,6 +905,13 @@ func ScanForDurationContext(ctx context.Context, duration time.Duration) ([]Disc
 		if err := scanCompletionError(scanErr); err != nil {
 			return nil, err
 		}
+	}
+	// A scan whose duration elapsed and whose stop completed cleanly keeps
+	// its discovery results even when a cancellation lands in the
+	// stop-handshake window: the scan work is already done, so reporting
+	// it as cancelled would discard valid stations for no reason.
+	if session.durationStopIssuedFlag() && session.stopErr == nil {
+		return results, nil
 	}
 	// A watcher that failed to stop or timed out after a cancellation
 	// request must be reported as a failure so callers (HTTP, Wails,
@@ -1728,7 +1754,9 @@ func writePowerValueInternal(station *BaseStation, value byte) error {
 
 // confirmPowerStateInternalContext polls briefly because Lighthouse state
 // transitions are not always visible immediately after a successful GATT write.
-// Assumes caller holds station.mutex.
+// Assumes caller holds station.mutex. Inter-attempt sleeps release the lock so
+// snapshots and other short readers are not queued behind the whole polling
+// window (up to ~10s for On); the lock is always held again on return.
 func confirmPowerStateInternalContext(ctx context.Context, station *BaseStation, expectedState PowerState) error {
 	attempts := 15
 	if expectedState == PowerStateOn {
@@ -1744,7 +1772,10 @@ func confirmPowerStateInternalContext(ctx context.Context, station *BaseStation,
 			return contextErr
 		}
 		if attempt > 0 {
-			if err := sleepContext(ctx, 200*time.Millisecond); err != nil {
+			station.mutex.Unlock()
+			err := sleepContext(ctx, 200*time.Millisecond)
+			station.mutex.Lock()
+			if err != nil {
 				if lastErr != nil {
 					return errors.Join(lastErr, err)
 				}
@@ -1762,7 +1793,10 @@ func confirmPowerStateInternalContext(ctx context.Context, station *BaseStation,
 			consecutiveReadErrors++
 			if consecutiveReadErrors >= 2 && attempt < attempts-1 {
 				_ = disconnectInternal(station)
-				if sleepErr := sleepContext(ctx, 250*time.Millisecond); sleepErr != nil {
+				station.mutex.Unlock()
+				sleepErr := sleepContext(ctx, 250*time.Millisecond)
+				station.mutex.Lock()
+				if sleepErr != nil {
 					return errors.Join(lastErr, sleepErr)
 				}
 				if reconnectErr := connectAndDiscoverInternalContext(ctx, station); reconnectErr != nil {
@@ -1893,7 +1927,13 @@ func SetPowerStateContext(ctx context.Context, station *BaseStation, target Powe
 				return PowerControlResult{}, fmt.Errorf("failed to connect/discover before power command: %w", err)
 			}
 			_ = disconnectInternal(station)
-			if waitErr := sleepContext(ctx, 500*time.Millisecond); waitErr != nil {
+			// Retry backoff runs outside the station lock so short readers
+			// are not queued behind the wait; the lock is held again before
+			// the next attempt touches station state.
+			station.mutex.Unlock()
+			waitErr := sleepContext(ctx, 500*time.Millisecond)
+			station.mutex.Lock()
+			if waitErr != nil {
 				return PowerControlResult{}, waitErr
 			}
 			continue
@@ -1946,7 +1986,10 @@ func SetPowerStateContext(ctx context.Context, station *BaseStation, target Powe
 		log.Printf("Bluetooth: Write %s failed for %s: %v. Retrying...", target, station.Name, err)
 		_ = disconnectInternal(station)
 		if i < maxRetries-1 {
-			if waitErr := sleepContext(ctx, 500*time.Millisecond); waitErr != nil {
+			station.mutex.Unlock()
+			waitErr := sleepContext(ctx, 500*time.Millisecond)
+			station.mutex.Lock()
+			if waitErr != nil {
 				return PowerControlResult{}, waitErr
 			}
 		}
@@ -2055,7 +2098,10 @@ func IdentifyContext(ctx context.Context, station *BaseStation) error {
 		}
 		if attempt == 0 {
 			_ = disconnectInternal(station)
-			if err := sleepContext(ctx, 250*time.Millisecond); err != nil {
+			station.mutex.Unlock()
+			err := sleepContext(ctx, 250*time.Millisecond)
+			station.mutex.Lock()
+			if err != nil {
 				return err
 			}
 		}
@@ -2153,7 +2199,13 @@ func SetChannelContext(ctx context.Context, station *BaseStation, channel int) (
 	var confirmationErr error
 	consecutiveReadErrors := 0
 	for attempt := 0; attempt < 5; attempt++ {
-		if sleepErr := sleepContext(ctx, 250*time.Millisecond); sleepErr != nil {
+		// Readback waits run outside the station lock so snapshots are not
+		// queued behind the confirmation window; the lock is held again
+		// before station state is read or written.
+		station.mutex.Unlock()
+		sleepErr := sleepContext(ctx, 250*time.Millisecond)
+		station.mutex.Lock()
+		if sleepErr != nil {
 			confirmationErr = sleepErr
 			break
 		}
@@ -2168,7 +2220,10 @@ func SetChannelContext(ctx context.Context, station *BaseStation, channel int) (
 			consecutiveReadErrors++
 			if consecutiveReadErrors >= 2 && attempt < 4 {
 				_ = disconnectInternal(station)
-				if sleepErr := sleepContext(ctx, 250*time.Millisecond); sleepErr != nil {
+				station.mutex.Unlock()
+				sleepErr := sleepContext(ctx, 250*time.Millisecond)
+				station.mutex.Lock()
+				if sleepErr != nil {
 					confirmationErr = errors.Join(confirmationErr, sleepErr)
 					break
 				}

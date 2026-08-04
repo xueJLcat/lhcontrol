@@ -1412,9 +1412,9 @@ func (m *Manager) scanAndFetchStations(ctx context.Context) ([]StationInfo, int,
 		m.observeBluetoothError(err)
 		return m.GetStationInfo(), 0, fmt.Errorf("bluetooth scan failed: %w", err)
 	}
-	if err := scanContextError(ctx); err != nil {
-		return m.GetStationInfo(), 0, err
-	}
+	// The BLE scan completed its full duration, so the discovery results
+	// are merged even if the context was cancelled during the stop
+	// handshake; only the optional initial reads are skipped below.
 
 	stationsToFetch := make([]*bluetooth.BaseStation, 0)
 	scanTime := time.Now()
@@ -1458,7 +1458,7 @@ func (m *Manager) scanAndFetchStations(ctx context.Context) ([]StationInfo, int,
 	}
 	m.stationsMutex.Unlock()
 
-	if len(stationsToFetch) > 0 {
+	if len(stationsToFetch) > 0 && scanContextError(ctx) == nil {
 		phaseContext, cancelPhase := context.WithTimeout(ctx, m.initialReadPhaseTimeout)
 		defer cancelPhase()
 		var wg sync.WaitGroup

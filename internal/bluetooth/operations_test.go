@@ -50,6 +50,7 @@ type fakeBLEAdapter struct {
 	once           sync.Once
 	stopCalls      atomic.Int32
 	startDelay     chan struct{}
+	stopHold       chan struct{}
 	connectHandler func(tinybluetooth.Device, bool)
 }
 
@@ -100,6 +101,9 @@ func (a *fakeBLEAdapter) StopScan() error {
 	a.stopCalls.Add(1)
 	if a.panicStop {
 		panic("stop scan boundary")
+	}
+	if a.stopHold != nil {
+		<-a.stopHold
 	}
 	a.once.Do(func() { close(a.stopped) })
 	return nil
@@ -1477,11 +1481,53 @@ func TestPowerConfirmationKeepsPollingDuringGenuineBoot(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	if err := confirmPowerStateInternalContext(ctx, station, PowerStateOn); err == nil {
+	station.mutex.Lock()
+	err := confirmPowerStateInternalContext(ctx, station, PowerStateOn)
+	station.mutex.Unlock()
+	if err == nil {
 		t.Fatal("confirmation unexpectedly accepted a booting station as On")
 	}
 	if station.PowerState != PowerStateBooting {
 		t.Fatalf("station state = %v, want Booting while raw 0x01 is transitional", station.PowerState)
+	}
+}
+
+func TestSnapshotStaysResponsiveDuringPowerConfirmationPolling(t *testing.T) {
+	power := &fakeCharacteristic{value: []byte{0x00}}
+	station := connectedFakeStation(power, nil, nil, Capabilities{PowerRead: true, PowerWrite: true})
+	station.PowerState = PowerStateSleep
+
+	ctx, cancel := context.WithTimeout(context.Background(), 700*time.Millisecond)
+	defer cancel()
+	setDone := make(chan error, 1)
+	go func() {
+		_, err := SetPowerStateContext(ctx, station, PowerStateOn)
+		setDone <- err
+	}()
+
+	// While the confirmation loop polls (200ms sleeps between attempts),
+	// snapshots must not queue behind the station lock. With the sleeps
+	// moved outside the lock, contention is limited to single short
+	// read/write steps.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		start := time.Now()
+		_ = station.Snapshot()
+		if elapsed := time.Since(start); elapsed > 150*time.Millisecond {
+			t.Fatalf("Snapshot() blocked for %v during confirmation polling", elapsed)
+		}
+		select {
+		case err := <-setDone:
+			if err == nil {
+				t.Fatal("SetPowerStateContext() unexpectedly confirmed a sleeping station as On")
+			}
+			return
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("SetPowerStateContext did not return")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
@@ -1769,6 +1815,67 @@ func TestScanForDurationContextStopsActiveScan(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("context cancellation did not stop active scan")
+	}
+}
+
+func TestScanForDurationContextKeepsResultsWhenCancelledDuringStopHandshake(t *testing.T) {
+	originalAdapter := adapter
+	fake := newFakeBLEAdapter()
+	fake.stopHold = make(chan struct{})
+	adapter = fake
+	t.Cleanup(func() { adapter = originalAdapter })
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+	mac, err := tinybluetooth.ParseMAC("11:22:33:44:55:68")
+	if err != nil {
+		t.Fatalf("ParseMAC() error = %v", err)
+	}
+	fake.results = []tinybluetooth.ScanResult{{
+		Address: tinybluetooth.Address{MACAddress: tinybluetooth.MACAddress{MAC: mac}},
+		AdvertisementPayload: &fakeAdvertisementPayload{
+			name:     "LHB-LATE",
+			services: []tinybluetooth.UUID{powerControlServiceUUID},
+		},
+	}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	type scanOutcome struct {
+		results []DiscoveredStation
+		err     error
+	}
+	outcome := make(chan scanOutcome, 1)
+	go func() {
+		results, scanErr := ScanForDurationContext(ctx, 10*time.Millisecond)
+		outcome <- scanOutcome{results, scanErr}
+	}()
+
+	// Wait until the duration timer has issued the stop and the fake
+	// StopScan is inside its hold window.
+	deadline := time.Now().Add(2 * time.Second)
+	for fake.stopCalls.Load() == 0 {
+		if time.Now().After(deadline) {
+			close(fake.stopHold)
+			t.Fatal("duration stop was never issued")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	// A cancellation landing in the stop-handshake window must not
+	// discard the stations discovered during the completed duration.
+	cancel()
+	close(fake.stopHold)
+
+	select {
+	case got := <-outcome:
+		if got.err != nil {
+			t.Fatalf("ScanForDurationContext() error = %v, want completed results", got.err)
+		}
+		if len(got.results) != 1 || got.results[0].Name != "LHB-LATE" {
+			t.Fatalf("scan results = %+v, want the discovered station", got.results)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("scan did not return after the stop handshake")
 	}
 }
 
