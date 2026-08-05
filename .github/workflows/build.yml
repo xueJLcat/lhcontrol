@@ -18,6 +18,9 @@ jobs:
     name: Build Windows App & Installer
     runs-on: windows-latest
     if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    env:
+      SIGNING_CERT_BASE64: ${{ secrets.SIGNING_CERT_BASE64 }}
+      SIGNING_CERT_PASSWORD: ${{ secrets.SIGNING_CERT_PASSWORD }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -80,6 +83,40 @@ jobs:
         run: |
           makensis /VERSION
           wails build -platform windows/amd64 -clean -nsis -trimpath -ldflags "-s -w"
+
+      - name: Sign Release Artifacts
+        if: steps.check_tag.outputs.skipped == 'false' && env.SIGNING_CERT_BASE64 != ''
+        shell: powershell
+        run: |
+          $signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" -ErrorAction SilentlyContinue |
+            Sort-Object FullName | Select-Object -Last 1 -ExpandProperty FullName
+          if (-not $signtool) {
+            throw "signtool.exe was not found on the runner"
+          }
+          $cert = Join-Path $env:RUNNER_TEMP "lhcontrol-signing-cert.pfx"
+          [IO.File]::WriteAllBytes($cert, [Convert]::FromBase64String($env:SIGNING_CERT_BASE64))
+          try {
+            & $signtool sign /v /fd SHA256 /f $cert /p $env:SIGNING_CERT_PASSWORD /tr http://timestamp.digicert.com /td SHA256 "build\bin\lhcontrol.exe"
+            if ($LASTEXITCODE -ne 0) { throw "Failed to sign lhcontrol.exe" }
+
+            Push-Location "build\windows\installer"
+            try {
+              makensis "-DARG_WAILS_AMD64_BINARY=..\..\bin\lhcontrol.exe" project.nsi
+              if ($LASTEXITCODE -ne 0) { throw "makensis failed to repackage the signed installer" }
+            } finally {
+              Pop-Location
+            }
+
+            & $signtool sign /v /fd SHA256 /f $cert /p $env:SIGNING_CERT_PASSWORD /tr http://timestamp.digicert.com /td SHA256 "build\bin\lhcontrol-amd64-installer.exe"
+            if ($LASTEXITCODE -ne 0) { throw "Failed to sign the installer" }
+
+            & $signtool verify /pa /v "build\bin\lhcontrol.exe"
+            if ($LASTEXITCODE -ne 0) { throw "lhcontrol.exe failed signature verification" }
+            & $signtool verify /pa /v "build\bin\lhcontrol-amd64-installer.exe"
+            if ($LASTEXITCODE -ne 0) { throw "The installer failed signature verification" }
+          } finally {
+            Remove-Item $cert -ErrorAction SilentlyContinue
+          }
 
       - name: Verify and Hash Build Output
         if: steps.check_tag.outputs.skipped == 'false'

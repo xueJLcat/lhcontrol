@@ -72,6 +72,7 @@
   let externalScanning = false;
   let externalScanID: number | null = null;
   let latestExternalScanID = 0;
+  let pendingExternalScanTerminal: ExternalScanEvent | null = null;
   let externalScanRecoveryEpoch: number | null = null;
   let externalScanRecoveryStatusEpoch: number | null = null;
   let stoppingScan = false;
@@ -114,6 +115,7 @@
     prepareForScan(false);
     externalScanRecoveryEpoch = null;
     externalScanRecoveryStatusEpoch = null;
+    pendingExternalScanTerminal = null;
     externalScanID = id;
     externalScanning = true;
     stoppingScan = false;
@@ -135,6 +137,67 @@
     // An adopted scan has no ID until its terminal event. Claim it before any
     // further awaits so concurrent terminal notifications cannot both commit.
     return claimExternalScanTerminal(event);
+  }
+
+  // A terminal event for a scan the UI never tracked must not be dropped: if a
+  // later IsScanning() result still reports that scan as running, adopting it
+  // would create a stale "scanning" state. Remember the newest untracked
+  // terminal so adoption can recover the finished outcome instead, and so its
+  // id can never be adopted through a delayed start event.
+  function rememberUntrackedExternalScanTerminal(event: ExternalScanEvent) {
+    if (externalScanning || externalScanID !== null) return;
+    if (event.id <= latestExternalScanID) return;
+    pendingExternalScanTerminal = event;
+    latestExternalScanID = event.id;
+  }
+
+  // Applies the terminal outcome of a scan that ended while untracked. The
+  // commit is gated like the terminal event handlers, and an incomplete status
+  // read leaves the recovery epochs pending so the periodic check retries.
+  async function recoverUntrackedExternalScan(): Promise<void> {
+    const statusOperation = beginStatusOperation();
+    const operationEpoch = beginScanEpoch();
+    const revision = listRevisions.next();
+    prepareForScan();
+    pendingExternalScanTerminal = null;
+    externalScanRecoveryEpoch = operationEpoch;
+    externalScanRecoveryStatusEpoch = statusOperation;
+    stoppingScan = false;
+    maybeEndScanTimer();
+    const capturedStationRevisions = new Map(stationRevisions);
+    const updated = await GetCurrentStationInfo().catch(() => null);
+    if (!canCommitOperation(operationEpoch) || !listRevisions.isCurrent(revision)) return;
+    if (updated) {
+      applyStationList(updated, revision, capturedStationRevisions);
+    }
+    const scanStatus = await GetScanStatus().catch(() => null);
+    if (disposed || !listRevisions.isCurrent(revision)) return;
+    if (updated && scanStatus) {
+      externalScanRecoveryEpoch = null;
+      externalScanRecoveryStatusEpoch = null;
+    }
+    if (!canCommitStatus(statusOperation)) return;
+    const found = scanStatus?.found ?? stations.filter((station) => station.seenInLatestScan).length;
+    statusMessage = formatTerminalScanResult({
+      state: scanStatus?.state ?? 'completed',
+      found,
+      known: stations.length,
+      error: scanStatus?.error,
+      warnings: scanStatus?.warnings,
+      external: true
+    });
+  }
+
+  async function adoptUnknownExternalScan(): Promise<void> {
+    // The scan observed by IsScanning may have terminated before this
+    // continuation ran; its terminal event then arrived while no listener
+    // tracked the scan. Recover that finished outcome instead of entering a
+    // stale scanning state.
+    if (pendingExternalScanTerminal) {
+      await recoverUntrackedExternalScan();
+      return;
+    }
+    beginExternalScan(null);
   }
 
   function beginStatusOperation(): number {
@@ -466,7 +529,10 @@
       const event = value as ExternalScanEvent;
       if (externalScanID === null
         ? !(await claimUnknownExternalScanTerminal(event))
-        : !claimExternalScanTerminal(event)) return;
+        : !claimExternalScanTerminal(event)) {
+        rememberUntrackedExternalScanTerminal(event);
+        return;
+      }
       const statusOperation = beginStatusOperation();
       const operationEpoch = beginScanEpoch();
       const revision = listRevisions.next();
@@ -493,7 +559,10 @@
       const event = value as ExternalScanEvent;
       if (externalScanID === null
         ? !(await claimUnknownExternalScanTerminal(event))
-        : !claimExternalScanTerminal(event)) return;
+        : !claimExternalScanTerminal(event)) {
+        rememberUntrackedExternalScanTerminal(event);
+        return;
+      }
       const statusOperation = beginStatusOperation();
       const message = event.error || 'unknown error';
       const operationEpoch = beginScanEpoch();
@@ -526,7 +595,10 @@
       const event = value as ExternalScanEvent;
       if (externalScanID === null
         ? !(await claimUnknownExternalScanTerminal(event))
-        : !claimExternalScanTerminal(event)) return;
+        : !claimExternalScanTerminal(event)) {
+        rememberUntrackedExternalScanTerminal(event);
+        return;
+      }
       const statusOperation = beginStatusOperation();
       const operationEpoch = beginScanEpoch();
       const revision = listRevisions.next();
@@ -553,7 +625,7 @@
     // pending. Do not let its older result overwrite the newer event state.
     if (disposed || startupScanEpoch !== scanEpoch) return;
     if (startupScanning) {
-      beginExternalScan(null);
+      await adoptUnknownExternalScan();
     } else {
       await handleScanClick();
     }
@@ -608,8 +680,11 @@
       const scanning = await IsScanning();
       if (disposed || !listRevisions.isCurrent(revision)) return;
       const wasExternalScanning = externalScanning;
-      if (scanning && !isLoading && !externalScanning) beginExternalScan(null);
-      else externalScanning = scanning && !isLoading;
+      if (scanning && !isLoading && !externalScanning) {
+        await adoptUnknownExternalScan();
+        return;
+      }
+      externalScanning = scanning && !isLoading;
       if (!scanning) {
         stoppingScan = false;
         if (wasExternalScanning) {
@@ -637,6 +712,11 @@
             warnings: scanStatus?.warnings,
             external: true
           });
+        } else if (pendingExternalScanTerminal) {
+          // A scan ended while no listener tracked it. Apply its terminal
+          // outcome now instead of waiting for the next external scan event.
+          await recoverUntrackedExternalScan();
+          return;
         } else if (!applyStationList(await CheckAllStationStatuses(), revision, capturedStationRevisions)) return;
         maybeEndScanTimer();
       } else {
@@ -673,6 +753,7 @@
     // The old stop's finally never clears stoppingScan while a scan runs,
     // so this reset cannot be clobbered.
     stoppingScan = false;
+    pendingExternalScanTerminal = null;
     globalOperation = 'scanning';
     externalScanID = null;
     externalScanRecoveryEpoch = null;

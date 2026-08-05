@@ -1235,6 +1235,15 @@ func TestDecodePowerStateWithHistory(t *testing.T) {
 	if got := decodePowerStateWithHistory(0x01, PowerStateBooting, now.Add(-bootingFallbackAfter), now); got != PowerStateOn {
 		t.Fatalf("persistent 0x01 = %v, want On fallback", got)
 	}
+	if got := decodePowerStateWithHistory(0x08, PowerStateOn, time.Time{}, now); got != PowerStateOn {
+		t.Fatalf("0x08 after On = %v, want On", got)
+	}
+	if got := decodePowerStateWithHistory(0x08, PowerStateSleep, time.Time{}, now); got != PowerStateBooting {
+		t.Fatalf("fresh 0x08 after Sleep = %v, want Booting", got)
+	}
+	if got := decodePowerStateWithHistory(0x08, PowerStateBooting, now.Add(-bootingFallbackAfter), now); got != PowerStateOn {
+		t.Fatalf("persistent 0x08 = %v, want On fallback", got)
+	}
 }
 
 func TestReleaseStationForScanPreservesLastKnownState(t *testing.T) {
@@ -1462,6 +1471,7 @@ func TestPowerStateVerifiedFollowsHistoryAwareDecode(t *testing.T) {
 		{PowerStateOn, 0x09, true},
 		{PowerStateOn, 0x0B, true},
 		{PowerStateOn, 0x01, true},
+		{PowerStateOn, 0x08, true},
 		{PowerStateOn, 0x00, false},
 		{PowerStateSleep, 0x00, true},
 		{PowerStateSleep, 0x01, false},
@@ -1487,6 +1497,20 @@ func TestPowerConfirmationAcceptsSteadyBootRawWhenAlreadyOn(t *testing.T) {
 	}
 	if station.PowerState != PowerStateOn || station.RawPowerState != 0x01 {
 		t.Fatalf("station state = %v raw %#x, want On with steady raw 0x01", station.PowerState, station.RawPowerState)
+	}
+}
+
+func TestPowerConfirmationAcceptsSteady0x08RawWhenAlreadyOn(t *testing.T) {
+	power := &fakeCharacteristic{value: []byte{0x08}, ignoreWrite: true}
+	station := connectedFakeStation(power, nil, nil, Capabilities{PowerRead: true, PowerWrite: true})
+	station.PowerState = PowerStateOn
+
+	result, err := SetPowerState(station, PowerStateOn)
+	if err != nil || !result.Confirmed {
+		t.Fatalf("SetPowerState() result=%+v error=%v, want confirmed steady 0x08 station", result, err)
+	}
+	if station.PowerState != PowerStateOn || station.RawPowerState != 0x08 {
+		t.Fatalf("station state = %v raw %#x, want On with steady raw 0x08", station.PowerState, station.RawPowerState)
 	}
 }
 

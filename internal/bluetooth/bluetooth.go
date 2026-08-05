@@ -1035,12 +1035,13 @@ func readPowerStateInternalContext(ctx context.Context, station *BaseStation) er
 
 const bootingFallbackAfter = 8 * time.Second
 
-// Some Lighthouse 2.0 firmware reports 0x01 both while starting and
-// occasionally while already awake. Keep the transitional interpretation
-// initially, but do not let a station remain permanently stuck in Booting.
+// Some Lighthouse 2.0 firmware reports booting raw values (such as 0x01)
+// both while starting and occasionally while already awake. Keep the
+// transitional interpretation initially, but do not let a station remain
+// permanently stuck in Booting.
 func decodePowerStateWithHistory(raw byte, previous PowerState, bootingSince, now time.Time) PowerState {
 	state := DecodePowerState(raw)
-	if raw != 0x01 {
+	if state != PowerStateBooting {
 		return state
 	}
 	if previous == PowerStateOn {
@@ -1840,14 +1841,15 @@ func IsPowerStateConfirmed(expectedState PowerState, raw int) bool {
 
 // IsPowerStateVerified reports whether a decoded state is backed by a raw
 // value that decodePowerStateWithHistory accepts as that stable state. Some
-// Lighthouse 2.0 firmware keeps reporting 0x01 while already awake, and the
-// decode history falls back to On for it, so verification follows the
-// displayed state instead of raw values such firmware never produces.
+// Lighthouse 2.0 firmware keeps reporting booting raw values (such as 0x01)
+// while already awake, and the decode history falls back to On for them, so
+// verification follows the displayed state instead of raw values such
+// firmware never produces.
 func IsPowerStateVerified(decoded PowerState, raw int) bool {
 	if IsPowerStateConfirmed(decoded, raw) {
 		return true
 	}
-	return decoded == PowerStateOn && raw == 0x01
+	return decoded == PowerStateOn && (raw == 0x01 || raw == 0x08)
 }
 
 type PowerControlResult struct {

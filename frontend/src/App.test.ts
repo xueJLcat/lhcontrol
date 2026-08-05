@@ -284,6 +284,89 @@ describe('App asynchronous operations', () => {
     expect(screen.getByRole('button', { name: 'Stop' })).toBeEnabled();
   });
 
+  it('recovers the finished external scan instead of adopting it at startup', async () => {
+    let resolveStartupScan!: (scanning: boolean) => void;
+    api.IsScanning.mockReturnValueOnce(new Promise((resolve) => {
+      resolveStartupScan = resolve;
+    }));
+    api.GetCurrentStationInfo.mockResolvedValue([createStation({ name: 'LHB-AFTER-RACE' })]);
+    api.GetScanStatus.mockResolvedValue({ state: 'completed', found: 1, warnings: [] });
+    render(App);
+
+    runtime.handlers.get('external-scan-completed')?.(externalScanEvent(3, {
+      stations: [createStation()]
+    }));
+    await Promise.resolve();
+    resolveStartupScan(true);
+
+    expect(await screen.findByText('LHB-AFTER-RACE')).toBeInTheDocument();
+    expect(screen.queryByText('Preparing external scan...')).not.toBeInTheDocument();
+    expect(screen.queryByText('External scan in progress...')).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('External scan completed'));
+    expect(screen.getByRole('button', { name: 'Scan' })).toBeEnabled();
+  });
+
+  it('recovers instead of adopting when an external scan ends before a poll adopts it', async () => {
+    vi.useFakeTimers();
+    api.IsScanning.mockResolvedValue(false);
+    api.GetCurrentStationInfo.mockResolvedValue([createStation({ name: 'LHB-POLL-RECOVERED' })]);
+    api.GetScanStatus.mockResolvedValue({ state: 'cancelled', found: 0, warnings: [] });
+    render(App);
+    await screen.findByText('LHB-TEST');
+
+    runtime.handlers.get('external-scan-completed')?.(externalScanEvent(5, { stations: [createStation()] }));
+    api.IsScanning.mockResolvedValueOnce(true);
+    await vi.advanceTimersByTimeAsync(15_000);
+
+    expect(await screen.findByText('LHB-POLL-RECOVERED')).toBeInTheDocument();
+    expect(screen.queryByText('Preparing external scan...')).not.toBeInTheDocument();
+    expect(screen.queryByText('External scan in progress...')).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('External scan stopped.'));
+  });
+
+  it('applies a remembered untracked terminal during the next status poll', async () => {
+    vi.useFakeTimers();
+    api.IsScanning.mockResolvedValue(false);
+    api.GetCurrentStationInfo.mockResolvedValue([createStation({ name: 'LHB-PENDING-TERMINAL' })]);
+    api.GetScanStatus.mockResolvedValue({ state: 'failed', found: 0, error: 'radio failure', warnings: [] });
+    render(App);
+    await screen.findByText('LHB-TEST');
+
+    runtime.handlers.get('external-scan-failed')?.(externalScanEvent(6, { error: 'radio failure' }));
+    await vi.advanceTimersByTimeAsync(15_000);
+
+    expect(await screen.findByText('LHB-PENDING-TERMINAL')).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('External scan failed: radio failure'));
+  });
+
+  it('does not adopt a delayed start event whose scan already terminated untracked', async () => {
+    render(App);
+    await screen.findByText('LHB-TEST');
+
+    runtime.handlers.get('external-scan-completed')?.(externalScanEvent(4, { stations: [createStation()] }));
+    await Promise.resolve();
+    await Promise.resolve();
+    runtime.handlers.get('external-scan-started')?.(externalScanEvent(4));
+    await Promise.resolve();
+
+    expect(screen.queryByText('Preparing external scan...')).not.toBeInTheDocument();
+    expect(screen.queryByText('External scan in progress...')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Scan' })).toBeEnabled();
+  });
+
+  it('still adopts a genuinely running external scan detected by polling', async () => {
+    vi.useFakeTimers();
+    api.IsScanning.mockResolvedValue(false);
+    render(App);
+    await screen.findByText('LHB-TEST');
+
+    api.IsScanning.mockResolvedValueOnce(true);
+    await vi.advanceTimersByTimeAsync(15_000);
+
+    expect(screen.getByText('Preparing external scan...')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Stop' })).toBeEnabled();
+  });
+
   it('ignores a delayed external completion after a newer local scan starts', async () => {
     let resolveLocalScan!: (stations: StationInfo[]) => void;
     api.ScanAndFetchStations.mockReturnValueOnce(new Promise((resolve) => {
