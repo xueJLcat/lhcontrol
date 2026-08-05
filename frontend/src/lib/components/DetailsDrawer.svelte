@@ -56,7 +56,7 @@
   aria-label="Station details"
   tabindex="-1"
   use:focusTrap
-  in:fly={{ x: 64, duration: 280, easing: cubicOut }}
+  in:fly={{ x: 64, duration: 320, easing: cubicOut }}
   out:fly={{ x: 64, duration: 180 }}
 >
   <div class="drawer-head">
@@ -170,7 +170,17 @@
   }
   .drawer-head h2 { margin: 0.1rem 0 0; font-size: var(--fs-h2); font-weight: 800; color: var(--text-primary); overflow-wrap: anywhere; }
   .drawer-title { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
-  section { border-top: 1px solid var(--color-border); padding-top: 0.85rem; margin-top: 0.85rem; }
+  section {
+    border-top: 1px solid var(--color-border);
+    padding-top: 0.85rem;
+    margin-top: 0.85rem;
+    /* Staggered reveal timed with the drawer's 320ms entry (--dur-3). */
+    animation: rise var(--dur-3) var(--ease) backwards;
+  }
+  section:nth-of-type(1) { animation-delay: 60ms; }
+  section:nth-of-type(2) { animation-delay: 110ms; }
+  section:nth-of-type(3) { animation-delay: 160ms; }
+  section:nth-of-type(4) { animation-delay: 210ms; }
   h4 {
     margin: 0 0 0.55rem;
     display: flex;

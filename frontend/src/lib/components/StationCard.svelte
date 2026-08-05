@@ -1,5 +1,7 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
+  import { cubicOut } from 'svelte/easing';
+  import { fly } from 'svelte/transition';
   import {
     Bluetooth, Check, ChevronRight, CircleCheck, CircleHelp, CircleX, History,
     LoaderCircle, Moon, Pause, SquarePen, TriangleAlert, X, Zap
@@ -70,8 +72,34 @@
     prevPowerState = station.powerState;
   }
 
+  // Confirmed-state index drives the sliding segment thumb: 0=On 1=Standby
+  // 2=Sleep, -1 keeps the thumb hidden.
+  $: activePowerIndex = isCurrentPowerState(station, 'on')
+    ? 0
+    : isCurrentPowerState(station, 'standby')
+      ? 1
+      : isCurrentPowerState(station, 'sleep')
+        ? 2
+        : -1;
+
+  // One-shot pop on the active segment when a power operation settles
+  // successfully; keyed by createdAt so a re-shown feedback does not replay.
+  let popActive = false;
+  let popTimer: ReturnType<typeof setTimeout> | null = null;
+  let lastPopCreatedAt: number | undefined;
+  $: if (feedback && feedback.kind === 'success' && feedback.createdAt !== lastPopCreatedAt) {
+    lastPopCreatedAt = feedback.createdAt;
+    popActive = true;
+    if (popTimer) clearTimeout(popTimer);
+    popTimer = setTimeout(() => {
+      popActive = false;
+      popTimer = null;
+    }, 700);
+  }
+
   onDestroy(() => {
     if (flashTimer) clearTimeout(flashTimer);
+    if (popTimer) clearTimeout(popTimer);
   });
 
   $: hasKnownPower = station.powerState >= 0;
@@ -150,7 +178,11 @@
       {#if station.isPresent && !station.presenceUncertain && !station.seenInLatestScan}<span class="muted-badge" title="Missed by one scan; retained until a second consecutive miss">scan stale</span>{/if}
     </div>
     {#if feedback}
-      <div class="power-feedback {feedback.kind}" title={feedback.text}>
+      <div
+        class="power-feedback {feedback.kind}"
+        title={feedback.text}
+        in:fly={{ y: 4, duration: 160, easing: cubicOut }}
+      >
         {#if feedback.kind === 'pending'}<LoaderCircle class="spin" size={11} />
         {:else if feedback.kind === 'success'}<CircleCheck size={11} />
         {:else if feedback.kind === 'warning'}<TriangleAlert size={11} />
@@ -159,7 +191,16 @@
       </div>
     {/if}
     <div class="card-actions">
-      <div class="power-segment" aria-label={`Power control for ${station.name}`}>
+      <div class="power-segment" class:pop={popActive} aria-label={`Power control for ${station.name}`}>
+        <div
+          class="seg-thumb"
+          class:seg-thumb-on={activePowerIndex === 0}
+          class:seg-thumb-standby={activePowerIndex === 1}
+          class:seg-thumb-sleep={activePowerIndex === 2}
+          style:transform={`translateX(${activePowerIndex * 100}%)`}
+          style:opacity={activePowerIndex >= 0 ? 1 : 0}
+          aria-hidden="true"
+        ></div>
         <button
           class="seg-on"
           class:active={isCurrentPowerState(station, 'on')}
@@ -217,18 +258,52 @@
       inset 0 1px 0 rgba(255, 255, 255, 0.8);
     transform: translateY(-2px);
   }
-  .station-card.state-on { border-left-color: var(--color-on); --flash: var(--color-on); --glow: color-mix(in srgb, var(--color-on) 26%, transparent); }
-  .station-card.state-standby { border-left-color: var(--color-standby); --flash: var(--color-standby); --glow: color-mix(in srgb, var(--color-standby) 26%, transparent); }
-  .station-card.state-sleep { border-left-color: var(--color-sleep); --flash: var(--color-sleep); --glow: color-mix(in srgb, var(--color-sleep) 26%, transparent); }
-  .station-card.state-booting { border-left-color: var(--color-booting); --flash: var(--color-booting); --glow: color-mix(in srgb, var(--color-booting) 26%, transparent); }
+  .station-card.state-on { --flash: var(--color-on); --glow: var(--glow-on); }
+  .station-card.state-standby { --flash: var(--color-standby); --glow: var(--glow-standby); }
+  .station-card.state-sleep { --flash: var(--color-sleep); --glow: var(--glow-sleep); }
+  .station-card.state-booting { --flash: var(--color-booting); --glow: var(--glow-booting); }
+  /* Gradient accent bar: replaces the old flat 3px state border with a
+     glowing light strip that fades in when a state is known. */
+  .station-card::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 10px;
+    bottom: 10px;
+    width: 3px;
+    border-radius: var(--radius-pill);
+    opacity: 0;
+    transition: opacity var(--dur-2) var(--ease);
+  }
+  .station-card.state-on::before {
+    opacity: 1;
+    background: linear-gradient(180deg, var(--color-on), color-mix(in srgb, var(--color-on) 40%, transparent));
+    box-shadow: 0 0 10px color-mix(in srgb, var(--color-on) 50%, transparent);
+  }
+  .station-card.state-standby::before {
+    opacity: 1;
+    background: linear-gradient(180deg, var(--color-standby), color-mix(in srgb, var(--color-standby) 40%, transparent));
+    box-shadow: 0 0 10px color-mix(in srgb, var(--color-standby) 50%, transparent);
+  }
+  .station-card.state-sleep::before {
+    opacity: 1;
+    background: linear-gradient(180deg, var(--color-sleep), color-mix(in srgb, var(--color-sleep) 40%, transparent));
+    box-shadow: 0 0 10px color-mix(in srgb, var(--color-sleep) 50%, transparent);
+  }
+  .station-card.state-booting::before {
+    opacity: 1;
+    background: linear-gradient(180deg, var(--color-booting), color-mix(in srgb, var(--color-booting) 40%, transparent));
+    box-shadow: 0 0 10px color-mix(in srgb, var(--color-booting) 50%, transparent);
+  }
+  .station-card.offline::before { opacity: 0.35; box-shadow: none; }
   .station-card.flash { animation: state-flash 1.1s var(--ease); }
   @keyframes state-flash {
     0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--flash, var(--color-primary)) 45%, transparent); }
     100% { box-shadow: 0 0 0 14px transparent; }
   }
   .station-card.conflict { border-color: color-mix(in srgb, var(--color-danger) 55%, transparent); }
-  .station-card.conflict:hover { border-color: color-mix(in srgb, var(--color-danger) 75%, transparent); box-shadow: 0 8px 22px -8px color-mix(in srgb, var(--color-danger) 25%, transparent), var(--shadow-sm); }
-  .station-card.offline { border-style: dashed; border-left-style: solid; border-left-color: color-mix(in srgb, var(--text-muted) 45%, transparent); background: color-mix(in srgb, var(--bg-surface-solid) 70%, var(--bg-app)); }
+  .station-card.conflict:hover { border-color: color-mix(in srgb, var(--color-danger) 75%, transparent); box-shadow: 0 8px 22px -8px var(--glow-danger), var(--shadow-sm); }
+  .station-card.offline { border-style: dashed; background: color-mix(in srgb, var(--bg-surface-solid) 70%, var(--bg-app)); }
   .station-card.offline .card-top, .station-card.offline .card-sub { opacity: 0.65; }
   .station-card.offline .state-badge {
     color: var(--text-muted);
@@ -268,7 +343,7 @@
   .station-card.offline .status-dot { background: transparent; border: 1.5px solid var(--text-muted); box-shadow: none; box-sizing: border-box; }
 
   .channel-chip { color: var(--text-secondary); text-transform: none; letter-spacing: 0.02em; background: var(--bg-input); border-color: var(--color-border-strong); }
-  .channel-chip.warn { color: var(--fb-error); border-color: color-mix(in srgb, var(--color-danger) 50%, transparent); background: color-mix(in srgb, var(--color-danger) 7%, white); }
+  .channel-chip.warn { color: var(--fb-error); border-color: color-mix(in srgb, var(--color-danger) 50%, transparent); background: linear-gradient(135deg, color-mix(in srgb, var(--color-danger) 10%, white), color-mix(in srgb, var(--color-warning) 6%, white)); }
   .channel-chip.stale { opacity: 0.7; border-bottom: 1px dashed var(--color-border-strong); }
   .conflict-icon { color: var(--color-danger); flex-shrink: 0; }
 

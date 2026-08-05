@@ -1256,6 +1256,7 @@
           <div
             animate:flip={{ duration: 300, easing: cubicOut }}
             in:fade={{ duration: 180, delay: Math.min(index * 30, 240) }}
+            out:fade={{ duration: 120 }}
           >
             <StationCard
               {station}

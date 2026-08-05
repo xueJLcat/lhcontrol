@@ -142,19 +142,19 @@
   .cm-cell:disabled { cursor: default; background: transparent; border-color: color-mix(in srgb, var(--color-border) 60%, transparent); }
   .cm-cell.occupied:hover:not(:disabled) { transform: translateY(-1px); box-shadow: var(--shadow-sm); }
   .cm-cell.occupied {
-    background: color-mix(in srgb, var(--cm, var(--text-muted)) 15%, white);
+    background: linear-gradient(160deg, color-mix(in srgb, var(--cm, var(--text-muted)) 20%, white), color-mix(in srgb, var(--cm, var(--text-muted)) 7%, white));
     border-color: color-mix(in srgb, var(--cm, var(--text-muted)) 48%, transparent);
     color: var(--cm-deep, var(--text-secondary));
   }
   .cm-cell.occupied.stale {
-    background: color-mix(in srgb, var(--cm, var(--text-muted)) 8%, white);
+    background: linear-gradient(160deg, color-mix(in srgb, var(--cm, var(--text-muted)) 10%, white), color-mix(in srgb, var(--cm, var(--text-muted)) 3%, white));
     border-style: dashed;
     border-color: color-mix(in srgb, var(--cm, var(--text-muted)) 38%, transparent);
     color: var(--text-secondary);
   }
   .cm-cell.conflict {
-    background: color-mix(in srgb, var(--color-danger) 12%, white);
-    border-color: color-mix(in srgb, var(--color-danger) 55%, transparent);
+    background: linear-gradient(160deg, color-mix(in srgb, var(--color-danger) 15%, white), color-mix(in srgb, var(--color-danger) 6%, white));
     color: var(--fb-error);
+    animation: conflict-pulse 2.4s var(--ease) infinite;
   }
 </style>

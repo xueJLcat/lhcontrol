@@ -172,7 +172,7 @@
   .ch-cell:active:not(:disabled):not(.occupied) { transform: translateY(1px); box-shadow: none; }
   .ch-cell.selected {
     border-color: var(--color-primary);
-    background: color-mix(in srgb, var(--color-primary) 12%, white);
+    background: linear-gradient(135deg, color-mix(in srgb, var(--color-primary) 16%, white), color-mix(in srgb, var(--color-primary) 6%, white));
     color: var(--color-primary-deep);
     box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-primary) 16%, transparent), var(--shadow-sm);
   }

@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
+  import { fade } from 'svelte/transition';
   import { LoaderCircle, RefreshCw, Square, Zap } from 'lucide-svelte';
   import type { PowerTarget } from '../types';
   import logo from '../../assets/images/logo-universal.png';
@@ -23,6 +25,34 @@
   export let onBulkPower: (state: PowerTarget) => void;
 
   $: fleetTotal = onCount + standbyCount + sleepCount;
+
+  // Bulk segment thumb + confirmation pop. allOn/allStandby/allSleep are
+  // mutually exclusive, so a single index describes the active segment.
+  $: bulkActiveIndex = allOn ? 0 : allStandby ? 1 : allSleep ? 2 : -1;
+
+  let mounted = false;
+  let bulkPopIndex = -1;
+  let bulkPopTimer: ReturnType<typeof setTimeout> | null = null;
+  let prevAllOn = false;
+  let prevAllStandby = false;
+  let prevAllSleep = false;
+  onMount(() => {
+    mounted = true;
+  });
+  $: {
+    const previousIndex = prevAllOn ? 0 : prevAllStandby ? 1 : prevAllSleep ? 2 : -1;
+    if (mounted && bulkActiveIndex !== -1 && bulkActiveIndex !== previousIndex) {
+      bulkPopIndex = bulkActiveIndex;
+      if (bulkPopTimer) clearTimeout(bulkPopTimer);
+      bulkPopTimer = setTimeout(() => {
+        bulkPopIndex = -1;
+        bulkPopTimer = null;
+      }, 700);
+    }
+    prevAllOn = allOn;
+    prevAllStandby = allStandby;
+    prevAllSleep = allSleep;
+  }
 </script>
 
 <header>
@@ -36,9 +66,9 @@
     </div>
     {#if fleetTotal > 0}
       <div class="fleet-summary" aria-label="Fleet power summary">
-        {#if onCount > 0}<span class="fleet-chip chip-on"><span class="fleet-dot dot-on"></span>{onCount} On</span>{/if}
-        {#if standbyCount > 0}<span class="fleet-chip chip-standby"><span class="fleet-dot dot-standby"></span>{standbyCount} Standby</span>{/if}
-        {#if sleepCount > 0}<span class="fleet-chip chip-sleep"><span class="fleet-dot dot-sleep"></span>{sleepCount} Sleep</span>{/if}
+        {#if onCount > 0}<span class="fleet-chip chip-on" in:fade={{ duration: 160 }}><span class="fleet-dot dot-on"></span>{onCount} On</span>{/if}
+        {#if standbyCount > 0}<span class="fleet-chip chip-standby" in:fade={{ duration: 160 }}><span class="fleet-dot dot-standby"></span>{standbyCount} Standby</span>{/if}
+        {#if sleepCount > 0}<span class="fleet-chip chip-sleep" in:fade={{ duration: 160 }}><span class="fleet-dot dot-sleep"></span>{sleepCount} Sleep</span>{/if}
       </div>
     {/if}
   </div>
@@ -50,9 +80,20 @@
     </button>
     <div class="bulk-power" aria-label="Set all known stations">
       <span class="bulk-label">{#if isBulkLoading}<LoaderCircle class="spin" size={12} />{:else}<Zap size={12} />{/if} All</span>
-      <button class="seg-on" class:pending={bulkTarget === 'on'} class:active={allOn} on:click={() => onBulkPower('on')} disabled={scanning || bulkLocked || !canOn} title={!canOn ? 'No actionable station' : bulkLocked ? 'Bluetooth operation in progress' : 'Turn all known stations on'}>On</button>
-      <button class="seg-standby" class:pending={bulkTarget === 'standby'} class:active={allStandby} on:click={() => onBulkPower('standby')} disabled={scanning || bulkLocked || !canStandby} title={!canStandby ? 'No actionable station' : bulkLocked ? 'Bluetooth operation in progress' : 'Set all known stations to standby'}>Standby</button>
-      <button class="seg-sleep" class:pending={bulkTarget === 'sleep'} class:active={allSleep} on:click={() => onBulkPower('sleep')} disabled={scanning || bulkLocked || !canSleep} title={!canSleep ? 'No actionable station' : bulkLocked ? 'Bluetooth operation in progress' : 'Put all known stations to sleep'}>Sleep</button>
+      <div class="bulk-seg" class:pop={bulkPopIndex >= 0}>
+        <div
+          class="seg-thumb"
+          class:seg-thumb-on={bulkActiveIndex === 0}
+          class:seg-thumb-standby={bulkActiveIndex === 1}
+          class:seg-thumb-sleep={bulkActiveIndex === 2}
+          style:transform={`translateX(${bulkActiveIndex * 100}%)`}
+          style:opacity={bulkActiveIndex >= 0 ? 1 : 0}
+          aria-hidden="true"
+        ></div>
+        <button class="seg-on" class:pending={bulkTarget === 'on'} class:active={allOn} on:click={() => onBulkPower('on')} disabled={scanning || bulkLocked || !canOn} title={!canOn ? 'No actionable station' : bulkLocked ? 'Bluetooth operation in progress' : 'Turn all known stations on'}>On</button>
+        <button class="seg-standby" class:pending={bulkTarget === 'standby'} class:active={allStandby} on:click={() => onBulkPower('standby')} disabled={scanning || bulkLocked || !canStandby} title={!canStandby ? 'No actionable station' : bulkLocked ? 'Bluetooth operation in progress' : 'Set all known stations to standby'}>Standby</button>
+        <button class="seg-sleep" class:pending={bulkTarget === 'sleep'} class:active={allSleep} on:click={() => onBulkPower('sleep')} disabled={scanning || bulkLocked || !canSleep} title={!canSleep ? 'No actionable station' : bulkLocked ? 'Bluetooth operation in progress' : 'Put all known stations to sleep'}>Sleep</button>
+      </div>
     </div>
   </div>
   {#if scanning}<div class="scan-progress" aria-hidden="true"></div>{/if}
@@ -118,6 +159,7 @@
   .brand-text span { font-size: var(--fs-micro); font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.08em; }
   .scan-btn { min-width: 96px; flex-shrink: 0; }
   .bulk-power { flex: 1; min-width: 0; }
+  .bulk-seg { flex: 1; display: flex; min-width: 0; }
   .bulk-power button { flex: 1; min-width: 0; }
   .fleet-summary {
     display: flex;
@@ -138,9 +180,9 @@
     background: var(--bg-surface-solid);
     box-shadow: var(--shadow-sm);
   }
-  .fleet-chip.chip-on { color: var(--color-on-deep); border-color: color-mix(in srgb, var(--color-on) 40%, transparent); background: color-mix(in srgb, var(--color-on) 10%, white); }
-  .fleet-chip.chip-standby { color: var(--color-standby-deep); border-color: color-mix(in srgb, var(--color-standby) 40%, transparent); background: color-mix(in srgb, var(--color-standby) 10%, white); }
-  .fleet-chip.chip-sleep { color: var(--color-sleep-deep); border-color: color-mix(in srgb, var(--color-sleep) 38%, transparent); background: color-mix(in srgb, var(--color-sleep) 10%, white); }
+  .fleet-chip.chip-on { color: var(--color-on-deep); border-color: color-mix(in srgb, var(--color-on) 40%, transparent); background: linear-gradient(135deg, color-mix(in srgb, var(--color-on) 14%, white), color-mix(in srgb, var(--color-on) 6%, white)); }
+  .fleet-chip.chip-standby { color: var(--color-standby-deep); border-color: color-mix(in srgb, var(--color-standby) 40%, transparent); background: linear-gradient(135deg, color-mix(in srgb, var(--color-standby) 14%, white), color-mix(in srgb, var(--color-standby) 6%, white)); }
+  .fleet-chip.chip-sleep { color: var(--color-sleep-deep); border-color: color-mix(in srgb, var(--color-sleep) 38%, transparent); background: linear-gradient(135deg, color-mix(in srgb, var(--color-sleep) 13%, white), color-mix(in srgb, var(--color-sleep) 6%, white)); }
   .fleet-dot { width: 6px; height: 6px; border-radius: var(--radius-pill); flex-shrink: 0; }
   .fleet-dot.dot-on { background: var(--color-on); box-shadow: 0 0 5px color-mix(in srgb, var(--color-on) 70%, transparent); }
   .fleet-dot.dot-standby { background: var(--color-standby); box-shadow: 0 0 5px color-mix(in srgb, var(--color-standby) 70%, transparent); }
