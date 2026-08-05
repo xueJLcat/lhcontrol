@@ -8,6 +8,11 @@ import (
 )
 
 var (
+	// ErrAsyncBudgetExceeded reports that a WinRT async operation outlasted
+	// the library's internal budget when the caller supplied no deadline of
+	// its own. It is deliberately distinct from context.DeadlineExceeded so
+	// an unresponsive device is not mistaken for a caller timeout.
+	ErrAsyncBudgetExceeded = errors.New("WinRT async operation exceeded its internal budget")
 	// ErrGATTUnreachable means Windows could not communicate with the device.
 	ErrGATTUnreachable = errors.New("Bluetooth GATT device is unreachable")
 	// ErrGATTProtocol means the device rejected or could not complete the GATT request.

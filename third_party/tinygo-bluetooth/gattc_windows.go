@@ -841,7 +841,15 @@ func (c DeviceCharacteristic) EnableNotificationsWithMode(mode NotificationMode,
 			return
 		}
 
-		callback(data)
+		// Deliver the copied payload outside the WinRT callback stack. User
+		// code that calls Disconnect from inside a notification callback
+		// would otherwise deadlock: cleanup waits for the callback gate to
+		// drain, and the gate cannot drain until the callback returns.
+		// Delivery order between consecutive notifications is not guaranteed.
+		go func() {
+			defer func() { _ = recover() }()
+			callback(data)
+		}()
 	})
 	token, err := c.characteristic.AddValueChanged(valueChangedEventHandler)
 	if err != nil {

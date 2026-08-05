@@ -536,25 +536,32 @@ func (m *Manager) stopExhaustedAbsentRecovery(address string, station *bluetooth
 // recordStructuredReadResult tracks power/connection recovery independently
 // from optional channel recovery. A firmware that rejects power reads can
 // still have a transient channel failure that needs another attempt.
+// A dead connection normally fails both reads in one operation, so the
+// connection failure is recorded at most once per call; counting it twice
+// would double the exponential backoff and abandon absent stations early.
 func (m *Manager) recordStructuredReadResult(
 	station *bluetooth.BaseStation,
 	address string,
 	powerErr error,
 	channelErr error,
 ) {
+	connectionNoted := false
 	if powerErr == nil || bluetooth.IsUnsupportedCapabilityError(powerErr) {
 		m.clearStatusFailureKind(address, statusRetryConnection)
 	} else {
 		_ = m.bluetoothOps.disconnectStation(station)
 		m.noteStatusFailure(address)
+		connectionNoted = true
 	}
 	if channelErr == nil || bluetooth.IsUnsupportedCapabilityError(channelErr) {
 		m.clearStatusFailureKind(address, statusRetryChannel)
 	} else {
 		m.noteChannelFailure(address)
 		if bluetooth.RequiresReconnect(channelErr) || bluetooth.IsAdapterUnavailable(channelErr) {
-			_ = m.bluetoothOps.disconnectStation(station)
-			m.noteStatusFailure(address)
+			if !connectionNoted {
+				_ = m.bluetoothOps.disconnectStation(station)
+				m.noteStatusFailure(address)
+			}
 		}
 	}
 }

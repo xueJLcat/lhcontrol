@@ -643,7 +643,10 @@
         beginScanTimer();
         if (externalScanning) {
           const scanStatus = await GetScanStatus().catch(() => null);
-          if (!disposed && listRevisions.isCurrent(revision) && scanStatus) {
+          // A pending stop owns the status message; letting the poll
+          // overwrite "Stopping scan..." contradicts the header button.
+          if (!disposed && listRevisions.isCurrent(revision) && scanStatus &&
+            !stoppingScan && !stopRequestPending) {
             statusMessage = scanStatus.state === 'starting'
               ? 'Preparing external scan...'
               : 'External scan in progress...';
@@ -664,6 +667,12 @@
   async function handleScanClick() {
     if (isLoading || scanLocked) return;
     prepareForScan();
+    // A pending stop belongs to the superseded scan. Its StopScan promise
+    // can still be settling while the empty fleet lets the user start a new
+    // scan; the new scan must show its own running state and a working Stop.
+    // The old stop's finally never clears stoppingScan while a scan runs,
+    // so this reset cannot be clobbered.
+    stoppingScan = false;
     globalOperation = 'scanning';
     externalScanID = null;
     externalScanRecoveryEpoch = null;

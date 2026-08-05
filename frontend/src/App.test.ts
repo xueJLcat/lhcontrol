@@ -716,6 +716,62 @@ describe('App asynchronous operations', () => {
     expect(await screen.findByRole('button', { name: 'Scan' })).toBeEnabled();
   });
 
+  it('keeps a scan started while a previous StopScan is settling stoppable', async () => {
+    let rejectFirstScan!: (error: Error) => void;
+    let resolveSecondScan!: (stations: StationInfo[]) => void;
+    let resolveStop!: () => void;
+    api.ScanAndFetchStations
+      .mockReturnValueOnce(new Promise((_, reject) => { rejectFirstScan = reject; }))
+      .mockReturnValueOnce(new Promise((resolve) => { resolveSecondScan = resolve; }));
+    api.GetCurrentStationInfo.mockResolvedValue([]);
+    api.StopScan.mockReturnValue(new Promise<void>((resolve) => { resolveStop = resolve; }));
+    api.GetScanStatus.mockResolvedValue({ state: 'cancelled', found: 0, warnings: [] });
+    render(App);
+
+    await fireEvent.click(await screen.findByRole('button', { name: 'Stop' }));
+    rejectFirstScan(new Error('scan cancelled'));
+    expect(await screen.findByRole('button', { name: 'Stopping...' })).toBeDisabled();
+
+    // The empty fleet offers Scan Now while the old StopScan promise is still
+    // pending. The pending stop belongs to the superseded scan, so the new
+    // scan must start in its own running state with a working Stop control.
+    await fireEvent.click(await screen.findByRole('button', { name: 'Scan Now' }));
+    expect(api.ScanAndFetchStations).toHaveBeenCalledTimes(2);
+
+    const stop = await screen.findByRole('button', { name: 'Stop' });
+    expect(stop).toBeEnabled();
+    await fireEvent.click(stop);
+    expect(api.StopScan).toHaveBeenCalledTimes(2);
+
+    resolveStop();
+    resolveSecondScan([createStation({ name: 'LHB-AFTER-RESUME' })]);
+    expect(await screen.findByText('LHB-AFTER-RESUME')).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: 'Scan' })).toBeEnabled();
+  });
+
+  it('keeps the stopping message while polling a pending external stop', async () => {
+    vi.useFakeTimers();
+    let resolveStop!: () => void;
+    api.IsScanning.mockResolvedValueOnce(false).mockResolvedValue(true);
+    api.StopScan.mockReturnValue(new Promise<void>((resolve) => { resolveStop = resolve; }));
+    api.GetScanStatus.mockResolvedValue({ state: 'cancelled', found: 0, warnings: [] });
+    api.GetCurrentStationInfo.mockResolvedValue([createStation()]);
+    render(App);
+    await screen.findByText('LHB-TEST');
+
+    runtime.handlers.get('external-scan-started')?.(externalScanEvent(9));
+    await screen.findByText('Preparing external scan...');
+    await fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
+    expect(screen.getByRole('status')).toHaveTextContent('Stopping scan...');
+
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(screen.getByRole('status')).toHaveTextContent('Stopping scan...');
+
+    api.IsScanning.mockResolvedValue(false);
+    resolveStop();
+    await vi.advanceTimersByTimeAsync(0);
+  });
+
   it('treats a local scan cancellation as stopped instead of failed', async () => {
     api.GetScanStatus.mockResolvedValue({ state: 'cancelled', found: 0, warnings: [] });
     api.ScanAndFetchStations.mockRejectedValue(new Error('scan cancelled'));

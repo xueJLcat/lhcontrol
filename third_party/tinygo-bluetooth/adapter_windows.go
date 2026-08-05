@@ -108,12 +108,33 @@ func boundedAsyncOperationContext(ctx context.Context) (context.Context, context
 	return context.WithTimeout(ctx, asyncOperationTimeout)
 }
 
+// asyncTimeoutCause reports why the bounded operation context finished. When
+// the library injected its own budget and the caller's context is still
+// healthy, the expiry is attributed to the budget instead of a caller
+// deadline the caller never set, so errors.Is cannot mistake an unresponsive
+// device for a caller cancellation or timeout.
+func asyncTimeoutCause(callerCtx, operationCtx context.Context, budgetInjected bool) error {
+	if operationCtx.Err() == nil {
+		return nil
+	}
+	if budgetInjected && callerCtx.Err() == nil {
+		return ErrAsyncBudgetExceeded
+	}
+	return operationCtx.Err()
+}
+
 func awaitAsyncOperationContext(ctx context.Context, asyncOperation *foundation.IAsyncOperation, genericParamSignature string) error {
 	if asyncOperation == nil {
 		return errors.New("async operation is nil")
 	}
-	operationCtx, cancel := boundedAsyncOperationContext(ctx)
+	callerCtx := ctx
+	if callerCtx == nil {
+		callerCtx = context.Background()
+	}
+	operationCtx, cancel := boundedAsyncOperationContext(callerCtx)
 	defer cancel()
+	_, callerHasDeadline := callerCtx.Deadline()
+	budgetInjected := !callerHasDeadline
 
 	// We need to obtain the GUID of the AsyncOperationCompletedHandler, but its a generic delegate
 	// so we also need the generic parameter type's signature:
@@ -138,10 +159,10 @@ func awaitAsyncOperationContext(ctx context.Context, asyncOperation *foundation.
 	if queryErr != nil {
 		select {
 		case status := <-completed:
-			return contextualAsyncCompletionError(operationCtx, asyncOperation, status)
+			return contextualAsyncCompletionError(asyncTimeoutCause(callerCtx, operationCtx, budgetInjected), asyncOperation, status)
 		case <-operationCtx.Done():
 			_ = asyncOperation.SetCompleted(nil)
-			return &AsyncOperationTimeoutError{Cause: operationCtx.Err()}
+			return &AsyncOperationTimeoutError{Cause: asyncTimeoutCause(callerCtx, operationCtx, budgetInjected)}
 		}
 	}
 	defer asyncInfo.Release()
@@ -151,14 +172,20 @@ func awaitAsyncOperationContext(ctx context.Context, asyncOperation *foundation.
 		// Detaching is best-effort. If WinRT rejects it, the operation retains
 		// its COM reference until the caller releases the operation.
 		_ = asyncOperation.SetCompleted(nil)
+		if cause := asyncTimeoutCause(callerCtx, operationCtx, budgetInjected); cause != nil {
+			var timeoutErr *AsyncOperationTimeoutError
+			if errors.As(err, &timeoutErr) {
+				return &AsyncOperationTimeoutError{Cause: cause}
+			}
+		}
 		return err
 	}
-	return contextualAsyncCompletionError(operationCtx, asyncOperation, status)
+	return contextualAsyncCompletionError(asyncTimeoutCause(callerCtx, operationCtx, budgetInjected), asyncOperation, status)
 }
 
-func contextualAsyncCompletionError(ctx context.Context, asyncOperation *foundation.IAsyncOperation, status foundation.AsyncStatus) error {
-	if ctx != nil && ctx.Err() != nil && status != foundation.AsyncStatusCompleted {
-		return fmt.Errorf("async operation ended with status %d after cancellation: %w", status, ctx.Err())
+func contextualAsyncCompletionError(cause error, asyncOperation *foundation.IAsyncOperation, status foundation.AsyncStatus) error {
+	if cause != nil && status != foundation.AsyncStatusCompleted {
+		return fmt.Errorf("async operation ended with status %d after cancellation: %w", status, cause)
 	}
 	return asyncCompletionError(asyncOperation, status)
 }
@@ -244,7 +271,10 @@ func getAsyncError(asyncOperation *foundation.IAsyncOperation) error {
 }
 
 // hresultToError converts an HRESULT to an appropriate error type while
-// retaining the original HRESULT for diagnostics.
+// retaining the original HRESULT for diagnostics. Non-ATT failures unwrap to
+// a GATT transport sentinel so caller classification (errors.Is against
+// ErrGATTUnreachable/ErrGATTAccessDenied/ErrGATTCommunication) works for
+// async failures the same way it already works for status-based ones.
 func hresultToError(hr uint32) error {
 	facility := (hr >> 16) & 0x1FFF
 	code := hr & 0xFFFF
@@ -257,7 +287,14 @@ func hresultToError(hr uint32) error {
 		)
 	}
 
-	return fmt.Errorf("HRESULT 0x%08X", hr)
+	switch hr {
+	case 0x80070005: // E_ACCESSDENIED
+		return fmt.Errorf("HRESULT 0x%08X: %w", hr, ErrGATTAccessDenied)
+	case 0x8007048F: // HRESULT_FROM_WIN32(ERROR_DEVICE_NOT_CONNECTED)
+		return fmt.Errorf("HRESULT 0x%08X: %w", hr, ErrGATTUnreachable)
+	default:
+		return fmt.Errorf("HRESULT 0x%08X: %w", hr, ErrGATTCommunication)
+	}
 }
 
 func (a *Adapter) Address() (MACAddress, error) {

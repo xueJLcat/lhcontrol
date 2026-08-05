@@ -1135,6 +1135,22 @@ func TestCleanupTransportFailureIsNotMaskedByUnsupportedCapability(t *testing.T)
 	}
 }
 
+func TestUnsupportedCapabilityRejectionNeverRequiresReconnect(t *testing.T) {
+	// Standby rejections arrive as Value Not Allowed (0x13), which is outside
+	// the unsupported ATT whitelist. The capability wrapper must keep the
+	// healthy connection alive regardless of the wrapped rejection code.
+	err := &UnsupportedCapabilityError{
+		Capability: "standby",
+		Err:        transportError("write characteristic", tinybluetooth.ErrAttValueNotAllowed),
+	}
+	if !IsUnsupportedCapabilityError(err) {
+		t.Fatalf("standby rejection lost unsupported classification: %v", err)
+	}
+	if RequiresReconnect(err) {
+		t.Fatalf("standby value rejection incorrectly required reconnect: %v", err)
+	}
+}
+
 func TestSetChannelAcceptsConfirmedReadbackAfterWriteError(t *testing.T) {
 	mode := &fakeCharacteristic{
 		value:                []byte{0x03},

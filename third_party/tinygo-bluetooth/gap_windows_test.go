@@ -86,9 +86,48 @@ func TestContextualAsyncCompletionErrorPreservesCancellationIdentity(t *testing.
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	err := contextualAsyncCompletionError(ctx, nil, foundation.AsyncStatusCanceled)
+	err := contextualAsyncCompletionError(ctx.Err(), nil, foundation.AsyncStatusCanceled)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("contextualAsyncCompletionError() error = %v, want context.Canceled", err)
+	}
+}
+
+func TestContextualAsyncCompletionErrorPreservesBudgetIdentity(t *testing.T) {
+	err := contextualAsyncCompletionError(ErrAsyncBudgetExceeded, nil, foundation.AsyncStatusCanceled)
+	if !errors.Is(err, ErrAsyncBudgetExceeded) {
+		t.Fatalf("contextualAsyncCompletionError() error = %v, want budget error", err)
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("budget expiry leaked as a caller deadline: %v", err)
+	}
+}
+
+func TestAsyncTimeoutCauseDistinguishesLibraryBudgetFromCallerDeadlines(t *testing.T) {
+	budget, cancelBudget := context.WithCancel(context.Background())
+	cancelBudget()
+	if got := asyncTimeoutCause(context.Background(), budget, true); !errors.Is(got, ErrAsyncBudgetExceeded) {
+		t.Fatalf("injected budget expiry cause = %v, want ErrAsyncBudgetExceeded", got)
+	}
+
+	parentCtx, cancelParent := context.WithCancel(context.Background())
+	cancelParent()
+	child, cancelChild := context.WithCancel(parentCtx)
+	cancelChild()
+	defer cancelChild()
+	if got := asyncTimeoutCause(parentCtx, child, true); !errors.Is(got, context.Canceled) {
+		t.Fatalf("parent cancellation cause = %v, want context.Canceled", got)
+	}
+
+	deadlineCtx, cancelDeadline := context.WithTimeout(context.Background(), -time.Nanosecond)
+	defer cancelDeadline()
+	<-deadlineCtx.Done()
+	if got := asyncTimeoutCause(context.Background(), deadlineCtx, false); !errors.Is(got, context.DeadlineExceeded) {
+		t.Fatalf("caller deadline cause = %v, want context.DeadlineExceeded", got)
+	}
+
+	live := context.Background()
+	if got := asyncTimeoutCause(live, live, true); got != nil {
+		t.Fatalf("unexpired contexts produced cause %v", got)
 	}
 }
 
@@ -542,5 +581,63 @@ func TestHRESULTToErrorPreservesUnknownHRESULT(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "0x80004005") {
 		t.Fatalf("error %q does not retain HRESULT", err)
+	}
+	if !errors.Is(err, ErrGATTCommunication) {
+		t.Fatalf("unknown HRESULT lost its transport classification: %v", err)
+	}
+}
+
+func TestHRESULTToErrorMapsKnownTransportHRESULTs(t *testing.T) {
+	tests := []struct {
+		hr   uint32
+		want error
+	}{
+		{0x80070005, ErrGATTAccessDenied},  // E_ACCESSDENIED
+		{0x8007048F, ErrGATTUnreachable},   // ERROR_DEVICE_NOT_CONNECTED
+		{0x80004005, ErrGATTCommunication}, // E_FAIL
+	}
+	for _, test := range tests {
+		err := hresultToError(test.hr)
+		if !errors.Is(err, test.want) {
+			t.Fatalf("HRESULT 0x%08X error = %v, want %v", test.hr, err, test.want)
+		}
+		var attErr AttributeProtocolError
+		if errors.As(err, &attErr) {
+			t.Fatalf("HRESULT 0x%08X unexpectedly classified as ATT: %v", test.hr, err)
+		}
+	}
+}
+
+func TestNotificationCallbackCanDisconnectWithoutDeadlock(t *testing.T) {
+	originalEnter := enterWinRTThread
+	enterWinRTThread = func() (func(), error) { return func() {}, nil }
+	t.Cleanup(func() { enterWinRTThread = originalEnter })
+
+	state := &deviceState{callbacks: newCallbackGate()}
+	device := Device{state: state}
+
+	// The ValueChanged handler admits the WinRT callback through the gate,
+	// copies the payload, and dispatches the user callback outside the gate.
+	// A Disconnect issued from that dispatched callback must therefore be
+	// able to drain the gate and complete instead of deadlocking.
+	if !state.beginCallback() {
+		t.Fatal("callback gate rejected the notification")
+	}
+	dispatched := make(chan error, 1)
+	go func() {
+		defer state.endCallback()
+		go func() {
+			defer func() { _ = recover() }()
+			dispatched <- device.Disconnect()
+		}()
+	}()
+
+	select {
+	case err := <-dispatched:
+		if err != nil {
+			t.Fatalf("Disconnect() from notification callback error = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Disconnect() from a notification callback deadlocked")
 	}
 }

@@ -765,8 +765,12 @@ func RequiresReconnect(err error) bool {
 	if protocolErr, ok := err.(bluetooth.AttributeProtocolError); ok {
 		return !IsCapabilityUnsupported(protocolErr)
 	}
-	if capabilityErr, ok := err.(*UnsupportedCapabilityError); ok {
-		return RequiresReconnect(capabilityErr.Err)
+	if _, ok := err.(*UnsupportedCapabilityError); ok {
+		// A capability rejection is a protocol decision, never a broken link.
+		// Recursing into the wrapped ATT response would classify codes outside
+		// the unsupported whitelist (such as standby's Value Not Allowed) as
+		// transport failures and make healthy connections pay a reconnect.
+		return false
 	}
 	if transportErr, ok := err.(*DeviceTransportError); ok {
 		if RequiresReconnect(transportErr.Err) {

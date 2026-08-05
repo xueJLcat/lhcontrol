@@ -46,14 +46,16 @@ func (mac *MACAddress) SetRandom(val bool) {
 	mac.isRandom = val
 }
 
-// Set the address
-func (mac *MACAddress) Set(val string) {
+// Set the address. It returns the parse error instead of silently leaving
+// the address unchanged.
+func (mac *MACAddress) Set(val string) error {
 	m, err := ParseMAC(val)
 	if err != nil {
-		return
+		return err
 	}
 
 	mac.MAC = m
+	return nil
 }
 
 type AdvertisingType int

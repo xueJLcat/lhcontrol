@@ -75,6 +75,48 @@ func TestUnsupportedPowerReadDoesNotHideChannelRecovery(t *testing.T) {
 	}
 }
 
+func TestCombinedStructuredReadFailureRecordsConnectionFailureOnce(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	manager.statusRetryBase = time.Hour
+	defer manager.Shutdown()
+	var disconnects atomic.Int32
+	manager.bluetoothOps.disconnectStation = func(*internalbluetooth.BaseStation) error {
+		disconnects.Add(1)
+		return nil
+	}
+	address := "AA:BB:CC:DD:EE:01"
+	powerErr := &internalbluetooth.DeviceTransportError{
+		Operation: "read power characteristic",
+		Err:       tinybluetooth.ErrGATTUnreachable,
+	}
+	channelErr := &internalbluetooth.DeviceTransportError{
+		Operation: "read channel characteristic",
+		Err:       tinybluetooth.ErrGATTUnreachable,
+	}
+
+	manager.recordStructuredReadResult(
+		&internalbluetooth.BaseStation{Address: mustAddress(t, address)},
+		address,
+		powerErr,
+		channelErr,
+	)
+
+	manager.statusRetryMutex.Lock()
+	retry, tracked := manager.statusRetries[address]
+	manager.statusRetryMutex.Unlock()
+	if !tracked {
+		t.Fatal("combined read failure did not schedule recovery")
+	}
+	// One failed operation is one connection failure, even when both reads
+	// surfaced the same broken link; the channel keeps its own schedule.
+	if retry.failures != 1 || retry.channelFailures != 1 {
+		t.Fatalf("retry counters = connection:%d channel:%d, want 1 and 1", retry.failures, retry.channelFailures)
+	}
+	if disconnects.Load() != 1 {
+		t.Fatalf("disconnects = %d, want exactly 1", disconnects.Load())
+	}
+}
+
 func TestPermanentUnsupportedDiscoveryDoesNotRemainInBackgroundRecovery(t *testing.T) {
 	manager := NewManager(config.NewConfig())
 	manager.statusRetryBase = time.Hour
@@ -134,6 +176,48 @@ func TestUnsupportedFailureWithCleanupErrorStillSchedulesRecovery(t *testing.T) 
 	manager.statusRetryMutex.Unlock()
 	if !tracked || disconnects.Load() != 1 {
 		t.Fatalf("mixed failure recovery tracked=%v disconnects=%d, want true and 1", tracked, disconnects.Load())
+	}
+}
+
+func TestStandbyValueNotAllowedRejectionKeepsConnectionAndSkipsRecovery(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	manager.statusRetryBase = time.Hour
+	defer manager.Shutdown()
+	var disconnects atomic.Int32
+	manager.bluetoothOps.disconnectStation = func(*internalbluetooth.BaseStation) error {
+		disconnects.Add(1)
+		return nil
+	}
+	address := "AA:BB:CC:DD:EE:02"
+	station := &internalbluetooth.BaseStation{
+		Name: "LHB-STANDBY-REJECT", Address: mustAddress(t, address), Present: true,
+		Capabilities:      internalbluetooth.Capabilities{PowerWrite: true, Standby: true},
+		CapabilitiesKnown: true,
+	}
+	manager.stations[address] = station
+	standbyErr := &internalbluetooth.UnsupportedCapabilityError{
+		Capability: "standby",
+		Err: &internalbluetooth.DeviceTransportError{
+			Operation: "write characteristic",
+			Err:       tinybluetooth.ErrAttValueNotAllowed,
+		},
+	}
+	manager.bluetoothOps.setPowerState = func(context.Context, *internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
+		return internalbluetooth.PowerControlResult{}, standbyErr
+	}
+
+	_, err := manager.SetStationPower(address, "standby")
+	if !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("SetStationPower() error = %v, want ErrUnsupported", err)
+	}
+	if disconnects.Load() != 0 {
+		t.Fatalf("standby rejection discarded a healthy connection: disconnects=%d", disconnects.Load())
+	}
+	manager.statusRetryMutex.Lock()
+	_, tracked := manager.statusRetries[address]
+	manager.statusRetryMutex.Unlock()
+	if tracked {
+		t.Fatal("standby rejection scheduled connection recovery")
 	}
 }
 

@@ -9,37 +9,44 @@ import (
 type MAC [6]byte
 
 // UnmarshalText unmarshals the text into itself.
-// The given MAC address byte array must be of the format 11:22:33:AA:BB:CC.
-// If it cannot be unmarshaled, an error is returned.
+// The given MAC address must be exactly 17 characters in the format
+// 11:22:33:AA:BB:CC; hexadecimal digits are case-insensitive. Any previous
+// content of the receiver is overwritten. If it cannot be unmarshaled, an
+// error is returned.
 func (mac *MAC) UnmarshalText(s []byte) error {
-	macIndex := 11
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if c == ':' {
-			continue
-		}
-		var nibble byte
-		if c >= '0' && c <= '9' {
-			nibble = c - '0' + 0x0
-		} else if c >= 'A' && c <= 'F' {
-			nibble = c - 'A' + 0xA
-		} else {
-			return ErrInvalidMAC
-		}
-		if macIndex < 0 {
-			return ErrInvalidMAC
-		}
-		if macIndex%2 == 0 {
-			mac[macIndex/2] |= nibble
-		} else {
-			mac[macIndex/2] |= nibble << 4
-		}
-		macIndex--
-	}
-	if macIndex != -1 {
+	if len(s) != 17 {
 		return ErrInvalidMAC
 	}
+	*mac = MAC{}
+	for group := 0; group < 6; group++ {
+		base := group * 3
+		if group < 5 && s[base+2] != ':' {
+			return ErrInvalidMAC
+		}
+		high, err := macHexNibble(s[base])
+		if err != nil {
+			return err
+		}
+		low, err := macHexNibble(s[base+1])
+		if err != nil {
+			return err
+		}
+		mac[5-group] = high<<4 | low
+	}
 	return nil
+}
+
+func macHexNibble(c byte) (byte, error) {
+	switch {
+	case c >= '0' && c <= '9':
+		return c - '0', nil
+	case c >= 'A' && c <= 'F':
+		return c - 'A' + 0xA, nil
+	case c >= 'a' && c <= 'f':
+		return c - 'a' + 0xA, nil
+	default:
+		return 0, ErrInvalidMAC
+	}
 }
 
 // ParseMAC parses the given MAC address, which must be in 11:22:33:AA:BB:CC
