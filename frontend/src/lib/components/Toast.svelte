@@ -50,8 +50,13 @@
   .toast::before {
     content: '';
     position: absolute;
-    left: 0; top: 0; bottom: 0;
+    /* Inset vertically and round the strip so the toast's own border-radius
+       never clips it into cut corners. */
+    left: 0;
+    top: 6px;
+    bottom: 6px;
     width: 3px;
+    border-radius: var(--radius-pill);
     background: var(--color-danger);
   }
   .toast.info { border-color: var(--color-border-strong); color: var(--text-secondary); background-image: none; }

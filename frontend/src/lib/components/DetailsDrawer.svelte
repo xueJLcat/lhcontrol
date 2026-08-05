@@ -156,6 +156,8 @@
         0 0 / 3px 100% no-repeat,
       var(--bg-surface-solid);
     border-left: 1px solid var(--color-border);
+    /* Rounded left edge; the right side stays flush with the window. */
+    border-radius: var(--radius-lg) 0 0 var(--radius-lg);
     padding: 1rem 1rem 1.25rem;
     overflow: auto;
     box-shadow: var(--shadow-lg);

@@ -75,7 +75,7 @@
   <div class="row-actions">
     <button class="btn primary scan-btn" on:click={scanning ? onStop : onScan} disabled={scanning ? stopping : scanLocked}>
       {#if stopping}<LoaderCircle class="spin" size={15} /> Stopping...
-      {:else if scanning}<Square size={13} /> Stop
+      {:else if scanning}<Square size={15} /> Stop
       {:else}<RefreshCw size={15} /> Scan{/if}
     </button>
     <div class="bulk-power" aria-label="Set all known stations">
@@ -144,7 +144,7 @@
     border: 1px solid color-mix(in srgb, var(--color-primary) 22%, transparent);
     box-shadow: var(--shadow-sm);
   }
-  .brand-logo img { width: 24px; height: 24px; border-radius: 5px; }
+  .brand-logo img { width: 24px; height: 24px; border-radius: calc(var(--radius-sm) - 4px); }
   .brand-text { display: flex; flex-direction: column; line-height: 1.15; min-width: 0; }
   .brand-text h1 {
     margin: 0;
@@ -157,7 +157,9 @@
     text-overflow: ellipsis;
   }
   .brand-text span { font-size: var(--fs-micro); font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.08em; }
-  .scan-btn { min-width: 96px; flex-shrink: 0; }
+  /* Fixed width covers the longest state ("Stopping...") so the bulk-power
+     group on the right never shifts when the scan state changes. */
+  .scan-btn { min-width: 118px; flex-shrink: 0; }
   .bulk-power { flex: 1; min-width: 0; }
   .bulk-seg { flex: 1; display: flex; min-width: 0; }
   .bulk-power button { flex: 1; min-width: 0; }

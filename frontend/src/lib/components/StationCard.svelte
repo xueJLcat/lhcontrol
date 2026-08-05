@@ -164,86 +164,92 @@
         title={channelLastKnown ? 'Last known channel' : undefined}
       >{channelLabel(shownChannel)}</span>
     </div>
-    <div class="card-sub">
-      <Bluetooth size={12} />
-      <span class="mono addr">{station.address}</span>
-      <StateBadge label={stateLabel(station)} {unverified} stale={stalePower} booting={station.powerFresh && station.powerState === 3} />
-      {#if stalePower}
-        <span class="fresh-icon stale" title={`Last known state; last successful read ${relativeTime(station.lastPowerReadAt) || 'unknown'}`}><History size={11} /></span>
-      {:else if unverified}
-        <span class="fresh-icon unverified" title="State reported by the station but not confirmed by readback"><CircleHelp size={11} /></span>
-      {/if}
-      {#if !station.isPresent}<span class="muted-badge" title="Not detected in the latest scan; direct power control can still be attempted">not visible</span>{/if}
-      {#if station.isPresent && station.presenceUncertain}<span class="muted-badge" title="Its connection could not be fully released before the last scan, so the advertisement may have been missed">presence uncertain</span>{/if}
-      {#if station.isPresent && !station.presenceUncertain && !station.seenInLatestScan}<span class="muted-badge" title="Missed by one scan; retained until a second consecutive miss">scan stale</span>{/if}
-    </div>
-    {#if feedback}
-      <div
-        class="power-feedback {feedback.kind}"
-        title={feedback.text}
-        in:fly={{ y: 4, duration: 160, easing: cubicOut }}
-      >
-        {#if feedback.kind === 'pending'}<LoaderCircle class="spin" size={11} />
-        {:else if feedback.kind === 'success'}<CircleCheck size={11} />
-        {:else if feedback.kind === 'warning'}<TriangleAlert size={11} />
-        {:else}<CircleX size={11} />{/if}
-        {feedback.text}
-      </div>
+  {/if}
+  <!-- Sub-state, feedback and actions stay mounted while renaming so the
+       card keeps its height and the grid row does not jump. -->
+  <div class="card-sub">
+    <Bluetooth size={12} />
+    <span class="mono addr">{station.address}</span>
+    <StateBadge label={stateLabel(station)} {unverified} stale={stalePower} booting={station.powerFresh && station.powerState === 3} />
+    {#if stalePower}
+      <span class="fresh-icon stale" title={`Last known state; last successful read ${relativeTime(station.lastPowerReadAt) || 'unknown'}`}><History size={11} /></span>
+    {:else if unverified}
+      <span class="fresh-icon unverified" title="State reported by the station but not confirmed by readback"><CircleHelp size={11} /></span>
     {/if}
-    <div class="card-actions">
-      <div class="power-segment" class:pop={popActive} aria-label={`Power control for ${station.name}`}>
-        <div
-          class="seg-thumb"
-          class:seg-thumb-on={activePowerIndex === 0}
-          class:seg-thumb-standby={activePowerIndex === 1}
-          class:seg-thumb-sleep={activePowerIndex === 2}
-          style:transform={`translateX(${activePowerIndex * 100}%)`}
-          style:opacity={activePowerIndex >= 0 ? 1 : 0}
-          aria-hidden="true"
-        ></div>
-        <button
-          class="seg-on"
-          class:active={isCurrentPowerState(station, 'on')}
-          class:pending={pendingTarget === 'on'}
-          aria-pressed={isCurrentPowerState(station, 'on')}
-          aria-label={`Turn ${station.name} on`}
-          title="Turn lasers and motor on"
-          on:click|stopPropagation={() => onPower(station, 'on')}
-          disabled={!canSetPower(station, 'on') || gattBusy || configBusy || gattLocked}
-        ><Zap size={12} /> On</button>
-        <button
-          class="seg-standby"
-          class:active={isCurrentPowerState(station, 'standby')}
-          class:pending={pendingTarget === 'standby'}
-          aria-pressed={isCurrentPowerState(station, 'standby')}
-          aria-label={`Set ${station.name} to standby`}
-          title="Lasers off, motor remains powered"
-          on:click|stopPropagation={() => onPower(station, 'standby')}
-          disabled={!canSetPower(station, 'standby') || gattBusy || configBusy || gattLocked}
-        ><Pause size={12} /> Standby</button>
-        <button
-          class="seg-sleep"
-          class:active={isCurrentPowerState(station, 'sleep')}
-          class:pending={pendingTarget === 'sleep'}
-          aria-pressed={isCurrentPowerState(station, 'sleep')}
-          aria-label={`Put ${station.name} to sleep`}
-          title="Turn lasers and motor off"
-          on:click|stopPropagation={() => onPower(station, 'sleep')}
-          disabled={!canSetPower(station, 'sleep') || gattBusy || configBusy || gattLocked}
-        ><Moon size={12} /> Sleep</button>
-      </div>
-      <button class="icon-btn details" title="Details" aria-label={`Details for ${station.name}`} on:click|stopPropagation={openDetails}><ChevronRight size={17} /></button>
+    {#if !station.isPresent}<span class="muted-badge" title="Not detected in the latest scan; direct power control can still be attempted">not visible</span>{/if}
+    {#if station.isPresent && station.presenceUncertain}<span class="muted-badge" title="Its connection could not be fully released before the last scan, so the advertisement may have been missed">presence uncertain</span>{/if}
+    {#if station.isPresent && !station.presenceUncertain && !station.seenInLatestScan}<span class="muted-badge" title="Missed by one scan; retained until a second consecutive miss">scan stale</span>{/if}
+  </div>
+  {#if feedback}
+    <div
+      class="power-feedback {feedback.kind}"
+      title={feedback.text}
+      in:fly={{ y: 4, duration: 160, easing: cubicOut }}
+    >
+      {#if feedback.kind === 'pending'}<LoaderCircle class="spin" size={11} />
+      {:else if feedback.kind === 'success'}<CircleCheck size={11} />
+      {:else if feedback.kind === 'warning'}<TriangleAlert size={11} />
+      {:else}<CircleX size={11} />{/if}
+      {feedback.text}
     </div>
   {/if}
+  <div class="card-actions">
+    <div class="power-segment" class:pop={popActive} aria-label={`Power control for ${station.name}`}>
+      <div
+        class="seg-thumb"
+        class:seg-thumb-on={activePowerIndex === 0}
+        class:seg-thumb-standby={activePowerIndex === 1}
+        class:seg-thumb-sleep={activePowerIndex === 2}
+        style:transform={`translateX(${activePowerIndex * 100}%)`}
+        style:opacity={activePowerIndex >= 0 ? 1 : 0}
+        aria-hidden="true"
+      ></div>
+      <button
+        class="seg-on"
+        class:active={isCurrentPowerState(station, 'on')}
+        class:pending={pendingTarget === 'on'}
+        aria-pressed={isCurrentPowerState(station, 'on')}
+        aria-label={`Turn ${station.name} on`}
+        title="Turn lasers and motor on"
+        on:click|stopPropagation={() => onPower(station, 'on')}
+        disabled={renaming || !canSetPower(station, 'on') || gattBusy || configBusy || gattLocked}
+      ><Zap size={12} /> On</button>
+      <button
+        class="seg-standby"
+        class:active={isCurrentPowerState(station, 'standby')}
+        class:pending={pendingTarget === 'standby'}
+        aria-pressed={isCurrentPowerState(station, 'standby')}
+        aria-label={`Set ${station.name} to standby`}
+        title="Lasers off, motor remains powered"
+        on:click|stopPropagation={() => onPower(station, 'standby')}
+        disabled={renaming || !canSetPower(station, 'standby') || gattBusy || configBusy || gattLocked}
+      ><Pause size={12} /> Standby</button>
+      <button
+        class="seg-sleep"
+        class:active={isCurrentPowerState(station, 'sleep')}
+        class:pending={pendingTarget === 'sleep'}
+        aria-pressed={isCurrentPowerState(station, 'sleep')}
+        aria-label={`Put ${station.name} to sleep`}
+        title="Turn lasers and motor off"
+        on:click|stopPropagation={() => onPower(station, 'sleep')}
+        disabled={renaming || !canSetPower(station, 'sleep') || gattBusy || configBusy || gattLocked}
+      ><Moon size={12} /> Sleep</button>
+    </div>
+    <button class="icon-btn details" title="Details" aria-label={`Details for ${station.name}`} on:click|stopPropagation={openDetails} disabled={renaming}><ChevronRight size={17} /></button>
+  </div>
 </div>
 
 <style>
   .station-card {
     position: relative;
     background: var(--bg-surface-solid);
+    /* Uniform 1px border: the 3px transparent left edge used to break the
+       corner arcs; the gradient bar (::before below) carries the accent.
+       overflow:hidden clips that bar to the rounded silhouette so its ends
+       never poke past the 20px corner arcs. */
     border: 1px solid var(--color-border);
-    border-left: 3px solid transparent;
     border-radius: var(--radius-lg);
+    overflow: hidden;
     padding: 0.65rem 0.7rem;
     display: flex;
     flex-direction: column;
@@ -356,7 +362,7 @@
     font-size: var(--fs-sm);
   }
   .card-sub > :global(svg) { color: color-mix(in srgb, var(--color-primary) 70%, var(--text-muted)); flex-shrink: 0; }
-  .addr { font-size: 0.72rem; color: var(--text-muted); }
+  .addr { font-size: var(--fs-xs); color: var(--text-muted); }
 
   .fresh-icon { display: inline-flex; align-items: center; flex-shrink: 0; }
   .fresh-icon.stale { color: var(--text-muted); }
@@ -399,7 +405,9 @@
     border-color: color-mix(in srgb, var(--color-primary) 38%, transparent);
     color: var(--color-primary-deep);
     transform: translateX(1px);
-    box-shadow: var(--shadow-md);
+    /* Compact shadow: the card's overflow:hidden would clip a --shadow-md
+       spread at the bottom-right padding. */
+    box-shadow: 0 4px 12px -4px color-mix(in srgb, var(--color-primary) 35%, transparent), var(--shadow-sm);
   }
 
   .rename-row { display: flex; align-items: center; gap: 0.35rem; }

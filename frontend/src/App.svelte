@@ -1278,7 +1278,7 @@
         {/each}
       </div>
     {:else if isLoading || externalScanning}
-      <div class="empty" in:fade={{ duration: 180 }}>
+      <div class="empty scan" in:fade={{ duration: 180 }}>
         <div class="empty-icon"><Radar size={40} /></div>
         <p>{isLoading ? 'Scanning for base stations...' : 'External scan in progress...'} {Math.max(1, scanElapsed)}s</p>
         <p class="scan-sub">{scanElapsed >= 6 ? 'Reading station states...' : 'Discovering nearby stations...'}</p>
@@ -1395,6 +1395,10 @@
     inset: -1px;
     border-radius: var(--radius-pill);
     border: 1px solid color-mix(in srgb, var(--color-primary) 40%, transparent);
+  }
+  /* Only a genuinely running scan pulses; the idle "no stations" state keeps
+     a static ring so it does not suggest activity that is not happening. */
+  .empty.scan .empty-icon::after {
     animation: ping-ring 2.2s var(--ease) infinite;
   }
   @keyframes ping-ring {
