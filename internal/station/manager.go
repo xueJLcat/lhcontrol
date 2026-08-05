@@ -17,6 +17,7 @@ import (
 )
 
 var ErrOperationInProgress = errors.New("another Bluetooth operation is already in progress")
+var ErrStationTransitioning = errors.New("station is transitioning between power states")
 var ErrNotFound = errors.New("station not found")
 var ErrInvalidArgument = errors.New("invalid argument")
 var ErrUnsupported = errors.New("operation is not supported")
@@ -46,6 +47,7 @@ type StationInfo struct {
 	Channel             int                      `json:"channel"`
 	ChannelConflict     bool                     `json:"channelConflict"`
 	IsPresent           bool                     `json:"isPresent"`
+	PresenceUncertain   bool                     `json:"presenceUncertain"`
 	SeenInLatestScan    bool                     `json:"seenInLatestScan"`
 	ScanFresh           bool                     `json:"scanFresh"`
 	MissedScans         int                      `json:"missedScans"`
@@ -1112,6 +1114,7 @@ func (m *Manager) GetStationInfo() []StationInfo {
 			ChannelConflict: snapshot.Present && scanFresh && channelFresh &&
 				channelCounts[snapshot.Channel] > 1,
 			IsPresent:         snapshot.Present,
+			PresenceUncertain: snapshot.PresenceUncertain,
 			SeenInLatestScan:  seenInLatestScan,
 			ScanFresh:         scanFresh,
 			MissedScans:       snapshot.MissedScans,
@@ -2298,7 +2301,7 @@ func (m *Manager) cachedPowerOutcome(stationPtr *bluetooth.BaseStation, target b
 	snapshot := stationPtr.Snapshot()
 	switch classifyCachedPower(snapshot, target, time.Now()) {
 	case cachedPowerBooting:
-		return PowerActionResult{}, fmt.Errorf("station is booting; retry after transition: %w", ErrOperationInProgress), true
+		return PowerActionResult{}, fmt.Errorf("station is booting; retry after transition: %w", ErrStationTransitioning), true
 	case cachedPowerActionable:
 		return PowerActionResult{}, nil, false
 	}
@@ -2580,7 +2583,7 @@ func (m *Manager) SetStationChannel(
 		isFresh(targetSnapshot.LastPowerReadAt, time.Now()) {
 		return result, fmt.Errorf(
 			"station is booting; retry channel change after transition: %w",
-			ErrOperationInProgress,
+			ErrStationTransitioning,
 		)
 	}
 	if err := m.ensureReady(); err != nil {

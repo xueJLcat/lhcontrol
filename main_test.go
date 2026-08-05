@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -97,5 +98,51 @@ func TestRotatingLogFileReopensCurrentFileAfterRotationFailure(t *testing.T) {
 	writer.maxSize = 32
 	if _, err := writer.Write([]byte("ok")); err != nil {
 		t.Fatalf("writer remained unusable after rotation failure: %v", err)
+	}
+}
+
+func TestRotatingLogFileRecoversFromCloseFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "lhcontrol.log")
+	writer, err := openRotatingLogFile(path, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	if _, err := writer.Write([]byte("123456")); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a Close that reports an error after the handle is actually
+	// released. Before the fix, rotateLocked and truncateLocked returned at
+	// the failing Close and kept the dead handle, so every later rotation
+	// retried the same failing Close and logging stayed broken forever.
+	originalClose := logFileClose
+	logFileClose = func(file *os.File) error {
+		if closeErr := originalClose(file); closeErr != nil {
+			return closeErr
+		}
+		return errors.New("simulated close failure")
+	}
+	defer func() { logFileClose = originalClose }()
+	if _, err := writer.Write([]byte("7890abcd")); err != nil {
+		t.Fatalf("rotation did not survive a failing Close: %v", err)
+	}
+	logFileClose = originalClose
+	writer.maxSize = 32
+	if _, err := writer.Write([]byte("after")); err != nil {
+		t.Fatalf("writer remained unusable after a failing Close: %v", err)
+	}
+	backup, err := os.ReadFile(path + ".1")
+	if err != nil {
+		t.Fatalf("read backup after close-failure rotation: %v", err)
+	}
+	if !bytes.Equal(backup, []byte("123456")) {
+		t.Fatalf("backup = %q, want %q", backup, "123456")
+	}
+	current, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read current log after close-failure rotation: %v", err)
+	}
+	if !bytes.Equal(current, []byte("7890abcdafter")) {
+		t.Fatalf("current log = %q, want %q", current, "7890abcdafter")
 	}
 }

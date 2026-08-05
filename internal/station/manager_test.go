@@ -1878,8 +1878,8 @@ func TestSetStationChannelRejectsFreshBootingStation(t *testing.T) {
 	}
 
 	result, err := manager.SetStationChannel(address, 5, false)
-	if !errors.Is(err, ErrOperationInProgress) || !strings.Contains(err.Error(), "station is booting") {
-		t.Fatalf("SetStationChannel() error = %v, want booting conflict", err)
+	if !errors.Is(err, ErrStationTransitioning) || !strings.Contains(err.Error(), "station is booting") {
+		t.Fatalf("SetStationChannel() error = %v, want booting transition conflict", err)
 	}
 	if result.CommandSent || result.Station.Address != address {
 		t.Fatalf("booting channel result = %+v", result)
@@ -2856,8 +2856,8 @@ func TestSinglePowerRejectsFreshBootingStation(t *testing.T) {
 	}
 
 	_, err := manager.SetStationPower(address, "on")
-	if !errors.Is(err, ErrOperationInProgress) || !strings.Contains(err.Error(), "station is booting") {
-		t.Fatalf("SetStationPower() error = %v, want booting ErrOperationInProgress", err)
+	if !errors.Is(err, ErrStationTransitioning) || !strings.Contains(err.Error(), "station is booting") {
+		t.Fatalf("SetStationPower() error = %v, want booting ErrStationTransitioning", err)
 	}
 }
 

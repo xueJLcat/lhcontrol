@@ -146,7 +146,8 @@
         <span class="fresh-icon unverified" title="State reported by the station but not confirmed by readback"><CircleHelp size={11} /></span>
       {/if}
       {#if !station.isPresent}<span class="muted-badge" title="Not detected in the latest scan; direct power control can still be attempted">not visible</span>{/if}
-      {#if station.isPresent && !station.seenInLatestScan}<span class="muted-badge" title="Missed by one scan; retained until a second consecutive miss">scan stale</span>{/if}
+      {#if station.isPresent && station.presenceUncertain}<span class="muted-badge" title="Its connection could not be fully released before the last scan, so the advertisement may have been missed">presence uncertain</span>{/if}
+      {#if station.isPresent && !station.presenceUncertain && !station.seenInLatestScan}<span class="muted-badge" title="Missed by one scan; retained until a second consecutive miss">scan stale</span>{/if}
     </div>
     {#if feedback}
       <div class="power-feedback {feedback.kind}" title={feedback.text}>

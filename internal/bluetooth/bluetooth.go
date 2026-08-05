@@ -446,20 +446,6 @@ func (bs *BaseStation) setOperationErrorInternal(err error) {
 	bs.refreshLastErrorInternal()
 }
 
-// GetPowerState reads the power state safely.
-func (bs *BaseStation) GetPowerState() int {
-	bs.mutex.RLock()
-	defer bs.mutex.RUnlock()
-	return int(bs.PowerState)
-}
-
-// GetChannel returns the cached optical channel (1-16), or 0 when unknown.
-func (bs *BaseStation) GetChannel() int {
-	bs.mutex.RLock()
-	defer bs.mutex.RUnlock()
-	return bs.Channel
-}
-
 type BaseStationSnapshot struct {
 	Name              string
 	Address           string
@@ -1039,6 +1025,13 @@ const bootingFallbackAfter = 8 * time.Second
 // both while starting and occasionally while already awake. Keep the
 // transitional interpretation initially, but do not let a station remain
 // permanently stuck in Booting.
+//
+// Known limitation: when the previous state was On, booting raw values are
+// masked back to On. This favors firmware that reports booting values while
+// already awake, but it hides a genuine reboot that begins while the station
+// is On (the transition is only visible once the firmware reports a stable
+// value). This masking is deliberate and covered by tests; do not remove it
+// without re-evaluating the awake-but-reporting-booting firmware behavior.
 func decodePowerStateWithHistory(raw byte, previous PowerState, bootingSince, now time.Time) PowerState {
 	state := DecodePowerState(raw)
 	if state != PowerStateBooting {

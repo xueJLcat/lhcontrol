@@ -141,7 +141,10 @@ func (f *fakeAPIStationManager) SetAllStationsPowerDetailed(string) (station.Bul
 	return f.bulkResult, f.bulkErr
 }
 func (f *fakeAPIStationManager) SetStationPower(string, string) (station.PowerActionResult, error) {
-	return f.powerResult, f.powerErr
+	if f.powerErr != nil || f.powerResult.Station.Address != "" {
+		return f.powerResult, f.powerErr
+	}
+	return station.PowerActionResult{}, f.legacyErr
 }
 func (f *fakeAPIStationManager) IdentifyStation(string) error { return f.legacyErr }
 func (f *fakeAPIStationManager) RefreshStationCapabilities(string) (station.StationInfo, error) {
@@ -173,6 +176,7 @@ func TestAPIStatusForError(t *testing.T) {
 		{station.ErrChannelConflict, fiber.StatusConflict},
 		{station.ErrScanRequired, fiber.StatusConflict},
 		{bluetooth.ErrScanCancelled, fiber.StatusConflict},
+		{station.ErrStationTransitioning, fiber.StatusLocked},
 		{station.ErrUnsupported, fiber.StatusUnprocessableEntity},
 		{station.ErrShuttingDown, fiber.StatusServiceUnavailable},
 		{fmt.Errorf("BLE failure"), fiber.StatusInternalServerError},
@@ -676,7 +680,9 @@ func TestRegisteredRoutesMapFunctionalErrors(t *testing.T) {
 		{"refresh missing", http.MethodPost, "/stations/AA/refresh", "", station.ErrNotFound, fiber.StatusNotFound},
 		{"channel conflict", http.MethodPut, "/stations/AA/channel", `{"channel":4}`, station.ErrChannelConflict, fiber.StatusConflict},
 		{"channel booting", http.MethodPut, "/stations/AA/channel", `{"channel":4}`,
-			fmt.Errorf("station is booting: %w", station.ErrOperationInProgress), fiber.StatusConflict},
+			fmt.Errorf("station is booting: %w", station.ErrStationTransitioning), fiber.StatusLocked},
+		{"power transitioning", http.MethodPost, "/stations/AA/power", `{"state":"on"}`,
+			fmt.Errorf("station is booting: %w", station.ErrStationTransitioning), fiber.StatusLocked},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

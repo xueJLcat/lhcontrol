@@ -97,6 +97,7 @@ export function sameStationInfo(left: StationInfo, right: StationInfo): boolean 
     left.channel === right.channel &&
     left.channelConflict === right.channelConflict &&
     left.isPresent === right.isPresent &&
+    left.presenceUncertain === right.presenceUncertain &&
     left.seenInLatestScan === right.seenInLatestScan &&
     left.scanFresh === right.scanFresh &&
     left.missedScans === right.missedScans &&

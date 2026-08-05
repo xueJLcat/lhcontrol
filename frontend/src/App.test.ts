@@ -49,6 +49,7 @@ function createStation(overrides: Partial<StationInfo> = {}): StationInfo {
     channel: 3,
     channelConflict: false,
     isPresent: true,
+    presenceUncertain: false,
     seenInLatestScan: true,
     scanFresh: true,
     missedScans: 0,

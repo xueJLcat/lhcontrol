@@ -292,7 +292,7 @@
   })();
   $: hasUnknownVisibleChannel = stations.some(
     (station) => station.isPresent && station.address !== selectedAddress &&
-      (!station.scanFresh || !station.channelFresh || station.channel === 0)
+      (station.presenceUncertain || !station.scanFresh || !station.channelFresh || station.channel === 0)
   );
   $: operationLocks = deriveOperationLocks({
     global: globalOperation,

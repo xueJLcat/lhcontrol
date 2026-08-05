@@ -89,6 +89,7 @@ export namespace station {
 	    channel: number;
 	    channelConflict: boolean;
 	    isPresent: boolean;
+	    presenceUncertain: boolean;
 	    seenInLatestScan: boolean;
 	    scanFresh: boolean;
 	    missedScans: number;
@@ -123,6 +124,7 @@ export namespace station {
 	        this.channel = source["channel"];
 	        this.channelConflict = source["channelConflict"];
 	        this.isPresent = source["isPresent"];
+	        this.presenceUncertain = source["presenceUncertain"];
 	        this.seenInLatestScan = source["seenInLatestScan"];
 	        this.scanFresh = source["scanFresh"];
 	        this.missedScans = source["missedScans"];

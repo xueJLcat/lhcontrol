@@ -142,13 +142,25 @@ func (writer *rotatingLogFile) rotateClosedFile() error {
 	return nil
 }
 
-func (writer *rotatingLogFile) rotateLocked() error {
-	if writer.file != nil {
-		if err := writer.file.Close(); err != nil {
-			return err
-		}
-		writer.file = nil
+// logFileClose releases an open log file handle. Injectable in tests.
+var logFileClose = func(file *os.File) error { return file.Close() }
+
+// closeFileBestEffort drops the current log handle even when Close reports an
+// error. A handle whose Close failed is unusable anyway; keeping it would make
+// every later rotation retry the same failing Close and permanently break
+// file logging for the session.
+func (writer *rotatingLogFile) closeFileBestEffort() {
+	if writer.file == nil {
+		return
 	}
+	if err := logFileClose(writer.file); err != nil {
+		log.Printf("Closing the diagnostic log failed; continuing rotation: %v", err)
+	}
+	writer.file = nil
+}
+
+func (writer *rotatingLogFile) rotateLocked() error {
+	writer.closeFileBestEffort()
 	if err := writer.rotateClosedFile(); err != nil {
 		file, reopenErr := os.OpenFile(writer.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 		if reopenErr == nil {
@@ -175,12 +187,7 @@ func (writer *rotatingLogFile) rotateLocked() error {
 // produced (for example because the backup file is locked by another
 // process). Oldest content is dropped, but the log stays bounded.
 func (writer *rotatingLogFile) truncateLocked() error {
-	if writer.file != nil {
-		if err := writer.file.Close(); err != nil {
-			return err
-		}
-		writer.file = nil
-	}
+	writer.closeFileBestEffort()
 	file, err := os.OpenFile(writer.path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
 	if err != nil {
 		return err

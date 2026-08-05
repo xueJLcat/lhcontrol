@@ -33,6 +33,8 @@ func apiStatusForError(err error) int {
 		errors.Is(err, station.ErrScanRequired),
 		errors.Is(err, bluetooth.ErrScanCancelled):
 		status = fiber.StatusConflict
+	case errors.Is(err, station.ErrStationTransitioning):
+		status = fiber.StatusLocked
 	case errors.Is(err, station.ErrUnsupported):
 		status = fiber.StatusUnprocessableEntity
 	case errors.Is(err, station.ErrShuttingDown):
