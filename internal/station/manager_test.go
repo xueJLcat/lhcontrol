@@ -1601,6 +1601,35 @@ func TestStationOperationsRejectDuplicateAndLimitConcurrency(t *testing.T) {
 	}
 }
 
+func TestEndStationOperationWithoutBeginIsHarmless(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		manager.endStationOperation("MISSING")
+		manager.endStationOperation("MISSING")
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("endStationOperation blocked without a matching begin")
+	}
+	if err := manager.beginStationOperation("AA"); err != nil {
+		t.Fatalf("first device slot unavailable after defensive end: %v", err)
+	}
+	if err := manager.beginStationOperation("BB"); err != nil {
+		t.Fatalf("second device slot unavailable after defensive end: %v", err)
+	}
+	if err := manager.beginStationOperation("CC"); !errors.Is(err, ErrOperationInProgress) {
+		t.Fatalf("slot limit was broken by defensive end: %v", err)
+	}
+	manager.endStationOperation("AA")
+	manager.endStationOperation("BB")
+	if manager.IsBusy() {
+		t.Fatal("manager remained busy after station operations ended")
+	}
+}
+
 func TestVisibleStationsOnlyParticipateInChannelConflicts(t *testing.T) {
 	manager := NewManager(config.NewConfig())
 	now := time.Now()
@@ -2790,6 +2819,9 @@ func TestSinglePowerAlreadyAtConfirmedTargetIsNoOp(t *testing.T) {
 	if result.CommandSent || !result.Confirmed || result.Station.Address != address {
 		t.Fatalf("no-op power result = %+v", result)
 	}
+	if !result.Skipped || result.Reason != "already at target state" {
+		t.Fatalf("no-op power result = %+v, want skipped with reason", result)
+	}
 }
 
 func TestSinglePowerRejectsFreshBootingStation(t *testing.T) {
@@ -2962,6 +2994,34 @@ func TestRecoverySchedulerIncludesKnownAbsentStation(t *testing.T) {
 	manager.runStatusRecoveryRound()
 	if recovered.Load() != 1 {
 		t.Fatalf("absent known station recovery attempts = %d, want 1", recovered.Load())
+	}
+}
+
+func TestRecoverySchedulerTreatsZeroScheduleAsImmediatelyDue(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	address := "11:22:33:44:55:87"
+	manager.stations[address] = &internalbluetooth.BaseStation{
+		Name: "LHB-ZERO-SCHEDULE", Address: mustAddress(t, address), Present: false,
+	}
+	manager.statusRetryMutex.Lock()
+	// A legacy-shaped entry carries no explicit kinds and no schedule time;
+	// it must be treated as due immediately instead of waiting for a wake.
+	manager.statusRetries[address] = statusRetry{}
+	manager.statusRetryMutex.Unlock()
+
+	delay, scheduled := manager.nextStatusRecoveryDelay()
+	if !scheduled || delay != 0 {
+		t.Fatalf("nextStatusRecoveryDelay() = %v, %v; want 0, true", delay, scheduled)
+	}
+
+	var recovered atomic.Int32
+	manager.bluetoothOps.fetchInitialPowerState = func(context.Context, *internalbluetooth.BaseStation) error {
+		recovered.Add(1)
+		return nil
+	}
+	manager.runStatusRecoveryRound()
+	if recovered.Load() != 1 {
+		t.Fatalf("zero-schedule recovery attempts = %d, want 1", recovered.Load())
 	}
 }
 

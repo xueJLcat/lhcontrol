@@ -38,6 +38,26 @@
     wasRenaming = renaming;
   }
 
+  function commitRename() {
+    onSaveRename(station, localName.trim());
+  }
+
+  function discardRename() {
+    onCancelRename();
+  }
+
+  function handleRenameBlur(event: FocusEvent) {
+    // Chromium fires a synchronous blur when the focused input is removed
+    // from the DOM; the node is already detached at that point. A genuine
+    // focus loss targets the still-connected input. Suppressing only the
+    // removal-triggered blur keeps an explicit save or cancel from double
+    // saving the draft while a parent that rejects the action (leaving the
+    // row open) keeps blur-to-save fully functional.
+    const target = event.target;
+    if (target instanceof Element && !target.isConnected) return;
+    onSaveRename(station, localName.trim());
+  }
+
   $: if (station.powerState !== prevPowerState) {
     if (prevPowerState !== null && station.powerState >= 0) {
       flash = true;
@@ -67,10 +87,10 @@
   function handleRenameKeydown(event: KeyboardEvent) {
     if (event.key === 'Enter') {
       event.stopPropagation();
-      onSaveRename(station, localName.trim());
+      commitRename();
     } else if (event.key === 'Escape') {
       event.stopPropagation();
-      onCancelRename();
+      discardRename();
     }
   }
 </script>
@@ -90,11 +110,11 @@
         maxlength="32"
         aria-label="Station name"
         on:keydown={handleRenameKeydown}
-        on:blur={() => onSaveRename(station, localName.trim())}
+        on:blur={handleRenameBlur}
         on:click|stopPropagation
       />
-      <button type="button" class="icon-btn" title="Save name" aria-label="Save name" on:mousedown|preventDefault on:click|stopPropagation={() => onSaveRename(station, localName.trim())}><Check size={16} /></button>
-      <button type="button" class="icon-btn" title="Cancel" aria-label="Cancel rename" on:mousedown|preventDefault on:click|stopPropagation={onCancelRename}><X size={16} /></button>
+      <button type="button" class="icon-btn" title="Save name" aria-label="Save name" on:mousedown|preventDefault on:click|stopPropagation={commitRename}><Check size={16} /></button>
+      <button type="button" class="icon-btn" title="Cancel" aria-label="Cancel rename" on:mousedown|preventDefault on:click|stopPropagation={discardRename}><X size={16} /></button>
     </div>
   {:else}
     <div class="card-top">

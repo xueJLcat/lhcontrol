@@ -829,7 +829,12 @@
       const result = await SetStationPower(station.address, state);
       if (!canCommitStationOperation(operationEpoch, station.address, operationRevision)) return;
       mergeStationUpdates([result.station]);
-      setPowerFeedback(station.address, result.confirmed
+      setPowerFeedback(station.address, result.skipped
+        ? {
+            kind: 'success', text: `Already ${targetLabel}`, target: state,
+            readAt: result.station.lastPowerReadAt
+          }
+        : result.confirmed
         ? {
             kind: 'success', text: `${targetLabel} confirmed`, target: state,
             readAt: result.station.lastPowerReadAt
@@ -843,7 +848,9 @@
             readAt: result.station.lastPowerReadAt
           });
       if (canCommitStatus(statusOperation)) {
-        statusMessage = result.confirmed
+        statusMessage = result.skipped
+          ? `${station.name} is already ${targetLabel}; no command was sent.`
+          : result.confirmed
           ? `${station.name} is ${targetLabel}.`
           : result.confirmationError
             ? `${station.name}: command sent, but confirmation failed. ${result.confirmationError}`
@@ -948,6 +955,12 @@
 
   async function saveRename(station: StationInfo, name: string) {
     if (stationBusy(station.address) || stationLocked) {
+      // Keep the row open for a retry and explain why the submission did
+      // nothing; a silent rejection leaves the user typing into a dead input.
+      const statusOperation = beginStatusOperation();
+      const reason = `Rename blocked: another operation is in progress for ${station.name}.`;
+      if (canCommitStatus(statusOperation)) statusMessage = reason;
+      pushToast(reason, 'warning');
       return;
     }
     cancelRename();

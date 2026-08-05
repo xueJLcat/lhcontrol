@@ -43,6 +43,33 @@ describe('generated Wails result models', () => {
     expect(result.station.metadata.model).toBe('2.0');
   });
 
+  it('preserves the cached no-op power result', () => {
+    const result = station.PowerActionResult.createFrom({
+      commandSent: false,
+      skipped: true,
+      reason: 'already at target state',
+      confirmed: true,
+      station: {
+        name: 'LHB-TEST',
+        originalName: 'LHB-TEST',
+        address: '11:22:33:44:55:66',
+        powerState: 1,
+        powerStateName: 'on',
+        powerStateConfirmed: true,
+        rawPowerState: 0x0b,
+        channel: 3,
+        capabilities: { powerRead: true, powerWrite: true },
+        metadata: {}
+      }
+    });
+
+    expect(result.commandSent).toBe(false);
+    expect(result.skipped).toBe(true);
+    expect(result.reason).toBe('already at target state');
+    expect(result.confirmed).toBe(true);
+    expect(result.station).toBeInstanceOf(station.StationInfo);
+  });
+
   it('preserves channel confirmation data and scan terminal status', () => {
     const channel = station.ChannelChangeResult.createFrom({
       address: '11:22:33:44:55:66',

@@ -1074,6 +1074,30 @@ describe('App asynchronous operations', () => {
     expect(await screen.findByText('Failed · last-known sleep')).toBeInTheDocument();
   });
 
+  it('reports a backend no-op power result as already at target', async () => {
+    const alreadyOn = createStation({
+      powerState: 1,
+      powerStateName: 'on',
+      rawPowerState: 0x0b,
+      lastPowerReadAt: '2026-07-29T08:00:00Z'
+    });
+    api.SetStationPower.mockResolvedValue({
+      station: alreadyOn,
+      commandSent: false,
+      skipped: true,
+      reason: 'already at target state',
+      confirmed: true,
+      confirmationError: ''
+    });
+    render(App);
+    await screen.findByText('LHB-TEST');
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Turn LHB-TEST on' })).toBeEnabled());
+    await fireEvent.click(screen.getByRole('button', { name: 'Turn LHB-TEST on' }));
+    expect(await screen.findByText('Already On')).toBeInTheDocument();
+    expect(await screen.findByRole('status')).toHaveTextContent('LHB-TEST is already On; no command was sent.');
+    expect(api.SetStationPower).toHaveBeenCalledWith('11:22:33:44:55:66', 'on');
+  });
+
   it('clears completed power feedback when a periodic read reports a different state', async () => {
     vi.useFakeTimers();
     const initial = createStation({ lastPowerReadAt: '2026-07-29T08:00:00Z' });

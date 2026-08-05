@@ -286,6 +286,8 @@ export namespace station {
 	export class PowerActionResult {
 	    station: StationInfo;
 	    commandSent: boolean;
+	    skipped: boolean;
+	    reason?: string;
 	    confirmed: boolean;
 	    confirmationError: string;
 	
@@ -297,6 +299,8 @@ export namespace station {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.station = this.convertValues(source["station"], StationInfo);
 	        this.commandSent = source["commandSent"];
+	        this.skipped = source["skipped"];
+	        this.reason = source["reason"];
 	        this.confirmed = source["confirmed"];
 	        this.confirmationError = source["confirmationError"];
 	    }

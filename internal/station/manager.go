@@ -68,6 +68,8 @@ type StationInfo struct {
 type PowerActionResult struct {
 	Station           StationInfo `json:"station"`
 	CommandSent       bool        `json:"commandSent"`
+	Skipped           bool        `json:"skipped"`
+	Reason            string      `json:"reason,omitempty"`
 	Confirmed         bool        `json:"confirmed"`
 	ConfirmationError string      `json:"confirmationError"`
 }
@@ -878,10 +880,16 @@ func (m *Manager) endStationOperation(address string) {
 	key := strings.ToLower(address)
 	m.deviceOperationMutex.Lock()
 	active, exists := m.activeDeviceOperations[key]
-	delete(m.activeDeviceOperations, key)
-	if exists {
-		close(active.done)
+	if !exists {
+		m.deviceOperationMutex.Unlock()
+		// No matching beginStationOperation holds a slot, the shared read
+		// lock, or a lifecycle registration for this station. Releasing them
+		// here would either block forever on an empty slot channel or silently
+		// release resources owned by another active operation.
+		return
 	}
+	delete(m.activeDeviceOperations, key)
+	close(active.done)
 	m.deviceOperationMutex.Unlock()
 	<-m.deviceOperationSlots
 	m.operationMutex.RUnlock()
@@ -1037,7 +1045,10 @@ func (m *Manager) cancelRecoveryForForeground() {
 	}
 }
 
-// IsBusy reports whether a scan, status read, or power command is active.
+// IsBusy reports whether an exclusive global operation (a scan or a bulk
+// power batch) currently holds the global operation lock. Shared work such
+// as status refreshes, single-station commands, and configuration writes
+// does not make it return true.
 func (m *Manager) IsBusy() bool {
 	if !m.operationMutex.TryLock() {
 		return true
@@ -2032,6 +2043,11 @@ func (m *Manager) nextStatusRecoveryDelay() (time.Duration, bool) {
 			continue
 		}
 		_, _, nextAt := statusRetryOrder(retry)
+		if nextAt.IsZero() {
+			// A zero schedule is due immediately. Reporting it as "no work"
+			// would strand the station until an unrelated wake arrives.
+			return 0, true
+		}
 		if earliest.IsZero() || nextAt.Before(earliest) {
 			earliest = nextAt
 		}
@@ -2290,7 +2306,12 @@ func (m *Manager) cachedPowerOutcome(stationPtr *bluetooth.BaseStation, target b
 	if err != nil {
 		return PowerActionResult{}, err, true
 	}
-	return PowerActionResult{Station: info, Confirmed: true}, nil, true
+	return PowerActionResult{
+		Station:   info,
+		Skipped:   true,
+		Reason:    "already at target state",
+		Confirmed: true,
+	}, nil, true
 }
 
 type cachedPowerDisposition uint8

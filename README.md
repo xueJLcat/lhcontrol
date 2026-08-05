@@ -521,14 +521,30 @@ cancelled
 
 * 更新后的基站信息
 * `commandSent`
+* `skipped`
+* `reason`
 * `confirmed`
 * `confirmationError`
+
+如果基站在最近一次可信状态读取中已经处于目标状态，则不会发送任何命令，返回：
+
+```json
+{
+  "commandSent": false,
+  "skipped": true,
+  "reason": "already at target state",
+  "confirmed": true
+}
+```
+
+此时 `confirmed` 表示“状态已由新鲜读回确认”，而不是“命令已执行并确认”。
 
 如果命令已经成功写入设备，但无法确认最终状态，则会返回：
 
 ```json
 {
   "commandSent": true,
+  "skipped": false,
   "confirmed": false
 }
 ```
@@ -1166,14 +1182,32 @@ with:
 
 * Updated station information
 * `commandSent`
+* `skipped`
+* `reason`
 * `confirmed`
 * `confirmationError`
+
+When the station was already at the target state according to a recent
+verified read, no command is sent and the response is:
+
+```json
+{
+  "commandSent": false,
+  "skipped": true,
+  "reason": "already at target state",
+  "confirmed": true
+}
+```
+
+In this case `confirmed` means "the state was confirmed by a fresh read",
+not "a command was executed and confirmed".
 
 A command that was successfully sent but could not be confirmed is represented as:
 
 ```json
 {
   "commandSent": true,
+  "skipped": false,
   "confirmed": false
 }
 ```
