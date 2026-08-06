@@ -2,6 +2,7 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { StationInfo } from '../types';
+import { createOnStation } from '../../test/fixtures';
 import DetailsDrawer from './DetailsDrawer.svelte';
 
 afterEach(cleanup);
@@ -23,51 +24,7 @@ beforeEach(() => {
 });
 
 function station(): StationInfo {
-  return {
-    name: 'LHB-TEST',
-    originalName: 'LHB-TEST',
-    address: '11:22:33:44:55:66',
-    powerState: 1,
-    powerStateName: 'on',
-    powerStateConfirmed: true,
-    rawPowerState: 0x0b,
-    channel: 3,
-    channelConflict: false,
-    isPresent: true,
-    seenInLatestScan: true,
-    scanFresh: true,
-    missedScans: 0,
-    lastSeenAt: '',
-    lastReadAt: '',
-    lastPowerReadAt: '',
-    lastChannelReadAt: '',
-    metadataReadAt: '',
-    lastError: '',
-    statusFresh: true,
-    powerFresh: true,
-    channelFresh: true,
-    metadataFresh: false,
-    connectionState: 'connected',
-    capabilitiesKnown: true,
-    capabilities: {
-      powerRead: true,
-      powerWrite: true,
-      powerNotify: false,
-      standby: true,
-      channelRead: true,
-      channelWrite: true,
-      channelNotify: false,
-      identify: true,
-      deviceInformation: false
-    },
-    metadata: {
-      manufacturer: '',
-      model: '',
-      serialNumber: '',
-      hardwareRevision: '',
-      firmwareRevision: ''
-    }
-  } as StationInfo;
+  return createOnStation();
 }
 
 describe('DetailsDrawer actions', () => {

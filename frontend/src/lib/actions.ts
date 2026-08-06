@@ -9,7 +9,7 @@ export function focusTrap(node: HTMLElement) {
 
   function focusable(): HTMLElement[] {
     return Array.from(node.querySelectorAll<HTMLElement>(FOCUSABLE))
-      .filter((el) => !el.hasAttribute('disabled'));
+      .filter((el) => !el.hasAttribute('disabled') && !el.hasAttribute('hidden'));
   }
 
   function keydown(event: KeyboardEvent) {
@@ -28,7 +28,14 @@ export function focusTrap(node: HTMLElement) {
   }
 
   node.addEventListener('keydown', keydown);
-  focusable()[0]?.focus();
+  // A dialog container carrying tabindex="-1" is the better initial target:
+  // screen readers announce the dialog's accessible name before any control,
+  // and keyboard users can Tab into the content from there.
+  if (node.hasAttribute('tabindex')) {
+    node.focus();
+  } else {
+    focusable()[0]?.focus();
+  }
 
   return {
     destroy() {

@@ -9,8 +9,9 @@
 
   --text-primary: #101828;
   --text-secondary: #475467;
-  /* #64748b keeps micro captions above WCAG AA (4.5:1) on white surfaces. */
-  --text-muted: #64748b;
+  /* Kept >= 4.5:1 against white and the tinted input/inset surfaces even at
+     micro sizes. */
+  --text-muted: #5c6a7d;
 
   --color-primary: #3b82f6;
   --color-primary-hover: #2563eb;
@@ -40,6 +41,8 @@
   /* Spacing */
   --spacing-md: 0.75rem;
   --spacing-lg: 1rem;
+  /* Shared chrome metric: the toast stack is positioned above the footer. */
+  --footer-height: 28px;
 
   /* UI */
   --radius-xs: 7px;
@@ -67,8 +70,8 @@
   --ease-spring: cubic-bezier(0.34, 1.4, 0.44, 1);
 
   /* Typography */
-  --fs-micro: 0.7rem;
-  --fs-xs: 0.72rem;
+  --fs-micro: 0.75rem;
+  --fs-xs: 0.76rem;
   --fs-sm: 0.78rem;
   --fs-title: 1rem;
   --fs-h2: 1.1rem;
@@ -127,6 +130,18 @@ body::before {
 .mono {
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 ::selection {
@@ -348,7 +363,8 @@ button:focus-visible, [tabindex]:focus-visible {
 .power-segment button.pending, .bulk-power button.pending {
   opacity: 1;
   color: #fff;
-  background: var(--color-primary);
+  /* primary-deep keeps white text above WCAG AA (4.5:1) while pulsing. */
+  background: var(--color-primary-deep);
   box-shadow: none;
   animation: pulse 1.1s ease-in-out infinite;
 }
@@ -467,6 +483,27 @@ button:focus-visible, [tabindex]:focus-visible {
 @keyframes spin { to { transform: rotate(360deg); } }
 @keyframes pulse { 50% { filter: brightness(1.18); } }
 
+/* Dialog/drawer heading and definition-list primitives shared by
+   DetailsDrawer, ChannelModal and BulkConfirmModal. */
+.drawer-head { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; }
+.drawer-head small {
+  color: var(--color-primary-deep);
+  font-size: var(--fs-micro);
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.drawer-head h2 { margin: 0.1rem 0 0; font-size: var(--fs-h2); font-weight: 800; color: var(--text-primary); overflow-wrap: anywhere; }
+.drawer-title { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+.def-list { display: grid; grid-template-columns: 7.5rem minmax(0, 1fr); gap: 0.42rem; font-size: var(--fs-sm); }
+.def-list dt { color: var(--text-muted); font-weight: 600; }
+.def-list dd { margin: 0; color: var(--text-primary); font-weight: 700; overflow-wrap: anywhere; }
+.hint { font-size: var(--fs-sm); color: var(--text-muted); line-height: 1.45; }
+@media (max-width: 420px) {
+  .def-list { grid-template-columns: 1fr; gap: 0.1rem; }
+  .def-list dd { margin-bottom: 0.4rem; }
+}
+
 /* Channel-conflict attention pulse: border and glow breathe instead of a
    static red cell. The global reduced-motion override freezes it. */
 @keyframes conflict-pulse {
@@ -485,6 +522,3 @@ button:focus-visible, [tabindex]:focus-visible {
   from { opacity: 0; transform: translateY(8px); }
   to { opacity: 1; transform: translateY(0); }
 }
-
-/* Status message swap: the keyed span slides in below the previous text. */
-.status-msg { display: inline-block; }

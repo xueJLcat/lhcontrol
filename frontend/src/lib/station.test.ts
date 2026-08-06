@@ -1,46 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import { sameStationInfo, stateClass } from './station';
 import type { StationInfo } from './types';
+import { createOnStation } from '../test/fixtures';
 
 function station(overrides: Partial<StationInfo> = {}): StationInfo {
-  return {
+  return createOnStation({
     name: 'LHB-A',
     originalName: 'LHB-A',
-    address: '11:22:33:44:55:66',
-    powerState: 1,
-    powerStateName: 'on',
-    powerStateConfirmed: true,
-    rawPowerState: 0x0b,
-    channel: 3,
-    channelConflict: false,
-    isPresent: true,
-    presenceUncertain: false,
-    seenInLatestScan: true,
-    scanFresh: true,
-    missedScans: 0,
     lastSeenAt: '2026-01-01T00:00:00Z',
-    lastReadAt: '',
-    lastPowerReadAt: '',
-    lastChannelReadAt: '',
-    metadataReadAt: '',
-    lastError: '',
-    statusFresh: true,
-    powerFresh: true,
-    channelFresh: true,
-    metadataFresh: false,
-    connectionState: 'connected',
-    capabilitiesKnown: true,
-    capabilities: {
-      powerRead: true,
-      powerWrite: true,
-      powerNotify: false,
-      standby: true,
-      channelRead: true,
-      channelWrite: true,
-      channelNotify: false,
-      identify: true,
-      deviceInformation: false
-    },
     metadata: {
       manufacturer: 'Valve',
       model: '',
@@ -49,7 +16,7 @@ function station(overrides: Partial<StationInfo> = {}): StationInfo {
       firmwareRevision: ''
     },
     ...overrides
-  } as StationInfo;
+  });
 }
 
 describe('stateClass', () => {

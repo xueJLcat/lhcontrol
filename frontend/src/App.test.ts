@@ -36,56 +36,7 @@ vi.mock('./lib/toast', async (importOriginal) => {
 });
 
 import App from './App.svelte';
-
-function createStation(overrides: Partial<StationInfo> = {}): StationInfo {
-  return {
-    name: 'LHB-TEST',
-    originalName: 'LHB-TEST',
-    address: '11:22:33:44:55:66',
-    powerState: 0,
-    powerStateName: 'sleep',
-    powerStateConfirmed: true,
-    rawPowerState: 0,
-    channel: 3,
-    channelConflict: false,
-    isPresent: true,
-    presenceUncertain: false,
-    seenInLatestScan: true,
-    scanFresh: true,
-    missedScans: 0,
-    lastSeenAt: '',
-    lastReadAt: '',
-    lastPowerReadAt: '',
-    lastChannelReadAt: '',
-    metadataReadAt: '',
-    lastError: '',
-    statusFresh: true,
-    powerFresh: true,
-    channelFresh: true,
-    metadataFresh: false,
-    connectionState: 'connected',
-    capabilitiesKnown: true,
-    capabilities: {
-      powerRead: true,
-      powerWrite: true,
-      powerNotify: false,
-      standby: true,
-      channelRead: true,
-      channelWrite: true,
-      channelNotify: false,
-      identify: true,
-      deviceInformation: false
-    },
-    metadata: {
-      manufacturer: '',
-      model: '',
-      serialNumber: '',
-      hardwareRevision: '',
-      firmwareRevision: ''
-    },
-    ...overrides
-  } as StationInfo;
-}
+import { createStation } from './test/fixtures';
 
 function externalScanEvent(id: number, overrides: Partial<{ stations: StationInfo[]; error: string }> = {}) {
   return { id, ...overrides };
@@ -485,7 +436,7 @@ describe('App asynchronous operations', () => {
     await vi.advanceTimersByTimeAsync(15_000);
 
     expect(await screen.findByText('LHB-RECOVERED')).toBeInTheDocument();
-    expect(screen.getByText('External scan completed: found 1; 1 known station(s). partial metadata')).toBeInTheDocument();
+    expect(screen.getByText('External scan completed: found 1; 1 known station. partial metadata')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Scan' })).toBeEnabled();
   });
 
@@ -549,8 +500,7 @@ describe('App asynchronous operations', () => {
     runtime.handlers.get('external-scan-started')?.(externalScanEvent(1));
     runtime.handlers.get('external-scan-cancelled')?.(externalScanEvent(1));
     await vi.advanceTimersByTimeAsync(15_000);
-	await vi.advanceTimersByTimeAsync(15_000);
-
+    await vi.advanceTimersByTimeAsync(15_000);
     expect(await screen.findByText('LHB-RECOVERED-CANCEL')).toBeInTheDocument();
     expect(screen.getByText('External scan stopped.')).toBeInTheDocument();
   });
@@ -618,7 +568,7 @@ describe('App asynchronous operations', () => {
 
     runtime.handlers.get('external-scan-started')?.(externalScanEvent(7));
     runtime.handlers.get('external-scan-completed')?.(externalScanEvent(7, { stations: [createStation()] }));
-    await screen.findByText('External scan completed: found 1; 1 known station(s).');
+    await screen.findByText('External scan completed: found 1; 1 known station.');
     await vi.advanceTimersByTimeAsync(15_000);
     await screen.findByRole('button', { name: 'Stop' });
 
@@ -687,13 +637,13 @@ describe('App asynchronous operations', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: 'Scan' })).toBeEnabled());
     await fireEvent.click(screen.getByRole('button', { name: 'Scan' }));
     expect(await screen.findByText('LHB-LOCAL-FINAL')).toBeInTheDocument();
-    expect(screen.getByRole('status')).toHaveTextContent('Found 1; 1 known station(s).');
+    expect(screen.getByRole('status')).toHaveTextContent('Found 1; 1 known station.');
 
     resolveExternalList([createStation({ name: 'LHB-STALE-EXTERNAL' })]);
     await vi.advanceTimersByTimeAsync(15_000);
 
     expect(screen.queryByText('LHB-STALE-EXTERNAL')).not.toBeInTheDocument();
-    expect(screen.getByRole('status')).toHaveTextContent('Found 1; 1 known station(s).');
+    expect(screen.getByRole('status')).toHaveTextContent('Found 1; 1 known station.');
     expect(screen.queryByText(/External scan completed/)).not.toBeInTheDocument();
   });
 
@@ -1209,7 +1159,7 @@ describe('App asynchronous operations', () => {
 
     await vi.advanceTimersByTimeAsync(15_000);
     await vi.waitFor(() => expect(api.CheckAllStationStatuses).toHaveBeenCalledOnce());
-    expect(screen.queryByText('On confirmed')).not.toBeInTheDocument();
+    await vi.waitFor(() => expect(screen.queryByText('On confirmed')).not.toBeInTheDocument());
   });
 
   it('keeps GATT capacity available during rename but locks scan and bulk', async () => {
@@ -1326,7 +1276,7 @@ describe('App asynchronous operations', () => {
     await waitFor(() => expect(api.SetStationChannel).toHaveBeenCalledWith('11:22:33:44:55:66', 4, false));
 
     const channelDialog = screen.getByRole('dialog', { name: 'Change channel' });
-    await waitFor(() => expect(within(channelDialog).getByRole('button', { name: 'Close' })).toBeDisabled());
+    await waitFor(() => expect(within(channelDialog).getByRole('button', { name: 'Close channel editor' })).toBeDisabled());
     await fireEvent.keyDown(window, { key: 'Escape' });
     expect(screen.getByRole('dialog', { name: 'Change channel' })).toBeInTheDocument();
 
@@ -1500,7 +1450,7 @@ describe('App asynchronous operations', () => {
     expect(await screen.findByText('Switching to On…')).toBeInTheDocument();
 
     await vi.advanceTimersByTimeAsync(60_000);
-    expect(screen.queryByText('Switching to On…')).not.toBeInTheDocument();
+    await vi.waitFor(() => expect(screen.queryByText('Switching to On…')).not.toBeInTheDocument());
   });
 
   it('keeps the channel display stable across transient channel wipes', async () => {
@@ -1534,8 +1484,8 @@ describe('App asynchronous operations', () => {
     await fireEvent.click(await screen.findByRole('button', { name: /Change Channel/ }));
     const dialog = await screen.findByRole('dialog', { name: 'Change channel' });
     expect(within(dialog).getByText(/unknown channel/)).toBeInTheDocument();
-    await fireEvent.click(within(dialog).getByRole('button', { name: 'Close' }));
-    await fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+    await fireEvent.click(within(dialog).getByRole('button', { name: 'Close channel editor' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Close station details' }));
 
     // Once the memory window expires with the channel still unknown, the
     // display falls back to the live value.
@@ -1855,6 +1805,89 @@ describe('App asynchronous operations', () => {
     await fireEvent.click(screen.getByTitle('Save name'));
 
     expect(await screen.findByText('Config read-only')).toHaveAttribute('title', warning);
+  });
+
+  it('shows an actionable recovery card above the grid when a scan fails', async () => {
+    api.ScanAndFetchStations.mockRejectedValue(new Error('Bluetooth is unavailable; turn on Bluetooth and retry'));
+    api.GetCurrentStationInfo.mockResolvedValue([
+      createStation({ name: 'LHB-LATEST', connectionState: 'disconnected' })
+    ]);
+    render(App);
+    expect(await screen.findByRole('heading', { name: 'Bluetooth is unavailable' })).toBeInTheDocument();
+    expect(screen.getByRole('alert')).toBeInTheDocument();
+    expect(await screen.findByText('LHB-LATEST')).toBeInTheDocument();
+    expect(screen.queryByText('No base stations found.')).not.toBeInTheDocument();
+  });
+
+  it('offers retry from the recovery card and clears it once the next scan runs', async () => {
+    api.ScanAndFetchStations
+      .mockRejectedValueOnce(new Error('operation timed out'))
+      .mockResolvedValue([createStation()]);
+    api.GetCurrentStationInfo.mockResolvedValue([]);
+
+    render(App);
+    expect(await screen.findByRole('heading', { name: 'The scan timed out' })).toBeInTheDocument();
+    expect(screen.queryByText('No base stations found.')).not.toBeInTheDocument();
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Retry scan' }));
+    expect(await screen.findByText('LHB-TEST')).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(api.ScanAndFetchStations).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps the recovery card from claiming a scan that merely stopped', async () => {
+    api.GetScanStatus.mockResolvedValue({ state: 'cancelled', found: 0, warnings: [] });
+    api.ScanAndFetchStations.mockRejectedValue(new Error('scan cancelled'));
+    api.GetCurrentStationInfo.mockResolvedValue([]);
+    render(App);
+
+    expect(await screen.findByText('Scan stopped.')).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Scan Now' })).toBeEnabled();
+  });
+
+  it('demands confirmation before a bulk command that includes unverified stations', async () => {
+    const trusted = createStation({ name: 'LHB-TRUSTED', address: 'AA' });
+    const stale = createStation({ name: 'LHB-STALE', address: 'BB', isPresent: false });
+    api.ScanAndFetchStations.mockResolvedValue([trusted, stale]);
+    api.GetCurrentStationInfo.mockResolvedValue([trusted, stale]);
+    api.SetAllStationsPowerDetailed.mockResolvedValue({ target: 'on', results: [] });
+
+    render(App);
+    await screen.findByText('LHB-STALE');
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Scan' })).not.toBeDisabled());
+
+    expect(screen.getByText(/not fully verified — bulk commands include them/)).toBeInTheDocument();
+    await fireEvent.click(screen.getByTitle('Turn all known stations on'));
+    expect(api.SetAllStationsPowerDetailed).not.toHaveBeenCalled();
+
+    const dialog = await screen.findByRole('dialog', { name: 'Confirm bulk power' });
+    expect(within(dialog).getByText('Visible & verified')).toBeInTheDocument();
+    expect(within(dialog).getByText('Not seen in latest scan')).toBeInTheDocument();
+    await fireEvent.click(within(dialog).getByRole('button', { name: /Turn on/ }));
+    await waitFor(() => expect(api.SetAllStationsPowerDetailed).toHaveBeenCalledWith('on'));
+  });
+
+  it('cancels the bulk confirmation through the dialog, scrim and Escape key', async () => {
+    const trusted = createStation({ name: 'LHB-TRUSTED', address: 'AA' });
+    const stale = createStation({ name: 'LHB-STALE', address: 'BB', isPresent: false });
+    api.ScanAndFetchStations.mockResolvedValue([trusted, stale]);
+    api.GetCurrentStationInfo.mockResolvedValue([trusted, stale]);
+
+    render(App);
+    await screen.findByText('LHB-STALE');
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Scan' })).not.toBeDisabled());
+
+    await fireEvent.click(screen.getByTitle('Turn all known stations on'));
+    await fireEvent.click(within(await screen.findByRole('dialog', { name: 'Confirm bulk power' }))
+      .getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Confirm bulk power' })).not.toBeInTheDocument());
+
+    await fireEvent.click(screen.getByTitle('Turn all known stations on'));
+    await screen.findByRole('dialog', { name: 'Confirm bulk power' });
+    await fireEvent.keyDown(window, { key: 'Escape' });
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Confirm bulk power' })).not.toBeInTheDocument());
+    expect(api.SetAllStationsPowerDetailed).not.toHaveBeenCalled();
   });
 
   it('does not let a stale periodic fallback overwrite a newer scan event', async () => {

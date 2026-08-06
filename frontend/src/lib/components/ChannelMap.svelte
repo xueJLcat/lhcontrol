@@ -1,32 +1,43 @@
 <script lang="ts">
   import type { StationInfo } from '../types';
-  import { hasCurrentChannel, stateLabel } from '../station';
+  import { hasCurrentChannel, stateClass, stateLabel } from '../station';
 
-  export let stations: StationInfo[];
-  export let onSelect: (address: string) => void;
-  // Address of the station whose details drawer is open, so its channel cell
-  // can stay highlighted while the user inspects the station.
-  export let selectedAddress: string | null = null;
-  // Display-only channel resolver. The parent injects a short-lived memory so
-  // transient backend channel wipes do not flip cells between occupied and
-  // free/disabled. `current` still uses the live station data, so a resolved
-  // occupant without fresh data renders as last-known (stale).
-  export let channelOf: (station: StationInfo) => number = (station) => station.channel;
+  let {
+    stations,
+    onSelect,
+    selectedAddress = null,
+    channelOf = (station: StationInfo) => station.channel
+  }: {
+    stations: StationInfo[];
+    onSelect: (address: string) => void;
+    // Address of the station whose details drawer is open, so its channel
+    // cell can stay highlighted while the user inspects the station.
+    selectedAddress?: string | null;
+    // Display-only channel resolver. The parent injects a short-lived memory
+    // so transient backend channel wipes do not flip cells between occupied
+    // and free/disabled. `current` still uses the live station data, so a
+    // resolved occupant without fresh data renders as last-known (stale).
+    channelOf?: (station: StationInfo) => number;
+  } = $props();
 
   interface Occupant {
     name: string;
     state: string;
+    // Numeric-derived key for the CSS color variables: backend state labels
+    // may carry arbitrary casing that would miss every selector.
+    styleKey: string;
     address: string;
     current: boolean;
   }
 
-  $: byChannel = stations.reduce((map, station) => {
+  const byChannel = $derived(stations.reduce((map, station) => {
     const channel = channelOf(station);
     if (channel > 0) {
       const list = map.get(channel) ?? [];
       list.push({
         name: station.name,
         state: stateLabel(station),
+        styleKey: stateClass(station),
         address: station.address,
         current: hasCurrentChannel(station)
       });
@@ -34,12 +45,12 @@
       map.set(channel, list);
     }
     return map;
-  }, new Map<number, Occupant[]>());
+  }, new Map<number, Occupant[]>()));
 
-  $: conflictChannels = new Set(
+  const conflictChannels = $derived(new Set(
     stations.filter((station) => station.channelConflict && hasCurrentChannel(station))
       .map((station) => station.channel)
-  );
+  ));
 
   function cellLabel(channel: number, occupants: Occupant[]): string {
     if (!occupants.length) return `CH ${channel} — free`;
@@ -70,12 +81,12 @@
         class:stale={occupants.length > 0 && occupants.every((occupant) => !occupant.current)}
         class:conflict={occupants.filter((occupant) => occupant.current).length > 1 || conflictChannels.has(channel)}
         class:selected={selectedAddress !== null && occupants.some((occupant) => occupant.address === selectedAddress)}
-        style:--cm={occupants.length ? `var(--color-${occupants[0].state}, var(--text-muted))` : null}
-        style:--cm-deep={occupants.length ? `var(--color-${occupants[0].state}-deep, var(--text-secondary))` : null}
+        style:--cm={occupants.length ? `var(--color-${occupants[0].styleKey}, var(--text-muted))` : null}
+        style:--cm-deep={occupants.length ? `var(--color-${occupants[0].styleKey}-deep, var(--text-secondary))` : null}
         disabled={occupants.length === 0}
         aria-label={cellLabel(channel, occupants)}
         title={cellLabel(channel, occupants)}
-        on:click={() => occupants.length && onSelect(occupants[0].address)}
+        onclick={() => occupants.length && onSelect(occupants[0].address)}
       >{channel}</button>
     {/each}
   </div>
@@ -125,7 +136,9 @@
   .lg-booting::before { background: var(--color-booting); }
   .channel-map {
     display: grid;
-    grid-template-columns: repeat(16, 1fr);
+    /* minmax(0, ...) lets cells shrink below their text content so the row
+       never overflows or wraps in narrow windows. */
+    grid-template-columns: repeat(16, minmax(0, 1fr));
     gap: 3px;
   }
   .cm-cell {
@@ -134,8 +147,9 @@
     justify-content: center;
     height: 22px;
     padding: 0;
+    overflow: hidden;
     font-family: var(--font-mono);
-    font-size: 0.6rem;
+    font-size: 0.7rem;
     font-weight: 700;
     color: var(--text-muted);
     border: 1px solid var(--color-border);
@@ -172,5 +186,12 @@
     border-color: color-mix(in srgb, var(--color-primary) 65%, transparent);
     box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-primary) 28%, transparent);
     color: var(--color-primary-deep);
+  }
+  /* Always a single row of sixteen: cells shrink with the window via the fr
+     grid instead of wrapping, so the channel-to-position mapping stays
+     fixed. */
+  @media (max-width: 520px) {
+    .channel-map { gap: 2px; }
+    .cm-cell { height: 20px; }
   }
 </style>

@@ -1,15 +1,32 @@
 <script lang="ts">
   import { fade } from 'svelte/transition';
   import { Activity } from 'lucide-svelte';
+  import { dur } from '../motion';
 
-  export let statusMessage: string;
-  export let apiRunning: boolean;
-  export let apiError: string;
-  export let apiAddress = '';
-  export let configWarnings: string[] = [];
-  export let configWritable = true;
+  let {
+    statusMessage,
+    apiRunning,
+    apiError,
+    apiAddress = '',
+    configWarnings = [],
+    configWritable = true
+  }: {
+    statusMessage: string;
+    apiRunning: boolean;
+    apiError: string;
+    apiAddress?: string;
+    configWarnings?: string[];
+    configWritable?: boolean;
+  } = $props();
 
-  $: apiTitle = apiError || (apiAddress ? `HTTP API ${apiAddress}` : 'HTTP API unavailable');
+  let detail = $state<'config' | 'api' | null>(null);
+
+  const apiTitle = $derived(apiError || (apiAddress ? `HTTP API ${apiAddress}` : 'HTTP API unavailable'));
+  const configTitle = $derived(configWarnings.join('\n') || 'Configuration changes cannot be saved');
+
+  function toggle(target: 'config' | 'api') {
+    detail = detail === target ? null : target;
+  }
 </script>
 
 <footer>
@@ -17,29 +34,52 @@
   <span class="status-text" role="status" aria-live="polite" title={statusMessage}>
     {#key statusMessage}
       <!-- fade only: the parent ellipsis container clips vertical motion. -->
-      <span class="status-msg" in:fade={{ duration: 160 }}>{statusMessage}</span>
+      <span class="status-msg" in:fade={dur({ duration: 160 })}>{statusMessage}</span>
     {/key}
   </span>
-  {#if configWarnings.length > 0 || !configWritable}
-    <span
-      class="config-status"
-      title={configWarnings.join('\n') || 'Configuration changes cannot be saved'}
+  <!-- Hidden while the API is offline: the warning values may be stale, and
+       the API pill already carries the outage. -->
+  {#if apiRunning && (configWarnings.length > 0 || !configWritable)}
+    <button
+      type="button"
+      class="config-status pill-btn"
+      title={configTitle}
+      aria-expanded={detail === 'config'}
+      onclick={() => toggle('config')}
     >
       {configWritable ? 'Config warning' : 'Config read-only'}
-    </span>
+    </button>
   {/if}
-  <span class="api-status" class:ok={apiRunning} title={apiTitle}>
+  <button
+    type="button"
+    class="api-status pill-btn"
+    class:ok={apiRunning}
+    title={apiTitle}
+    aria-expanded={detail === 'api'}
+    onclick={() => toggle('api')}
+  >
     <span class="api-dot" aria-hidden="true"></span>
     {apiRunning ? 'API ready' : 'API offline'}
-  </span>
+  </button>
+  {#if detail === 'config'}
+    <div class="footer-detail" transition:fade={dur({ duration: 140 })}>
+      {#each configWarnings as warning}<p>{warning}</p>{/each}
+      {#if !configWritable}<p>Configuration changes cannot be saved.</p>{/if}
+    </div>
+  {:else if detail === 'api'}
+    <div class="footer-detail" transition:fade={dur({ duration: 140 })}>
+      <p>{apiTitle}</p>
+    </div>
+  {/if}
 </footer>
 
 <style>
   footer {
+    position: relative;
     display: flex;
     align-items: center;
     gap: 0.4rem;
-    min-height: 28px;
+    min-height: var(--footer-height);
     border-top: 1px solid var(--color-border);
     background: var(--bg-surface);
     backdrop-filter: blur(14px);
@@ -49,12 +89,43 @@
     padding: 0.15rem 0.6rem;
   }
   footer > :global(svg) { flex-shrink: 0; color: var(--color-primary); }
+  .pill-btn {
+    appearance: none;
+    background: transparent;
+    border: 0;
+    padding: 0;
+    font: inherit;
+    color: inherit;
+    cursor: pointer;
+    border-radius: var(--radius-xs);
+  }
+  .pill-btn:focus-visible { outline-offset: 1px; }
+  .footer-detail {
+    position: absolute;
+    right: 0.6rem;
+    bottom: calc(100% + 0.3rem);
+    z-index: 30;
+    max-width: min(340px, calc(100vw - 1.2rem));
+    padding: 0.45rem 0.6rem;
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius-md);
+    background: var(--bg-surface-solid);
+    box-shadow: var(--shadow-md);
+    font-size: var(--fs-sm);
+    font-weight: 600;
+    color: var(--text-secondary);
+    text-align: left;
+  }
+  .footer-detail p { margin: 0; overflow-wrap: anywhere; }
+  .footer-detail p + p { margin-top: 0.3rem; }
   .status-text {
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
+  /* The keyed swap span needs its own box for the fade. */
+  .status-msg { display: inline-block; }
   .api-status {
     flex-shrink: 0;
     display: inline-flex;

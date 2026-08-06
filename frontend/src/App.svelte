@@ -5,7 +5,6 @@
   import { fade } from 'svelte/transition';
   import {
     CheckAllStationStatuses,
-    GetAPIStatus,
     GetCurrentStationInfo,
     GetScanStatus,
     IdentifyStation,
@@ -17,23 +16,27 @@
     SetStationChannel,
     SetStationPower,
     StopScan
-  } from '../wailsjs/go/main/App';
+  } from './lib/backend';
   import { EventsOn } from '../wailsjs/runtime/runtime';
   import { station as stationModels } from '../wailsjs/go/models';
   import { Activity, CircleAlert, Radar } from 'lucide-svelte';
   import type { PowerFeedback, PowerTarget, StationInfo } from './lib/types';
+  import { classifyScanError, type ScanErrorInfo } from './lib/scan-error';
   import {
     canSetPower, channelChangeBlockedReason, hasCurrentChannel, hasVerifiedPowerState, isCurrentPowerState,
     powerTargetLabel, sameStationInfo, stateLabel
   } from './lib/station';
   import { formatBulkResult, formatTerminalScanResult, summarizeBulkResult } from './lib/result-format';
   import { clearToasts, pushToast } from './lib/toast';
+  import { dur } from './lib/motion';
   import { deriveOperationLocks, type GlobalOperation } from './lib/operation-state';
   import { ExternalScanCoordinator, type ExternalScanEvent } from './lib/external-scan';
   import { OperationGate } from './lib/operation-gate';
   import { PowerFeedbackRegistry } from './lib/power-feedback';
   import { RevisionGate } from './lib/revision-gate';
   import { ScanTimer } from './lib/scan-timer';
+  import { ApiStatusPoller } from './lib/api-status-poller';
+  import { ChannelMemory } from './lib/channel-memory';
   import AppHeader from './lib/components/AppHeader.svelte';
   import StationCard from './lib/components/StationCard.svelte';
   import ChannelMap from './lib/components/ChannelMap.svelte';
@@ -41,41 +44,42 @@
   import ChannelModal from './lib/components/ChannelModal.svelte';
   import StatusFooter from './lib/components/StatusFooter.svelte';
   import Toast from './lib/components/Toast.svelte';
+  import ScanRecovery from './lib/components/ScanRecovery.svelte';
+  import BulkConfirmModal from './lib/components/BulkConfirmModal.svelte';
 
-  let stations: StationInfo[] = [];
-  let statusMessage = 'Ready to scan.';
-  let gattOperations = new Set<string>();
-  let configOperations = new Set<string>();
-  let powerTargetByAddress: Record<string, PowerTarget | undefined> = {};
-  let powerFeedbackMap: Record<string, PowerFeedback | undefined> = {};
+  let stations = $state<StationInfo[]>([]);
+  let statusMessage = $state('Ready to scan.');
+  let gattOperations = $state(new Set<string>());
+  let configOperations = $state(new Set<string>());
+  let powerTargetByAddress = $state<Record<string, PowerTarget | undefined>>({});
+  let powerFeedbackMap = $state<Record<string, PowerFeedback | undefined>>({});
   const powerFeedback = new PowerFeedbackRegistry((next) => powerFeedbackMap = next);
-  let globalOperation: GlobalOperation = 'idle';
-  let bulkTarget: PowerTarget | null = null;
-  let editingAddress: string | null = null;
-  let selectedAddress: string | null = null;
-  let channelEditorOpen = false;
-  let channelError = '';
-  let channelWarning = false;
+  let globalOperation = $state<GlobalOperation>('idle');
+  let bulkTarget = $state<PowerTarget | null>(null);
+  let editingAddress = $state<string | null>(null);
+  let selectedAddress = $state<string | null>(null);
+  let channelEditorOpen = $state(false);
+  let channelError = $state('');
+  let channelWarning = $state(false);
+  let scanError = $state<ScanErrorInfo | null>(null);
+  let bulkConfirmTarget = $state<PowerTarget | null>(null);
   let statusCheckInterval: ReturnType<typeof setInterval> | null = null;
-  let apiStatusInterval: ReturnType<typeof setInterval> | null = null;
   let cancelExternalScanListener: (() => void) | null = null;
   let cancelExternalScanFailureListener: (() => void) | null = null;
   let cancelExternalScanStartedListener: (() => void) | null = null;
   let cancelExternalScanCancelledListener: (() => void) | null = null;
-  let apiRunning = false;
-  let apiAddress = '';
-  let apiError = '';
-  let configWarnings: string[] = [];
-  let configWritable = true;
-  const reportedConfigWarnings = new Set<string>();
-  let externalScanning = false;
-  let stoppingScan = false;
+  let apiRunning = $state(false);
+  let apiAddress = $state('');
+  let apiError = $state('');
+  let configWarnings = $state<string[]>([]);
+  let configWritable = $state(true);
+  let externalScanning = $state(false);
+  let stoppingScan = $state(false);
   let stopRequestPending = false;
   let stopRequestGeneration = 0;
-  let scanElapsed = 0;
+  let scanElapsed = $state(0);
   const scanTimer = new ScanTimer((seconds) => scanElapsed = seconds);
   const listRevisions = new RevisionGate();
-  const apiRevisions = new RevisionGate();
   const gates = new OperationGate();
   let disposed = false;
   let startupPending = true;
@@ -111,45 +115,46 @@
     notifyExternalScanFailure: (message) => pushToast(message)
   });
 
-  // Display-only channel memory. The backend deliberately wipes a station's
-  // channel on transient capability loss (rediscovery, read errors), which
-  // made the channel bar, card chip, and card ordering flap between
-  // enabled/disabled on every background refresh. The cache bridges those
-  // dropouts for display only; conflict checks, freshness gates, and the
-  // channel modal always use the live station.channel.
-  const channelMemory = new Map<string, { channel: number; at: number }>();
-  const channelMemoryMs = 45_000;
+  // HTTP API health polling and config-warning de-duplication live in a
+  // dedicated poller; the callbacks write through component state so Svelte
+  // reactivity keeps the template in sync.
+  const apiStatus = new ApiStatusPoller({
+    isDisposed: () => disposed,
+    commitStatus: (status) => {
+      apiRunning = status.running;
+      apiError = status.error;
+      apiAddress = status.address;
+      configWarnings = status.warnings ?? [];
+      configWritable = status.configWritable ?? true;
+    },
+    commitFailure: (error) => {
+      apiRunning = false;
+      apiError = error;
+    },
+    reportConfigWarning: (warning) => pushToast(warning, 'warning')
+  });
+
+  // Display-only channel memory (see ChannelMemory): keeps the channel bar,
+  // card chip and card ordering stable across transient backend wipes.
+  const channelMemory = new ChannelMemory();
 
   function displayChannel(station: StationInfo): number {
-    if (station.channel > 0) return station.channel;
-    const cached = channelMemory.get(station.address);
-    return cached && Date.now() - cached.at <= channelMemoryMs ? cached.channel : 0;
+    return channelMemory.displayChannel(station);
   }
 
-  // Keep the memory current before any derived list recomputes. This block
-  // must stay above $: sortedStations so the cache is fresh when sort keys
-  // and child props are evaluated. Entries for stations that left the list
-  // are dropped so long sessions do not accumulate stale addresses.
-  $: {
-    const now = Date.now();
-    const present = new Set<string>();
-    for (const station of stations) {
-      present.add(station.address);
-      if (station.channel > 0) {
-        channelMemory.set(station.address, { channel: station.channel, at: now });
-      }
-    }
-    for (const cached of [...channelMemory.keys()]) {
-      if (!present.has(cached)) channelMemory.delete(cached);
-    }
-  }
+  // Keep the memory current before any derived list recomputes. The pre
+  // effect runs before the render flush so the cache is fresh when sort keys
+  // and child props are evaluated.
+  $effect.pre(() => {
+    channelMemory.refresh(stations);
+  });
 
-  $: sortedStations = [...stations].sort((a, b) => {
+  const sortedStations = $derived([...stations].sort((a, b) => {
     const ac = displayChannel(a) || Number.MAX_SAFE_INTEGER;
     const bc = displayChannel(b) || Number.MAX_SAFE_INTEGER;
     return ac - bc || a.name.localeCompare(b.name) || a.address.localeCompare(b.address);
-  });
-  $: selectedStation = stations.find((station) => station.address === selectedAddress) ?? null;
+  }));
+  const selectedStation = $derived(stations.find((station) => station.address === selectedAddress) ?? null);
   // A station can drop out of the list while its drawer is open (backend
   // list replacement). Clear the stale selection so the drawer does not
   // silently reopen if the same address reappears later, and drop the
@@ -158,21 +163,22 @@
   // belongs to the previous selection. Only the station list drives this
   // guard; the addresses are read untracked to avoid a reactive cycle with
   // selectedStation.
-  $: {
+  $effect(() => {
+    const list = stations;
     const address = untrack(() => selectedAddress);
-    if (address !== null && !stations.some((station) => station.address === address)) {
+    if (address !== null && !list.some((station) => station.address === address)) {
       selectedAddress = null;
       channelEditorOpen = false;
       channelError = '';
       channelWarning = false;
     }
     const renaming = untrack(() => editingAddress);
-    if (renaming !== null && !stations.some((station) => station.address === renaming)) {
+    if (renaming !== null && !list.some((station) => station.address === renaming)) {
       editingAddress = null;
     }
-  }
-  $: conflictStations = stations.filter((station) => station.channelConflict);
-  $: conflictDetails = (() => {
+  });
+  const conflictStations = $derived(stations.filter((station) => station.channelConflict));
+  const conflictDetails = $derived((() => {
     const byChannel = new Map<number, string[]>();
     for (const station of conflictStations) {
       const key = station.channel > 0 ? station.channel : -1;
@@ -182,17 +188,17 @@
       .sort((a, b) => a[0] - b[0])
       .map(([channel, names]) => channel > 0 ? `CH ${channel}: ${names.join(' + ')}` : names.join(' + '))
       .join(' · ');
-  })();
-  $: fleetOn = stations.filter((station) => hasVerifiedPowerState(station, 'on')).length;
-  $: fleetStandby = stations.filter((station) => hasVerifiedPowerState(station, 'standby')).length;
-  $: fleetSleep = stations.filter((station) => hasVerifiedPowerState(station, 'sleep')).length;
+  })());
+  const fleetOn = $derived(stations.filter((station) => hasVerifiedPowerState(station, 'on')).length);
+  const fleetStandby = $derived(stations.filter((station) => hasVerifiedPowerState(station, 'standby')).length);
+  const fleetSleep = $derived(stations.filter((station) => hasVerifiedPowerState(station, 'sleep')).length);
   // Stations that exist but have no verified state (stale, unconfirmed or
   // booting) still count, so the summary never goes quiet while cards exist.
-  $: fleetUnverified = Math.max(0, stations.length - fleetOn - fleetStandby - fleetSleep);
-  $: actionableOn = stations.filter((station) => canSetPower(station, 'on'));
-  $: actionableStandby = stations.filter((station) => canSetPower(station, 'standby'));
-  $: actionableSleep = stations.filter((station) => canSetPower(station, 'sleep'));
-  $: occupiedChannels = (() => {
+  const fleetUnverified = $derived(Math.max(0, stations.length - fleetOn - fleetStandby - fleetSleep));
+  const actionableOn = $derived(stations.filter((station) => canSetPower(station, 'on')));
+  const actionableStandby = $derived(stations.filter((station) => canSetPower(station, 'standby')));
+  const actionableSleep = $derived(stations.filter((station) => canSetPower(station, 'sleep')));
+  const occupiedChannels = $derived((() => {
     const occupied = new Map<number, string[]>();
     const candidates = stations
       .filter((station) => hasCurrentChannel(station) && station.address !== selectedAddress)
@@ -201,30 +207,43 @@
       occupied.set(station.channel, [...(occupied.get(station.channel) ?? []), station.name]);
     }
     return occupied;
-  })();
-  $: hasUnknownVisibleChannel = stations.some(
+  })());
+  const hasUnknownVisibleChannel = $derived(stations.some(
     (station) => station.isPresent && station.address !== selectedAddress &&
       (station.presenceUncertain || !station.scanFresh || !station.channelFresh || station.channel === 0)
-  );
-  $: operationLocks = deriveOperationLocks({
+  ));
+  const operationLocks = $derived(deriveOperationLocks({
     global: globalOperation,
     externalScanning,
     gattAddresses: gattOperations,
     configAddresses: configOperations
-  });
-  $: isLoading = globalOperation === 'scanning';
-  $: isBulkLoading = globalOperation === 'bulk-power';
-  $: isStatusChecking = globalOperation === 'status-refresh';
-  $: scanningActive = isLoading || externalScanning || stoppingScan;
-  $: anyDeviceOperation = operationLocks.anyDeviceOperation;
-  $: scanLocked = operationLocks.scanLocked;
-  $: bulkLocked = operationLocks.bulkLocked;
-  $: stationLocked = operationLocks.stationLocked;
+  }));
+  const isLoading = $derived(globalOperation === 'scanning');
+  const isBulkLoading = $derived(globalOperation === 'bulk-power');
+  const isStatusChecking = $derived(globalOperation === 'status-refresh');
+  const scanningActive = $derived(isLoading || externalScanning || stoppingScan);
+  const anyDeviceOperation = $derived(operationLocks.anyDeviceOperation);
+  const scanLocked = $derived(operationLocks.scanLocked);
+  const bulkLocked = $derived(operationLocks.bulkLocked);
+  const stationLocked = $derived(operationLocks.stationLocked);
   // The periodic status reader occupies one of the backend's two device
   // operation slots. Keep the remaining slot available to one foreground
   // action instead of allowing a second action that will fail with Busy.
-  $: foregroundGattCapacity = isStatusChecking ? 1 : 2;
-  $: gattCapacityReached = gattOperations.size >= foregroundGattCapacity;
+  const foregroundGattCapacity = $derived(isStatusChecking ? 1 : 2);
+  const gattCapacityReached = $derived(gattOperations.size >= foregroundGattCapacity);
+
+  // Fleet trust partition behind the bulk scope row and the confirmation
+  // gate: a station counts as verified only while its presence, scan
+  // freshness and confirmed power state are all current. Everything else is
+  // included in bulk commands at the backend's discretion, which the user
+  // must see before confirming.
+  const visibleCount = $derived(stations.filter((station) => station.isPresent && !station.presenceUncertain).length);
+  const invisibleCount = $derived(stations.filter((station) => !station.isPresent).length);
+  const uncertainCount = $derived(stations.filter((station) => station.isPresent && station.presenceUncertain).length);
+  const untrustedCount = $derived(stations.filter((station) =>
+    !station.isPresent || station.presenceUncertain || !station.scanFresh ||
+    !station.powerStateConfirmed || station.powerState < 0 || station.powerState === 3
+  ).length);
 
   function stationBusy(address: string): boolean {
     return gattOperations.has(address) || configOperations.has(address);
@@ -269,6 +288,39 @@
     return stationLocked || (gattCapacityReached && !gattOperations.has(address));
   }
 
+  // Template-side lock lookup. Template expressions only invalidate on the
+  // variables they reference syntactically, so the reactive inputs are passed
+  // explicitly instead of being read inside a helper call.
+  function computeGattLocked(
+    current: StationInfo[],
+    locked: boolean,
+    capacityReached: boolean,
+    busy: Set<string>
+  ): Map<string, boolean> {
+    const byAddress = new Map<string, boolean>();
+    for (const station of current) {
+      byAddress.set(station.address, locked || (capacityReached && !busy.has(station.address)));
+    }
+    return byAddress;
+  }
+  const gattLockedByAddress = $derived(computeGattLocked(stations, stationLocked, gattCapacityReached, gattOperations));
+
+  // Same explicit-dependency pattern: the template reads per-address busy
+  // flags from this derived map instead of calling stationBusy(), whose
+  // reactive inputs a call expression would hide from invalidation.
+  function computeBusy(
+    current: StationInfo[],
+    gatt: Set<string>,
+    config: Set<string>
+  ): Map<string, boolean> {
+    const byAddress = new Map<string, boolean>();
+    for (const station of current) {
+      byAddress.set(station.address, gatt.has(station.address) || config.has(station.address));
+    }
+    return byAddress;
+  }
+  const busyByAddress = $derived(computeBusy(stations, gattOperations, configOperations));
+
   function applyStationList(
     updated: StationInfo[] | null | undefined,
     revision: number,
@@ -302,6 +354,8 @@
     channelEditorOpen = false;
     channelError = '';
     channelWarning = false;
+    scanError = null;
+    bulkConfirmTarget = null;
     // A locally running scan has acquired the backend's exclusive operation
     // lock. An accepted external scan may still be waiting for existing work,
     // so preserve those visible operations until their promises settle.
@@ -330,8 +384,7 @@
 
   onMount(async () => {
     const startupScanEpoch = gates.currentScanEpoch;
-    refreshAPIStatus();
-    apiStatusInterval = setInterval(refreshAPIStatus, 15000);
+    apiStatus.start(15000);
     cancelExternalScanStartedListener = EventsOn('external-scan-started', (value: unknown) => {
       externalScan.handleStarted(value as ExternalScanEvent);
     });
@@ -359,40 +412,14 @@
     }
   });
 
-  function refreshAPIStatus() {
-    const revision = apiRevisions.next();
-    GetAPIStatus().then((status) => {
-      if (disposed || !apiRevisions.isCurrent(revision)) return;
-      apiRunning = status.running;
-      apiError = status.error;
-      apiAddress = status.address;
-      configWarnings = status.warnings ?? [];
-      configWritable = status.configWritable ?? true;
-      const currentWarnings = new Set(configWarnings);
-      for (const warning of reportedConfigWarnings) {
-        if (!currentWarnings.has(warning)) reportedConfigWarnings.delete(warning);
-      }
-      for (const warning of configWarnings) {
-        if (reportedConfigWarnings.has(warning)) continue;
-        reportedConfigWarnings.add(warning);
-        pushToast(warning, 'warning');
-      }
-    }).catch((error) => {
-      if (disposed || !apiRevisions.isCurrent(revision)) return;
-      apiRunning = false;
-      apiError = String(error);
-    });
-  }
-
   onDestroy(() => {
     disposed = true;
     gates.dispose();
     clearToasts();
     listRevisions.dispose();
-    apiRevisions.dispose();
+    apiStatus.dispose();
     scanTimer.dispose();
     if (statusCheckInterval) clearInterval(statusCheckInterval);
-    if (apiStatusInterval) clearInterval(apiStatusInterval);
     powerFeedback.clearAll();
     cancelExternalScanListener?.();
     cancelExternalScanFailureListener?.();
@@ -481,6 +508,7 @@
         error: scanStatus?.error,
         warnings: scanStatus?.warnings
       });
+      scanError = null;
     } catch (error) {
       if (!gates.canCommitOperation(operationEpoch) || !listRevisions.isCurrent(revision) || !gates.canCommitStatus(statusOperation)) return;
       const updated = await GetCurrentStationInfo().catch(() => null);
@@ -491,9 +519,13 @@
       if (stoppingScan || scanStatus?.state === 'cancelled') {
         if (!stopRequestPending) stoppingScan = false;
         statusMessage = 'Scan stopped.';
+        scanError = null;
       } else {
         statusMessage = `Scan failed: ${error}`;
         pushToast(`Scan failed: ${error}`);
+        // The footer/toast are transient; the main area keeps a persistent,
+        // actionable recovery card until the next scan attempt.
+        scanError = classifyScanError(error);
       }
     } finally {
       if (!disposed && globalOperation === 'scanning') globalOperation = 'idle';
@@ -632,7 +664,9 @@
       }
     } finally {
       if (gates.canCleanupStationOperation(station.address, operationRevision)) {
-        powerTargetByAddress = { ...powerTargetByAddress, [station.address]: undefined };
+        const nextTargets = { ...powerTargetByAddress };
+        delete nextTargets[station.address];
+        powerTargetByAddress = nextTargets;
         setGattBusy(station.address, false);
       }
     }
@@ -642,16 +676,39 @@
     return stations.filter((station) => canSetPower(station, state));
   }
 
-  function allStationsAtState(state: PowerTarget): boolean {
-    return stations.length > 0 &&
-      stations.every((station) => isCurrentPowerState(station, state));
-  }
+  // Derived instead of a template function call: call expressions hide
+  // their reactive inputs from invalidation, and the header's "all at
+  // state" flags must follow the station list.
+  const allOn = $derived(stations.length > 0 && stations.every((item) => isCurrentPowerState(item, 'on')));
+  const allStandby = $derived(stations.length > 0 && stations.every((item) => isCurrentPowerState(item, 'standby')));
+  const allSleep = $derived(stations.length > 0 && stations.every((item) => isCurrentPowerState(item, 'sleep')));
 
-  async function handleBulkPower(state: PowerTarget) {
+  function handleBulkPower(state: PowerTarget) {
     // Do not duplicate backend capability/state decisions here. Cached
     // frontend data can be stale after scanning, while the backend refreshes
     // capabilities and returns a result for every known station.
     if (bulkLocked || actionablePowerStations(state).length === 0) return;
+    // When part of the fleet is not fully verified, the command scope is no
+    // longer obvious from the button; demand an explicit confirmation that
+    // lists what will be affected.
+    if (untrustedCount > 0) {
+      bulkConfirmTarget = state;
+      return;
+    }
+    void runBulkPower(state);
+  }
+
+  function cancelBulkPower() {
+    bulkConfirmTarget = null;
+  }
+
+  async function confirmBulkPower() {
+    const state = bulkConfirmTarget;
+    bulkConfirmTarget = null;
+    if (state) await runBulkPower(state);
+  }
+
+  async function runBulkPower(state: PowerTarget) {
     globalOperation = 'bulk-power';
     const statusOperation = gates.beginStatusOperation();
     bulkTarget = state;
@@ -744,7 +801,7 @@
         pushToast(`Error renaming: ${error}`);
       }
     } finally {
-      refreshAPIStatus();
+      apiStatus.refresh();
       if (gates.canCleanupStationOperation(station.address, operationRevision)) {
         setConfigBusy(station.address, false);
       }
@@ -887,17 +944,20 @@
 
   function handleGlobalKeydown(event: KeyboardEvent) {
     if (event.key !== 'Escape') return;
+    if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey) return;
     if (channelEditorOpen) {
       closeChannelEditor();
+    } else if (bulkConfirmTarget) {
+      cancelBulkPower();
     } else if (selectedAddress) {
       selectedAddress = null;
     }
   }
 </script>
 
-<svelte:window on:keydown={handleGlobalKeydown} />
+<svelte:window onkeydown={handleGlobalKeydown} />
 
-<div class="app-container" inert={selectedStation !== null} aria-hidden={selectedStation ? 'true' : undefined}>
+<div class="app-container" inert={selectedStation !== null}>
   <AppHeader
     scanning={scanningActive}
     {isBulkLoading}
@@ -907,13 +967,15 @@
     canOn={actionableOn.length > 0}
     canStandby={actionableStandby.length > 0}
     canSleep={actionableSleep.length > 0}
-    allOn={allStationsAtState('on')}
-    allStandby={allStationsAtState('standby')}
-    allSleep={allStationsAtState('sleep')}
+    allOn={allOn}
+    allStandby={allStandby}
+    allSleep={allSleep}
     onCount={fleetOn}
     standbyCount={fleetStandby}
     sleepCount={fleetSleep}
     unverifiedCount={fleetUnverified}
+    knownCount={stations.length}
+    {untrustedCount}
     onScan={handleScanClick}
     onStop={handleStopScan}
     stopping={stoppingScan}
@@ -922,16 +984,24 @@
 
   <main>
     {#if conflictStations.length}
-      <div class="alert danger" title={conflictDetails} transition:fade={{ duration: 180 }}><CircleAlert size={18} /> <span class="alert-text">Channel conflict: {conflictDetails}</span></div>
+      <div class="alert danger" title={conflictDetails} transition:fade={dur({ duration: 180 })}><CircleAlert size={18} /> <span class="alert-text">Channel conflict: {conflictDetails}</span></div>
+    {/if}
+    {#if scanError && !isLoading && !externalScanning}
+      <ScanRecovery
+        kind={scanError.kind}
+        detail={scanError.detail}
+        retryDisabled={scanLocked}
+        onRetry={handleScanClick}
+      />
     {/if}
     {#if sortedStations.length}
       <ChannelMap stations={sortedStations} channelOf={displayChannel} selectedAddress={selectedAddress} onSelect={(address) => selectedAddress = address} />
       <div class="station-grid">
         {#each sortedStations as station, index (station.address)}
           <div
-            animate:flip={{ duration: 300, easing: cubicOut }}
-            in:fade={{ duration: 180, delay: Math.min(index * 30, 240) }}
-            out:fade={{ duration: 120 }}
+            animate:flip={dur({ duration: 300, easing: cubicOut })}
+            in:fade={dur({ duration: 180, delay: Math.min(index * 30, 240) })}
+            out:fade={dur({ duration: 120 })}
           >
             <StationCard
               {station}
@@ -941,7 +1011,7 @@
               pendingTarget={powerTargetByAddress[station.address]}
               gattBusy={gattOperations.has(station.address)}
               configBusy={configOperations.has(station.address)}
-              gattLocked={stationLocked || (gattCapacityReached && !gattOperations.has(station.address))}
+              gattLocked={gattLockedByAddress.get(station.address) ?? false}
               renameLocked={stationLocked}
               onPower={setPower}
               onOpenDetails={(s) => selectedAddress = s.address}
@@ -953,16 +1023,16 @@
         {/each}
       </div>
     {:else if isLoading || externalScanning}
-      <div class="empty scan" in:fade={{ duration: 180 }}>
+      <div class="empty scan" in:fade={dur({ duration: 180 })}>
         <div class="empty-icon"><Radar size={40} /></div>
-        <p>{isLoading ? 'Scanning for base stations...' : 'External scan in progress...'} {Math.max(1, scanElapsed)}s</p>
+        <p>{isLoading ? 'Scanning for base stations...' : 'External scan in progress...'}{scanElapsed >= 1 ? ` ${scanElapsed}s` : ''}</p>
         <p class="scan-sub">{scanElapsed >= 6 ? 'Reading station states...' : 'Discovering nearby stations...'}</p>
       </div>
-    {:else}
+    {:else if !scanError}
       <div class="empty">
         <div class="empty-icon"><Activity size={40} /></div>
         <p>No base stations found.</p>
-        <button class="btn primary" disabled={scanLocked} on:click={handleScanClick}>
+        <button class="btn primary" disabled={scanLocked} onclick={handleScanClick}>
           Scan Now
         </button>
       </div>
@@ -976,13 +1046,13 @@
   <div
     class="scrim"
     role="presentation"
-    transition:fade={{ duration: 200 }}
-    on:click={() => selectedAddress = null}
+    transition:fade={dur({ duration: 200 })}
+    onclick={() => selectedAddress = null}
   ></div>
   <DetailsDrawer
     station={selectedStation}
-    busy={stationBusy(selectedStation.address)}
-    locked={stationLocked || (gattCapacityReached && !gattOperations.has(selectedStation.address))}
+    busy={busyByAddress.get(selectedStation.address) ?? false}
+    locked={gattLockedByAddress.get(selectedStation.address) ?? false}
     inactive={channelEditorOpen}
     onClose={() => selectedAddress = null}
     onRefresh={refreshCapabilities}
@@ -995,8 +1065,8 @@
   <div
     class="modal-scrim"
     role="presentation"
-    transition:fade={{ duration: 180 }}
-    on:click={closeChannelEditor}
+    transition:fade={dur({ duration: 180 })}
+    onclick={closeChannelEditor}
   >
     <ChannelModal
       station={selectedStation}
@@ -1005,10 +1075,30 @@
       error={channelError}
       warning={channelWarning}
       busy={gattOperations.has(selectedStation.address) || configOperations.has(selectedStation.address)}
-      locked={stationLocked || (gattCapacityReached && !gattOperations.has(selectedStation.address))}
+      locked={gattLockedByAddress.get(selectedStation.address) ?? false}
       onClose={closeChannelEditor}
       onSave={saveChannel}
       onIdentify={identify}
+    />
+  </div>
+{/if}
+
+{#if bulkConfirmTarget}
+  <div
+    class="modal-scrim"
+    role="presentation"
+    transition:fade={dur({ duration: 180 })}
+    onclick={cancelBulkPower}
+  >
+    <BulkConfirmModal
+      target={bulkConfirmTarget}
+      {visibleCount}
+      {invisibleCount}
+      {uncertainCount}
+      actionableCount={bulkConfirmTarget === 'on' ? actionableOn.length : bulkConfirmTarget === 'standby' ? actionableStandby.length : actionableSleep.length}
+      busy={isBulkLoading || bulkLocked || scanningActive}
+      onCancel={cancelBulkPower}
+      onConfirm={confirmBulkPower}
     />
   </div>
 {/if}
@@ -1021,7 +1111,12 @@
   .station-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-    gap: 0.8rem;
+    gap: var(--spacing-md);
+    /* Stop cards from stretching into sparse wide stripes on ultra-wide
+       windows. */
+    max-width: 1720px;
+    margin-inline: auto;
+    width: 100%;
   }
   .scrim {
     position: fixed;

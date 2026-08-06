@@ -2,18 +2,20 @@
   import { fly } from 'svelte/transition';
   import { CircleAlert, CircleCheck, Info, X } from 'lucide-svelte';
   import { dismissToast, toasts } from '../toast';
+  import { dur } from '../motion';
 </script>
 
-<!-- The live region stays mounted even when empty: screen readers only
-     announce insertions into a region that already exists. -->
-<div class="toast-stack" aria-live="polite">
+<!-- Each toast is its own live region: errors become assertive alerts so a
+     blocking failure is announced immediately, while everything else stays
+     polite. -->
+<div class="toast-stack" aria-label="Notifications">
   {#each $toasts as toast (toast.id)}
-    <div class="toast {toast.kind}" transition:fly={{ x: 24, duration: 220 }}>
+    <div class="toast {toast.kind}" role={toast.kind === 'error' ? 'alert' : 'status'} transition:fly={dur({ x: 24, duration: 220 })}>
       {#if toast.kind === 'success'}<CircleCheck size={15} />
       {:else if toast.kind === 'info'}<Info size={15} />
       {:else}<CircleAlert size={15} />{/if}
       <span class="toast-text">{toast.text}</span>
-      <button class="icon-btn" title="Dismiss" aria-label="Dismiss notification" on:click={() => dismissToast(toast.id)}><X size={14} /></button>
+      <button class="icon-btn" title="Dismiss" aria-label="Dismiss notification" onclick={() => dismissToast(toast.id)}><X size={14} /></button>
     </div>
   {/each}
 </div>
@@ -23,7 +25,7 @@
     /* Bottom-right keeps the header controls (scan, bulk power, fleet
        summary) visible while bulk operations produce toasts. */
     position: fixed;
-    bottom: calc(28px + 0.75rem);
+    bottom: calc(var(--footer-height) + 0.75rem);
     right: 0.75rem;
     z-index: 40;
     display: flex;
@@ -75,4 +77,16 @@
   .toast.success::before { background: var(--color-on); }
   .toast > :global(svg) { flex-shrink: 0; margin-top: 0.1rem; }
   .toast-text { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  @media (max-width: 520px) {
+    /* Full-width stack with its own scroll so toasts never cover the
+       scan controls in narrow windows. */
+    .toast-stack {
+      left: 0.5rem;
+      right: 0.5rem;
+      width: auto;
+      bottom: calc(var(--footer-height) + 0.5rem);
+      max-height: 45vh;
+      overflow-y: auto;
+    }
+  }
 </style>

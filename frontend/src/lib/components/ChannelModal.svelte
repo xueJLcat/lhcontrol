@@ -5,17 +5,31 @@
   import type { StationInfo } from '../types';
   import { channelChangeBlockedReason } from '../station';
   import { focusTrap } from '../actions';
+  import { dur } from '../motion';
 
-  export let station: StationInfo;
-  export let occupiedChannels: Map<number, string[]>;
-  export let hasUnknownVisibleChannel: boolean;
-  export let error: string;
-  export let warning = false;
-  export let busy: boolean;
-  export let locked: boolean;
-  export let onClose: () => void;
-  export let onSave: (channel: number, allowUnknownConflictRisk: boolean) => void;
-  export let onIdentify: (station: StationInfo) => void;
+  let {
+    station,
+    occupiedChannels,
+    hasUnknownVisibleChannel,
+    error,
+    warning = false,
+    busy,
+    locked,
+    onClose,
+    onSave,
+    onIdentify
+  }: {
+    station: StationInfo;
+    occupiedChannels: Map<number, string[]>;
+    hasUnknownVisibleChannel: boolean;
+    error: string;
+    warning?: boolean;
+    busy: boolean;
+    locked: boolean;
+    onClose: () => void;
+    onSave: (channel: number, allowUnknownConflictRisk: boolean) => void;
+    onIdentify: (station: StationInfo) => void;
+  } = $props();
 
   function initialTargetChannel(channel: number, occupied: Map<number, string[]>): number {
     if (channel > 0 && !occupied.has(channel)) return channel;
@@ -25,14 +39,19 @@
     return channel > 0 ? channel : 1;
   }
 
-  let targetChannel = initialTargetChannel(station.channel, occupiedChannels);
-  let confirmUnknownChannelRisk = false;
+  // The modal remounts on every open, so the initial-value capture in the
+  // state initializers below is intentional: targetChannel starts at the
+  // (possibly stale) current channel or the first free one and only changes
+  // through user selection.
+  // svelte-ignore state_referenced_locally
+  let targetChannel = $state(initialTargetChannel(station.channel, occupiedChannels));
+  let confirmUnknownChannelRisk = $state(false);
 
-  $: unchanged = station.isPresent && station.scanFresh && station.channelFresh &&
-    station.channel > 0 && station.channel === targetChannel;
-  $: blockedReason = channelChangeBlockedReason(station);
-  $: saveDisabled = Boolean(blockedReason) || unchanged || occupiedChannels.has(targetChannel) ||
-    (hasUnknownVisibleChannel && !confirmUnknownChannelRisk) || busy || locked;
+  const unchanged = $derived(station.isPresent && station.scanFresh && station.channelFresh &&
+    station.channel > 0 && station.channel === targetChannel);
+  const blockedReason = $derived(channelChangeBlockedReason(station));
+  const saveDisabled = $derived(Boolean(blockedReason) || unchanged || occupiedChannels.has(targetChannel) ||
+    (hasUnknownVisibleChannel && !confirmUnknownChannelRisk) || busy || locked);
 
   function save() {
     if (!saveDisabled) onSave(targetChannel, confirmUnknownChannelRisk);
@@ -47,14 +66,14 @@
   aria-label="Change channel"
   tabindex="-1"
   use:focusTrap
-  transition:scale={{ start: 0.96, duration: 180, easing: cubicOut }}
-  on:click|stopPropagation
+  transition:scale={dur({ start: 0.96, duration: 180, easing: cubicOut })}
+  onclick={(event) => event.stopPropagation()}
 >
   <div class="drawer-head">
     <div><small>Safe channel change</small><h2>{station.name}</h2></div>
-    <button class="icon-btn" title="Close" on:click={onClose} disabled={busy}><X size={18} /></button>
+    <button type="button" class="icon-btn" title="Close" aria-label="Close channel editor" onclick={onClose} disabled={busy}><X size={18} /></button>
   </div>
-  <dl>
+  <dl class="def-list">
     <dt>Original name</dt><dd>{station.originalName}</dd>
     <dt>Address</dt><dd class="mono">{station.address}</dd>
     <dt>Current channel</dt><dd class="mono">{station.channel || 'Unknown'}</dd>
@@ -74,9 +93,12 @@
           class:occupied={occupiedChannels.has(channel)}
           disabled={busy || locked}
           aria-disabled={occupiedChannels.has(channel)}
+          aria-label={occupiedChannels.has(channel)
+            ? `Channel ${channel}, occupied by ${occupiedChannels.get(channel)?.join(', ')}`
+            : undefined}
           title={occupiedChannels.has(channel) ? `Occupied by ${occupiedChannels.get(channel)?.join(', ')}` : `Channel ${channel}`}
           aria-pressed={targetChannel === channel}
-          on:click={() => { if (!occupiedChannels.has(channel)) targetChannel = channel; }}
+          onclick={() => { if (!occupiedChannels.has(channel)) targetChannel = channel; }}
         >{channel}{#if station.channel > 0 && station.channel === channel}<span class="ch-dot" aria-hidden="true"></span>{/if}</button>
       {/each}
     </div>
@@ -92,8 +114,8 @@
   {/if}
   <p class="hint">The value is only accepted after the base station reads back the requested channel. Failure will not trigger an automatic rollback.</p>
   <div class="modal-actions">
-    <button class="btn" on:click={() => onIdentify(station)} disabled={busy || locked}><Eye size={15} /> Identify this station</button>
-    <button class="btn primary" on:click={save} disabled={saveDisabled}>Confirm change</button>
+    <button class="btn" onclick={() => onIdentify(station)} disabled={busy || locked}><Eye size={15} /> Identify this station</button>
+    <button class="btn primary" onclick={save} disabled={saveDisabled}>Confirm change</button>
   </div>
 </div>
 
@@ -109,18 +131,7 @@
     padding: 1rem;
     box-shadow: var(--shadow-lg), inset 0 1px 0 rgba(255, 255, 255, 0.9);
   }
-  .drawer-head { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; }
-  .drawer-head small {
-    color: var(--color-primary-deep);
-    font-size: var(--fs-micro);
-    font-weight: 800;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-  }
-  .drawer-head h2 { margin: 0.1rem 0 0; font-size: var(--fs-h2); font-weight: 800; color: var(--text-primary); overflow-wrap: anywhere; }
-  dl { display: grid; grid-template-columns: 7.5rem minmax(0, 1fr); gap: 0.42rem; margin: 0.8rem 0 0; font-size: var(--fs-sm); }
-  dt { color: var(--text-muted); font-weight: 600; }
-  dd { margin: 0; color: var(--text-primary); font-weight: 700; overflow-wrap: anywhere; }
+  .def-list { margin: 0.8rem 0 0; }
 
   .ch-field { border: 0; padding: 0; margin: 0.95rem 0 0; min-width: 0; }
   .ch-field legend {
@@ -214,6 +225,9 @@
 
   .risk { display: flex; gap: 0.5rem; align-items: flex-start; margin-top: 0.8rem; font-size: 0.75rem; font-weight: 700; line-height: 1.4; color: var(--color-warning-deep); }
   .risk input { margin-top: 0.15rem; accent-color: var(--color-warning); }
-  .hint { font-size: var(--fs-sm); color: var(--text-muted); line-height: 1.45; }
+  .ch-hint { margin: 0.5rem 0 0; }
   .modal-actions { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; justify-content: flex-end; margin-top: 0.8rem; }
+  @media (max-width: 420px) {
+    .ch-grid { grid-template-columns: repeat(4, 1fr); gap: 0.3rem; }
+  }
 </style>

@@ -24,8 +24,9 @@ export function formatTerminalScanResult(result: TerminalScanResult): string {
     default: {
       const found = result.found ?? 0;
       const known = result.known ?? 0;
+      const knownLabel = known === 1 ? '1 known station.' : `${known} known stations.`;
       const summary = found
-        ? `found ${found}; ${known} known station(s).`
+        ? `found ${found}; ${knownLabel}`
         : 'no stations found in this scan.';
       const message = result.external
         ? `${prefix} completed: ${summary}`

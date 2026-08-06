@@ -7,18 +7,30 @@
   import { channelChangeBlockedReason, stateClass, stateLabel } from '../station';
   import { relativeTime } from '../relative-time';
   import { focusTrap } from '../actions';
+  import { dur } from '../motion';
   import StateBadge from './StateBadge.svelte';
 
-  export let station: StationInfo;
-  export let busy: boolean;
-  export let locked: boolean;
-  export let inactive = false;
-  export let onClose: () => void;
-  export let onRefresh: (station: StationInfo) => void;
-  export let onIdentify: (station: StationInfo) => void;
-  export let onOpenChannelEditor: (station: StationInfo) => void;
+  let {
+    station,
+    busy,
+    locked,
+    inactive = false,
+    onClose,
+    onRefresh,
+    onIdentify,
+    onOpenChannelEditor
+  }: {
+    station: StationInfo;
+    busy: boolean;
+    locked: boolean;
+    inactive?: boolean;
+    onClose: () => void;
+    onRefresh: (station: StationInfo) => void;
+    onIdentify: (station: StationInfo) => void;
+    onOpenChannelEditor: (station: StationInfo) => void;
+  } = $props();
 
-  let now = Date.now();
+  let now = $state(Date.now());
 
   onMount(() => {
     const timer = setInterval(() => {
@@ -33,18 +45,18 @@
     { label: 'Other', entries: [['identify', 'identify'], ['deviceInformation', 'device info']] }
   ];
 
-  $: hasCachedMetadata = Boolean(
+  const hasCachedMetadata = $derived(Boolean(
     station.metadataReadAt ||
     station.metadata.manufacturer ||
     station.metadata.model ||
     station.metadata.serialNumber ||
     station.metadata.hardwareRevision ||
     station.metadata.firmwareRevision
-  );
-  $: metadataStatus = station.metadataFresh
+  ));
+  const metadataStatus = $derived(station.metadataFresh
     ? 'loaded and fresh'
-    : hasCachedMetadata ? 'cached, stale' : 'unavailable';
-  $: channelBlockedReason = channelChangeBlockedReason(station);
+    : hasCachedMetadata ? 'cached, stale' : 'unavailable');
+  const channelBlockedReason = $derived(channelChangeBlockedReason(station));
 </script>
 
 <div
@@ -56,8 +68,8 @@
   aria-label="Station details"
   tabindex="-1"
   use:focusTrap
-  in:fly={{ x: 64, duration: 320, easing: cubicOut }}
-  out:fly={{ x: 64, duration: 180 }}
+  in:fly={dur({ x: 64, duration: 320, easing: cubicOut })}
+  out:fly={dur({ x: 64, duration: 180 })}
 >
   <div class="drawer-head">
     <div>
@@ -72,12 +84,12 @@
         />
       </div>
     </div>
-    <button class="icon-btn" title="Close" on:click={onClose}><X size={18} /></button>
+    <button type="button" class="icon-btn" title="Close" aria-label="Close station details" onclick={onClose}><X size={18} /></button>
   </div>
 
   <section>
     <h4>Status</h4>
-    <dl>
+    <dl class="def-list">
       <dt>Power</dt><dd><span class="state-text state-text-{stateClass(station)}">{stateLabel(station)}</span> · {station.powerFresh ? station.powerStateConfirmed ? 'confirmed' : 'unverified' : 'last known, stale'} (raw {station.rawPowerState})</dd>
       <dt>Channel</dt><dd class="mono">{station.channel || 'Unable to verify'}</dd>
       <dt>Connection</dt><dd>{station.connectionState}</dd>
@@ -91,11 +103,11 @@
       <div class="alert">Capabilities could not be verified. Power commands will retry discovery; unsupported operations will be reported.</div>
     {/if}
     <div class="drawer-actions">
-      <button class="btn" on:click={() => onRefresh(station)} disabled={busy || locked}>{#if busy}<LoaderCircle class="spin" size={15} />{:else}<RefreshCw size={15} />{/if} Refresh capabilities</button>
-      <button class="btn" on:click={() => onIdentify(station)} disabled={busy || locked} title={station.capabilities.identify ? 'Send the identify signal' : 'Recheck support and identify'}>{#if busy}<LoaderCircle class="spin" size={15} />{:else}<Eye size={15} />{/if} Identify</button>
+      <button class="btn" onclick={() => onRefresh(station)} disabled={busy || locked}>{#if busy}<LoaderCircle class="spin" size={15} />{:else}<RefreshCw size={15} />{/if} Refresh capabilities</button>
+      <button class="btn" onclick={() => onIdentify(station)} disabled={busy || locked} title={station.capabilities.identify ? 'Send the identify signal' : 'Recheck support and identify'}>{#if busy}<LoaderCircle class="spin" size={15} />{:else}<Eye size={15} />{/if} Identify</button>
       <button
         class="btn primary"
-        on:click={() => onOpenChannelEditor(station)}
+        onclick={() => onOpenChannelEditor(station)}
         disabled={Boolean(channelBlockedReason) || busy || locked}
         title={channelBlockedReason || 'Recheck support and change Channel safely'}
       ><Settings2 size={15} /> Change Channel</button>
@@ -106,7 +118,7 @@
 
   <section>
     <h4>Identity</h4>
-    <dl>
+    <dl class="def-list">
       <dt>Original name</dt><dd>{station.originalName}</dd>
       <dt>Address</dt><dd class="mono">{station.address}</dd>
       <dt>Metadata</dt><dd title={station.metadataReadAt || undefined}>{metadataStatus} · {relativeTime(station.metadataReadAt, now) || 'never'}</dd>
@@ -115,7 +127,7 @@
 
   <section>
     <h4>Device information</h4>
-    <dl>
+    <dl class="def-list">
       <dt>Manufacturer</dt><dd>{station.metadata.manufacturer || '—'}</dd>
       <dt>Model</dt><dd>{station.metadata.model || '—'}</dd>
       <dt>Serial number</dt><dd class="mono">{station.metadata.serialNumber || '—'}</dd>
@@ -168,16 +180,6 @@
     overflow: auto;
     box-shadow: var(--shadow-lg);
   }
-  .drawer-head { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; }
-  .drawer-head small {
-    color: var(--color-primary-deep);
-    font-size: var(--fs-micro);
-    font-weight: 800;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-  }
-  .drawer-head h2 { margin: 0.1rem 0 0; font-size: var(--fs-h2); font-weight: 800; color: var(--text-primary); overflow-wrap: anywhere; }
-  .drawer-title { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
   section {
     border-top: 1px solid var(--color-border);
     padding-top: 0.85rem;
@@ -207,9 +209,7 @@
     border-radius: 2px;
     background: linear-gradient(180deg, var(--color-primary), var(--color-sleep));
   }
-  dl { display: grid; grid-template-columns: 7.5rem minmax(0, 1fr); gap: 0.42rem; margin: 0.5rem 0; font-size: var(--fs-sm); }
-  dt { color: var(--text-muted); font-weight: 600; }
-  dd { margin: 0; color: var(--text-primary); font-weight: 700; overflow-wrap: anywhere; }
+  .def-list { margin: 0.5rem 0; }
   .state-text { font-weight: 800; text-transform: capitalize; }
   .state-text-on { color: var(--color-on-deep); }
   .state-text-standby { color: var(--color-standby-deep); }
@@ -234,7 +234,6 @@
     white-space: nowrap;
   }
   .drawer-actions .btn :global(svg) { flex: 0 0 auto; }
-  .hint { font-size: var(--fs-sm); color: var(--text-muted); line-height: 1.45; }
   .warning-text { color: var(--color-warning-deep); font-weight: 700; }
   .capability-groups { display: flex; flex-direction: column; gap: 0.55rem; }
   .capability-group { display: flex; align-items: baseline; gap: 0.5rem; }

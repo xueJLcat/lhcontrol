@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
   import { cubicOut } from 'svelte/easing';
-  import { fly } from 'svelte/transition';
+  import { fade, fly } from 'svelte/transition';
   import {
     Bluetooth, Check, ChevronRight, CircleCheck, CircleHelp, CircleX, History,
     LoaderCircle, Moon, Pause, SquarePen, TriangleAlert, X, Zap
@@ -10,35 +10,55 @@
   import { canSetPower, channelLabel, isCurrentPowerState, stateClass, stateLabel } from '../station';
   import { relativeTime } from '../relative-time';
   import { autofocus } from '../actions';
+  import { dur } from '../motion';
   import StateBadge from './StateBadge.svelte';
 
-  export let station: StationInfo;
-  // Display-only fallback for the channel chip, bridging transient backend
-  // channel wipes. All interaction logic keeps using the live station data.
-  export let channelDisplay: number | undefined = undefined;
-  export let renaming: boolean;
-  export let feedback: PowerFeedback | undefined = undefined;
-  export let pendingTarget: PowerTarget | undefined = undefined;
-  export let gattBusy: boolean;
-  export let configBusy: boolean;
-  export let gattLocked: boolean;
-  export let renameLocked: boolean;
-  export let onPower: (station: StationInfo, state: PowerTarget) => void;
-  export let onOpenDetails: (station: StationInfo) => void;
-  export let onStartRename: (station: StationInfo) => void;
-  export let onSaveRename: (station: StationInfo, name: string) => void;
-  export let onCancelRename: () => void;
+  let {
+    station,
+    channelDisplay = undefined,
+    renaming,
+    feedback = undefined,
+    pendingTarget = undefined,
+    gattBusy,
+    configBusy,
+    gattLocked,
+    renameLocked,
+    onPower,
+    onOpenDetails,
+    onStartRename,
+    onSaveRename,
+    onCancelRename
+  }: {
+    station: StationInfo;
+    // Display-only fallback for the channel chip, bridging transient backend
+    // channel wipes. All interaction logic keeps using the live station data.
+    channelDisplay?: number | undefined;
+    renaming: boolean;
+    feedback?: PowerFeedback | undefined;
+    pendingTarget?: PowerTarget | undefined;
+    gattBusy: boolean;
+    configBusy: boolean;
+    gattLocked: boolean;
+    renameLocked: boolean;
+    onPower: (station: StationInfo, state: PowerTarget) => void;
+    onOpenDetails: (station: StationInfo) => void;
+    onStartRename: (station: StationInfo) => void;
+    onSaveRename: (station: StationInfo, name: string) => void;
+    onCancelRename: () => void;
+  } = $props();
 
-  let localName = '';
+  let localName = $state('');
   let wasRenaming = false;
   let prevPowerState: number | null = null;
-  let flash = false;
+  let flash = $state(false);
   let flashTimer: ReturnType<typeof setTimeout> | null = null;
 
-  $: if (renaming !== wasRenaming) {
-    if (renaming) localName = station.name;
-    wasRenaming = renaming;
-  }
+  $effect(() => {
+    if (renaming !== wasRenaming) {
+      if (renaming) localName = station.name;
+      wasRenaming = renaming;
+    }
+  });
 
   function commitRename() {
     onSaveRename(station, localName.trim());
@@ -60,53 +80,82 @@
     onSaveRename(station, localName.trim());
   }
 
-  $: if (station.powerState !== prevPowerState) {
-    if (prevPowerState !== null && station.powerState >= 0) {
-      flash = true;
-      if (flashTimer) clearTimeout(flashTimer);
-      flashTimer = setTimeout(() => {
-        flash = false;
-        flashTimer = null;
-      }, 1100);
+  $effect(() => {
+    if (station.powerState !== prevPowerState) {
+      if (prevPowerState !== null && station.powerState >= 0) {
+        flash = true;
+        if (flashTimer) clearTimeout(flashTimer);
+        flashTimer = setTimeout(() => {
+          flash = false;
+          flashTimer = null;
+        }, 1100);
+      }
+      prevPowerState = station.powerState;
     }
-    prevPowerState = station.powerState;
-  }
+  });
 
   // Confirmed-state index drives the sliding segment thumb: 0=On 1=Standby
   // 2=Sleep, -1 keeps the thumb hidden.
-  $: activePowerIndex = isCurrentPowerState(station, 'on')
+  const activePowerIndex = $derived(isCurrentPowerState(station, 'on')
     ? 0
     : isCurrentPowerState(station, 'standby')
       ? 1
       : isCurrentPowerState(station, 'sleep')
         ? 2
-        : -1;
+        : -1);
 
   // One-shot pop on the active segment when a power operation settles
   // successfully; keyed by createdAt so a re-shown feedback does not replay.
-  let popActive = false;
+  let popActive = $state(false);
   let popTimer: ReturnType<typeof setTimeout> | null = null;
   let lastPopCreatedAt: number | undefined;
-  $: if (feedback && feedback.kind === 'success' && feedback.createdAt !== lastPopCreatedAt) {
-    lastPopCreatedAt = feedback.createdAt;
-    popActive = true;
-    if (popTimer) clearTimeout(popTimer);
-    popTimer = setTimeout(() => {
-      popActive = false;
-      popTimer = null;
-    }, 700);
-  }
+  $effect(() => {
+    if (feedback && feedback.kind === 'success' && feedback.createdAt !== lastPopCreatedAt) {
+      lastPopCreatedAt = feedback.createdAt;
+      popActive = true;
+      if (popTimer) clearTimeout(popTimer);
+      popTimer = setTimeout(() => {
+        popActive = false;
+        popTimer = null;
+      }, 700);
+    }
+  });
 
   onDestroy(() => {
     if (flashTimer) clearTimeout(flashTimer);
     if (popTimer) clearTimeout(popTimer);
   });
 
-  $: hasKnownPower = station.powerState >= 0;
-  $: stalePower = hasKnownPower && !station.powerFresh;
-  $: unverified = hasKnownPower && station.powerFresh && !station.powerStateConfirmed;
-  $: shownChannel = station.channel > 0 ? station.channel : (channelDisplay ?? 0);
-  $: channelLastKnown = station.channel <= 0 && shownChannel > 0;
+  const hasKnownPower = $derived(station.powerState >= 0);
+  const stalePower = $derived(hasKnownPower && !station.powerFresh);
+  const unverified = $derived(hasKnownPower && station.powerFresh && !station.powerStateConfirmed);
+
+  // Display hysteresis for the channel chip. The keyed each upstream reuses
+  // this card while the station object is unchanged, so the expiry must run
+  // here: while the live channel is wiped the last known value persists for
+  // CHANNEL_MEMORY_MS before falling back to CH --.
+  const CHANNEL_MEMORY_MS = 45_000;
+  // Intentional one-time capture: channelDisplay seeds the hysteresis when a
+  // card mounts during a transient wipe; after that the card tracks changes
+  // through the station prop itself.
+  // svelte-ignore state_referenced_locally
+  let lastKnownChannel = $state(channelDisplay ?? 0);
+  let lastKnownAt = $state(Date.now());
+  $effect(() => {
+    if (station.channel > 0) {
+      lastKnownChannel = station.channel;
+      lastKnownAt = Date.now();
+    }
+  });
+  $effect(() => {
+    if (station.channel > 0 || lastKnownChannel <= 0) return;
+    const timer = setInterval(() => {
+      if (Date.now() - lastKnownAt > CHANNEL_MEMORY_MS) lastKnownChannel = 0;
+    }, 15_000);
+    return () => clearInterval(timer);
+  });
+  const shownChannel = $derived(station.channel > 0 ? station.channel : lastKnownChannel);
+  const channelLastKnown = $derived(station.channel <= 0 && shownChannel > 0);
 
   function openDetails() {
     if (!renaming) onOpenDetails(station);
@@ -125,14 +174,15 @@
 
 <!-- Card-wide click is a mouse convenience; keyboard users open details
      through the dedicated Details button. -->
-<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+<!-- svelte-ignore a11y_click_events_have_key_events -->
+<!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
   class="station-card state-{stateClass(station)}"
   class:offline={!station.isPresent}
   class:conflict={station.channelConflict}
   class:renaming
   class:flash
-  on:click={openDetails}
+  onclick={openDetails}
 >
   {#if renaming}
     <div class="rename-row">
@@ -143,12 +193,14 @@
         placeholder={station.originalName}
         title="Save an empty name to restore the original name"
         aria-label="Station name"
-        on:keydown={handleRenameKeydown}
-        on:blur={handleRenameBlur}
-        on:click|stopPropagation
+        aria-describedby={`rename-hint-${station.address}`}
+        onkeydown={handleRenameKeydown}
+        onblur={handleRenameBlur}
+        onclick={(event) => event.stopPropagation()}
       />
-      <button type="button" class="icon-btn" title="Save name" aria-label="Save name" on:mousedown|preventDefault on:click|stopPropagation={commitRename}><Check size={16} /></button>
-      <button type="button" class="icon-btn" title="Cancel" aria-label="Cancel rename" on:mousedown|preventDefault on:click|stopPropagation={discardRename}><X size={16} /></button>
+      <button type="button" class="icon-btn" title="Save name" aria-label="Save name" onmousedown={(event) => event.preventDefault()} onclick={(event) => { event.stopPropagation(); commitRename(); }}><Check size={16} /></button>
+      <button type="button" class="icon-btn" title="Cancel" aria-label="Cancel rename" onmousedown={(event) => event.preventDefault()} onclick={(event) => { event.stopPropagation(); discardRename(); }}><X size={16} /></button>
+      <span class="sr-only" id={`rename-hint-${station.address}`}>Saving an empty name restores the original name: {station.originalName}.</span>
     </div>
   {:else}
     <div class="card-top">
@@ -158,7 +210,7 @@
         class="icon-btn rename-btn"
         title="Rename"
         aria-label={`Rename ${station.name}`}
-        on:click|stopPropagation={() => onStartRename(station)}
+        onclick={(event) => { event.stopPropagation(); onStartRename(station); }}
         disabled={gattBusy || configBusy || renameLocked}
       ><SquarePen size={13} /></button>
       <span class="spacer"></span>
@@ -178,19 +230,20 @@
     <span class="mono addr">{station.address}</span>
     <StateBadge label={stateLabel(station)} {unverified} stale={stalePower} booting={station.powerFresh && station.powerState === 3} />
     {#if stalePower}
-      <span class="fresh-icon stale" title={`Last known state; last successful read ${relativeTime(station.lastPowerReadAt) || 'unknown'}`}><History size={11} /></span>
+      <span class="fresh-icon stale" role="img" title={`Last known state; last successful read ${relativeTime(station.lastPowerReadAt) || 'unknown'}`} aria-label={`Last known state; last successful read ${relativeTime(station.lastPowerReadAt) || 'unknown'}`}><History size={11} aria-hidden="true" /></span>
     {:else if unverified}
-      <span class="fresh-icon unverified" title="State reported by the station but not confirmed by readback"><CircleHelp size={11} /></span>
+      <span class="fresh-icon unverified" role="img" title="State reported by the station but not confirmed by readback" aria-label="State reported by the station but not confirmed by readback"><CircleHelp size={11} aria-hidden="true" /></span>
     {/if}
-    {#if !station.isPresent}<span class="muted-badge" title="Not detected in the latest scan; direct power control can still be attempted">not visible</span>{/if}
-    {#if station.isPresent && station.presenceUncertain}<span class="muted-badge" title="Its connection could not be fully released before the last scan, so the advertisement may have been missed">presence uncertain</span>{/if}
-    {#if station.isPresent && !station.presenceUncertain && !station.seenInLatestScan}<span class="muted-badge" title="Missed by one scan; retained until a second consecutive miss">scan stale</span>{/if}
+    {#if !station.isPresent}<span class="muted-badge" title="Not detected in the latest scan; direct power control can still be attempted">not visible<span class="sr-only"> — not detected in the latest scan, but direct power control can still be attempted</span></span>{/if}
+    {#if station.isPresent && station.presenceUncertain}<span class="muted-badge" title="Its connection could not be fully released before the last scan, so the advertisement may have been missed">presence uncertain<span class="sr-only"> — the connection could not be fully released before the last scan, so the advertisement may have been missed</span></span>{/if}
+    {#if station.isPresent && !station.presenceUncertain && !station.seenInLatestScan}<span class="muted-badge" title="Missed by one scan; retained until a second consecutive miss">scan stale<span class="sr-only"> — missed by one scan, retained until a second consecutive miss</span></span>{/if}
   </div>
   {#if feedback}
     <div
       class="power-feedback {feedback.kind}"
       title={feedback.text}
-      in:fly={{ y: 4, duration: 160, easing: cubicOut }}
+      in:fly={dur({ y: 4, duration: 160, easing: cubicOut })}
+      out:fade={dur({ duration: 120 })}
     >
       {#if feedback.kind === 'pending'}<LoaderCircle class="spin" size={11} />
       {:else if feedback.kind === 'success'}<CircleCheck size={11} />
@@ -217,7 +270,7 @@
         aria-pressed={isCurrentPowerState(station, 'on')}
         aria-label={`Turn ${station.name} on`}
         title="Turn lasers and motor on"
-        on:click|stopPropagation={() => onPower(station, 'on')}
+        onclick={(event) => { event.stopPropagation(); onPower(station, 'on'); }}
         disabled={renaming || !canSetPower(station, 'on') || gattBusy || configBusy || gattLocked}
       ><Zap size={12} /> On</button>
       <button
@@ -227,7 +280,7 @@
         aria-pressed={isCurrentPowerState(station, 'standby')}
         aria-label={`Set ${station.name} to standby`}
         title="Lasers off, motor remains powered"
-        on:click|stopPropagation={() => onPower(station, 'standby')}
+        onclick={(event) => { event.stopPropagation(); onPower(station, 'standby'); }}
         disabled={renaming || !canSetPower(station, 'standby') || gattBusy || configBusy || gattLocked}
       ><Pause size={12} /> Standby</button>
       <button
@@ -237,11 +290,11 @@
         aria-pressed={isCurrentPowerState(station, 'sleep')}
         aria-label={`Put ${station.name} to sleep`}
         title="Turn lasers and motor off"
-        on:click|stopPropagation={() => onPower(station, 'sleep')}
+        onclick={(event) => { event.stopPropagation(); onPower(station, 'sleep'); }}
         disabled={renaming || !canSetPower(station, 'sleep') || gattBusy || configBusy || gattLocked}
       ><Moon size={12} /> Sleep</button>
     </div>
-    <button class="icon-btn details" title="Details" aria-label={`Details for ${station.name}`} on:click|stopPropagation={openDetails} disabled={renaming}><ChevronRight size={17} /></button>
+    <button class="icon-btn details" title="Details" aria-label={`Details for ${station.name}`} onclick={(event) => { event.stopPropagation(); openDetails(); }} disabled={renaming}><ChevronRight size={17} /></button>
   </div>
 </div>
 

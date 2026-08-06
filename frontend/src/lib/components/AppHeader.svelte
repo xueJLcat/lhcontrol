@@ -1,48 +1,74 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onDestroy } from 'svelte';
   import { fade } from 'svelte/transition';
   import { LoaderCircle, RefreshCw, Square, Zap } from 'lucide-svelte';
   import type { PowerTarget } from '../types';
+  import { dur } from '../motion';
   import logo from '../../assets/images/logo-universal.png';
 
-  export let scanning: boolean;
-  export let isBulkLoading: boolean;
-  export let scanLocked: boolean;
-  export let bulkLocked: boolean;
-  export let bulkTarget: PowerTarget | null;
-  export let canOn: boolean;
-  export let canStandby: boolean;
-  export let canSleep: boolean;
-  export let allOn: boolean;
-  export let allStandby: boolean;
-  export let allSleep: boolean;
-  export let onCount = 0;
-  export let standbyCount = 0;
-  export let sleepCount = 0;
-  export let unverifiedCount = 0;
-  export let onScan: () => void;
-  export let onStop: () => void;
-  export let stopping = false;
-  export let onBulkPower: (state: PowerTarget) => void;
+  let {
+    scanning,
+    isBulkLoading,
+    scanLocked,
+    bulkLocked,
+    bulkTarget,
+    canOn,
+    canStandby,
+    canSleep,
+    allOn,
+    allStandby,
+    allSleep,
+    onCount = 0,
+    standbyCount = 0,
+    sleepCount = 0,
+    unverifiedCount = 0,
+    knownCount = 0,
+    untrustedCount = 0,
+    onScan,
+    onStop,
+    stopping = false,
+    onBulkPower
+  }: {
+    scanning: boolean;
+    isBulkLoading: boolean;
+    scanLocked: boolean;
+    bulkLocked: boolean;
+    bulkTarget: PowerTarget | null;
+    canOn: boolean;
+    canStandby: boolean;
+    canSleep: boolean;
+    allOn: boolean;
+    allStandby: boolean;
+    allSleep: boolean;
+    onCount?: number;
+    standbyCount?: number;
+    sleepCount?: number;
+    unverifiedCount?: number;
+    knownCount?: number;
+    untrustedCount?: number;
+    onScan: () => void;
+    onStop: () => void;
+    stopping?: boolean;
+    onBulkPower: (state: PowerTarget) => void;
+  } = $props();
 
-  $: fleetTotal = onCount + standbyCount + sleepCount;
+  const fleetTotal = $derived(onCount + standbyCount + sleepCount);
 
   // Bulk segment thumb + confirmation pop. allOn/allStandby/allSleep are
   // mutually exclusive, so a single index describes the active segment.
-  $: bulkActiveIndex = allOn ? 0 : allStandby ? 1 : allSleep ? 2 : -1;
+  const bulkActiveIndex = $derived(allOn ? 0 : allStandby ? 1 : allSleep ? 2 : -1);
 
-  let mounted = false;
-  let bulkPopIndex = -1;
+  let bulkPopIndex = $state(-1);
   let bulkPopTimer: ReturnType<typeof setTimeout> | null = null;
   let prevAllOn = false;
   let prevAllStandby = false;
   let prevAllSleep = false;
-  onMount(() => {
-    mounted = true;
-  });
-  $: {
+  let firstRun = true;
+  $effect(() => {
     const previousIndex = prevAllOn ? 0 : prevAllStandby ? 1 : prevAllSleep ? 2 : -1;
-    if (mounted && bulkActiveIndex !== -1 && bulkActiveIndex !== previousIndex) {
+    // The first evaluation carries the initial props and must not pop; only a
+    // genuine state transition after mount animates the thumb.
+    if (!firstRun && bulkActiveIndex !== -1 && bulkActiveIndex !== previousIndex) {
       bulkPopIndex = bulkActiveIndex;
       if (bulkPopTimer) clearTimeout(bulkPopTimer);
       bulkPopTimer = setTimeout(() => {
@@ -50,10 +76,15 @@
         bulkPopTimer = null;
       }, 700);
     }
+    firstRun = false;
     prevAllOn = allOn;
     prevAllStandby = allStandby;
     prevAllSleep = allSleep;
-  }
+  });
+
+  onDestroy(() => {
+    if (bulkPopTimer) clearTimeout(bulkPopTimer);
+  });
 </script>
 
 <header>
@@ -67,15 +98,16 @@
     </div>
     {#if fleetTotal > 0 || unverifiedCount > 0}
       <div class="fleet-summary" role="group" aria-label="Fleet power summary">
-        {#if onCount > 0}<span class="fleet-chip chip-on" transition:fade={{ duration: 160 }}><span class="fleet-dot dot-on"></span>{onCount} On</span>{/if}
-        {#if standbyCount > 0}<span class="fleet-chip chip-standby" transition:fade={{ duration: 160 }}><span class="fleet-dot dot-standby"></span>{standbyCount} Standby</span>{/if}
-        {#if sleepCount > 0}<span class="fleet-chip chip-sleep" transition:fade={{ duration: 160 }}><span class="fleet-dot dot-sleep"></span>{sleepCount} Sleep</span>{/if}
-        {#if unverifiedCount > 0}<span class="fleet-chip chip-unverified" title="State not confirmed by a fresh read" transition:fade={{ duration: 160 }}><span class="fleet-dot dot-unverified"></span>{unverifiedCount} Unconfirmed</span>{/if}
+        {#if onCount > 0}<span class="fleet-chip chip-on" transition:fade={dur({ duration: 160 })}><span class="fleet-dot dot-on"></span>{onCount} On</span>{/if}
+        {#if standbyCount > 0}<span class="fleet-chip chip-standby" transition:fade={dur({ duration: 160 })}><span class="fleet-dot dot-standby"></span>{standbyCount} Standby</span>{/if}
+        {#if sleepCount > 0}<span class="fleet-chip chip-sleep" transition:fade={dur({ duration: 160 })}><span class="fleet-dot dot-sleep"></span>{sleepCount} Sleep</span>{/if}
+        {#if unverifiedCount > 0}<span class="fleet-chip chip-unverified" title="State not confirmed by a fresh read" transition:fade={dur({ duration: 160 })}><span class="fleet-dot dot-unverified"></span>{unverifiedCount} Unconfirmed</span>{/if}
+        <span class="sr-only">Unconfirmed stations have a power state that was not confirmed by a fresh read.</span>
       </div>
     {/if}
   </div>
   <div class="row-actions">
-    <button class="btn primary scan-btn" on:click={scanning ? onStop : onScan} disabled={scanning ? stopping : scanLocked}>
+    <button class="btn primary scan-btn" onclick={scanning ? onStop : onScan} disabled={scanning ? stopping : scanLocked}>
       {#if stopping}<LoaderCircle class="spin" size={15} /> Stopping...
       {:else if scanning}<Square size={15} /> Stop
       {:else}<RefreshCw size={15} /> Scan{/if}
@@ -92,12 +124,17 @@
           style:opacity={bulkActiveIndex >= 0 ? 1 : 0}
           aria-hidden="true"
         ></div>
-        <button class="seg-on" class:pending={bulkTarget === 'on'} class:active={allOn} on:click={() => onBulkPower('on')} disabled={scanning || bulkLocked || !canOn} title={!canOn ? 'No actionable station' : bulkLocked ? 'Bluetooth operation in progress' : 'Turn all known stations on'}>On</button>
-        <button class="seg-standby" class:pending={bulkTarget === 'standby'} class:active={allStandby} on:click={() => onBulkPower('standby')} disabled={scanning || bulkLocked || !canStandby} title={!canStandby ? 'No actionable station' : bulkLocked ? 'Bluetooth operation in progress' : 'Set all known stations to standby'}>Standby</button>
-        <button class="seg-sleep" class:pending={bulkTarget === 'sleep'} class:active={allSleep} on:click={() => onBulkPower('sleep')} disabled={scanning || bulkLocked || !canSleep} title={!canSleep ? 'No actionable station' : bulkLocked ? 'Bluetooth operation in progress' : 'Put all known stations to sleep'}>Sleep</button>
+        <button class="seg-on" class:pending={bulkTarget === 'on'} class:active={allOn} onclick={() => onBulkPower('on')} disabled={scanning || bulkLocked || !canOn} title={!canOn ? 'No actionable station' : bulkLocked ? 'Bluetooth operation in progress' : 'Turn all known stations on'}>On</button>
+        <button class="seg-standby" class:pending={bulkTarget === 'standby'} class:active={allStandby} onclick={() => onBulkPower('standby')} disabled={scanning || bulkLocked || !canStandby} title={!canStandby ? 'No actionable station' : bulkLocked ? 'Bluetooth operation in progress' : 'Set all known stations to standby'}>Standby</button>
+        <button class="seg-sleep" class:pending={bulkTarget === 'sleep'} class:active={allSleep} onclick={() => onBulkPower('sleep')} disabled={scanning || bulkLocked || !canSleep} title={!canSleep ? 'No actionable station' : bulkLocked ? 'Bluetooth operation in progress' : 'Put all known stations to sleep'}>Sleep</button>
       </div>
     </div>
   </div>
+  {#if untrustedCount > 0}
+    <p class="bulk-scope">
+      {knownCount} known stations · {untrustedCount} not fully verified — bulk commands include them.
+    </p>
+  {/if}
   {#if scanning}<div class="scan-progress" aria-hidden="true"></div>{/if}
 </header>
 
@@ -168,11 +205,12 @@
   .fleet-summary {
     display: flex;
     align-items: center;
+    justify-content: flex-end;
+    flex-wrap: wrap;
     gap: 0.35rem;
     font-size: var(--fs-micro);
     font-weight: 800;
-    white-space: nowrap;
-    flex-shrink: 0;
+    min-width: 0;
   }
   .fleet-chip {
     display: inline-flex;
@@ -183,6 +221,7 @@
     border: 1px solid var(--color-border);
     background: var(--bg-surface-solid);
     box-shadow: var(--shadow-sm);
+    white-space: nowrap;
   }
   .fleet-chip.chip-on { color: var(--color-on-deep); border-color: color-mix(in srgb, var(--color-on) 40%, transparent); background: linear-gradient(135deg, color-mix(in srgb, var(--color-on) 14%, white), color-mix(in srgb, var(--color-on) 6%, white)); }
   .fleet-chip.chip-standby { color: var(--color-standby-deep); border-color: color-mix(in srgb, var(--color-standby) 40%, transparent); background: linear-gradient(135deg, color-mix(in srgb, var(--color-standby) 14%, white), color-mix(in srgb, var(--color-standby) 6%, white)); }
@@ -193,6 +232,12 @@
   .fleet-dot.dot-standby { background: var(--color-standby); box-shadow: 0 0 5px color-mix(in srgb, var(--color-standby) 70%, transparent); }
   .fleet-dot.dot-sleep { background: var(--color-sleep); box-shadow: 0 0 5px color-mix(in srgb, var(--color-sleep) 60%, transparent); }
   .fleet-dot.dot-unverified { background: transparent; border: 1.5px solid var(--text-muted); box-sizing: border-box; }
+  .bulk-scope {
+    margin: -0.25rem 0 0;
+    font-size: var(--fs-micro);
+    font-weight: 700;
+    color: var(--color-standby-deep);
+  }
   .scan-progress {
     position: absolute;
     left: 0; right: 0; bottom: -1px;

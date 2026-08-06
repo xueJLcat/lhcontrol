@@ -2,6 +2,7 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { StationInfo } from '../types';
+import { createOnStation } from '../../test/fixtures';
 import ChannelModal from './ChannelModal.svelte';
 
 afterEach(cleanup);
@@ -23,52 +24,7 @@ beforeEach(() => {
 });
 
 function station(overrides: Partial<StationInfo> = {}): StationInfo {
-  return {
-    name: 'LHB-A',
-    originalName: 'LHB-A',
-    address: '11:22:33:44:55:66',
-    powerState: 1,
-    powerStateName: 'on',
-    powerStateConfirmed: true,
-    rawPowerState: 0x0b,
-    channel: 3,
-    channelConflict: false,
-    isPresent: true,
-    seenInLatestScan: true,
-    scanFresh: true,
-    missedScans: 0,
-    lastSeenAt: '',
-    lastReadAt: '',
-    lastPowerReadAt: '',
-    lastChannelReadAt: '',
-    metadataReadAt: '',
-    lastError: '',
-    statusFresh: true,
-    powerFresh: true,
-    channelFresh: true,
-    metadataFresh: false,
-    connectionState: 'connected',
-    capabilitiesKnown: true,
-    capabilities: {
-      powerRead: true,
-      powerWrite: true,
-      powerNotify: false,
-      standby: true,
-      channelRead: true,
-      channelWrite: true,
-      channelNotify: false,
-      identify: true,
-      deviceInformation: false
-    },
-    metadata: {
-      manufacturer: '',
-      model: '',
-      serialNumber: '',
-      hardwareRevision: '',
-      firmwareRevision: ''
-    },
-    ...overrides
-  } as StationInfo;
+  return createOnStation({ name: 'LHB-A', originalName: 'LHB-A', ...overrides });
 }
 
 function renderModal(overrides: Record<string, unknown> = {}) {
@@ -94,7 +50,7 @@ function renderModal(overrides: Record<string, unknown> = {}) {
 describe('ChannelModal channel grid', () => {
   it('keeps occupied channels focusable with their tooltip instead of disabling them', () => {
     renderModal();
-    const cell = screen.getByRole('button', { name: '4' });
+    const cell = screen.getByRole('button', { name: 'Channel 4, occupied by LHB-B' });
     // Chromium suppresses hover events and title tooltips on truly disabled
     // buttons, so the cell must stay enabled and use aria-disabled instead.
     expect(cell).not.toBeDisabled();
@@ -104,13 +60,13 @@ describe('ChannelModal channel grid', () => {
 
   it('lists every station occupying the same channel', () => {
     renderModal({ occupiedChannels: new Map([[4, ['LHB-B', 'LHB-C']]]) });
-    expect(screen.getByRole('button', { name: '4' }))
+    expect(screen.getByRole('button', { name: 'Channel 4, occupied by LHB-B, LHB-C' }))
       .toHaveAttribute('title', 'Occupied by LHB-B, LHB-C');
   });
 
   it('does not select an occupied channel when clicked', async () => {
     renderModal();
-    const cell = screen.getByRole('button', { name: '4' });
+    const cell = screen.getByRole('button', { name: 'Channel 4, occupied by LHB-B' });
     await fireEvent.click(cell);
     expect(cell).toHaveAttribute('aria-pressed', 'false');
     expect(screen.getByRole('button', { name: 'Confirm change' })).toBeDisabled();
