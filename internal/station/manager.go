@@ -1000,12 +1000,16 @@ func (m *Manager) beginForegroundStationOperation(address string) error {
 }
 
 func (m *Manager) beginBulkGlobalOperation() error {
+	return m.beginBulkGlobalOperationContext(context.Background())
+}
+
+func (m *Manager) beginBulkGlobalOperationContext(ctx context.Context) error {
 	m.scanTransitionMutex.Lock()
 	defer m.scanTransitionMutex.Unlock()
 	if m.isScanning.Load() {
 		return ErrOperationInProgress
 	}
-	return m.beginForegroundGlobalOperation()
+	return m.beginForegroundGlobalOperationContext(ctx)
 }
 
 func (m *Manager) hasForegroundOperation() bool {
@@ -1197,11 +1201,18 @@ func (m *Manager) scanAndFetchStationsSafely(ctx context.Context) (stations []St
 }
 
 func (m *Manager) ScanAndFetchStations() ([]StationInfo, error) {
-	if err := m.beginScan(ScanCallbacks{}); err != nil {
+	return m.ScanAndFetchStationsContext(context.Background())
+}
+
+// ScanAndFetchStationsContext runs a synchronous scan that can be cancelled
+// independently of the Manager lifetime. StopScan and BeginShutdown still
+// cancel the same published scan lifecycle.
+func (m *Manager) ScanAndFetchStationsContext(ctx context.Context) ([]StationInfo, error) {
+	if err := m.beginScanContext(ctx, ScanCallbacks{}); err != nil {
 		return m.GetStationInfo(), err
 	}
-	ctx := m.currentScanContext()
-	stations, found, err := m.scanAndFetchStationsSafely(ctx)
+	scanCtx := m.currentScanContext()
+	stations, found, err := m.scanAndFetchStationsSafely(scanCtx)
 	m.scanLifecycleMutex.Lock()
 	lifecycle := m.scanLifecycle
 	m.scanLifecycleMutex.Unlock()
@@ -1215,7 +1226,11 @@ func (m *Manager) ScanAndFetchStations() ([]StationInfo, error) {
 }
 
 func (m *Manager) beginScan(callbacks ScanCallbacks) error {
-	lifecycle, err := m.reserveScan()
+	return m.beginScanContext(context.Background(), callbacks)
+}
+
+func (m *Manager) beginScanContext(ctx context.Context, callbacks ScanCallbacks) error {
+	lifecycle, err := m.reserveScan(ctx)
 	if err != nil {
 		return err
 	}
@@ -1234,7 +1249,13 @@ func (m *Manager) beginScan(callbacks ScanCallbacks) error {
 	return err
 }
 
-func (m *Manager) reserveScan() (*scanLifecycle, error) {
+func (m *Manager) reserveScan(parent context.Context) (*scanLifecycle, error) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	if parent.Err() != nil {
+		return nil, bluetooth.ErrScanCancelled
+	}
 	m.scanTransitionMutex.Lock()
 	if m.shuttingDown.Load() {
 		m.scanTransitionMutex.Unlock()
@@ -1251,7 +1272,7 @@ func (m *Manager) reserveScan() (*scanLifecycle, error) {
 		m.scanTransitionMutex.Unlock()
 		return nil, ErrOperationInProgress
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(parent)
 	lifecycle := &scanLifecycle{
 		ctx:         ctx,
 		cancel:      cancel,
@@ -1676,7 +1697,7 @@ func (m *Manager) GetScanStatus() ScanStatus {
 // StartScan reserves the Bluetooth adapter, starts scan processing, then emits
 // Started synchronously. Terminal callbacks run after processing has finished.
 func (m *Manager) StartScan(callbacks ScanCallbacks) error {
-	lifecycle, err := m.reserveScan()
+	lifecycle, err := m.reserveScan(context.Background())
 	if err != nil {
 		return err
 	}
@@ -2718,7 +2739,7 @@ func (m *Manager) SetAllStationsPower(state string) error {
 }
 
 func (m *Manager) setAllStationsPower(state string) error {
-	result, err := m.setAllStationsPowerDetailed(state)
+	result, err := m.SetAllStationsPowerDetailedContext(context.Background(), state)
 	if err != nil {
 		return err
 	}
@@ -2738,7 +2759,22 @@ func (m *Manager) setAllStationsPower(state string) error {
 // Per-device failures are data, not a top-level error, so Wails callers retain
 // successful results when only part of a batch fails.
 func (m *Manager) SetAllStationsPowerDetailed(state string) (BulkPowerResult, error) {
-	return m.setAllStationsPowerDetailed(state)
+	return m.SetAllStationsPowerDetailedContext(context.Background(), state)
+}
+
+// SetAllStationsPowerDetailedContext applies a bulk power target while
+// honoring caller cancellation as well as application shutdown.
+func (m *Manager) SetAllStationsPowerDetailedContext(ctx context.Context, state string) (BulkPowerResult, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	operationContext, cancelOperation := context.WithCancel(ctx)
+	stopLifecycleCancellation := context.AfterFunc(m.lifecycleContext, cancelOperation)
+	defer func() {
+		stopLifecycleCancellation()
+		cancelOperation()
+	}()
+	return m.setAllStationsPowerDetailed(operationContext, state)
 }
 
 func (m *Manager) cachedBulkPowerResult(target bluetooth.PowerState) (BulkPowerResult, bool) {
@@ -2775,7 +2811,7 @@ func classifyCachedPowerInfo(info StationInfo, target bluetooth.PowerState) cach
 	return cachedPowerActionable
 }
 
-func (m *Manager) setAllStationsPowerDetailed(state string) (BulkPowerResult, error) {
+func (m *Manager) setAllStationsPowerDetailed(ctx context.Context, state string) (BulkPowerResult, error) {
 	target, err := bluetooth.ParsePowerTarget(state)
 	result := BulkPowerResult{Target: target.String(), Results: []BulkPowerStationResult{}}
 	if err != nil {
@@ -2784,10 +2820,13 @@ func (m *Manager) setAllStationsPowerDetailed(state string) (BulkPowerResult, er
 	if m.shuttingDown.Load() {
 		return result, ErrShuttingDown
 	}
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
 	if cached, complete := m.cachedBulkPowerResult(target); complete {
 		return cached, nil
 	}
-	if err := m.beginBulkGlobalOperation(); err != nil {
+	if err := m.beginBulkGlobalOperationContext(ctx); err != nil {
 		return result, err
 	}
 	defer m.endForegroundGlobalOperation()
@@ -2863,6 +2902,9 @@ func (m *Manager) setAllStationsPowerDetailed(state string) (BulkPowerResult, er
 	if err := m.ensureReady(); err != nil {
 		return result, err
 	}
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
 
 	var wg sync.WaitGroup
 	semaphore := make(chan struct{}, 2)
@@ -2873,15 +2915,27 @@ func (m *Manager) setAllStationsPowerDetailed(state string) (BulkPowerResult, er
 			defer wg.Done()
 			select {
 			case semaphore <- struct{}{}:
+			case <-ctx.Done():
+				result.Results[resultIndex].Skipped = true
+				if m.shuttingDown.Load() {
+					result.Results[resultIndex].Reason = "application is shutting down"
+				} else {
+					result.Results[resultIndex].Reason = "operation cancelled"
+				}
+				return
 			case <-m.shutdownCh:
 				result.Results[resultIndex].Skipped = true
 				result.Results[resultIndex].Reason = "application is shutting down"
 				return
 			}
 			defer func() { <-semaphore }()
-			if m.shuttingDown.Load() {
+			if m.shuttingDown.Load() || ctx.Err() != nil {
 				result.Results[resultIndex].Skipped = true
-				result.Results[resultIndex].Reason = "application is shutting down"
+				if m.shuttingDown.Load() {
+					result.Results[resultIndex].Reason = "application is shutting down"
+				} else {
+					result.Results[resultIndex].Reason = "operation cancelled"
+				}
 				return
 			}
 			stationResult := BulkPowerStationResult{
@@ -2908,7 +2962,7 @@ func (m *Manager) setAllStationsPowerDetailed(state string) (BulkPowerResult, er
 				}
 				capabilities := snapshot.Capabilities
 				var err error
-				discoveryContext, cancelDiscovery := context.WithTimeout(m.lifecycleContext, m.initialReadTimeout)
+				discoveryContext, cancelDiscovery := context.WithTimeout(ctx, m.initialReadTimeout)
 				defer cancelDiscovery()
 				if snapshot.CapabilitiesKnown &&
 					(!capabilities.PowerWrite ||
@@ -2931,7 +2985,7 @@ func (m *Manager) setAllStationsPowerDetailed(state string) (BulkPowerResult, er
 					return err
 				}
 				var controlResult bluetooth.PowerControlResult
-				controlResult, err = m.bluetoothOps.setPowerState(m.lifecycleContext, s, target)
+				controlResult, err = m.bluetoothOps.setPowerState(ctx, s, target)
 				stationResult.CommandSent = err == nil
 				stationResult.Confirmed = controlResult.Confirmed
 				if err == nil {
@@ -2949,9 +3003,13 @@ func (m *Manager) setAllStationsPowerDetailed(state string) (BulkPowerResult, er
 					stationResult.Success = true
 					stationResult.Confirmed = false
 					stationResult.Error = workerErr.Error()
-				} else if m.shuttingDown.Load() && errors.Is(workerErr, context.Canceled) {
+				} else if errors.Is(workerErr, context.Canceled) {
 					stationResult.Skipped = true
-					stationResult.Reason = "application is shutting down"
+					if m.shuttingDown.Load() {
+						stationResult.Reason = "application is shutting down"
+					} else {
+						stationResult.Reason = "operation cancelled"
+					}
 					stationResult.CommandSent = false
 					stationResult.Error = ""
 					if info, infoErr := m.stationInfoByAddress(stationResult.Address); infoErr == nil {
@@ -2985,6 +3043,12 @@ func (m *Manager) setAllStationsPowerDetailed(state string) (BulkPowerResult, er
 	}
 
 	wg.Wait()
+	if err := ctx.Err(); err != nil {
+		if m.shuttingDown.Load() {
+			return result, nil
+		}
+		return result, err
+	}
 	return result, nil
 }
 

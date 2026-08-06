@@ -123,6 +123,37 @@ func TestStopScanAPI(t *testing.T) {
 	}
 }
 
+func TestHTTPMutationsEmitMonotonicStationUpdates(t *testing.T) {
+	manager := &fakeAPIStationManager{}
+	api := fiber.New(fiber.Config{ErrorHandler: apiErrorHandler})
+	var nextID atomic.Uint64
+	updates := []stationUpdateEvent{}
+	registerAPIRoutes(api, manager, scanEventCallbacks{
+		nextUpdateID: func() uint64 { return nextID.Add(1) },
+		updated: func(event stationUpdateEvent) {
+			updates = append(updates, event)
+		},
+	}, func() APIStatus { return APIStatus{Running: true} })
+
+	for _, request := range []*http.Request{
+		httptest.NewRequest(http.MethodPost, "/allon", nil),
+		httptest.NewRequest(http.MethodPost, "/stations/AA/refresh", nil),
+	} {
+		response, err := api.Test(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = response.Body.Close()
+		if response.StatusCode != fiber.StatusOK {
+			t.Fatalf("mutation status = %d, want 200", response.StatusCode)
+		}
+	}
+	if len(updates) != 2 || updates[0].ID != 1 || updates[1].ID != 2 ||
+		updates[0].Source != "http-power" || updates[1].Source != "http-refresh" {
+		t.Fatalf("station update events = %+v", updates)
+	}
+}
+
 func TestScanCancellationAPIIsConflict(t *testing.T) {
 	manager := &fakeAPIStationManager{legacyErr: bluetooth.ErrScanCancelled}
 	response, err := testAPI(manager).Test(httptest.NewRequest(http.MethodPost, "/scan", nil))
@@ -757,13 +788,7 @@ func TestAPIBodyLimit(t *testing.T) {
 }
 
 func TestBluetoothAdapterSettingsBindings(t *testing.T) {
-	t.Setenv("AppData", t.TempDir())
-
 	app := NewApp()
-
-	if got := app.GetBluetoothAdapter(); got != "" {
-		t.Fatalf("GetBluetoothAdapter() = %q, want empty default", got)
-	}
 
 	adapters, err := app.ListBluetoothAdapters()
 	if err != nil {
@@ -780,41 +805,6 @@ func TestBluetoothAdapterSettingsBindings(t *testing.T) {
 		}
 	}
 
-	// Unknown device IDs must be rejected instead of persisted.
-	unknownErr := app.SetBluetoothAdapter("Bluetooth#not-a-real-radio")
-	if unknownErr == nil {
-		t.Fatal("SetBluetoothAdapter() accepted an unknown device id")
-	}
-
-	// Clearing the preference always succeeds and persists an empty value.
-	if err := app.SetBluetoothAdapter(""); err != nil {
-		t.Fatalf("SetBluetoothAdapter(\"\") error = %v", err)
-	}
-	if got := app.GetBluetoothAdapter(); got != "" {
-		t.Fatalf("GetBluetoothAdapter() after clear = %q, want empty", got)
-	}
-}
-
-func TestBluetoothAdapterPreferenceSurvivesRestart(t *testing.T) {
-	configRoot := t.TempDir()
-	t.Setenv("AppData", configRoot)
-	configDir := filepath.Join(configRoot, "lhcontrol")
-	if err := os.MkdirAll(configDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	configPath := filepath.Join(configDir, "config.json")
-	saved := `{"bluetoothAdapter":"Bluetooth#Bluetooth00:11:22:33:44:55"}`
-	if err := os.WriteFile(configPath, []byte(saved), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	app := NewApp()
-	if err := app.config.Load(); err != nil {
-		t.Fatalf("config.Load() error = %v", err)
-	}
-	if got := app.GetBluetoothAdapter(); got != "Bluetooth#Bluetooth00:11:22:33:44:55" {
-		t.Fatalf("GetBluetoothAdapter() after simulated restart = %q, want persisted value", got)
-	}
 }
 
 func TestAutoSleepSettingsBindings(t *testing.T) {

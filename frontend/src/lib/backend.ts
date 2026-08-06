@@ -26,10 +26,6 @@ export function GetAutoSleepSettings(): Promise<autosleep.Settings> {
   return call(() => bindings.GetAutoSleepSettings());
 }
 
-export function GetBluetoothAdapter(): Promise<string> {
-  return call(() => bindings.GetBluetoothAdapter());
-}
-
 export function GetCurrentStationInfo(): Promise<station.StationInfo[]> {
   return call(() => bindings.GetCurrentStationInfo());
 }
@@ -68,10 +64,6 @@ export function SetAllStationsPowerDetailed(target: PowerTarget): Promise<statio
 
 export function SetAutoSleepSettings(settings: autosleep.Settings): Promise<void> {
   return call(() => bindings.SetAutoSleepSettings(settings));
-}
-
-export function SetBluetoothAdapter(deviceID: string): Promise<void> {
-  return call(() => bindings.SetBluetoothAdapter(deviceID));
 }
 
 export function SetStationChannel(address: string, channel: number, allowUnknownConflictRisk: boolean): Promise<station.ChannelChangeResult> {

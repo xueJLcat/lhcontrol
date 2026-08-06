@@ -8,7 +8,6 @@ const api = vi.hoisted(() => ({
   CheckAllStationStatuses: vi.fn(),
   GetAPIStatus: vi.fn(),
   GetAutoSleepSettings: vi.fn(),
-  GetBluetoothAdapter: vi.fn(),
   GetCurrentStationInfo: vi.fn(),
   GetScanStatus: vi.fn(),
   IdentifyStation: vi.fn(),
@@ -19,7 +18,6 @@ const api = vi.hoisted(() => ({
   ScanAndFetchStations: vi.fn(),
   SetAllStationsPowerDetailed: vi.fn(),
   SetAutoSleepSettings: vi.fn(),
-  SetBluetoothAdapter: vi.fn(),
   SetStationChannel: vi.fn(),
   SetStationPower: vi.fn(),
   StopScan: vi.fn()
@@ -77,8 +75,6 @@ beforeEach(() => {
   api.CheckAllStationStatuses.mockResolvedValue([createStation()]);
   api.StopScan.mockResolvedValue(undefined);
   api.ListBluetoothAdapters.mockResolvedValue([]);
-  api.GetBluetoothAdapter.mockResolvedValue('');
-  api.SetBluetoothAdapter.mockResolvedValue(undefined);
   api.GetAutoSleepSettings.mockResolvedValue({ enabled: false, target: 'steamvr', delaySeconds: 300 });
   api.SetAutoSleepSettings.mockResolvedValue(undefined);
 });
@@ -1927,22 +1923,19 @@ describe('App asynchronous operations', () => {
 });
 
 describe('App settings drawer', () => {
-  it('opens the settings drawer and loads the adapter preference', async () => {
+  it('opens the settings drawer and lists adapter diagnostics', async () => {
     api.ListBluetoothAdapters.mockResolvedValue([
       { deviceId: 'BT-1', name: 'Intel Wireless Bluetooth' },
       { deviceId: 'BT-2', name: 'CSR Dongle' }
     ]);
-    api.GetBluetoothAdapter.mockResolvedValue('BT-1');
     render(App);
     await screen.findByText('LHB-TEST');
 
     await fireEvent.click(screen.getByRole('button', { name: 'Open settings' }));
     expect(await screen.findByRole('dialog', { name: 'Settings' })).toBeInTheDocument();
     expect(api.ListBluetoothAdapters).toHaveBeenCalledOnce();
-    expect(api.GetBluetoothAdapter).toHaveBeenCalledOnce();
     expect(screen.getByText('Intel Wireless Bluetooth')).toBeInTheDocument();
-    const selected = screen.getAllByRole('radio').find((radio) => (radio as HTMLInputElement).checked);
-    expect((selected as HTMLInputElement).value).toBe('BT-1');
+    expect(screen.getByText('BT-1')).toBeInTheDocument();
   });
 
   it('closes the settings drawer with Escape', async () => {
@@ -1953,34 +1946,6 @@ describe('App settings drawer', () => {
 
     await fireEvent.keyDown(window, { key: 'Escape' });
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Settings' })).not.toBeInTheDocument());
-  });
-
-  it('saves a new adapter preference and reports the result', async () => {
-    api.ListBluetoothAdapters.mockResolvedValue([{ deviceId: 'BT-1', name: 'Intel Wireless Bluetooth' }]);
-    render(App);
-    await screen.findByText('LHB-TEST');
-    await fireEvent.click(screen.getByRole('button', { name: 'Open settings' }));
-    await screen.findByRole('dialog', { name: 'Settings' });
-
-    await fireEvent.click(screen.getByText('Intel Wireless Bluetooth'));
-    await waitFor(() => expect(api.SetBluetoothAdapter).toHaveBeenCalledWith('BT-1'));
-    expect(pushToast).toHaveBeenCalledWith('Bluetooth adapter preference saved.', 'success');
-  });
-
-  it('rolls the selection back when saving fails', async () => {
-    api.ListBluetoothAdapters.mockResolvedValue([{ deviceId: 'BT-1', name: 'Intel Wireless Bluetooth' }]);
-    api.GetBluetoothAdapter.mockResolvedValue('BT-1');
-    api.SetBluetoothAdapter.mockRejectedValue(new Error('config locked'));
-    render(App);
-    await screen.findByText('LHB-TEST');
-    await fireEvent.click(screen.getByRole('button', { name: 'Open settings' }));
-    await screen.findByRole('dialog', { name: 'Settings' });
-
-    await fireEvent.click(screen.getByText('Default'));
-    await waitFor(() => expect(api.SetBluetoothAdapter).toHaveBeenCalledWith(''));
-    expect(pushToast).toHaveBeenCalledWith('Bluetooth adapter preference could not be saved: Error: config locked');
-    const selected = screen.getAllByRole('radio').find((radio) => (radio as HTMLInputElement).checked);
-    expect((selected as HTMLInputElement).value).toBe('BT-1');
   });
 
   it('replaces the settings drawer when a station is selected', async () => {

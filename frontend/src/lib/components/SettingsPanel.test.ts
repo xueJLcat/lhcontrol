@@ -4,10 +4,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const backend = vi.hoisted(() => ({
   GetAutoSleepSettings: vi.fn(),
-  GetBluetoothAdapter: vi.fn(),
   ListBluetoothAdapters: vi.fn(),
-  SetAutoSleepSettings: vi.fn(),
-  SetBluetoothAdapter: vi.fn()
+  SetAutoSleepSettings: vi.fn()
 }));
 
 vi.mock('../backend', () => backend);
@@ -40,44 +38,19 @@ beforeEach(() => {
     { deviceId: 'BT-1', name: 'Intel Wireless Bluetooth' },
     { deviceId: 'BT-2', name: 'CSR Dongle' }
   ]);
-  backend.GetBluetoothAdapter.mockResolvedValue('');
-  backend.SetBluetoothAdapter.mockResolvedValue(undefined);
   backend.GetAutoSleepSettings.mockResolvedValue({ enabled: false, target: 'steamvr', delaySeconds: 300 });
   backend.SetAutoSleepSettings.mockResolvedValue(undefined);
 });
 
 describe('SettingsPanel', () => {
   it('loads adapter and auto-sleep settings on mount', async () => {
-    backend.GetBluetoothAdapter.mockResolvedValue('BT-1');
     render(SettingsPanel, { props: { onClose: vi.fn() } });
     expect(await screen.findByRole('dialog', { name: 'Settings' })).toBeInTheDocument();
     expect(backend.ListBluetoothAdapters).toHaveBeenCalledOnce();
-    expect(backend.GetBluetoothAdapter).toHaveBeenCalledOnce();
     expect(backend.GetAutoSleepSettings).toHaveBeenCalledOnce();
     expect(await screen.findByText('Intel Wireless Bluetooth')).toBeInTheDocument();
-    const selected = screen.getAllByRole('radio').find((radio) => (radio as HTMLInputElement).checked);
-    expect((selected as HTMLInputElement).value).toBe('BT-1');
+    expect(screen.getByText('BT-1')).toBeInTheDocument();
     expect(screen.getByRole('checkbox', { name: 'Enable auto sleep' })).not.toBeChecked();
-  });
-
-  it('saves a new adapter preference and reports the result', async () => {
-    render(SettingsPanel, { props: { onClose: vi.fn() } });
-    await screen.findByRole('dialog', { name: 'Settings' });
-    await fireEvent.click(await screen.findByText('Intel Wireless Bluetooth'));
-    await waitFor(() => expect(backend.SetBluetoothAdapter).toHaveBeenCalledWith('BT-1'));
-    expect(pushToast).toHaveBeenCalledWith('Bluetooth adapter preference saved.', 'success');
-  });
-
-  it('rolls the adapter selection back when saving fails', async () => {
-    backend.GetBluetoothAdapter.mockResolvedValue('BT-1');
-    backend.SetBluetoothAdapter.mockRejectedValue(new Error('config locked'));
-    render(SettingsPanel, { props: { onClose: vi.fn() } });
-    await screen.findByRole('dialog', { name: 'Settings' });
-    await fireEvent.click(await screen.findByText('Default'));
-    await waitFor(() => expect(backend.SetBluetoothAdapter).toHaveBeenCalledWith(''));
-    expect(pushToast).toHaveBeenCalledWith('Bluetooth adapter preference could not be saved: Error: config locked');
-    const selected = screen.getAllByRole('radio').find((radio) => (radio as HTMLInputElement).checked);
-    expect((selected as HTMLInputElement).value).toBe('BT-1');
   });
 
   it('persists auto sleep changes', async () => {

@@ -37,6 +37,10 @@ Modified based on [lhcontrol](https://github.com/FlameInTheDark/lhcontrol). Spec
 * 一键开启或关闭当前应用会话中已经发现的全部基站。
 * 支持为基站设置本地名称，方便区分和管理。
 * 在单次应用运行期间持续保存已经发现的基站，即使后续扫描未再次发现，也不会立即从列表中移除。
+* 支持在设置中查看 Windows 检测到的蓝牙适配器，用于诊断无线电可用性；Windows 系统负责选择实际执行 BLE 扫描和连接的无线电。
+* 支持自动休眠：监控 SteamVR（`vrserver.exe`）或 Steam（`steam.exe`），在对应会话结束并经过 1-120 分钟延迟后，重新扫描并将全部已知基站设为 Sleep。
+* 自动处理外部 HTTP 扫描触发、扫描取消和恢复状态，并在界面中显示 API、配置持久化及设备可见性提示。
+* Windows 单实例运行；再次启动时会尝试将现有窗口带到前台。
 
 ## 技术栈
 
@@ -139,6 +143,22 @@ lhcontrol-amd64-installer.exe
    * 识别实体基站
    * 安全修改光学通道
 6. 使用 **All** 控件可以控制当前应用会话中发现过的全部基站，包括最近一次扫描没有再次发现的历史设备。
+7. 打开右上角的 **Settings**：
+
+   * 查看 Windows 检测到的蓝牙适配器。该列表仅用于诊断，Windows 会自行路由 BLE 扫描与连接。
+   * 启用 **Auto sleep**，选择监控 SteamVR 或 Steam，并设置 1-120 分钟延迟。
+
+自动休眠只会在监控进程至少运行过一次、随后退出并持续超过设定延迟时触发；如果进程在延迟内重新启动，本次计时会取消。触发后应用先扫描基站，再将全部已知基站设为 Sleep。如果此时已有其他蓝牙操作，本轮自动休眠会跳过，不会自动重试。
+
+## 设置与本地数据
+
+基站别名和自动休眠设置会保存到：
+
+```text
+%APPDATA%\lhcontrol\config.json
+```
+
+如果配置文件内容无效，应用会保留带时间戳的 `config.json.invalid-*` 副本并恢复默认配置；界面底部会显示配置只读或保存失败提示。
 
 ## 故障排查
 
@@ -267,6 +287,26 @@ lhcontrol.log.1
 ```text
 http://127.0.0.1:7575
 ```
+
+API 仅监听本机回环地址。JSON 请求体上限为 16 KiB。常见错误会以 `{"error":"..."}` 返回；当已有前台蓝牙操作时通常返回 `409 Conflict`。
+
+## `GET /health`
+
+返回本地 API 和配置持久化状态：
+
+```json
+{
+  "running": true,
+  "address": "127.0.0.1:7575",
+  "error": "",
+  "warnings": [],
+  "configWritable": true
+}
+```
+
+该接口适合启动探测及诊断；`running` 表示 API 监听器当前是否正常运行，`warnings` 会包含配置加载或保存警告。
+
+---
 
 ## `POST /allon`
 
@@ -580,7 +620,8 @@ cancelled
 
 ```json
 {
-  "channel": 5
+  "channel": 5,
+  "allowUnknownConflictRisk": false
 }
 ```
 
@@ -594,9 +635,10 @@ cancelled
 
 1. 检查当前可见基站是否存在目标通道冲突。
 2. 存在明显冲突时拒绝修改。
-3. 向基站写入新的通道。
-4. 重新读取设备通道。
-5. 只有回读值与目标值一致时，才认为修改得到完整确认。
+3. 如果一个或多个当前可见基站的通道未知，默认拒绝修改；只有调用方明确将 `allowUnknownConflictRisk` 设为 `true` 时才继续，并在结果中返回警告。
+4. 向基站写入新的通道。
+5. 重新读取设备通道。
+6. 只有回读值与目标值一致时，才认为修改得到完整确认。
 
 如果写入命令已经成功发送，但无法进行回读验证，会返回：
 
@@ -699,6 +741,10 @@ A simple application to control Valve Lighthouse (SteamVR) base station v2.0 pow
 * Power On or Off all base stations discovered during the current application session.
 * Rename base stations locally for easier identification.
 * Keep a persistent list of discovered stations during a single application session, including stations not rediscovered during the latest scan.
+* List Bluetooth adapters for radio-availability diagnostics. Windows chooses the radio used for BLE discovery and connections.
+* Automatically put stations to sleep after SteamVR (`vrserver.exe`) or Steam (`steam.exe`) exits, with a configurable delay from 1 to 120 minutes.
+* Reconcile scans started through the HTTP API and surface scan recovery, API health, configuration persistence, and device-presence states in the UI.
+* Enforce a single Windows application instance and bring the existing window forward when launched again.
 
 ## Technology Stack
 
@@ -798,6 +844,22 @@ lhcontrol-amd64-installer.exe
    * Sleep
 5. Open **Details** to inspect capabilities and metadata, identify a physical station, or safely change its optical channel.
 6. Use the **All** controls to change all stations discovered during the current application session, including stations missed by the latest scan.
+7. Open **Settings** in the upper-right corner to:
+
+   * Inspect the Bluetooth adapters detected by Windows. The list is diagnostic only; Windows routes BLE discovery and connections.
+   * Enable **Auto sleep**, choose SteamVR or Steam as the watched process, and set a delay from 1 to 120 minutes.
+
+Auto sleep only arms after the watched process has been observed running. If the process remains closed for the configured delay, the application scans and then puts every known station into Sleep. Relaunching the process during the delay cancels that pending action. If another Bluetooth operation is active when the timer fires, that auto-sleep cycle is skipped without an automatic retry.
+
+## Settings and Local Data
+
+Station aliases and auto-sleep settings are stored in:
+
+```text
+%APPDATA%\lhcontrol\config.json
+```
+
+If the configuration is invalid, the application preserves a timestamped `config.json.invalid-*` copy and falls back to defaults. The footer reports read-only configuration or persistence failures.
 
 ## Troubleshooting
 
@@ -924,6 +986,26 @@ For integration with external scripts or applications, `lhcontrol` exposes a sim
 ```text
 http://127.0.0.1:7575
 ```
+
+The API listens only on the local loopback address. JSON request bodies are limited to 16 KiB. Errors use the `{"error":"..."}` shape; requests normally return `409 Conflict` while another foreground Bluetooth operation is active.
+
+## `GET /health`
+
+Returns local API and configuration-persistence health:
+
+```json
+{
+  "running": true,
+  "address": "127.0.0.1:7575",
+  "error": "",
+  "warnings": [],
+  "configWritable": true
+}
+```
+
+Use this endpoint for startup probes and diagnostics. `running` describes the API listener, while `warnings` reports configuration load or save problems.
+
+---
 
 ## `POST /allon`
 
@@ -1243,7 +1325,8 @@ Changes the optical channel of a specific Lighthouse station.
 
 ```json
 {
-  "channel": 5
+  "channel": 5,
+  "allowUnknownConflictRisk": false
 }
 ```
 
@@ -1257,9 +1340,10 @@ The application:
 
 1. Checks visible stations for channel conflicts.
 2. Rejects the operation when a visible conflict exists.
-3. Writes the new channel.
-4. Reads the channel back from the station.
-5. Reports full success only when the readback matches the requested value.
+3. Rejects the operation by default when one or more visible stations have an unknown channel. Set `allowUnknownConflictRisk` to `true` to proceed explicitly; the result will contain a warning.
+4. Writes the new channel.
+5. Reads the channel back from the station.
+6. Reports full success only when the readback matches the requested value.
 
 If the command was sent successfully but readback is unavailable, the API returns:
 

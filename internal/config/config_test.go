@@ -318,85 +318,33 @@ func TestLoadClearsAliasesWhenConfigFileWasRemoved(t *testing.T) {
 	}
 }
 
-func TestBluetoothAdapterPreferencePersistsAcrossReloads(t *testing.T) {
-	configRoot := t.TempDir()
-	t.Setenv("AppData", configRoot)
-
-	cfg := NewConfig()
-	if got := cfg.GetBluetoothAdapter(); got != "" {
-		t.Fatalf("fresh config adapter = %q, want empty default", got)
-	}
-	if err := cfg.SetBluetoothAdapter("Bluetooth#Bluetooth00:11:22:33:44:55"); err != nil {
-		t.Fatalf("SetBluetoothAdapter() error = %v", err)
-	}
-
-	content, err := os.ReadFile(filepath.Join(configRoot, "lhcontrol", "config.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(content), `"bluetoothAdapter": "Bluetooth#Bluetooth00:11:22:33:44:55"`) {
-		t.Fatalf("persisted config missing adapter preference: %s", content)
-	}
-
-	reloaded := NewConfig()
-	if err := reloaded.Load(); err != nil {
-		t.Fatalf("reloaded Load() error = %v", err)
-	}
-	if got := reloaded.GetBluetoothAdapter(); got != "Bluetooth#Bluetooth00:11:22:33:44:55" {
-		t.Fatalf("reloaded adapter = %q, want persisted value", got)
-	}
-
-	// Clearing the preference removes the key entirely (omitempty).
-	if err := reloaded.SetBluetoothAdapter(""); err != nil {
-		t.Fatalf("clearing adapter preference error = %v", err)
-	}
-	content, err = os.ReadFile(filepath.Join(configRoot, "lhcontrol", "config.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(content), "bluetoothAdapter") {
-		t.Fatalf("cleared adapter preference still persisted: %s", content)
-	}
-}
-
-func TestSetBluetoothAdapterRollsBackWhenPersistenceFails(t *testing.T) {
-	t.Setenv("AppData", t.TempDir())
-	originalWriter := configFileWriter
-	configFileWriter = func(string, []byte, os.FileMode) error {
-		return errors.New("disk full")
-	}
-	t.Cleanup(func() { configFileWriter = originalWriter })
-
-	cfg := NewConfig()
-	if err := cfg.SetBluetoothAdapter("Bluetooth#Bluetooth00:11:22:33:44:55"); err == nil {
-		t.Fatal("SetBluetoothAdapter() unexpectedly succeeded")
-	}
-	if got := cfg.GetBluetoothAdapter(); got != "" {
-		t.Fatalf("in-memory adapter = %q, want rollback to empty", got)
-	}
-	if err := cfg.PersistenceError(); err == nil || !strings.Contains(err.Error(), "disk full") {
-		t.Fatalf("PersistenceError() = %v, want write failure", err)
-	}
-}
-
-func TestLoadWithoutBluetoothAdapterKeepsDefault(t *testing.T) {
+func TestLegacyBluetoothAdapterPreferenceIsIgnoredAndDroppedOnSave(t *testing.T) {
 	configRoot := t.TempDir()
 	t.Setenv("AppData", configRoot)
 	configDirectory := filepath.Join(configRoot, "lhcontrol")
 	if err := os.MkdirAll(configDirectory, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(configDirectory, "config.json"),
-		[]byte(`{"renamedStations":{"LHB-OLD":"Legacy"}}`), 0o644); err != nil {
+	configPath := filepath.Join(configDirectory, "config.json")
+	if err := os.WriteFile(configPath, []byte(`{
+  "renamedStations": {"LHB-OLD": "Legacy"},
+  "bluetoothAdapter": "Bluetooth#Bluetooth00:11:22:33:44:55"
+}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-
 	cfg := NewConfig()
 	if err := cfg.Load(); err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	if got := cfg.GetBluetoothAdapter(); got != "" {
-		t.Fatalf("adapter after legacy config load = %q, want empty", got)
+	if err := cfg.Save(); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+	content, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(content), "bluetoothAdapter") {
+		t.Fatalf("legacy adapter preference still persisted: %s", content)
 	}
 }
 

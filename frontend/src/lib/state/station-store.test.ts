@@ -294,7 +294,33 @@ describe('StationStore auto sleep events', () => {
     runtime.handlers.get('auto-sleep')?.({ phase: 'started' });
     expect(pushToast).toHaveBeenCalledWith('Session ended — scanning and putting all stations to sleep.', 'info');
 
-    runtime.handlers.get('auto-sleep')?.({ phase: 'completed', success: 2, failed: 0 });
+    runtime.handlers.get('auto-sleep')?.({
+      phase: 'completed', success: 2, failed: 0,
+      stations: [createStation({ powerState: 0, powerStateName: 'sleep', rawPowerState: 0x00 })]
+    });
     expect(pushToast).toHaveBeenCalledWith('Auto sleep finished: 2 station(s) put to sleep.', 'success');
+    expect(store?.stations[0].powerStateName).toBe('sleep');
+  });
+});
+
+describe('StationStore external station updates', () => {
+  it('applies the newest HTTP snapshot and ignores older event ids', async () => {
+    const { store } = mountStore();
+    await vi.waitFor(() => expect(store.stations).toHaveLength(1));
+    await vi.waitFor(() => expect(runtime.handlers.has('external-stations-updated')).toBe(true));
+
+    runtime.handlers.get('external-stations-updated')?.({
+      id: 2,
+      source: 'http-power',
+      stations: [createStation({ powerState: 1, powerStateName: 'on', rawPowerState: 0x0b })]
+    });
+    expect(store.stations[0].powerStateName).toBe('on');
+
+    runtime.handlers.get('external-stations-updated')?.({
+      id: 1,
+      source: 'http-power',
+      stations: [createStation({ powerState: 0, powerStateName: 'sleep', rawPowerState: 0x00 })]
+    });
+    expect(store.stations[0].powerStateName).toBe('on');
   });
 });

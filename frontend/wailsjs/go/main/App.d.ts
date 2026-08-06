@@ -11,8 +11,6 @@ export function GetAPIStatus():Promise<main.APIStatus>;
 
 export function GetAutoSleepSettings():Promise<autosleep.Settings>;
 
-export function GetBluetoothAdapter():Promise<string>;
-
 export function GetCurrentStationInfo():Promise<Array<station.StationInfo>>;
 
 export function GetScanStatus():Promise<station.ScanStatus>;
@@ -46,8 +44,6 @@ export function SetAllStationsPower(arg1:string):Promise<void>;
 export function SetAllStationsPowerDetailed(arg1:string):Promise<station.BulkPowerResult>;
 
 export function SetAutoSleepSettings(arg1:autosleep.Settings):Promise<void>;
-
-export function SetBluetoothAdapter(arg1:string):Promise<void>;
 
 export function SetStationChannel(arg1:string,arg2:number,arg3:boolean):Promise<station.ChannelChangeResult>;
 

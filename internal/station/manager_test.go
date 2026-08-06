@@ -4074,6 +4074,84 @@ func TestBulkShutdownCancellationReturnsSkippedResults(t *testing.T) {
 	manager.Shutdown()
 }
 
+func TestScanAndFetchStationsContextCancelsAndReleasesScan(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	started := make(chan struct{})
+	var calls atomic.Int32
+	manager.bluetoothOps.scanForDurationContext = func(ctx context.Context, _ time.Duration) ([]internalbluetooth.DiscoveredStation, error) {
+		if calls.Add(1) == 1 {
+			close(started)
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}
+		return []internalbluetooth.DiscoveredStation{}, nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := manager.ScanAndFetchStationsContext(ctx)
+		done <- err
+	}()
+	<-started
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, internalbluetooth.ErrScanCancelled) {
+			t.Fatalf("cancelled scan error = %v, want ErrScanCancelled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cancelled scan did not return promptly")
+	}
+	if manager.IsScanning() {
+		t.Fatal("cancelled scan left the manager scanning")
+	}
+	if _, err := manager.ScanAndFetchStationsContext(context.Background()); err != nil {
+		t.Fatalf("scan lock was not released after cancellation: %v", err)
+	}
+}
+
+func TestBulkPowerContextCancellationPreservesPossiblySentResult(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	address := "11:22:33:44:AA:03"
+	manager.stations[address] = &internalbluetooth.BaseStation{
+		Name: "LHB-CANCELLED-CONFIRMATION", Address: mustAddress(t, address), Present: true,
+		Capabilities: internalbluetooth.Capabilities{PowerWrite: true}, CapabilitiesKnown: true,
+	}
+	started := make(chan struct{})
+	manager.bluetoothOps.setPowerState = func(ctx context.Context, _ *internalbluetooth.BaseStation, target internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
+		close(started)
+		<-ctx.Done()
+		return internalbluetooth.PowerControlResult{State: target}, &internalbluetooth.PowerConfirmationError{
+			Target: target, Actual: internalbluetooth.PowerStateUnknown,
+			Raw: internalbluetooth.RawPowerStateUnknown, Err: ctx.Err(),
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	type outcome struct {
+		result BulkPowerResult
+		err    error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		result, err := manager.SetAllStationsPowerDetailedContext(ctx, "on")
+		done <- outcome{result: result, err: err}
+	}()
+	<-started
+	cancel()
+	result := <-done
+	if !errors.Is(result.err, context.Canceled) {
+		t.Fatalf("bulk cancellation error = %v, want context.Canceled", result.err)
+	}
+	if len(result.result.Results) != 1 || !result.result.Results[0].CommandSent ||
+		!result.result.Results[0].Success || result.result.Results[0].Confirmed {
+		t.Fatalf("possibly-sent cancellation result = %+v", result.result.Results)
+	}
+}
+
 func TestStatusRecoveryProcessesScheduleRequestedDuringActiveRound(t *testing.T) {
 	manager := NewManager(config.NewConfig())
 	defer manager.Shutdown()

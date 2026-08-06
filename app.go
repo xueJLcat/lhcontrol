@@ -108,6 +108,7 @@ type App struct {
 	apiRetryDelay     time.Duration
 	apiGeneration     uint64
 	externalScanID    atomic.Uint64
+	externalUpdateID  atomic.Uint64
 	shuttingDown      atomic.Bool
 	autoSleepMutex    sync.Mutex
 	autoSleepCancel   context.CancelFunc
@@ -135,11 +136,13 @@ type apiStationManager interface {
 }
 
 type scanEventCallbacks struct {
-	nextID    func() uint64
-	started   func(scanEvent)
-	completed func(scanEvent)
-	failed    func(scanEvent)
-	cancelled func(scanEvent)
+	nextID       func() uint64
+	nextUpdateID func() uint64
+	started      func(scanEvent)
+	completed    func(scanEvent)
+	failed       func(scanEvent)
+	cancelled    func(scanEvent)
+	updated      func(stationUpdateEvent)
 }
 
 // scanEvent ties every external lifecycle notification to one scan request so
@@ -148,6 +151,23 @@ type scanEvent struct {
 	ID       uint64                `json:"id"`
 	Stations []station.StationInfo `json:"stations,omitempty"`
 	Error    string                `json:"error,omitempty"`
+}
+
+type stationUpdateEvent struct {
+	ID       uint64                `json:"id"`
+	Source   string                `json:"source"`
+	Stations []station.StationInfo `json:"stations"`
+}
+
+func emitStationUpdate(events scanEventCallbacks, source string, stations []station.StationInfo) {
+	if events.updated == nil {
+		return
+	}
+	id := uint64(0)
+	if events.nextUpdateID != nil {
+		id = events.nextUpdateID()
+	}
+	events.updated(stationUpdateEvent{ID: id, Source: source, Stations: stations})
 }
 
 func registerAPIRoutes(api *fiber.App, manager apiStationManager, events scanEventCallbacks, status func() APIStatus) {
@@ -162,6 +182,7 @@ func registerAPIRoutes(api *fiber.App, manager apiStationManager, events scanEve
 		if err != nil {
 			return sendAPIError(c, err)
 		}
+		emitStationUpdate(events, "http-power", manager.GetStationInfo())
 		return c.JSON(result)
 	})
 	api.Post("/alloff", func(c *fiber.Ctx) error {
@@ -169,6 +190,7 @@ func registerAPIRoutes(api *fiber.App, manager apiStationManager, events scanEve
 		if err != nil {
 			return sendAPIError(c, err)
 		}
+		emitStationUpdate(events, "http-power", manager.GetStationInfo())
 		return c.JSON(result)
 	})
 	api.Get("/status", func(c *fiber.Ctx) error {
@@ -232,6 +254,7 @@ func registerAPIRoutes(api *fiber.App, manager apiStationManager, events scanEve
 		if err != nil {
 			return sendAPIError(c, err)
 		}
+		emitStationUpdate(events, "http-power", manager.GetStationInfo())
 		return c.JSON(result)
 	})
 	api.Post("/stations/:address/power", func(c *fiber.Ctx) error {
@@ -242,6 +265,9 @@ func registerAPIRoutes(api *fiber.App, manager apiStationManager, events scanEve
 			return sendAPIError(c, fmt.Errorf("%w: invalid JSON body", station.ErrInvalidArgument))
 		}
 		result, err := manager.SetStationPower(c.Params("address"), request.State)
+		if err == nil || result.CommandSent {
+			emitStationUpdate(events, "http-power", manager.GetStationInfo())
+		}
 		return sendPowerActionResponse(c, result, err)
 	})
 	api.Post("/stations/:address/identify", func(c *fiber.Ctx) error {
@@ -255,6 +281,7 @@ func registerAPIRoutes(api *fiber.App, manager apiStationManager, events scanEve
 		if err != nil {
 			return sendAPIError(c, err)
 		}
+		emitStationUpdate(events, "http-refresh", manager.GetStationInfo())
 		return c.JSON(result)
 	})
 	api.Put("/stations/:address/channel", func(c *fiber.Ctx) error {
@@ -266,6 +293,9 @@ func registerAPIRoutes(api *fiber.App, manager apiStationManager, events scanEve
 			return sendAPIError(c, fmt.Errorf("%w: invalid JSON body", station.ErrInvalidArgument))
 		}
 		result, err := manager.SetStationChannel(c.Params("address"), request.Channel, request.AllowUnknownConflictRisk)
+		if err == nil || result.CommandSent {
+			emitStationUpdate(events, "http-channel", manager.GetStationInfo())
+		}
 		return sendChannelActionResponse(c, result, request.Channel, err)
 	})
 }
@@ -316,29 +346,14 @@ func (a *App) startup(ctx context.Context) {
 		log.Printf("Error loading config: %v", configLoadErr)
 	}
 
-	if preferredAdapter := a.config.GetBluetoothAdapter(); preferredAdapter != "" {
-		adapters, err := bluetooth.ListAdapters()
-		if err != nil {
-			log.Printf("Could not verify preferred Bluetooth adapter: %v", err)
-		} else {
-			found := false
-			for _, adapter := range adapters {
-				if adapter.DeviceID == preferredAdapter {
-					found = true
-					break
-				}
-			}
-			if !found {
-				log.Printf("Preferred Bluetooth adapter %q is no longer available; falling back to the system default", preferredAdapter)
-			}
-		}
-	}
-
 	a.applyAutoSleep(a.config.GetAutoSleep())
 
 	registerAPIRoutes(a.api, a.stationManager, scanEventCallbacks{
 		nextID: func() uint64 {
 			return a.externalScanID.Add(1)
+		},
+		nextUpdateID: func() uint64 {
+			return a.externalUpdateID.Add(1)
 		},
 		started: func(event scanEvent) {
 			if a.ctx != nil && !a.shuttingDown.Load() {
@@ -359,6 +374,11 @@ func (a *App) startup(ctx context.Context) {
 		cancelled: func(event scanEvent) {
 			if a.ctx != nil && !a.shuttingDown.Load() {
 				runtime.EventsEmit(a.ctx, "external-scan-cancelled", event)
+			}
+		},
+		updated: func(event stationUpdateEvent) {
+			if a.ctx != nil && !a.shuttingDown.Load() {
+				runtime.EventsEmit(a.ctx, "external-stations-updated", event)
 			}
 		},
 	}, a.GetAPIStatus)
@@ -648,45 +668,15 @@ func (a *App) ListBluetoothAdapters() ([]bluetooth.AdapterInfo, error) {
 	return bluetooth.ListAdapters()
 }
 
-// GetBluetoothAdapter returns the persisted preferred Bluetooth adapter
-// device ID. An empty string means "no preference".
-func (a *App) GetBluetoothAdapter() string {
-	return a.config.GetBluetoothAdapter()
-}
-
-// SetBluetoothAdapter persists the preferred Bluetooth adapter device ID.
-// An empty deviceID clears the preference back to the default.
-func (a *App) SetBluetoothAdapter(deviceID string) error {
-	if deviceID != "" {
-		adapters, err := bluetooth.ListAdapters()
-		if err != nil {
-			return err
-		}
-		found := false
-		for _, adapter := range adapters {
-			if adapter.DeviceID == deviceID {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return fmt.Errorf("Bluetooth adapter %q was not found", deviceID)
-		}
-	}
-	log.Printf("Setting preferred Bluetooth adapter to %q", deviceID)
-	err := a.config.SetBluetoothAdapter(deviceID)
-	a.setConfigPersistenceStatus()
-	return err
-}
-
 // autoSleepEvent is the frontend payload for the "auto-sleep" event. Phase is
 // "started", "completed", "skipped" (user was operating Bluetooth) or
 // "failed".
 type autoSleepEvent struct {
-	Phase   string `json:"phase"`
-	Success int    `json:"success"`
-	Failed  int    `json:"failed"`
-	Error   string `json:"error,omitempty"`
+	Phase    string                `json:"phase"`
+	Success  int                   `json:"success"`
+	Failed   int                   `json:"failed"`
+	Error    string                `json:"error,omitempty"`
+	Stations []station.StationInfo `json:"stations,omitempty"`
 }
 
 // GetAutoSleepSettings returns the persisted automatic-sleep settings.
@@ -768,11 +758,22 @@ func (a *App) runAutoSleep(ctx context.Context) {
 	}
 	a.emitAutoSleep(autoSleepEvent{Phase: "started"})
 	log.Println("Auto-sleep: scanning for base stations")
-	_, scanErr := a.stationManager.ScanAndFetchStations()
+	_, scanErr := a.stationManager.ScanAndFetchStationsContext(ctx)
 	switch {
+	case errors.Is(scanErr, context.Canceled), errors.Is(scanErr, bluetooth.ErrScanCancelled):
+		if !a.shuttingDown.Load() {
+			a.emitAutoSleep(autoSleepEvent{
+				Phase: "skipped", Error: "operation cancelled",
+				Stations: a.stationManager.GetStationInfo(),
+			})
+		}
+		return
 	case errors.Is(scanErr, station.ErrOperationInProgress):
 		log.Println("Auto-sleep skipped: another Bluetooth operation is in progress")
-		a.emitAutoSleep(autoSleepEvent{Phase: "skipped", Error: "another Bluetooth operation is in progress"})
+		a.emitAutoSleep(autoSleepEvent{
+			Phase: "skipped", Error: "another Bluetooth operation is in progress",
+			Stations: a.stationManager.GetStationInfo(),
+		})
 		return
 	case errors.Is(scanErr, station.ErrShuttingDown):
 		return
@@ -785,15 +786,29 @@ func (a *App) runAutoSleep(ctx context.Context) {
 		return
 	}
 	log.Println("Auto-sleep: putting all known stations to sleep")
-	result, err := a.stationManager.SetAllStationsPowerDetailed("sleep")
+	result, err := a.stationManager.SetAllStationsPowerDetailedContext(ctx, "sleep")
 	switch {
+	case errors.Is(err, context.Canceled):
+		if !a.shuttingDown.Load() {
+			a.emitAutoSleep(autoSleepEvent{
+				Phase: "skipped", Error: "operation cancelled",
+				Stations: a.stationManager.GetStationInfo(),
+			})
+		}
+		return
 	case errors.Is(err, station.ErrOperationInProgress):
 		log.Println("Auto-sleep skipped: another Bluetooth operation is in progress")
-		a.emitAutoSleep(autoSleepEvent{Phase: "skipped", Error: "another Bluetooth operation is in progress"})
+		a.emitAutoSleep(autoSleepEvent{
+			Phase: "skipped", Error: "another Bluetooth operation is in progress",
+			Stations: a.stationManager.GetStationInfo(),
+		})
 	case errors.Is(err, station.ErrShuttingDown):
 	case err != nil:
 		log.Printf("Auto-sleep failed: %v", err)
-		a.emitAutoSleep(autoSleepEvent{Phase: "failed", Error: err.Error()})
+		a.emitAutoSleep(autoSleepEvent{
+			Phase: "failed", Error: err.Error(),
+			Stations: a.stationManager.GetStationInfo(),
+		})
 	default:
 		success, failed := 0, 0
 		for _, entry := range result.Results {
@@ -804,7 +819,10 @@ func (a *App) runAutoSleep(ctx context.Context) {
 			}
 		}
 		log.Printf("Auto-sleep completed: %d succeeded, %d failed", success, failed)
-		a.emitAutoSleep(autoSleepEvent{Phase: "completed", Success: success, Failed: failed})
+		a.emitAutoSleep(autoSleepEvent{
+			Phase: "completed", Success: success, Failed: failed,
+			Stations: a.stationManager.GetStationInfo(),
+		})
 	}
 }
 
@@ -812,8 +830,8 @@ func (a *App) runAutoSleep(ctx context.Context) {
 func (a *App) shutdown(ctx context.Context) {
 	a.shuttingDown.Store(true)
 	log.Println("App shutdown requested. Cleaning up...")
-	a.stopAutoSleep()
 	a.stationManager.BeginShutdown()
+	a.stopAutoSleep()
 	a.apiLifecycleMutex.Lock()
 	cancelAPI := a.apiCancel
 	a.apiCancel = nil

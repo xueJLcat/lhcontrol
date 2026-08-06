@@ -1,7 +1,7 @@
 <script lang="ts">
   import { cubicOut } from 'svelte/easing';
   import { fly } from 'svelte/transition';
-  import { Bluetooth, CircleAlert, LoaderCircle, MoonStar, RefreshCw, X } from 'lucide-svelte';
+  import { Bluetooth, LoaderCircle, MoonStar, RefreshCw, X } from 'lucide-svelte';
   import { autosleep } from '../../../wailsjs/go/models';
   import type { bluetooth } from '../../../wailsjs/go/models';
   import { focusTrap } from '../actions';
@@ -14,40 +14,27 @@
     adapters,
     loading,
     loadError,
-    selectedDeviceId,
-    busy,
     autoSleep,
     autoSleepError = null,
     autoSleepBusy = false,
     inactive = false,
     onClose,
     onRefresh,
-    onSelect,
     onAutoSleepChange,
     onAutoSleepRetry
   }: {
     adapters: bluetooth.AdapterInfo[];
     loading: boolean;
     loadError: string | null;
-    selectedDeviceId: string;
-    busy: boolean;
     autoSleep: autosleep.Settings | null;
     autoSleepError?: string | null;
     autoSleepBusy?: boolean;
     inactive?: boolean;
     onClose: () => void;
     onRefresh: () => void;
-    onSelect: (deviceId: string) => void;
     onAutoSleepChange: (settings: autosleep.Settings) => void;
     onAutoSleepRetry?: () => void;
   } = $props();
-
-  // A persisted selection may point at a radio that is currently detached
-  // (USB dongle unplugged). Keep it visible so the user can see and replace
-  // it instead of silently snapping back to the default.
-  const selectedMissing = $derived(
-    selectedDeviceId !== '' && !adapters.some((adapter) => adapter.deviceId === selectedDeviceId)
-  );
 
   // The delay input keeps a draft copy so typing never saves; only commit
   // (blur/Enter) pushes a change, matching the rest of the drawer.
@@ -100,67 +87,28 @@
         <button class="btn" onclick={onRefresh}><RefreshCw size={15} /> Retry</button>
       </div>
     {:else}
-      <div class="adapter-list" role="radiogroup" aria-label="Preferred Bluetooth adapter">
-        <label class="adapter-option" class:selected={selectedDeviceId === ''}>
-          <input
-            type="radio"
-            name="bluetooth-adapter"
-            value=""
-            checked={selectedDeviceId === ''}
-            disabled={busy}
-            onchange={() => onSelect('')}
-          />
-          <span class="adapter-text">
-            <span class="adapter-name">Default</span>
-            <span class="adapter-desc">No preference — use the system-wide scan</span>
-          </span>
-        </label>
-        {#if selectedMissing}
-          <label class="adapter-option selected missing">
-            <input
-              type="radio"
-              name="bluetooth-adapter"
-              value={selectedDeviceId}
-              checked
-              disabled={busy}
-            />
-            <span class="adapter-text">
-              <span class="adapter-name"><CircleAlert size={12} /> Not currently detected</span>
-              <span class="adapter-desc">The saved adapter is unavailable right now</span>
-              <span class="adapter-id">{selectedDeviceId}</span>
-            </span>
-          </label>
-        {/if}
+      <div class="adapter-list" aria-label="Detected Bluetooth adapters">
         {#each adapters as adapter (adapter.deviceId)}
-          <label class="adapter-option" class:selected={selectedDeviceId === adapter.deviceId}>
-            <input
-              type="radio"
-              name="bluetooth-adapter"
-              value={adapter.deviceId}
-              checked={selectedDeviceId === adapter.deviceId}
-              disabled={busy}
-              onchange={() => onSelect(adapter.deviceId)}
-            />
+          <div class="adapter-option">
             <span class="adapter-text">
               <span class="adapter-name">{adapter.name}</span>
               <span class="adapter-id">{adapter.deviceId}</span>
             </span>
-          </label>
+          </div>
         {:else}
           <p class="hint">No Bluetooth adapters were detected on this system.</p>
         {/each}
       </div>
       <div class="drawer-actions">
-        <button class="btn" onclick={onRefresh} disabled={busy || loading}>
+        <button class="btn" onclick={onRefresh} disabled={loading}>
           {#if loading}<LoaderCircle class="spin" size={15} />{:else}<RefreshCw size={15} />{/if}
           Refresh adapters
         </button>
       </div>
       <p class="hint">
-        The selection is saved and restored on the next start. Windows performs
-        Bluetooth discovery across all radios at once, so this preference
-        cannot restrict the scan to a single adapter; it is kept for systems
-        and future versions that support radio selection.
+        Windows controls which radio handles BLE discovery and connections.
+        The application cannot route a Lighthouse operation through one
+        specific adapter.
       </p>
     {/if}
   </section>
@@ -301,24 +249,12 @@
     border: 1px solid var(--color-border);
     border-radius: var(--radius-md);
     background: var(--bg-input);
-    cursor: pointer;
+    cursor: default;
     transition:
       border-color var(--dur-1) var(--ease),
       background-color var(--dur-1) var(--ease),
       box-shadow var(--dur-1) var(--ease);
   }
-  .adapter-option:hover { border-color: var(--color-border-strong); }
-  .adapter-option.selected {
-    border-color: color-mix(in srgb, var(--color-primary) 45%, transparent);
-    background: color-mix(in srgb, var(--color-primary) 7%, white);
-    box-shadow: var(--shadow-sm);
-  }
-  .adapter-option.missing {
-    border-color: color-mix(in srgb, var(--color-warning-deep) 55%, transparent);
-    background: color-mix(in srgb, var(--color-warning-deep) 8%, white);
-  }
-  .adapter-option input { margin-top: 0.2rem; accent-color: var(--color-primary); flex-shrink: 0; }
-  .adapter-option:has(input:disabled) { cursor: wait; }
   .adapter-text { display: flex; flex-direction: column; gap: 0.1rem; min-width: 0; }
   .adapter-name {
     display: inline-flex;

@@ -36,6 +36,13 @@ export interface AutoSleepEvent {
   success?: number;
   failed?: number;
   error?: string;
+  stations?: StationInfo[];
+}
+
+export interface ExternalStationUpdateEvent {
+  id: number;
+  source: string;
+  stations: StationInfo[];
 }
 
 // Overlay controls owned by App. The store calls back into them whenever an
@@ -78,6 +85,8 @@ export class StationStore {
   private cancelExternalScanStartedListener: (() => void) | null = null;
   private cancelExternalScanCancelledListener: (() => void) | null = null;
   private cancelAutoSleepListener: (() => void) | null = null;
+  private cancelExternalStationUpdateListener: (() => void) | null = null;
+  private lastExternalUpdateId = 0;
   private stopRequestPending = false;
   private stopRequestGeneration = 0;
   private disposed = false;
@@ -409,6 +418,9 @@ export class StationStore {
     this.cancelAutoSleepListener = EventsOn('auto-sleep', (value: unknown) => {
       this.handleAutoSleepEvent(value as AutoSleepEvent);
     });
+    this.cancelExternalStationUpdateListener = EventsOn('external-stations-updated', (value: unknown) => {
+      this.handleExternalStationUpdate(value as ExternalStationUpdateEvent);
+    });
     this.statusCheckInterval = setInterval(() => {
       void this.periodicStatusCheck();
     }, 15000);
@@ -441,6 +453,7 @@ export class StationStore {
     this.cancelExternalScanStartedListener?.();
     this.cancelExternalScanCancelledListener?.();
     this.cancelAutoSleepListener?.();
+    this.cancelExternalStationUpdateListener?.();
   }
 
   private async periodicStatusCheck() {
@@ -943,6 +956,9 @@ export class StationStore {
 
   private handleAutoSleepEvent(event: AutoSleepEvent) {
     if (this.disposed || !event) return;
+    if (event.phase !== 'started' && event.stations?.length) {
+      this.mergeStationUpdates(event.stations);
+    }
     switch (event.phase) {
       case 'started':
         pushToast('Session ended — scanning and putting all stations to sleep.', 'info');
@@ -964,5 +980,17 @@ export class StationStore {
         pushToast(`Auto sleep failed: ${event.error || 'unknown error'}.`);
         break;
     }
+  }
+
+  private handleExternalStationUpdate(event: ExternalStationUpdateEvent) {
+    if (this.disposed || !event || !Array.isArray(event.stations)) return;
+    if (event.id > 0 && event.id <= this.lastExternalUpdateId) return;
+    if (event.id > 0) this.lastExternalUpdateId = event.id;
+    // A local operation owns its station snapshot until its promise settles.
+    // Skipped updates are recovered by that result or the periodic poll.
+    const safeUpdates = event.stations.filter((station) =>
+      Boolean(station?.address) && !this.stationBusy(station.address)
+    );
+    this.mergeStationUpdates(safeUpdates);
   }
 }
