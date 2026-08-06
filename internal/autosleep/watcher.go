@@ -25,6 +25,9 @@ type Watcher struct {
 	Interval  time.Duration
 	IsRunning IsRunningFunc
 	Trigger   TriggerFunc
+	// Now is injectable for deterministic lifecycle tests. Production uses
+	// time.Now when it is nil.
+	Now func() time.Time
 }
 
 // Run blocks until ctx is cancelled. It is meant to execute in its own
@@ -46,21 +49,57 @@ func (w *Watcher) Run(ctx context.Context) {
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+	var triggerCancel context.CancelFunc
+	var triggerDone <-chan struct{}
+	stopTrigger := func() {
+		if triggerCancel == nil {
+			return
+		}
+		triggerCancel()
+		<-triggerDone
+		triggerCancel = nil
+		triggerDone = nil
+	}
 	for {
 		select {
 		case <-ctx.Done():
+			stopTrigger()
 			return
+		case <-triggerDone:
+			triggerCancel()
+			triggerCancel = nil
+			triggerDone = nil
 		case now := <-ticker.C:
+			if w.Now != nil {
+				now = w.Now()
+			}
 			running, checkErr := w.IsRunning(processName)
 			if checkErr != nil {
 				log.Printf("Auto-sleep process check failed: %v", checkErr)
 				continue
 			}
+			// Keep monitoring while the Bluetooth action runs. A new session
+			// invalidates the old session's pending sleep immediately, including
+			// work that is already scanning or waiting for a GATT slot.
+			if running && triggerCancel != nil {
+				triggerCancel()
+			}
 			if monitor.Poll(running, now) != ActionTrigger {
 				continue
 			}
+			if triggerDone != nil {
+				log.Printf("Auto-sleep trigger ignored because the previous action is still stopping")
+				continue
+			}
 			log.Printf("Auto-sleep: %s stayed closed for %s; triggering", processName, w.Settings.Delay())
-			w.Trigger(ctx)
+			triggerContext, cancelTrigger := context.WithCancel(ctx)
+			done := make(chan struct{})
+			triggerCancel = cancelTrigger
+			triggerDone = done
+			go func() {
+				defer close(done)
+				w.Trigger(triggerContext)
+			}()
 		}
 	}
 }

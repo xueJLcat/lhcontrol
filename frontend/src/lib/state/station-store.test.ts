@@ -293,13 +293,55 @@ describe('StationStore auto sleep events', () => {
 
     runtime.handlers.get('auto-sleep')?.({ phase: 'started' });
     expect(pushToast).toHaveBeenCalledWith('Session ended — scanning and putting all stations to sleep.', 'info');
+    expect(store?.autoSleepRunning).toBe(true);
+    expect(store?.scanLocked).toBe(true);
+    expect(store?.bulkLocked).toBe(true);
+    expect(store?.stationLocked).toBe(true);
 
     runtime.handlers.get('auto-sleep')?.({
       phase: 'completed', success: 2, failed: 0,
+      updateId: 1,
       stations: [createStation({ powerState: 0, powerStateName: 'sleep', rawPowerState: 0x00 })]
     });
     expect(pushToast).toHaveBeenCalledWith('Auto sleep finished: 2 station(s) put to sleep.', 'success');
     expect(store?.stations[0].powerStateName).toBe('sleep');
+    expect(store?.autoSleepRunning).toBe(false);
+
+    runtime.handlers.get('auto-sleep')?.({
+      phase: 'completed', success: 1, failed: 0, skipped: 1, updateId: 2,
+      stations: [createStation({ powerState: 0, powerStateName: 'sleep', rawPowerState: 0x00 })]
+    });
+    expect(pushToast).toHaveBeenCalledWith('Auto sleep finished: 1 succeeded, 1 skipped.', 'warning');
+  });
+
+  it('reports partial results when automatic sleep is cancelled', async () => {
+    const { store } = mountStore();
+    await vi.waitFor(() => expect(runtime.handlers.has('auto-sleep')).toBe(true));
+
+    runtime.handlers.get('auto-sleep')?.({ phase: 'started' });
+    runtime.handlers.get('auto-sleep')?.({
+      phase: 'cancelled', success: 1, failed: 0, skipped: 2, updateId: 1,
+      stations: [createStation({ powerState: 0, powerStateName: 'sleep', rawPowerState: 0x00 })]
+    });
+
+    expect(store.autoSleepRunning).toBe(false);
+    expect(store.statusMessage).toBe('Auto sleep cancelled: 1 succeeded, 0 failed, 2 skipped.');
+    expect(pushToast).toHaveBeenCalledWith(
+      'Auto sleep cancelled: 1 succeeded, 0 failed, 2 skipped.',
+      'warning'
+    );
+    expect(store.stations[0].powerStateName).toBe('sleep');
+  });
+
+  it('does not start periodic status work while automatic sleep is active', async () => {
+    const { store } = mountStore();
+    await vi.waitFor(() => expect(store.stations).toHaveLength(1));
+    backend.CheckAllStationStatuses.mockClear();
+
+    runtime.handlers.get('auto-sleep')?.({ phase: 'started' });
+    await (store as unknown as { periodicStatusCheck(): Promise<void> }).periodicStatusCheck();
+
+    expect(backend.CheckAllStationStatuses).not.toHaveBeenCalled();
   });
 });
 
@@ -321,6 +363,44 @@ describe('StationStore external station updates', () => {
       source: 'http-power',
       stations: [createStation({ powerState: 0, powerStateName: 'sleep', rawPowerState: 0x00 })]
     });
+    expect(store.stations[0].powerStateName).toBe('on');
+  });
+
+  it('invalidates a pending status response when a newer HTTP event arrives', async () => {
+    const { store } = mountStore();
+    await vi.waitFor(() => expect(store.stations).toHaveLength(1));
+
+    let resolveStatus!: (stations: ReturnType<typeof createStation>[]) => void;
+    backend.CheckAllStationStatuses.mockReturnValue(new Promise((resolve) => { resolveStatus = resolve; }));
+    const pendingCheck = (store as unknown as { periodicStatusCheck(): Promise<void> }).periodicStatusCheck();
+    await vi.waitFor(() => expect(backend.CheckAllStationStatuses).toHaveBeenCalledOnce());
+
+    runtime.handlers.get('external-stations-updated')?.({
+      id: 5,
+      source: 'http-power',
+      stations: [createStation({ powerState: 1, powerStateName: 'on', rawPowerState: 0x0b })]
+    });
+    expect(store.stations[0].powerStateName).toBe('on');
+
+    resolveStatus([createStation({ powerState: 0, powerStateName: 'sleep', rawPowerState: 0x00 })]);
+    await pendingCheck;
+    expect(store.stations[0].powerStateName).toBe('on');
+  });
+
+  it('orders automatic-sleep snapshots with HTTP updates using the shared id', async () => {
+    const { store } = mountStore();
+    await vi.waitFor(() => expect(store.stations).toHaveLength(1));
+
+    runtime.handlers.get('external-stations-updated')?.({
+      id: 8,
+      source: 'http-power',
+      stations: [createStation({ powerState: 1, powerStateName: 'on', rawPowerState: 0x0b })]
+    });
+    runtime.handlers.get('auto-sleep')?.({
+      phase: 'completed', success: 1, failed: 0, updateId: 7,
+      stations: [createStation({ powerState: 0, powerStateName: 'sleep', rawPowerState: 0x00 })]
+    });
+
     expect(store.stations[0].powerStateName).toBe('on');
   });
 });

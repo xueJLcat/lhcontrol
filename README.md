@@ -148,7 +148,7 @@ lhcontrol-amd64-installer.exe
    * 查看 Windows 检测到的蓝牙适配器。该列表仅用于诊断，Windows 会自行路由 BLE 扫描与连接。
    * 启用 **Auto sleep**，选择监控 SteamVR 或 Steam，并设置 1-120 分钟延迟。
 
-自动休眠只会在监控进程至少运行过一次、随后退出并持续超过设定延迟时触发；如果进程在延迟内重新启动，本次计时会取消。触发后应用先扫描基站，再将全部已知基站设为 Sleep。如果此时已有其他蓝牙操作，本轮自动休眠会跳过，不会自动重试。
+自动休眠只会在监控进程至少运行过一次、随后退出并持续超过设定延迟时触发；如果进程在延迟期间或自动休眠执行期间重新启动，本轮操作会取消，尚未发送的命令不会继续，界面会报告取消前已经完成、失败及跳过的基站数量。触发后应用先扫描基站，再将全部已知基站设为 Sleep。如果此时已有其他蓝牙操作，本轮自动休眠会跳过，不会自动重试。
 
 ## 设置与本地数据
 
@@ -849,7 +849,7 @@ lhcontrol-amd64-installer.exe
    * Inspect the Bluetooth adapters detected by Windows. The list is diagnostic only; Windows routes BLE discovery and connections.
    * Enable **Auto sleep**, choose SteamVR or Steam as the watched process, and set a delay from 1 to 120 minutes.
 
-Auto sleep only arms after the watched process has been observed running. If the process remains closed for the configured delay, the application scans and then puts every known station into Sleep. Relaunching the process during the delay cancels that pending action. If another Bluetooth operation is active when the timer fires, that auto-sleep cycle is skipped without an automatic retry.
+Auto sleep only arms after the watched process has been observed running. If the process remains closed for the configured delay, the application scans and then puts every known station into Sleep. Relaunching the process during the delay or while automatic sleep is running cancels the action, stops commands not yet sent, and reports how many stations completed, failed, or were skipped before cancellation. If another Bluetooth operation is active when the timer fires, that auto-sleep cycle is skipped without an automatic retry.
 
 ## Settings and Local Data
 

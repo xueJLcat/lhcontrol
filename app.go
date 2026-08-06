@@ -159,13 +159,17 @@ type stationUpdateEvent struct {
 	Stations []station.StationInfo `json:"stations"`
 }
 
-func emitStationUpdate(events scanEventCallbacks, source string, stations []station.StationInfo) {
+func emitStationUpdate(events scanEventCallbacks, source string, snapshot func() []station.StationInfo) {
 	if events.updated == nil {
 		return
 	}
 	id := uint64(0)
 	if events.nextUpdateID != nil {
 		id = events.nextUpdateID()
+	}
+	stations := []station.StationInfo{}
+	if snapshot != nil {
+		stations = snapshot()
 	}
 	events.updated(stationUpdateEvent{ID: id, Source: source, Stations: stations})
 }
@@ -182,7 +186,7 @@ func registerAPIRoutes(api *fiber.App, manager apiStationManager, events scanEve
 		if err != nil {
 			return sendAPIError(c, err)
 		}
-		emitStationUpdate(events, "http-power", manager.GetStationInfo())
+		emitStationUpdate(events, "http-power", manager.GetStationInfo)
 		return c.JSON(result)
 	})
 	api.Post("/alloff", func(c *fiber.Ctx) error {
@@ -190,7 +194,7 @@ func registerAPIRoutes(api *fiber.App, manager apiStationManager, events scanEve
 		if err != nil {
 			return sendAPIError(c, err)
 		}
-		emitStationUpdate(events, "http-power", manager.GetStationInfo())
+		emitStationUpdate(events, "http-power", manager.GetStationInfo)
 		return c.JSON(result)
 	})
 	api.Get("/status", func(c *fiber.Ctx) error {
@@ -254,7 +258,7 @@ func registerAPIRoutes(api *fiber.App, manager apiStationManager, events scanEve
 		if err != nil {
 			return sendAPIError(c, err)
 		}
-		emitStationUpdate(events, "http-power", manager.GetStationInfo())
+		emitStationUpdate(events, "http-power", manager.GetStationInfo)
 		return c.JSON(result)
 	})
 	api.Post("/stations/:address/power", func(c *fiber.Ctx) error {
@@ -266,7 +270,7 @@ func registerAPIRoutes(api *fiber.App, manager apiStationManager, events scanEve
 		}
 		result, err := manager.SetStationPower(c.Params("address"), request.State)
 		if err == nil || result.CommandSent {
-			emitStationUpdate(events, "http-power", manager.GetStationInfo())
+			emitStationUpdate(events, "http-power", manager.GetStationInfo)
 		}
 		return sendPowerActionResponse(c, result, err)
 	})
@@ -281,7 +285,7 @@ func registerAPIRoutes(api *fiber.App, manager apiStationManager, events scanEve
 		if err != nil {
 			return sendAPIError(c, err)
 		}
-		emitStationUpdate(events, "http-refresh", manager.GetStationInfo())
+		emitStationUpdate(events, "http-refresh", manager.GetStationInfo)
 		return c.JSON(result)
 	})
 	api.Put("/stations/:address/channel", func(c *fiber.Ctx) error {
@@ -294,7 +298,7 @@ func registerAPIRoutes(api *fiber.App, manager apiStationManager, events scanEve
 		}
 		result, err := manager.SetStationChannel(c.Params("address"), request.Channel, request.AllowUnknownConflictRisk)
 		if err == nil || result.CommandSent {
-			emitStationUpdate(events, "http-channel", manager.GetStationInfo())
+			emitStationUpdate(events, "http-channel", manager.GetStationInfo)
 		}
 		return sendChannelActionResponse(c, result, request.Channel, err)
 	})
@@ -669,13 +673,15 @@ func (a *App) ListBluetoothAdapters() ([]bluetooth.AdapterInfo, error) {
 }
 
 // autoSleepEvent is the frontend payload for the "auto-sleep" event. Phase is
-// "started", "completed", "skipped" (user was operating Bluetooth) or
-// "failed".
+// "started", "completed", "cancelled" (the watched session restarted),
+// "skipped" (user was operating Bluetooth) or "failed".
 type autoSleepEvent struct {
 	Phase    string                `json:"phase"`
 	Success  int                   `json:"success"`
 	Failed   int                   `json:"failed"`
+	Skipped  int                   `json:"skipped,omitempty"`
 	Error    string                `json:"error,omitempty"`
+	UpdateID uint64                `json:"updateId,omitempty"`
 	Stations []station.StationInfo `json:"stations,omitempty"`
 }
 
@@ -749,6 +755,35 @@ func (a *App) emitAutoSleep(event autoSleepEvent) {
 	runtime.EventsEmit(a.ctx, "auto-sleep", event)
 }
 
+func (a *App) emitTerminalAutoSleep(event autoSleepEvent) {
+	// Allocate the shared update ID before taking the snapshot. Concurrent HTTP
+	// updates with a larger ID are then guaranteed to start their snapshot no
+	// earlier than this one, so an older snapshot can never look newer.
+	event.UpdateID = a.externalUpdateID.Add(1)
+	event.Stations = a.stationManager.GetStationInfo()
+	a.emitAutoSleep(event)
+}
+
+func summarizeAutoSleepResults(results []station.BulkPowerStationResult) (success, failed, skipped int) {
+	for _, entry := range results {
+		if entry.Skipped && !entry.Success {
+			skipped++
+		} else if entry.Success {
+			success++
+		} else {
+			failed++
+		}
+	}
+	return success, failed, skipped
+}
+
+func cancelledAutoSleepEvent(results []station.BulkPowerStationResult, reason string) autoSleepEvent {
+	success, failed, skipped := summarizeAutoSleepResults(results)
+	return autoSleepEvent{
+		Phase: "cancelled", Success: success, Failed: failed, Skipped: skipped, Error: reason,
+	}
+}
+
 // runAutoSleep is the watcher trigger: rescan for base stations, then put
 // every known station to sleep. When the user is running a Bluetooth
 // operation this cycle is skipped without a retry, as configured.
@@ -762,18 +797,12 @@ func (a *App) runAutoSleep(ctx context.Context) {
 	switch {
 	case errors.Is(scanErr, context.Canceled), errors.Is(scanErr, bluetooth.ErrScanCancelled):
 		if !a.shuttingDown.Load() {
-			a.emitAutoSleep(autoSleepEvent{
-				Phase: "skipped", Error: "operation cancelled",
-				Stations: a.stationManager.GetStationInfo(),
-			})
+			a.emitTerminalAutoSleep(cancelledAutoSleepEvent(nil, "cancelled before power commands were sent"))
 		}
 		return
 	case errors.Is(scanErr, station.ErrOperationInProgress):
 		log.Println("Auto-sleep skipped: another Bluetooth operation is in progress")
-		a.emitAutoSleep(autoSleepEvent{
-			Phase: "skipped", Error: "another Bluetooth operation is in progress",
-			Stations: a.stationManager.GetStationInfo(),
-		})
+		a.emitTerminalAutoSleep(autoSleepEvent{Phase: "skipped", Error: "another Bluetooth operation is in progress"})
 		return
 	case errors.Is(scanErr, station.ErrShuttingDown):
 		return
@@ -790,38 +819,24 @@ func (a *App) runAutoSleep(ctx context.Context) {
 	switch {
 	case errors.Is(err, context.Canceled):
 		if !a.shuttingDown.Load() {
-			a.emitAutoSleep(autoSleepEvent{
-				Phase: "skipped", Error: "operation cancelled",
-				Stations: a.stationManager.GetStationInfo(),
-			})
+			// Cancellation can arrive after one or more workers have already sent
+			// their commands. Preserve those outcomes instead of reporting the
+			// entire automatic-sleep action as if nothing happened.
+			a.emitTerminalAutoSleep(cancelledAutoSleepEvent(result.Results, "watched process restarted or automatic sleep was reconfigured"))
 		}
 		return
 	case errors.Is(err, station.ErrOperationInProgress):
 		log.Println("Auto-sleep skipped: another Bluetooth operation is in progress")
-		a.emitAutoSleep(autoSleepEvent{
-			Phase: "skipped", Error: "another Bluetooth operation is in progress",
-			Stations: a.stationManager.GetStationInfo(),
-		})
+		a.emitTerminalAutoSleep(autoSleepEvent{Phase: "skipped", Error: "another Bluetooth operation is in progress"})
 	case errors.Is(err, station.ErrShuttingDown):
 	case err != nil:
 		log.Printf("Auto-sleep failed: %v", err)
-		a.emitAutoSleep(autoSleepEvent{
-			Phase: "failed", Error: err.Error(),
-			Stations: a.stationManager.GetStationInfo(),
-		})
+		a.emitTerminalAutoSleep(autoSleepEvent{Phase: "failed", Error: err.Error()})
 	default:
-		success, failed := 0, 0
-		for _, entry := range result.Results {
-			if entry.Success {
-				success++
-			} else {
-				failed++
-			}
-		}
-		log.Printf("Auto-sleep completed: %d succeeded, %d failed", success, failed)
-		a.emitAutoSleep(autoSleepEvent{
-			Phase: "completed", Success: success, Failed: failed,
-			Stations: a.stationManager.GetStationInfo(),
+		success, failed, skipped := summarizeAutoSleepResults(result.Results)
+		log.Printf("Auto-sleep completed: %d succeeded, %d failed, %d skipped", success, failed, skipped)
+		a.emitTerminalAutoSleep(autoSleepEvent{
+			Phase: "completed", Success: success, Failed: failed, Skipped: skipped,
 		})
 	}
 }

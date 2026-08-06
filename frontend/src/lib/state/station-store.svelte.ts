@@ -32,10 +32,12 @@ import { ApiStatusPoller } from '../api-status-poller';
 import { ChannelMemory } from '../channel-memory';
 
 export interface AutoSleepEvent {
-  phase: 'started' | 'completed' | 'skipped' | 'failed';
+  phase: 'started' | 'completed' | 'cancelled' | 'skipped' | 'failed';
   success?: number;
   failed?: number;
+  skipped?: number;
   error?: string;
+  updateId?: number;
   stations?: StationInfo[];
 }
 
@@ -71,6 +73,7 @@ export class StationStore {
   channelWarning = $state(false);
   scanError = $state<ScanErrorInfo | null>(null);
   externalScanning = $state(false);
+  autoSleepRunning = $state(false);
   stoppingScan = $state(false);
   scanElapsed = $state(0);
   apiRunning = $state(false);
@@ -208,6 +211,7 @@ export class StationStore {
   private operationLocks = $derived(deriveOperationLocks({
     global: this.globalOperation,
     externalScanning: this.externalScanning,
+    autoSleepRunning: this.autoSleepRunning,
     gattAddresses: this.gattOperations,
     configAddresses: this.configOperations
   }));
@@ -457,7 +461,7 @@ export class StationStore {
   }
 
   private async periodicStatusCheck() {
-    if (this.startupPending || this.isStatusChecking || this.isLoading || this.isBulkLoading || this.anyDeviceOperation) return;
+    if (this.startupPending || this.autoSleepRunning || this.isStatusChecking || this.isLoading || this.isBulkLoading || this.anyDeviceOperation) return;
     this.globalOperation = 'status-refresh';
     const statusOperation = this.gates.currentStatusEpoch;
     const revision = this.listRevisions.next();
@@ -956,27 +960,57 @@ export class StationStore {
 
   private handleAutoSleepEvent(event: AutoSleepEvent) {
     if (this.disposed || !event) return;
-    if (event.phase !== 'started' && event.stations?.length) {
-      this.mergeStationUpdates(event.stations);
+    if (event.phase !== 'started' && Array.isArray(event.stations)) {
+      this.applyExternalStationUpdate(event.updateId ?? 0, event.stations);
     }
     switch (event.phase) {
       case 'started':
+        this.autoSleepRunning = true;
+        // This lifecycle now owns the global status line. Invalidate a status
+        // refresh that began before automatic sleep acquired the backend.
+        this.gates.beginStatusOperation();
+        this.statusMessage = 'Auto sleep: scanning and putting all stations to sleep...';
         pushToast('Session ended — scanning and putting all stations to sleep.', 'info');
         break;
       case 'completed': {
+        this.autoSleepRunning = false;
+        this.gates.beginStatusOperation();
         const success = event.success ?? 0;
         const failed = event.failed ?? 0;
+        const skipped = event.skipped ?? 0;
+        this.statusMessage = `Auto sleep finished: ${success} succeeded, ${failed} failed, ${skipped} skipped.`;
         if (failed > 0) {
-          pushToast(`Auto sleep finished: ${success} succeeded, ${failed} failed.`, 'warning');
+          pushToast(`Auto sleep finished: ${success} succeeded, ${failed} failed${skipped ? `, ${skipped} skipped` : ''}.`, 'warning');
+        } else if (skipped > 0) {
+          pushToast(`Auto sleep finished: ${success} succeeded, ${skipped} skipped.`, 'warning');
         } else {
           pushToast(`Auto sleep finished: ${success} station(s) put to sleep.`, 'success');
         }
         break;
       }
+      case 'cancelled': {
+        this.autoSleepRunning = false;
+        this.gates.beginStatusOperation();
+        const success = event.success ?? 0;
+        const failed = event.failed ?? 0;
+        const skipped = event.skipped ?? 0;
+        const details = success || failed || skipped
+          ? `${success} succeeded, ${failed} failed, ${skipped} skipped`
+          : 'no station commands completed';
+        this.statusMessage = `Auto sleep cancelled: ${details}.`;
+        pushToast(`Auto sleep cancelled: ${details}.`, success || failed ? 'warning' : 'info');
+        break;
+      }
       case 'skipped':
-        pushToast(`Auto sleep skipped: ${event.error || 'Bluetooth busy'}.`, 'info');
+        this.autoSleepRunning = false;
+        this.gates.beginStatusOperation();
+        this.statusMessage = `Auto sleep skipped: ${event.error || 'Bluetooth busy'}.`;
+        pushToast(this.statusMessage, 'info');
         break;
       case 'failed':
+        this.autoSleepRunning = false;
+        this.gates.beginStatusOperation();
+        this.statusMessage = `Auto sleep failed: ${event.error || 'unknown error'}.`;
         pushToast(`Auto sleep failed: ${event.error || 'unknown error'}.`);
         break;
     }
@@ -984,11 +1018,19 @@ export class StationStore {
 
   private handleExternalStationUpdate(event: ExternalStationUpdateEvent) {
     if (this.disposed || !event || !Array.isArray(event.stations)) return;
-    if (event.id > 0 && event.id <= this.lastExternalUpdateId) return;
-    if (event.id > 0) this.lastExternalUpdateId = event.id;
+    this.applyExternalStationUpdate(event.id, event.stations);
+  }
+
+  private applyExternalStationUpdate(id: number, stations: StationInfo[]) {
+    if (id > 0 && id <= this.lastExternalUpdateId) return;
+    if (id > 0) this.lastExternalUpdateId = id;
+    // Invalidate any list request that began before this event. Without this,
+    // a delayed periodic status response can reapply the snapshot it captured
+    // before the HTTP or automatic-sleep operation completed.
+    this.listRevisions.next();
     // A local operation owns its station snapshot until its promise settles.
     // Skipped updates are recovered by that result or the periodic poll.
-    const safeUpdates = event.stations.filter((station) =>
+    const safeUpdates = stations.filter((station) =>
       Boolean(station?.address) && !this.stationBusy(station.address)
     );
     this.mergeStationUpdates(safeUpdates);

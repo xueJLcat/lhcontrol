@@ -1,6 +1,9 @@
 package autosleep
 
 import (
+	"context"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -143,5 +146,66 @@ func TestMonitorRejectsNonPositiveDelay(t *testing.T) {
 	// With the default delay in effect an immediate poll must not fire.
 	if got := monitor.Poll(false, base.Add(2*time.Second)); got != ActionNone {
 		t.Fatalf("zero-delay fallback fired early: %v", got)
+	}
+}
+
+func TestWatcherCancelsActiveTriggerWhenProcessRelaunches(t *testing.T) {
+	var running atomic.Bool
+	running.Store(true)
+	base := time.Now()
+	var ticks atomic.Int64
+	observedRunning := make(chan struct{})
+	var observedOnce sync.Once
+	triggerStarted := make(chan struct{})
+	triggerCancelled := make(chan struct{})
+	watcher := &Watcher{
+		Settings: Settings{Enabled: true, Target: string(TargetSteamVR), DelaySeconds: 60},
+		Interval: time.Millisecond,
+		IsRunning: func(string) (bool, error) {
+			value := running.Load()
+			if value {
+				observedOnce.Do(func() { close(observedRunning) })
+			}
+			return value, nil
+		},
+		Now: func() time.Time {
+			return base.Add(time.Duration(ticks.Add(1)) * time.Minute)
+		},
+		Trigger: func(ctx context.Context) {
+			close(triggerStarted)
+			<-ctx.Done()
+			close(triggerCancelled)
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		watcher.Run(ctx)
+	}()
+	defer func() {
+		cancel()
+		<-done
+	}()
+
+	// Let the watcher observe a running session, then its close and delay.
+	select {
+	case <-observedRunning:
+	case <-time.After(time.Second):
+		t.Fatal("watcher did not observe the running session")
+	}
+	running.Store(false)
+	select {
+	case <-triggerStarted:
+	case <-time.After(time.Second):
+		t.Fatal("watcher did not start the automatic-sleep action")
+	}
+
+	running.Store(true)
+	select {
+	case <-triggerCancelled:
+	case <-time.After(time.Second):
+		t.Fatal("relaunch did not cancel the active automatic-sleep action")
 	}
 }

@@ -179,10 +179,11 @@
         </div>
       {/if}
       <p class="hint">
-        The timer starts when the watched process closes and restarts if it is
-        reopened in time. When it fires, a Bluetooth operation from you skips
-        this round instead of retrying. Settings are saved and restored on the
-        next start.
+        The timer starts when the watched process closes. Reopening it cancels
+        pending or in-progress automatic sleep. Commands already completed are
+        kept and reported; commands not yet sent are skipped. When the timer
+        fires, a Bluetooth operation from you skips this round instead of retrying.
+        Settings are saved and restored on the next start.
       </p>
     {:else if autoSleepError}
       <div class="alert danger">{autoSleepError}</div>

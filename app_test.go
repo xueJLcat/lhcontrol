@@ -154,6 +154,54 @@ func TestHTTPMutationsEmitMonotonicStationUpdates(t *testing.T) {
 	}
 }
 
+func TestStationUpdateAllocatesIDBeforeTakingSnapshot(t *testing.T) {
+	order := []string{}
+	emitStationUpdate(scanEventCallbacks{
+		nextUpdateID: func() uint64 {
+			order = append(order, "id")
+			return 7
+		},
+		updated: func(event stationUpdateEvent) {
+			order = append(order, "event")
+			if event.ID != 7 || len(event.Stations) != 1 || event.Stations[0].Address != "AA" {
+				t.Fatalf("event = %+v", event)
+			}
+		},
+	}, "http-power", func() []station.StationInfo {
+		order = append(order, "snapshot")
+		return []station.StationInfo{{Address: "AA"}}
+	})
+	if strings.Join(order, ",") != "id,snapshot,event" {
+		t.Fatalf("update construction order = %v", order)
+	}
+}
+
+func TestAutoSleepSummaryDoesNotCountSkippedStationsAsFailed(t *testing.T) {
+	success, failed, skipped := summarizeAutoSleepResults([]station.BulkPowerStationResult{
+		{Success: true, Confirmed: true},
+		{Skipped: true, Reason: "station is booting"},
+		{Skipped: true, Success: true, Reason: "already at target state"},
+		{Error: "connection failed"},
+	})
+	if success != 2 || failed != 1 || skipped != 1 {
+		t.Fatalf("summary = success %d, failed %d, skipped %d", success, failed, skipped)
+	}
+}
+
+func TestCancelledAutoSleepEventPreservesPartialResults(t *testing.T) {
+	event := cancelledAutoSleepEvent([]station.BulkPowerStationResult{
+		{Success: true, Confirmed: true},
+		{Skipped: true, Reason: "operation cancelled"},
+		{Error: "connection failed"},
+	}, "watched process restarted")
+	if event.Phase != "cancelled" || event.Success != 1 || event.Failed != 1 || event.Skipped != 1 {
+		t.Fatalf("cancelled event = %+v", event)
+	}
+	if event.Error != "watched process restarted" {
+		t.Fatalf("cancelled event error = %q", event.Error)
+	}
+}
+
 func TestScanCancellationAPIIsConflict(t *testing.T) {
 	manager := &fakeAPIStationManager{legacyErr: bluetooth.ErrScanCancelled}
 	response, err := testAPI(manager).Test(httptest.NewRequest(http.MethodPost, "/scan", nil))

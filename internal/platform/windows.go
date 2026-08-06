@@ -16,7 +16,7 @@ import (
 
 var (
 	user32                         = syscall.NewLazyDLL("user32.dll")
-	procFindWindowW                = user32.NewProc("FindWindowW")
+	procFindWindowExW              = user32.NewProc("FindWindowExW")
 	procSetForegroundWindow        = user32.NewProc("SetForegroundWindow")
 	procShowWindow                 = user32.NewProc("ShowWindow")
 	procFlashWindowEx              = user32.NewProc("FlashWindowEx")
@@ -80,14 +80,55 @@ type FLASHWINFO struct {
 	DwTimeout uint32
 }
 
-// findWindow finds a window by title.
+// findWindow finds a window with the requested title that belongs to this
+// executable. FindWindowW returns only one arbitrary title match; iterating
+// with FindWindowExW prevents a same-titled foreign window from hiding the
+// actual existing instance.
 func findWindow(title string) (syscall.Handle, error) {
 	titlePtr, err := syscall.UTF16PtrFromString(title)
 	if err != nil {
 		return 0, err
 	}
-	hwnd, _, _ := procFindWindowW.Call(0, uintptr(unsafe.Pointer(titlePtr)))
-	return foundWindowHandle(hwnd), nil
+	expected, expectedErr := ownProcessImageBaseName()
+	return firstOwnedWindow(
+		expected,
+		func(after syscall.Handle) (syscall.Handle, error) {
+			hwnd, _, _ := procFindWindowExW.Call(
+				0,
+				uintptr(after),
+				0,
+				uintptr(unsafe.Pointer(titlePtr)),
+			)
+			return foundWindowHandle(hwnd), nil
+		},
+		func(hwnd syscall.Handle) (string, error) {
+			if expectedErr != nil {
+				return "", expectedErr
+			}
+			return windowOwnerProcessName(hwnd)
+		},
+	)
+}
+
+func firstOwnedWindow(
+	expected string,
+	next func(after syscall.Handle) (syscall.Handle, error),
+	owner func(syscall.Handle) (string, error),
+) (syscall.Handle, error) {
+	var after syscall.Handle
+	for {
+		hwnd, err := next(after)
+		if err != nil || hwnd == 0 {
+			return hwnd, err
+		}
+		actual, ownerErr := owner(hwnd)
+		if ownerErr != nil || expected == "" || strings.EqualFold(actual, expected) {
+			// Preserve the previous best-effort behavior when owner validation is
+			// unavailable; refusing every window would make the instance unusable.
+			return hwnd, nil
+		}
+		after = hwnd
+	}
 }
 
 // FindWindowW documents "not found" with a zero HWND. Its last-error value is

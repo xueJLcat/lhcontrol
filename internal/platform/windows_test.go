@@ -37,6 +37,36 @@ func TestFoundWindowHandleUsesOnlyReturnedHandle(t *testing.T) {
 	}
 }
 
+func TestFirstOwnedWindowSkipsSameTitledForeignWindow(t *testing.T) {
+	foreign := syscall.Handle(0x1000)
+	owned := syscall.Handle(0x2000)
+	sequence := []syscall.Handle{foreign, owned, 0}
+	index := 0
+	got, err := firstOwnedWindow(
+		"lhcontrol.exe",
+		func(after syscall.Handle) (syscall.Handle, error) {
+			if index == 0 && after != 0 {
+				t.Fatalf("first enumeration started after %v", after)
+			}
+			if index == 1 && after != foreign {
+				t.Fatalf("second enumeration started after %v, want foreign window", after)
+			}
+			value := sequence[index]
+			index++
+			return value, nil
+		},
+		func(hwnd syscall.Handle) (string, error) {
+			if hwnd == foreign {
+				return "notepad.exe", nil
+			}
+			return "LHCONTROL.EXE", nil
+		},
+	)
+	if err != nil || got != owned {
+		t.Fatalf("firstOwnedWindow() = (%v, %v), want (%v, nil)", got, err, owned)
+	}
+}
+
 func TestWaitForWindowRetriesUntilWindowAppears(t *testing.T) {
 	var attempts int
 	var sleeps int
