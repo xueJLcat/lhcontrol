@@ -128,11 +128,6 @@
     grid-template-columns: repeat(16, 1fr);
     gap: 3px;
   }
-  @media (max-width: 780px) {
-    /* On narrow windows sixteen cells get too cramped to hit; wrap to two
-       rows of eight instead. */
-    .channel-map { grid-template-columns: repeat(8, 1fr); }
-  }
   .cm-cell {
     display: flex;
     align-items: center;

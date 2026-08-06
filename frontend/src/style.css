@@ -354,7 +354,7 @@ button:focus-visible, [tabindex]:focus-visible {
 }
 /* Edge pending buttons carry the same corner radius as the thumb so their
    solid background is not clipped square by the rounded container. */
-.power-segment button.pending:first-of-type, .bulk-power button.pending:first-of-type {
+.power-segment button.pending:first-of-type {
   border-top-left-radius: calc(var(--radius-md) - 1px);
   border-bottom-left-radius: calc(var(--radius-md) - 1px);
 }

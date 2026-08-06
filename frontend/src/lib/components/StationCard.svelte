@@ -186,23 +186,19 @@
     {#if station.isPresent && station.presenceUncertain}<span class="muted-badge" title="Its connection could not be fully released before the last scan, so the advertisement may have been missed">presence uncertain</span>{/if}
     {#if station.isPresent && !station.presenceUncertain && !station.seenInLatestScan}<span class="muted-badge" title="Missed by one scan; retained until a second consecutive miss">scan stale</span>{/if}
   </div>
-  <!-- The slot reserves the feedback line's height so cards in the grid row
-       never stretch when feedback appears or disappears. -->
-  <div class="feedback-slot">
-    {#if feedback}
-      <div
-        class="power-feedback {feedback.kind}"
-        title={feedback.text}
-        in:fly={{ y: 4, duration: 160, easing: cubicOut }}
-      >
-        {#if feedback.kind === 'pending'}<LoaderCircle class="spin" size={11} />
-        {:else if feedback.kind === 'success'}<CircleCheck size={11} />
-        {:else if feedback.kind === 'warning'}<TriangleAlert size={11} />
-        {:else}<CircleX size={11} />{/if}
-        {feedback.text}
-      </div>
-    {/if}
-  </div>
+  {#if feedback}
+    <div
+      class="power-feedback {feedback.kind}"
+      title={feedback.text}
+      in:fly={{ y: 4, duration: 160, easing: cubicOut }}
+    >
+      {#if feedback.kind === 'pending'}<LoaderCircle class="spin" size={11} />
+      {:else if feedback.kind === 'success'}<CircleCheck size={11} />
+      {:else if feedback.kind === 'warning'}<TriangleAlert size={11} />
+      {:else}<CircleX size={11} />{/if}
+      {feedback.text}
+    </div>
+  {/if}
   <div class="card-actions">
     <div class="power-segment" role="group" class:pop={popActive} aria-label={`Power control for ${station.name}`}>
       <div
@@ -389,13 +385,6 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-  }
-  .feedback-slot {
-    display: flex;
-    align-items: center;
-    min-width: 0;
-    /* Fixed line height keeps grid rows stable while feedback comes and goes. */
-    min-height: 1.05rem;
   }
   .power-feedback > :global(svg) { flex-shrink: 0; }
   .power-feedback.pending { color: var(--fb-pending); }
