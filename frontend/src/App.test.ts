@@ -731,7 +731,7 @@ describe('App asynchronous operations', () => {
     expect(screen.queryByText(/Unable to stop scan/)).not.toBeInTheDocument();
   });
 
-  it('keeps a local scan stopping until the StopScan promise settles', async () => {
+  it('returns the header to Scan once a stopped local scan ends, even mid-stop', async () => {
     let rejectScan!: (error: Error) => void;
     let resolveStop!: () => void;
     api.ScanAndFetchStations.mockReturnValue(new Promise((_, reject) => { rejectScan = reject; }));
@@ -739,11 +739,11 @@ describe('App asynchronous operations', () => {
     api.GetScanStatus.mockResolvedValue({ state: 'cancelled', found: 0, warnings: [] });
     render(App);
     await fireEvent.click(await screen.findByRole('button', { name: 'Stop' }));
-    rejectScan(new Error('scan cancelled'));
-
     expect(await screen.findByRole('button', { name: 'Stopping...' })).toBeDisabled();
-    resolveStop();
+
+    rejectScan(new Error('scan cancelled'));
     expect(await screen.findByRole('button', { name: 'Scan' })).toBeEnabled();
+    resolveStop();
   });
 
   it('keeps a local scan stopping when StopScan settles before the scan promise', async () => {
@@ -776,10 +776,11 @@ describe('App asynchronous operations', () => {
     rejectFirstScan(new Error('scan cancelled'));
     expect(await screen.findByRole('button', { name: 'Stopping...' })).toBeDisabled();
 
-    // The empty fleet offers Scan Now while the old StopScan promise is still
-    // pending. The pending stop belongs to the superseded scan, so the new
-    // scan must start in its own running state with a working Stop control.
-    await fireEvent.click(await screen.findByRole('button', { name: 'Scan Now' }));
+    // Once the superseded scan ends the header returns to an actionable Scan
+    // even though the old StopScan promise is still settling. The pending stop
+    // belongs to the superseded scan, so the new scan must start in its own
+    // running state with a working Stop control.
+    await fireEvent.click(await screen.findByRole('button', { name: 'Scan' }));
     expect(api.ScanAndFetchStations).toHaveBeenCalledTimes(2);
 
     const stop = await screen.findByRole('button', { name: 'Stop' });
@@ -1710,7 +1711,7 @@ describe('App asynchronous operations', () => {
 
   it('excludes unverified power states from fleet counts', async () => {
     api.ScanAndFetchStations.mockResolvedValue([
-      createStation({ name: 'VERIFIED', address: 'AA', powerState: 1, powerStateName: 'on' }),
+      createStation({ name: 'VERIFIED', address: 'AA', powerState: 1, powerStateName: 'on', rawPowerState: 0x0b }),
       createStation({ name: 'UNVERIFIED', address: 'BB', powerState: 1, powerStateName: 'on', powerStateConfirmed: false })
     ]);
     render(App);
@@ -1719,12 +1720,12 @@ describe('App asynchronous operations', () => {
     expect(screen.queryByText('2 On')).not.toBeInTheDocument();
   });
 
-  it('locks the empty-state scan button while an external scan is running', async () => {
+  it('switches the header to Stop while an external scan runs over an empty fleet', async () => {
     api.ScanAndFetchStations.mockResolvedValue([]);
     api.GetScanStatus.mockResolvedValue({ state: 'completed', found: 0, warnings: [] });
 
     render(App);
-    expect(await screen.findByRole('button', { name: 'Scan Now' })).not.toBeDisabled();
+    expect(await screen.findByRole('button', { name: 'Scan' })).toBeEnabled();
     runtime.handlers.get('external-scan-started')?.(externalScanEvent(1));
 
     const scanningButtons = await screen.findAllByRole('button', { name: 'Stop' });
@@ -1829,7 +1830,7 @@ describe('App asynchronous operations', () => {
     expect(screen.queryByText('No base stations found.')).not.toBeInTheDocument();
   });
 
-  it('offers retry from the recovery card and clears it once the next scan runs', async () => {
+  it('keeps the recovery card until the next scan clears it', async () => {
     api.ScanAndFetchStations
       .mockRejectedValueOnce(new Error('operation timed out'))
       .mockResolvedValue([createStation()]);
@@ -1839,7 +1840,7 @@ describe('App asynchronous operations', () => {
     expect(await screen.findByRole('heading', { name: 'The scan timed out' })).toBeInTheDocument();
     expect(screen.queryByText('No base stations found.')).not.toBeInTheDocument();
 
-    await fireEvent.click(screen.getByRole('button', { name: 'Retry scan' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Scan' }));
     expect(await screen.findByText('LHB-TEST')).toBeInTheDocument();
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
     expect(api.ScanAndFetchStations).toHaveBeenCalledTimes(2);
@@ -1853,7 +1854,7 @@ describe('App asynchronous operations', () => {
 
     expect(await screen.findByText('Scan stopped.')).toBeInTheDocument();
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Scan Now' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Scan' })).toBeEnabled();
   });
 
   it('demands confirmation before a bulk command that includes unverified stations', async () => {

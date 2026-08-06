@@ -15,9 +15,9 @@ import {
   StopScan
 } from '../backend';
 import type { PowerFeedback, PowerTarget, StationInfo } from '../types';
-import { classifyScanError, type ScanErrorInfo } from '../scan-error';
+import { scanErrorCopy, classifyScanError, type ScanErrorInfo } from '../scan-error';
 import {
-  canSetPower, channelChangeBlockedReason, hasCurrentChannel, hasVerifiedPowerState, isCurrentPowerState,
+  canSetPower, channelChangeBlockedReason, hasCurrentChannel, hasStableConfirmedPowerState,
   powerTargetLabel, sameStationInfo, stateLabel
 } from '../station';
 import { formatBulkResult, formatTerminalScanResult, summarizeBulkResult } from '../result-format';
@@ -177,9 +177,9 @@ export class StationStore {
       .join(' · ');
   })());
 
-  fleetOn = $derived(this.stations.filter((station) => hasVerifiedPowerState(station, 'on')).length);
-  fleetStandby = $derived(this.stations.filter((station) => hasVerifiedPowerState(station, 'standby')).length);
-  fleetSleep = $derived(this.stations.filter((station) => hasVerifiedPowerState(station, 'sleep')).length);
+  fleetOn = $derived(this.stations.filter((station) => hasStableConfirmedPowerState(station, 'on')).length);
+  fleetStandby = $derived(this.stations.filter((station) => hasStableConfirmedPowerState(station, 'standby')).length);
+  fleetSleep = $derived(this.stations.filter((station) => hasStableConfirmedPowerState(station, 'sleep')).length);
   // Stations that exist but have no verified state (stale, unconfirmed or
   // booting) still count, so the summary never goes quiet while cards exist.
   fleetUnverified = $derived(Math.max(0, this.stations.length - this.fleetOn - this.fleetStandby - this.fleetSleep));
@@ -189,10 +189,12 @@ export class StationStore {
 
   // Derived instead of a template function call: call expressions hide
   // their reactive inputs from invalidation, and the header's "all at
-  // state" flags must follow the station list.
-  allOn = $derived(this.stations.length > 0 && this.stations.every((item) => isCurrentPowerState(item, 'on')));
-  allStandby = $derived(this.stations.length > 0 && this.stations.every((item) => isCurrentPowerState(item, 'standby')));
-  allSleep = $derived(this.stations.length > 0 && this.stations.every((item) => isCurrentPowerState(item, 'sleep')));
+  // state" flags must follow the station list. The stable-raw check keeps
+  // the bulk thumb dark while stations are still booting after a bulk
+  // power-on, instead of trusting the backend's heuristic boot fallback.
+  allOn = $derived(this.stations.length > 0 && this.stations.every((item) => hasStableConfirmedPowerState(item, 'on')));
+  allStandby = $derived(this.stations.length > 0 && this.stations.every((item) => hasStableConfirmedPowerState(item, 'standby')));
+  allSleep = $derived(this.stations.length > 0 && this.stations.every((item) => hasStableConfirmedPowerState(item, 'sleep')));
 
   private operationLocks = $derived(deriveOperationLocks({
     global: this.globalOperation,
@@ -204,6 +206,10 @@ export class StationStore {
   isBulkLoading = $derived(this.globalOperation === 'bulk-power');
   isStatusChecking = $derived(this.globalOperation === 'status-refresh');
   scanningActive = $derived(this.isLoading || this.externalScanning || this.stoppingScan);
+  // A scan is genuinely in flight. Unlike scanningActive this ignores a stop
+  // request that is still settling after its scan already ended, so the header
+  // returns to an actionable Scan instead of staying stuck on "Stopping...".
+  scanRunning = $derived(this.isLoading || this.externalScanning);
   private anyDeviceOperation = $derived(this.operationLocks.anyDeviceOperation);
   scanLocked = $derived(this.operationLocks.scanLocked);
   bulkLocked = $derived(this.operationLocks.bulkLocked);
@@ -485,7 +491,10 @@ export class StationStore {
       console.error('Periodic status check failed:', error);
       const fallback = await GetCurrentStationInfo().catch(() => this.stations);
       if (!this.applyStationList(fallback, revision, capturedStationRevisions)) return;
-      if (this.gates.canCommitStatus(statusOperation)) this.statusMessage = `Status refresh incomplete: ${error}`;
+      // While the scan recovery card is up the Bluetooth outage is already
+      // explained; repeating this failure in the status line every poll
+      // cycle only re-surfaces the same error.
+      if (this.gates.canCommitStatus(statusOperation) && !this.scanError) this.statusMessage = `Status refresh incomplete: ${error}`;
     } finally {
       if (!this.disposed && this.globalOperation === 'status-refresh') this.globalOperation = 'idle';
     }
@@ -531,11 +540,14 @@ export class StationStore {
         this.statusMessage = 'Scan stopped.';
         this.scanError = null;
       } else {
-        this.statusMessage = `Scan failed: ${error}`;
-        pushToast(`Scan failed: ${error}`);
-        // The footer/toast are transient; the main area keeps a persistent,
-        // actionable recovery card until the next scan attempt.
-        this.scanError = classifyScanError(error);
+        // The persistent recovery card carries the heading, guidance and raw
+        // detail; a toast plus a verbatim status line were two extra copies
+        // of the same failure. The status line keeps only a short summary.
+        const classified = classifyScanError(error);
+        this.scanError = classified;
+        this.statusMessage = classified.kind === 'unknown'
+          ? 'Scan failed.'
+          : `Scan failed: ${scanErrorCopy(classified).heading}`;
       }
     } finally {
       if (!this.disposed && this.globalOperation === 'scanning') this.globalOperation = 'idle';

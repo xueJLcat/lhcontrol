@@ -32,7 +32,6 @@ function defaultProps(overrides: Record<string, unknown> = {}) {
     scanError: null,
     isLoading: false,
     externalScanning: false,
-    scanLocked: false,
     scanElapsed: 0,
     editingAddress: null,
     feedbackByAddress: {},
@@ -41,7 +40,6 @@ function defaultProps(overrides: Record<string, unknown> = {}) {
     configBusyAddresses: new Set<string>(),
     gattLockedByAddress: new Map<string, boolean>(),
     stationLocked: false,
-    onScan: vi.fn(),
     onSelect: vi.fn(),
     onPower: vi.fn(),
     onOpenDetails: vi.fn(),
@@ -75,19 +73,10 @@ describe('FleetView', () => {
     expect(props.onOpenDetails).toHaveBeenCalledWith(expect.objectContaining({ address: '11:22:33:44:55:66' }));
   });
 
-  it('shows the idle empty state and retries through the callback', async () => {
-    const props = defaultProps({ stations: [] });
-    render(FleetView, { props });
+  it('shows the idle empty state without its own scan entry point', () => {
+    render(FleetView, { props: defaultProps({ stations: [] }) });
     expect(screen.getByText('No base stations found.')).toBeInTheDocument();
-    const scanNow = screen.getByRole('button', { name: 'Scan Now' });
-    expect(scanNow).toBeEnabled();
-    await fireEvent.click(scanNow);
-    expect(props.onScan).toHaveBeenCalledOnce();
-  });
-
-  it('locks the idle scan button while scans are unavailable', () => {
-    render(FleetView, { props: defaultProps({ stations: [], scanLocked: true }) });
-    expect(screen.getByRole('button', { name: 'Scan Now' })).toBeDisabled();
+    expect(screen.queryByRole('button', { name: 'Scan Now' })).not.toBeInTheDocument();
   });
 
   it('shows the local scanning placeholder with elapsed time', () => {
@@ -102,16 +91,16 @@ describe('FleetView', () => {
     expect(screen.getByText('Discovering nearby stations...')).toBeInTheDocument();
   });
 
-  it('keeps the recovery card instead of the idle empty state after a failed scan', async () => {
-    const props = defaultProps({
-      stations: [],
-      scanError: { kind: 'timeout', detail: 'operation timed out' }
+  it('keeps the recovery card instead of the idle empty state after a failed scan', () => {
+    render(FleetView, {
+      props: defaultProps({
+        stations: [],
+        scanError: { kind: 'timeout', detail: 'operation timed out' }
+      })
     });
-    render(FleetView, { props });
     expect(screen.getByRole('heading', { name: 'The scan timed out' })).toBeInTheDocument();
     expect(screen.queryByText('No base stations found.')).not.toBeInTheDocument();
-    await fireEvent.click(screen.getByRole('button', { name: 'Retry scan' }));
-    expect(props.onScan).toHaveBeenCalledOnce();
+    expect(screen.queryByRole('button', { name: 'Retry scan' })).not.toBeInTheDocument();
   });
 
   it('surfaces channel conflicts in a banner', () => {

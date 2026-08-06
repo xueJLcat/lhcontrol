@@ -20,6 +20,21 @@ export function hasVerifiedPowerState(station: StationInfo, state: PowerTarget):
   return station.powerFresh && station.powerStateConfirmed && station.powerState === powerStateValue(state);
 }
 
+// Stable raw values per protocol: sleep 0x00, standby 0x02, on 0x09/0x0B.
+const STABLE_POWER_RAW: Record<PowerTarget, readonly number[]> = {
+  on: [0x09, 0x0b],
+  standby: [0x02],
+  sleep: [0x00]
+};
+
+// Stricter fleet-level confirmation. The backend's boot fallback also marks a
+// decoded On backed by booting raw values (0x01/0x08) as confirmed, which
+// would light the bulk bar's On thumb while stations are still spinning up;
+// aggregate indicators therefore require the genuinely stable readback.
+export function hasStableConfirmedPowerState(station: StationInfo, state: PowerTarget): boolean {
+  return hasVerifiedPowerState(station, state) && STABLE_POWER_RAW[state].includes(station.rawPowerState);
+}
+
 export function isFreshBooting(station: StationInfo): boolean {
   return station.powerFresh && station.powerState === 3;
 }

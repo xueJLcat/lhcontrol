@@ -150,4 +150,22 @@ describe('DetailsDrawer actions', () => {
     expect(hiddenDrawer).toHaveAttribute('aria-hidden', 'true');
     expect(hiddenDrawer).not.toHaveAttribute('aria-modal');
   });
+
+  it('renders the raw power readback as two-digit hex and a dash when unknown', async () => {
+    const view = render(DetailsDrawer, {
+      props: {
+        station: station(), busy: false, locked: false, inactive: false,
+        onClose: vi.fn(), onRefresh: vi.fn(), onIdentify: vi.fn(), onOpenChannelEditor: vi.fn()
+      }
+    });
+    expect(screen.getByText(/raw 0x0B/)).toBeInTheDocument();
+
+    const unknown = station();
+    unknown.rawPowerState = -1;
+    await view.rerender({
+      station: unknown, busy: false, locked: false, inactive: false,
+      onClose: vi.fn(), onRefresh: vi.fn(), onIdentify: vi.fn(), onOpenChannelEditor: vi.fn()
+    });
+    expect(screen.getByText(/raw —/)).toBeInTheDocument();
+  });
 });

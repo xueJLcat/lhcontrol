@@ -307,6 +307,10 @@ button:focus-visible, [tabindex]:focus-visible {
   background: linear-gradient(160deg, color-mix(in srgb, var(--color-sleep) 22%, white), color-mix(in srgb, var(--color-sleep) 10%, white));
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-sleep) 45%, transparent);
 }
+/* Header bulk segments sit after the "All" label instead of hugging the
+   container edge, so their thumb stays a plain rectangle with right-angle
+   corners; only card segments round against the outer silhouette. */
+.bulk-seg .seg-thumb { border-radius: 0; }
 .power-segment.pop button.active, .bulk-seg.pop button.active {
   animation: seg-pop 0.6s var(--ease);
 }
@@ -369,12 +373,13 @@ button:focus-visible, [tabindex]:focus-visible {
   animation: pulse 1.1s ease-in-out infinite;
 }
 /* Edge pending buttons carry the same corner radius as the thumb so their
-   solid background is not clipped square by the rounded container. */
+   solid background is not clipped square by the rounded container. Card
+   segments only: header bulk segments stay right-angle like their thumb. */
 .power-segment button.pending:first-of-type {
   border-top-left-radius: calc(var(--radius-md) - 1px);
   border-bottom-left-radius: calc(var(--radius-md) - 1px);
 }
-.power-segment button.pending:last-of-type, .bulk-power button.pending:last-of-type {
+.power-segment button.pending:last-of-type {
   border-top-right-radius: calc(var(--radius-md) - 1px);
   border-bottom-right-radius: calc(var(--radius-md) - 1px);
 }

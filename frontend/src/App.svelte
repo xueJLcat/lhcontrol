@@ -136,7 +136,7 @@
 
 <div class="app-container" inert={selectedStation !== null || settingsOpen}>
   <AppHeader
-    scanning={store.scanningActive}
+    scanning={store.scanRunning}
     isBulkLoading={store.isBulkLoading}
     scanLocked={store.scanLocked}
     bulkLocked={store.bulkLocked}
@@ -169,7 +169,6 @@
       scanError={store.scanError}
       isLoading={store.isLoading}
       externalScanning={store.externalScanning}
-      scanLocked={store.scanLocked}
       scanElapsed={store.scanElapsed}
       editingAddress={store.editingAddress}
       feedbackByAddress={store.powerFeedbackMap}
@@ -178,7 +177,6 @@
       configBusyAddresses={store.configOperations}
       gattLockedByAddress={store.gattLockedByAddress}
       stationLocked={store.stationLocked}
-      onScan={() => void store.startScan()}
       onSelect={openDetails}
       onPower={(station, state) => void store.setPower(station, state)}
       onOpenDetails={(station) => openDetails(station.address)}

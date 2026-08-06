@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { sameStationInfo, stateClass } from './station';
+import { hasStableConfirmedPowerState, sameStationInfo, stateClass } from './station';
 import type { StationInfo } from './types';
 import { createOnStation } from '../test/fixtures';
 
@@ -73,5 +73,30 @@ describe('sameStationInfo', () => {
     expect(sameStationInfo(base, station({
       metadata: { ...base.metadata, firmwareRevision: '1.2.3' }
     }))).toBe(false);
+  });
+});
+
+describe('hasStableConfirmedPowerState', () => {
+  it('accepts a confirmed on backed by a stable raw readback', () => {
+    expect(hasStableConfirmedPowerState(station({ rawPowerState: 0x09 }), 'on')).toBe(true);
+    expect(hasStableConfirmedPowerState(station({ rawPowerState: 0x0b }), 'on')).toBe(true);
+  });
+
+  it('rejects the boot fallback: decoded on with booting raw values', () => {
+    expect(hasStableConfirmedPowerState(station({ rawPowerState: 0x01 }), 'on')).toBe(false);
+    expect(hasStableConfirmedPowerState(station({ rawPowerState: 0x08 }), 'on')).toBe(false);
+  });
+
+  it('rejects unconfirmed or stale stations', () => {
+    expect(hasStableConfirmedPowerState(station({ powerStateConfirmed: false }), 'on')).toBe(false);
+    expect(hasStableConfirmedPowerState(station({ powerFresh: false }), 'on')).toBe(false);
+    expect(hasStableConfirmedPowerState(station({ powerState: 0 }), 'on')).toBe(false);
+  });
+
+  it('keeps the exact-raw semantics for standby and sleep', () => {
+    expect(hasStableConfirmedPowerState(station({ powerState: 2, powerStateName: 'standby', rawPowerState: 0x02 }), 'standby')).toBe(true);
+    expect(hasStableConfirmedPowerState(station({ powerState: 2, powerStateName: 'standby', rawPowerState: 0x01 }), 'standby')).toBe(false);
+    expect(hasStableConfirmedPowerState(station({ powerState: 0, powerStateName: 'sleep', rawPowerState: 0x00 }), 'sleep')).toBe(true);
+    expect(hasStableConfirmedPowerState(station({ powerState: 0, powerStateName: 'sleep', rawPowerState: 0x08 }), 'sleep')).toBe(false);
   });
 });

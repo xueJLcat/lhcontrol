@@ -1,18 +1,18 @@
 <script lang="ts">
-  import { RefreshCw, CircleAlert } from 'lucide-svelte';
+  import { CircleAlert } from 'lucide-svelte';
   import type { ScanErrorKind } from '../scan-error';
   import { scanErrorCopy } from '../scan-error';
 
-  let { kind, detail, retryDisabled = false, onRetry }: {
+  let { kind, detail }: {
     kind: ScanErrorKind;
     detail: string;
-    retryDisabled?: boolean;
-    onRetry: () => void;
   } = $props();
 
   const copy = $derived(scanErrorCopy({ kind, detail }));
 </script>
 
+<!-- Guidance only: the header keeps the single scan entry point, so a
+     second retry button here would just duplicate it. -->
 <div class="recovery" role="alert">
   <span class="recovery-icon"><CircleAlert size={26} /></span>
   <div class="recovery-body">
@@ -25,9 +25,6 @@
     </ol>
     {#if detail}<p class="recovery-detail mono">{detail}</p>{/if}
   </div>
-  <button class="btn primary" onclick={onRetry} disabled={retryDisabled}>
-    <RefreshCw size={15} /> Retry scan
-  </button>
 </div>
 
 <style>
@@ -80,10 +77,5 @@
     color: var(--text-muted);
     font-size: var(--fs-xs);
     overflow-wrap: anywhere;
-  }
-  .recovery .btn { flex-shrink: 0; align-self: center; }
-  @media (max-width: 520px) {
-    .recovery { flex-wrap: wrap; }
-    .recovery .btn { align-self: stretch; justify-content: center; }
   }
 </style>

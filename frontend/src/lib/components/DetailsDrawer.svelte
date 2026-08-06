@@ -57,6 +57,10 @@
     ? 'loaded and fresh'
     : hasCachedMetadata ? 'cached, stale' : 'unavailable');
   const channelBlockedReason = $derived(channelChangeBlockedReason(station));
+  // Rendered like the backend diagnostics (0x09); -1 means no readback yet.
+  const rawPowerLabel = $derived(station.rawPowerState < 0
+    ? '—'
+    : `0x${station.rawPowerState.toString(16).toUpperCase().padStart(2, '0')}`);
 </script>
 
 <div
@@ -90,7 +94,7 @@
   <section>
     <h4>Status</h4>
     <dl class="def-list">
-      <dt>Power</dt><dd><span class="state-text state-text-{stateClass(station)}">{stateLabel(station)}</span> · {station.powerFresh ? station.powerStateConfirmed ? 'confirmed' : 'unverified' : 'last known, stale'} (raw {station.rawPowerState})</dd>
+      <dt>Power</dt><dd><span class="state-text state-text-{stateClass(station)}">{stateLabel(station)}</span> · {station.powerFresh ? station.powerStateConfirmed ? 'confirmed' : 'unverified' : 'last known, stale'} (raw {rawPowerLabel})</dd>
       <dt>Channel</dt><dd class="mono">{station.channel || 'Unable to verify'}</dd>
       <dt>Connection</dt><dd>{station.connectionState}</dd>
       <dt>Last seen</dt><dd title={station.lastSeenAt || undefined}>{relativeTime(station.lastSeenAt, now) || '—'}</dd>

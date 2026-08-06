@@ -110,7 +110,7 @@
   </div>
   <div class="row-actions">
     <button class="btn primary scan-btn" onclick={scanning ? onStop : onScan} disabled={scanning ? stopping : scanLocked}>
-      {#if stopping}<LoaderCircle class="spin" size={15} /> Stopping...
+      {#if scanning && stopping}<LoaderCircle class="spin" size={15} /> Stopping...
       {:else if scanning}<Square size={15} /> Stop
       {:else}<RefreshCw size={15} /> Scan{/if}
     </button>

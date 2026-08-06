@@ -18,7 +18,6 @@
     scanError,
     isLoading,
     externalScanning,
-    scanLocked,
     scanElapsed,
     editingAddress,
     feedbackByAddress,
@@ -27,7 +26,6 @@
     configBusyAddresses,
     gattLockedByAddress,
     stationLocked,
-    onScan,
     onSelect,
     onPower,
     onOpenDetails,
@@ -42,7 +40,6 @@
     scanError: ScanErrorInfo | null;
     isLoading: boolean;
     externalScanning: boolean;
-    scanLocked: boolean;
     scanElapsed: number;
     editingAddress: string | null;
     feedbackByAddress: Record<string, PowerFeedback | undefined>;
@@ -51,7 +48,6 @@
     configBusyAddresses: Set<string>;
     gattLockedByAddress: Map<string, boolean>;
     stationLocked: boolean;
-    onScan: () => void;
     onSelect: (address: string) => void;
     onPower: (station: StationInfo, state: PowerTarget) => void;
     onOpenDetails: (station: StationInfo) => void;
@@ -68,8 +64,6 @@
   <ScanRecovery
     kind={scanError.kind}
     detail={scanError.detail}
-    retryDisabled={scanLocked}
-    onRetry={onScan}
   />
 {/if}
 {#if stations.length}
@@ -110,9 +104,6 @@
   <div class="empty">
     <div class="empty-icon"><Activity size={40} /></div>
     <p>No base stations found.</p>
-    <button class="btn primary" disabled={scanLocked} onclick={onScan}>
-      Scan Now
-    </button>
   </div>
 {/if}
 

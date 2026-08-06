@@ -1,30 +1,26 @@
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { cleanup, render, screen } from '@testing-library/svelte';
+import { afterEach, describe, expect, it } from 'vitest';
 import ScanRecovery from './ScanRecovery.svelte';
 
 afterEach(cleanup);
 
 function renderRecovery(overrides: Record<string, unknown> = {}) {
-  const onRetry = vi.fn();
   render(ScanRecovery, {
     props: {
       kind: 'bluetooth-off',
       detail: 'Bluetooth is unavailable; turn on Bluetooth and retry',
-      onRetry,
       ...overrides
     }
   });
-  return onRetry;
 }
 
 describe('ScanRecovery', () => {
-  it('announces the failure and offers a retry action', async () => {
-    const onRetry = renderRecovery();
+  it('announces the failure with targeted guidance', () => {
+    renderRecovery();
     expect(screen.getByRole('alert')).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Bluetooth is unavailable' })).toBeInTheDocument();
-    await fireEvent.click(screen.getByRole('button', { name: 'Retry scan' }));
-    expect(onRetry).toHaveBeenCalledOnce();
+    expect(screen.getAllByRole('listitem').length).toBeGreaterThan(0);
   });
 
   it('keeps the raw backend error visible for diagnostics', () => {
@@ -32,9 +28,9 @@ describe('ScanRecovery', () => {
     expect(screen.getByText('Bluetooth is unavailable; turn on Bluetooth and retry')).toBeInTheDocument();
   });
 
-  it('disables retry while another scan is locked', () => {
-    renderRecovery({ retryDisabled: true });
-    expect(screen.getByRole('button', { name: 'Retry scan' })).toBeDisabled();
+  it('offers no scan entry point of its own; the header owns scanning', () => {
+    renderRecovery();
+    expect(screen.queryByRole('button')).not.toBeInTheDocument();
   });
 
   it('renders targeted copy for every error kind', () => {
@@ -42,7 +38,6 @@ describe('ScanRecovery', () => {
       cleanup();
       renderRecovery({ kind });
       expect(screen.getByRole('alert')).toBeInTheDocument();
-      expect(screen.getByRole('button', { name: 'Retry scan' })).toBeEnabled();
     }
   });
 });

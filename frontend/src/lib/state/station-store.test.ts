@@ -90,14 +90,25 @@ describe('StationStore startup', () => {
     expect(backend.ScanAndFetchStations).not.toHaveBeenCalled();
   });
 
-  it('classifies a failed scan into a recovery error and toasts it', async () => {
+  it('classifies a failed scan into a recovery error without a duplicate toast', async () => {
     backend.ScanAndFetchStations.mockRejectedValue(new Error('Bluetooth is unavailable; turn on Bluetooth and retry'));
     backend.GetCurrentStationInfo.mockResolvedValue([]);
     const { store } = mountStore();
     await vi.waitFor(() => expect(store.scanError).not.toBeNull());
     expect(store.scanError?.kind).toBe('bluetooth-off');
-    expect(store.statusMessage).toContain('Scan failed:');
-    expect(pushToast).toHaveBeenCalledWith(expect.stringContaining('Scan failed:'));
+    // The persistent recovery card carries the detail; the status line keeps
+    // a short summary and no toast duplicates the failure.
+    expect(store.statusMessage).toBe('Scan failed: Bluetooth is unavailable');
+    expect(pushToast).not.toHaveBeenCalledWith(expect.stringContaining('Scan failed'));
+  });
+
+  it('keeps a short status line for unknown scan failures', async () => {
+    backend.ScanAndFetchStations.mockRejectedValue(new Error('mystery backend failure'));
+    backend.GetCurrentStationInfo.mockResolvedValue([]);
+    const { store } = mountStore();
+    await vi.waitFor(() => expect(store.scanError?.kind).toBe('unknown'));
+    expect(store.statusMessage).toBe('Scan failed.');
+    expect(store.scanError?.detail).toBe('mystery backend failure');
   });
 });
 
@@ -185,6 +196,34 @@ describe('StationStore bulk power', () => {
     expect(ui.requestBulkConfirmation).not.toHaveBeenCalled();
     await vi.waitFor(() => expect(store.bulkTarget).toBeNull());
     expect(store.globalOperation).toBe('idle');
+  });
+});
+
+describe('StationStore fleet aggregates', () => {
+  it('hides the bulk On thumb while stations are only heuristically on', async () => {
+    // Backend boot fallback marks decoded-on with booting raw values as
+    // confirmed; the bulk bar must not light up for those.
+    backend.ScanAndFetchStations.mockResolvedValue([
+      createStation({ name: 'LHB-A', address: 'AA', powerState: 1, powerStateName: 'on', rawPowerState: 0x01 }),
+      createStation({ name: 'LHB-B', address: 'BB', powerState: 1, powerStateName: 'on', rawPowerState: 0x08 })
+    ]);
+    const { store } = mountStore();
+    await vi.waitFor(() => expect(store.stations).toHaveLength(2));
+    expect(store.allOn).toBe(false);
+    expect(store.fleetOn).toBe(0);
+    expect(store.fleetUnverified).toBe(2);
+  });
+
+  it('shows the bulk On thumb once every station reports a stable on raw', async () => {
+    backend.ScanAndFetchStations.mockResolvedValue([
+      createStation({ name: 'LHB-A', address: 'AA', powerState: 1, powerStateName: 'on', rawPowerState: 0x09 }),
+      createStation({ name: 'LHB-B', address: 'BB', powerState: 1, powerStateName: 'on', rawPowerState: 0x0b })
+    ]);
+    const { store } = mountStore();
+    await vi.waitFor(() => expect(store.stations).toHaveLength(2));
+    expect(store.allOn).toBe(true);
+    expect(store.fleetOn).toBe(2);
+    expect(store.fleetUnverified).toBe(0);
   });
 });
 
