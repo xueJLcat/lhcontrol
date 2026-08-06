@@ -58,6 +58,31 @@ describe('StatusFooter', () => {
     expect(screen.queryByText('Config warning')).not.toBeInTheDocument();
   });
 
+  it('drops an open config panel when the API goes offline', async () => {
+    const view = render(StatusFooter, {
+      props: {
+        statusMessage: 'Ready.',
+        apiRunning: true,
+        apiError: '',
+        apiAddress: '127.0.0.1:7575',
+        configWarnings: ['stale warning'],
+        configWritable: false
+      }
+    });
+    await fireEvent.click(screen.getByRole('button', { name: 'Config read-only' }));
+    expect(screen.getByText('stale warning')).toBeInTheDocument();
+
+    await view.rerender({
+      statusMessage: 'Ready.',
+      apiRunning: false,
+      apiError: 'gone',
+      apiAddress: '',
+      configWarnings: ['stale warning'],
+      configWritable: false
+    });
+    await waitFor(() => expect(screen.queryByText('stale warning')).not.toBeInTheDocument());
+  });
+
   it('expands the API pill to reveal the error or address', async () => {
     renderFooter({ apiRunning: false, apiError: 'API crashed' });
     const control = screen.getByRole('button', { name: 'API offline' });

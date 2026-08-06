@@ -36,6 +36,57 @@ type scanControl struct {
 	watcher      *advertisement.BluetoothLEAdvertisementWatcher
 	stopRequests chan error
 	stopOnce     sync.Once
+	// mutex guards the start/stop state below so a StopScan racing the
+	// watcher setup window cannot call Stop before Start, and concurrent
+	// StopScan callers share one Stop call instead of stacking redundant
+	// ones that WinRT may reject.
+	mutex       sync.Mutex
+	started     bool  // watcher.Start() has been accepted
+	pendingStop bool  // StopScan arrived before Start
+	stopIssued  bool  // watcher.Stop() has been attempted after Start
+	stopErr     error // result of the first watcher.Stop() attempt
+	terminal    bool  // watcher confirmed Stopped/Aborted
+}
+
+// stopWatcher issues watcher.Stop() once watcher.Start() has been accepted.
+// A stop requested before Start is recorded as pendingStop and executed by
+// ScanWithStart right after Start succeeds: WinRT may accept a Stop on a
+// not-yet-started watcher as a no-op, and Scan would then run to completion
+// despite the stop request.
+func (control *scanControl) stopWatcher() error {
+	control.mutex.Lock()
+	defer control.mutex.Unlock()
+	if !control.started {
+		control.pendingStop = true
+		return nil
+	}
+	if control.stopIssued {
+		return control.stopErr
+	}
+	control.stopIssued = true
+	control.stopErr = control.watcher.Stop()
+	return control.stopErr
+}
+
+// ensureStopped is the last-resort stop for cleanup paths that leave without
+// a confirmed terminal state (stop timeout, a failure or panic after Start).
+// Releasing the watcher alone does not end the WinRT scan activity, so the
+// radio could keep scanning and reject the next scan with ResourceInUse.
+func (control *scanControl) ensureStopped() {
+	control.mutex.Lock()
+	if !control.started || control.terminal {
+		control.mutex.Unlock()
+		return
+	}
+	watcher := control.watcher
+	control.mutex.Unlock()
+	_ = watcher.Stop()
+}
+
+func (control *scanControl) markTerminal() {
+	control.mutex.Lock()
+	control.terminal = true
+	control.mutex.Unlock()
 }
 
 // ScanStopTimeoutError reports a watcher that did not reach a terminal state
@@ -155,6 +206,11 @@ func (a *Advertisement) Configure(options AdvertisementOptions) error {
 	if err != nil {
 		return err
 	}
+	// GetManufacturerData returns a caller-owned vector reference; the
+	// manufacturer data objects and detached buffers created below are also
+	// caller-owned. Releasing them (after the vector has AddRef'd what it
+	// keeps) prevents COM reference leaks on every Configure call.
+	defer vec.Release()
 
 	for _, optManData := range options.ManufacturerData {
 		writer, err := streams.NewDataWriter()
@@ -172,11 +228,13 @@ func (a *Advertisement) Configure(options AdvertisementOptions) error {
 		if err != nil {
 			return err
 		}
+		defer buf.Release()
 
 		manData, err := advertisement.BluetoothLEManufacturerDataCreate(optManData.CompanyID, buf)
 		if err != nil {
 			return err
 		}
+		defer manData.Release()
 
 		if err = vec.Append(unsafe.Pointer(&manData.IUnknown.RawVTable)); err != nil {
 			return err
@@ -246,6 +304,7 @@ func (a *Adapter) ScanWithStart(callback func(*Adapter, ScanResult), started fun
 			a.watcher = nil
 			a.scan = nil
 		}
+		control.ensureStopped()
 		_ = watcher.Release()
 		a.watcherMutex.Unlock()
 	}()
@@ -369,6 +428,17 @@ func (a *Adapter) ScanWithStart(callback func(*Adapter, ScanResult), started fun
 	if err != nil {
 		return err
 	}
+	control.mutex.Lock()
+	control.started = true
+	pendingStop := control.pendingStop
+	control.mutex.Unlock()
+	if pendingStop {
+		// StopScan landed in the setup window before Start. Its request was
+		// recorded instead of being sent to a not-yet-started watcher; issue
+		// the real stop now that Start has been accepted.
+		stopErr := control.stopWatcher()
+		control.stopOnce.Do(func() { control.stopRequests <- stopErr })
+	}
 	if started != nil {
 		started()
 	}
@@ -376,7 +446,12 @@ func (a *Adapter) ScanWithStart(callback func(*Adapter, ScanResult), started fun
 	// Wait until advertisement has stopped, and finish. Once StopScan is
 	// requested, status polling and retries bound cleanup even if WinRT omits
 	// the Stopped event.
-	return waitForScanStop(stoppingChan, control.stopRequests, watcher.Stop, watcher.GetStatus)
+	err = waitForScanStop(stoppingChan, control.stopRequests, control.stopWatcher, watcher.GetStatus)
+	var stopTimeout *ScanStopTimeoutError
+	if !errors.As(err, &stopTimeout) {
+		control.markTerminal()
+	}
+	return err
 }
 
 func waitForScanStop(stopped <-chan error, stopRequests <-chan error, stop func() error, getStatus func() (advertisement.BluetoothLEAdvertisementWatcherStatus, error)) error {
@@ -609,14 +684,16 @@ func (a *Adapter) StopScan() error {
 	defer leaveThread()
 
 	a.watcherMutex.RLock()
+	defer a.watcherMutex.RUnlock()
 	control := a.scan
 	if control == nil || control.watcher == nil {
-		a.watcherMutex.RUnlock()
 		return errNotScanning
 	}
-	err = control.watcher.Stop()
+	// stopWatcher dedupes concurrent callers so at most one watcher.Stop()
+	// COM call is issued per scan; a stop before Start is recorded and
+	// executed right after Start instead of being lost.
+	err = control.stopWatcher()
 	control.stopOnce.Do(func() { control.stopRequests <- err })
-	a.watcherMutex.RUnlock()
 	return err
 }
 
@@ -639,6 +716,7 @@ type deviceState struct {
 	cleanupStarted  bool
 	cleanupComplete bool
 	cleanupAttempt  *deviceCleanupAttempt
+	cleanupRetries  int
 	leaveThread     func()
 	cancel          context.CancelFunc
 
@@ -969,6 +1047,48 @@ func (d Device) Disconnect() error {
 	return attempt.err
 }
 
+const maxCleanupRetries = 5
+
+var cleanupRetryBaseDelay = 500 * time.Millisecond
+
+// cleanupRetryDelay backs automatic cleanup retries off exponentially so a
+// persistently broken WinRT state cannot hammer the stack.
+func cleanupRetryDelay(retries int) time.Duration {
+	delay := cleanupRetryBaseDelay
+	for i := 0; i < retries; i++ {
+		delay *= 2
+		if delay > 8*time.Second {
+			return 8 * time.Second
+		}
+	}
+	return delay
+}
+
+// scheduleCleanupRetry re-attempts a retryable cleanup failure after a delay.
+// Automatic retry cannot rely on connection status callbacks: the callback
+// gate may already be closed by the failed attempt, and no further events
+// arrive for a session nobody released. Without this retry the GATT session,
+// device object, and every cached service/characteristic COM handle would
+// stay alive for the lifetime of the process.
+func (d Device) scheduleCleanupRetry(delay time.Duration) {
+	time.AfterFunc(delay, func() {
+		state := d.state
+		if state == nil {
+			return
+		}
+		state.cleanupMutex.Lock()
+		if state.cleanupComplete || state.cleanupStarted {
+			state.cleanupMutex.Unlock()
+			return
+		}
+		attempt := &deviceCleanupAttempt{done: make(chan struct{})}
+		state.cleanupAttempt = attempt
+		state.cleanupStarted = true
+		state.cleanupMutex.Unlock()
+		go d.cleanup(attempt)
+	})
+}
+
 func (d Device) cleanup(attempt *deviceCleanupAttempt) {
 	state := d.state
 	retryable := false
@@ -988,13 +1108,19 @@ func (d Device) cleanup(attempt *deviceCleanupAttempt) {
 			state.cleanupStarted = false
 			state.cleanupComplete = false
 			state.cleanupAttempt = nil
+			shouldRetry := state.cleanupRetries < maxCleanupRetries
+			nextDelay := cleanupRetryDelay(state.cleanupRetries)
+			state.cleanupRetries++
+			state.cleanupMutex.Unlock()
+			if shouldRetry {
+				d.scheduleCleanupRetry(nextDelay)
+			}
 		} else {
 			state.cleanupComplete = true
+			state.cleanupMutex.Unlock()
 		}
 		close(attempt.done)
-		state.cleanupMutex.Unlock()
 	}()
-	state.blockCallbacks()
 	leaveThread, err := enterWinRTThread()
 	if err != nil {
 		attempt.err = err
@@ -1002,6 +1128,11 @@ func (d Device) cleanup(attempt *deviceCleanupAttempt) {
 		return
 	}
 	defer leaveThread()
+	// Blocking the callback gate only after the WinRT thread is ready keeps a
+	// retryable thread-initialization failure from closing the gate forever:
+	// late callbacks stay functional until a cleanup attempt actually
+	// continues.
+	state.blockCallbacks()
 
 	var warnings []error
 	state.drainCallbacksForCleanup(func() {

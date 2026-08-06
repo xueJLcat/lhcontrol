@@ -182,28 +182,28 @@ func registerAPIRoutes(api *fiber.App, manager apiStationManager, events scanEve
 		if events.nextID != nil {
 			id = events.nextID()
 		}
-		event := scanEvent{ID: id}
+		// Each callback builds its own event value: Started runs on the HTTP
+		// goroutine while terminal callbacks run later on the scan goroutine,
+		// so a shared mutable event would race between the two.
 		err := manager.StartScan(station.ScanCallbacks{
 			Started: func() {
 				if events.started != nil {
-					events.started(event)
+					events.started(scanEvent{ID: id})
 				}
 			},
 			Completed: func(stations []station.StationInfo) {
 				if events.completed != nil {
-					event.Stations = stations
-					events.completed(event)
+					events.completed(scanEvent{ID: id, Stations: stations})
 				}
 			},
 			Failed: func(err error) {
 				if events.failed != nil {
-					event.Error = err.Error()
-					events.failed(event)
+					events.failed(scanEvent{ID: id, Error: err.Error()})
 				}
 			},
 			Cancelled: func() {
 				if events.cancelled != nil {
-					events.cancelled(event)
+					events.cancelled(scanEvent{ID: id})
 				}
 			},
 		})

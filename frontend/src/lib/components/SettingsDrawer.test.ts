@@ -49,6 +49,7 @@ function defaultProps(overrides: Record<string, unknown> = {}) {
     onRefresh: vi.fn(),
     onSelect: vi.fn(),
     onAutoSleepChange: vi.fn(),
+    onAutoSleepRetry: vi.fn(),
     ...overrides
   };
 }
@@ -137,6 +138,15 @@ describe('SettingsDrawer auto sleep', () => {
     render(SettingsDrawer, { props: defaultProps({ autoSleep: null }) });
     expect(screen.getByText(/Loading auto sleep settings/)).toBeInTheDocument();
     expect(screen.queryByRole('checkbox', { name: 'Enable auto sleep' })).not.toBeInTheDocument();
+  });
+
+  it('shows load failures with a retry action instead of a permanent spinner', async () => {
+    const props = defaultProps({ autoSleep: null, autoSleepError: 'settings unavailable' });
+    render(SettingsDrawer, { props });
+    expect(screen.queryByText(/Loading auto sleep settings/)).not.toBeInTheDocument();
+    expect(screen.getByText('settings unavailable')).toBeInTheDocument();
+    await fireEvent.click(screen.getByRole('button', { name: /Retry/ }));
+    expect(props.onAutoSleepRetry).toHaveBeenCalledOnce();
   });
 
   it('toggles the feature on and off', async () => {

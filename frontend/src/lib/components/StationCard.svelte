@@ -140,17 +140,25 @@
   // through the station prop itself.
   // svelte-ignore state_referenced_locally
   let lastKnownChannel = $state(channelDisplay ?? 0);
-  let lastKnownAt = $state(Date.now());
+  // The memory window runs from the first observed wipe, not from the last
+  // confirmed channel: unchanged snapshots reuse the same object reference,
+  // so an "age of the last confirmed value" timestamp silently goes stale
+  // while a long-lived channel looks unchanged and the bridge collapses the
+  // moment the wipe happens.
+  // svelte-ignore state_referenced_locally
+  let wipeStartedAt = $state<number | null>(station.channel > 0 ? null : Date.now());
   $effect(() => {
     if (station.channel > 0) {
       lastKnownChannel = station.channel;
-      lastKnownAt = Date.now();
+      wipeStartedAt = null;
+    } else if (wipeStartedAt === null) {
+      wipeStartedAt = Date.now();
     }
   });
   $effect(() => {
     if (station.channel > 0 || lastKnownChannel <= 0) return;
     const timer = setInterval(() => {
-      if (Date.now() - lastKnownAt > CHANNEL_MEMORY_MS) lastKnownChannel = 0;
+      if (wipeStartedAt !== null && Date.now() - wipeStartedAt > CHANNEL_MEMORY_MS) lastKnownChannel = 0;
     }, 15_000);
     return () => clearInterval(timer);
   });

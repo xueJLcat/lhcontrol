@@ -19,6 +19,7 @@
   let preferredAdapterId = $state('');
   let adapterSaving = $state(false);
   let autoSleepSettings = $state<autosleepModels.Settings | null>(null);
+  let autoSleepError = $state<string | null>(null);
   let autoSleepBusy = $state(false);
 
   // The panel only mounts while the settings drawer is open, so loading here
@@ -60,10 +61,12 @@
   }
 
   async function loadAutoSleepSettings() {
+    autoSleepError = null;
     try {
       autoSleepSettings = autosleepModels.Settings.createFrom(await GetAutoSleepSettings());
     } catch (error) {
       autoSleepSettings = null;
+      autoSleepError = String(error);
       pushToast(`Auto-sleep settings could not be loaded: ${String(error)}`);
     }
   }
@@ -92,10 +95,12 @@
   selectedDeviceId={preferredAdapterId}
   busy={adapterSaving}
   autoSleep={autoSleepSettings}
+  autoSleepError={autoSleepError}
   {autoSleepBusy}
   {inactive}
   {onClose}
   onRefresh={loadAdapterSettings}
   onSelect={selectAdapter}
   onAutoSleepChange={changeAutoSleep}
+  onAutoSleepRetry={loadAutoSleepSettings}
 />

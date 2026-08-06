@@ -379,6 +379,11 @@ func (buf *rawAdvertisementPayload) ManufacturerData() []ManufacturerDataElement
 		if fieldLength < 3 {
 			continue
 		}
+		// A malformed packet may claim a field longer than the remaining
+		// bytes; parsing it would index past the buffer.
+		if index+fieldLength+1 > int(buf.len) {
+			break
+		}
 		fieldType := buf.data[index+1]
 		if fieldType != 0xff {
 			continue
@@ -400,6 +405,11 @@ func (buf *rawAdvertisementPayload) ServiceData() []ServiceDataElement {
 		if fieldLength < 3 { // field has only length and type and no data
 			continue
 		}
+		// A malformed packet may claim a field longer than the remaining
+		// bytes; parsing it would index past the buffer.
+		if index+fieldLength+1 > int(buf.len) {
+			break
+		}
 		fieldType := buf.data[index+1]
 		switch fieldType {
 		case 0x16: // 16-bit uuid
@@ -408,11 +418,17 @@ func (buf *rawAdvertisementPayload) ServiceData() []ServiceDataElement {
 				Data: buf.data[index+4 : index+fieldLength+1],
 			})
 		case 0x20: // 32-bit uuid
+			if fieldLength < 5 { // type + 4 UUID bytes minimum
+				continue
+			}
 			serviceData = append(serviceData, ServiceDataElement{
 				UUID: New32BitUUID(uint32(buf.data[index+2]) + (uint32(buf.data[index+3]) << 8) + (uint32(buf.data[index+4]) << 16) + (uint32(buf.data[index+5]) << 24)),
 				Data: buf.data[index+6 : index+fieldLength+1],
 			})
 		case 0x21: // 128-bit uuid
+			if fieldLength < 17 { // type + 16 UUID bytes minimum
+				continue
+			}
 			var uuidArray [16]byte
 			copy(uuidArray[:], buf.data[index+2:index+18])
 			serviceData = append(serviceData, ServiceDataElement{

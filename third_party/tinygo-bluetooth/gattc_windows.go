@@ -467,6 +467,21 @@ func (c DeviceCharacteristic) Write(p []byte) (n int, err error) {
 	return c.write(p, genericattributeprofile.GattWriteOptionWriteWithResponse)
 }
 
+// WriteContext is the cancellable form of Write. Cancellation after the
+// asynchronous operation was created is classified like any other failed
+// write, so write-without-response callers keep their possibly-sent safety
+// semantics.
+func (c DeviceCharacteristic) WriteContext(ctx context.Context, p []byte) (n int, err error) {
+	if err := c.available(); err != nil {
+		return 0, err
+	}
+	if c.properties&genericattributeprofile.GattCharacteristicPropertiesWrite == 0 {
+		return 0, errNoWrite
+	}
+
+	return c.writeContext(ctx, p, genericattributeprofile.GattWriteOptionWriteWithResponse)
+}
+
 // WriteWithoutResponse replaces the characteristic value with a new value. The
 // call will return before all data has been written. A limited number of such
 // writes can be in flight at any given time. This call is also known as a
@@ -481,7 +496,28 @@ func (c DeviceCharacteristic) WriteWithoutResponse(p []byte) (n int, err error) 
 	return c.write(p, genericattributeprofile.GattWriteOptionWriteWithoutResponse)
 }
 
+// WriteWithoutResponseContext is the cancellable form of WriteWithoutResponse.
+func (c DeviceCharacteristic) WriteWithoutResponseContext(ctx context.Context, p []byte) (n int, err error) {
+	if err := c.available(); err != nil {
+		return 0, err
+	}
+	if c.properties&genericattributeprofile.GattCharacteristicPropertiesWriteWithoutResponse == 0 {
+		return 0, errNoWriteWithoutResponse
+	}
+	return c.writeContext(ctx, p, genericattributeprofile.GattWriteOptionWriteWithoutResponse)
+}
+
 func (c DeviceCharacteristic) write(p []byte, mode genericattributeprofile.GattWriteOption) (n int, err error) {
+	return c.writeContext(context.Background(), p, mode)
+}
+
+func (c DeviceCharacteristic) writeContext(ctx context.Context, p []byte, mode genericattributeprofile.GattWriteOption) (n int, err error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	if _, err := c.service.device.beginOperation(); err != nil {
 		return 0, err
 	}
@@ -515,7 +551,7 @@ func (c DeviceCharacteristic) write(p []byte, mode genericattributeprofile.GattW
 	if resultWrite {
 		signature = signatureGattWriteResult
 	}
-	if err := awaitAsyncOperation(asyncOp, signature); err != nil {
+	if err := awaitAsyncOperationContext(ctx, asyncOp, signature); err != nil {
 		return 0, classifyWriteFailure(mode, true, false, err)
 	}
 

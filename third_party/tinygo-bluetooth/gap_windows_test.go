@@ -386,6 +386,49 @@ func TestDisconnectRetriesAfterWinRTThreadInitializationFailure(t *testing.T) {
 	}
 }
 
+func TestDisconnectSchedulesAutomaticRetryAfterWinRTThreadFailure(t *testing.T) {
+	originalEnter := enterWinRTThread
+	originalBaseDelay := cleanupRetryBaseDelay
+	var attempts atomic.Int32
+	enterWinRTThread = func() (func(), error) {
+		if attempts.Add(1) == 1 {
+			return nil, errors.New("temporary apartment failure")
+		}
+		return func() {}, nil
+	}
+	cleanupRetryBaseDelay = time.Millisecond
+	t.Cleanup(func() {
+		enterWinRTThread = originalEnter
+		cleanupRetryBaseDelay = originalBaseDelay
+	})
+
+	state := &deviceState{callbacks: newCallbackGate()}
+	device := Device{state: state}
+	if err := device.Disconnect(); err == nil {
+		t.Fatal("first Disconnect() unexpectedly succeeded")
+	}
+
+	// No further manual Disconnect: the retryable failure must schedule a
+	// background attempt instead of leaking the owned handles forever.
+	deadline := time.After(2 * time.Second)
+	for {
+		state.cleanupMutex.Lock()
+		complete := state.cleanupComplete
+		state.cleanupMutex.Unlock()
+		if complete {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("automatic cleanup retry did not complete")
+		case <-time.After(time.Millisecond):
+		}
+	}
+	if got := attempts.Load(); got < 2 {
+		t.Fatalf("cleanup attempts = %d, want at least 2", got)
+	}
+}
+
 func TestDisconnectPanicAfterOwnershipBeginsDoesNotRetry(t *testing.T) {
 	originalEnter := enterWinRTThread
 	enterWinRTThread = func() (func(), error) { return func() {}, nil }

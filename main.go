@@ -56,7 +56,7 @@ func openRotatingLogFile(path string, maxSize int64) (*rotatingLogFile, error) {
 	if err != nil && !os.IsNotExist(err) {
 		return nil, err
 	}
-	if err == nil && info.Size() >= maxSize {
+	if err == nil && info.Size() > maxSize {
 		if rotateErr := writer.rotateClosedFile(); rotateErr != nil {
 			// A transient problem with the backup target must not disable
 			// file logging for the whole session. Keep the oversized file;

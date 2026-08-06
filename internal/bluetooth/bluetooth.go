@@ -80,6 +80,11 @@ type contextCharacteristic interface {
 	ReadContext(context.Context, []byte) (int, error)
 }
 
+type contextCharacteristicWriter interface {
+	WriteContext(context.Context, []byte) (int, error)
+	WriteWithoutResponseContext(context.Context, []byte) (int, error)
+}
+
 func normalizeContext(ctx context.Context) context.Context {
 	if ctx == nil {
 		return context.Background()
@@ -1700,18 +1705,39 @@ func FetchInitialPowerStateContext(ctx context.Context, station *BaseStation) er
 // not be retried as a response write because the first command may have
 // reached the device.
 // Assumes caller holds station.mutex.
-func writeCharacteristicValueInternal(characteristic characteristicIO, value byte) error {
+func writeCharacteristicValueInternal(ctx context.Context, characteristic characteristicIO, value byte) error {
 	if characteristic == nil {
 		return transportError("write characteristic", fmt.Errorf("characteristic is unavailable"))
+	}
+	ctx = normalizeContext(ctx)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	// Cancellable writes keep the operation lock bounded by the caller's
+	// context instead of the transport's full budget. A cancelled
+	// already-submitted write still carries the transport's possibly-sent
+	// classification, so callers never replay it.
+	contextWriter, hasContextWriter := characteristic.(contextCharacteristicWriter)
+	writeWithoutResponse := func() (int, error) {
+		if hasContextWriter {
+			return contextWriter.WriteWithoutResponseContext(ctx, []byte{value})
+		}
+		return characteristic.WriteWithoutResponse([]byte{value})
+	}
+	writeWithResponse := func() (int, error) {
+		if hasContextWriter {
+			return contextWriter.WriteContext(ctx, []byte{value})
+		}
+		return characteristic.Write([]byte{value})
 	}
 	properties := bluetooth.CharacteristicPermissions(characteristic.Properties())
 	var n int
 	var err error
 	switch {
 	case properties.WriteWithoutResponse():
-		n, err = characteristic.WriteWithoutResponse([]byte{value})
+		n, err = writeWithoutResponse()
 		if err != nil && properties.Write() && IsCapabilityUnsupported(err) {
-			n, err = characteristic.Write([]byte{value})
+			n, err = writeWithResponse()
 		} else if err != nil && !isDefiniteWriteRejection(err) {
 			possiblySent, classified := possiblySentClassification(err)
 			if !classified {
@@ -1721,7 +1747,7 @@ func writeCharacteristicValueInternal(characteristic characteristicIO, value byt
 			}
 		}
 	case properties.Write():
-		n, err = characteristic.Write([]byte{value})
+		n, err = writeWithResponse()
 	default:
 		return unsupportedCapability("characteristic write", nil)
 	}
@@ -1743,11 +1769,11 @@ func isDefiniteWriteRejection(err error) bool {
 	return errors.As(err, &protocolErr)
 }
 
-func writePowerValueInternal(station *BaseStation, value byte) error {
+func writePowerValueInternal(ctx context.Context, station *BaseStation, value byte) error {
 	if station.characteristic == nil {
 		return fmt.Errorf("power characteristic is unavailable")
 	}
-	return writeCharacteristicValueInternal(station.characteristic, value)
+	return writeCharacteristicValueInternal(ctx, station.characteristic, value)
 }
 
 // confirmPowerStateInternalContext polls briefly because Lighthouse state
@@ -1944,16 +1970,16 @@ func SetPowerStateContext(ctx context.Context, station *BaseStation, target Powe
 		log.Printf("Bluetooth: Sending %s command to %s", target, station.Name)
 		if target == PowerStateSleep {
 			// Some Lighthouse 2.0 firmware expects wake/prepare then sleep.
-			err = writePowerValueInternal(station, 0x01)
+			err = writePowerValueInternal(ctx, station, 0x01)
 			if err == nil {
 				// Once prepare has been sent, complete this paired write even when
 				// shutdown cancels ctx. Leaving a sleeping station prepared can wake it.
 				time.Sleep(50 * time.Millisecond)
 				sleepFinalAttempted = true
-				err = writePowerValueInternal(station, command)
+				err = writePowerValueInternal(context.WithoutCancel(ctx), station, command)
 			}
 		} else {
-			err = writePowerValueInternal(station, command)
+			err = writePowerValueInternal(ctx, station, command)
 		}
 		if err == nil {
 			break
@@ -2080,7 +2106,7 @@ func IdentifyContext(ctx context.Context, station *BaseStation) error {
 			lastErr = err
 		} else if !station.Capabilities.Identify || station.identifyCharacteristic == nil {
 			return unsupportedCapability("identify", nil)
-		} else if err := writeCharacteristicValueInternal(station.identifyCharacteristic, 0x01); err != nil {
+		} else if err := writeCharacteristicValueInternal(ctx, station.identifyCharacteristic, 0x01); err != nil {
 			if IsCapabilityUnsupported(err) {
 				station.Capabilities.Identify = false
 				station.setOperationErrorInternal(err)
@@ -2162,7 +2188,7 @@ func SetChannelContext(ctx context.Context, station *BaseStation, channel int) (
 		return result, nil
 	}
 
-	if writeErr := writeCharacteristicValueInternal(station.modeCharacteristic, byte(channel)); writeErr != nil {
+	if writeErr := writeCharacteristicValueInternal(ctx, station.modeCharacteristic, byte(channel)); writeErr != nil {
 		if IsCapabilityUnsupported(writeErr) {
 			station.Capabilities.ChannelWrite = false
 			station.setOperationErrorInternal(writeErr)

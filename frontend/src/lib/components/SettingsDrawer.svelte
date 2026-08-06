@@ -17,12 +17,14 @@
     selectedDeviceId,
     busy,
     autoSleep,
+    autoSleepError = null,
     autoSleepBusy = false,
     inactive = false,
     onClose,
     onRefresh,
     onSelect,
-    onAutoSleepChange
+    onAutoSleepChange,
+    onAutoSleepRetry
   }: {
     adapters: bluetooth.AdapterInfo[];
     loading: boolean;
@@ -30,12 +32,14 @@
     selectedDeviceId: string;
     busy: boolean;
     autoSleep: autosleep.Settings | null;
+    autoSleepError?: string | null;
     autoSleepBusy?: boolean;
     inactive?: boolean;
     onClose: () => void;
     onRefresh: () => void;
     onSelect: (deviceId: string) => void;
     onAutoSleepChange: (settings: autosleep.Settings) => void;
+    onAutoSleepRetry?: () => void;
   } = $props();
 
   // A persisted selection may point at a radio that is currently detached
@@ -232,6 +236,11 @@
         this round instead of retrying. Settings are saved and restored on the
         next start.
       </p>
+    {:else if autoSleepError}
+      <div class="alert danger">{autoSleepError}</div>
+      <div class="drawer-actions">
+        <button class="btn" onclick={() => onAutoSleepRetry?.()}><RefreshCw size={15} /> Retry</button>
+      </div>
     {:else}
       <p class="hint loading"><LoaderCircle class="spin" size={14} /> Loading auto sleep settings...</p>
     {/if}

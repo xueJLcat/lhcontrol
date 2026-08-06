@@ -438,7 +438,7 @@ func TestWriteCharacteristicDoesNotRetryAmbiguousTransportFailure(t *testing.T) 
 		writeWithoutResponseErr: tinybluetooth.ErrGATTUnreachable,
 	}
 
-	err := writeCharacteristicValueInternal(characteristic, 0x01)
+	err := writeCharacteristicValueInternal(context.Background(), characteristic, 0x01)
 	if !errors.Is(err, tinybluetooth.ErrGATTUnreachable) {
 		t.Fatalf("writeCharacteristicValueInternal() error = %v", err)
 	}
@@ -661,7 +661,7 @@ func TestWriteCharacteristicFallsBackOnlyForUnsupportedWriteMode(t *testing.T) {
 		writeWithoutResponseErr: tinybluetooth.ErrAttRequestNotSupported,
 	}
 
-	if err := writeCharacteristicValueInternal(characteristic, 0x01); err != nil {
+	if err := writeCharacteristicValueInternal(context.Background(), characteristic, 0x01); err != nil {
 		t.Fatalf("writeCharacteristicValueInternal() error = %v", err)
 	}
 	if characteristic.writeWithoutResponseAttempts != 1 || characteristic.writeWithResponseAttempts != 1 {
@@ -680,7 +680,7 @@ func TestWriteCharacteristicPreservesDefinitelyNotSentClassification(t *testing.
 		writeWithoutResponseErr: writeErr,
 	}
 
-	err := writeCharacteristicValueInternal(characteristic, 0x01)
+	err := writeCharacteristicValueInternal(context.Background(), characteristic, 0x01)
 	if !errors.Is(err, writeErr) || IsPossiblySent(err) {
 		t.Fatalf("writeCharacteristicValueInternal() error = %v, want definitely-not-sent classification", err)
 	}

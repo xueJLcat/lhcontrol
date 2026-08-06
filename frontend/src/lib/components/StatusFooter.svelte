@@ -61,7 +61,10 @@
     <span class="api-dot" aria-hidden="true"></span>
     {apiRunning ? 'API ready' : 'API offline'}
   </button>
-  {#if detail === 'config'}
+  <!-- The config detail panel shares the pill's visibility condition: when
+       the pill disappears (API offline or warnings cleared) a leftover panel
+       would keep showing stale warnings. -->
+  {#if detail === 'config' && apiRunning && (configWarnings.length > 0 || !configWritable)}
     <div class="footer-detail" transition:fade={dur({ duration: 140 })}>
       {#each configWarnings as warning}<p>{warning}</p>{/each}
       {#if !configWritable}<p>Configuration changes cannot be saved.</p>{/if}
