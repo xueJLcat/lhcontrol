@@ -19,6 +19,7 @@
   export let onCount = 0;
   export let standbyCount = 0;
   export let sleepCount = 0;
+  export let unverifiedCount = 0;
   export let onScan: () => void;
   export let onStop: () => void;
   export let stopping = false;
@@ -64,11 +65,12 @@
         <span>SteamVR base stations</span>
       </div>
     </div>
-    {#if fleetTotal > 0}
-      <div class="fleet-summary" aria-label="Fleet power summary">
+    {#if fleetTotal > 0 || unverifiedCount > 0}
+      <div class="fleet-summary" role="group" aria-label="Fleet power summary">
         {#if onCount > 0}<span class="fleet-chip chip-on" transition:fade={{ duration: 160 }}><span class="fleet-dot dot-on"></span>{onCount} On</span>{/if}
         {#if standbyCount > 0}<span class="fleet-chip chip-standby" transition:fade={{ duration: 160 }}><span class="fleet-dot dot-standby"></span>{standbyCount} Standby</span>{/if}
         {#if sleepCount > 0}<span class="fleet-chip chip-sleep" transition:fade={{ duration: 160 }}><span class="fleet-dot dot-sleep"></span>{sleepCount} Sleep</span>{/if}
+        {#if unverifiedCount > 0}<span class="fleet-chip chip-unverified" title="State not confirmed by a fresh read" transition:fade={{ duration: 160 }}><span class="fleet-dot dot-unverified"></span>{unverifiedCount} Unconfirmed</span>{/if}
       </div>
     {/if}
   </div>
@@ -78,7 +80,7 @@
       {:else if scanning}<Square size={15} /> Stop
       {:else}<RefreshCw size={15} /> Scan{/if}
     </button>
-    <div class="bulk-power" aria-label="Set all known stations">
+    <div class="bulk-power" role="group" aria-label="Set all known stations">
       <span class="bulk-label">{#if isBulkLoading}<LoaderCircle class="spin" size={12} />{:else}<Zap size={12} />{/if} All</span>
       <div class="bulk-seg" class:pop={bulkPopIndex >= 0}>
         <div
@@ -185,10 +187,12 @@
   .fleet-chip.chip-on { color: var(--color-on-deep); border-color: color-mix(in srgb, var(--color-on) 40%, transparent); background: linear-gradient(135deg, color-mix(in srgb, var(--color-on) 14%, white), color-mix(in srgb, var(--color-on) 6%, white)); }
   .fleet-chip.chip-standby { color: var(--color-standby-deep); border-color: color-mix(in srgb, var(--color-standby) 40%, transparent); background: linear-gradient(135deg, color-mix(in srgb, var(--color-standby) 14%, white), color-mix(in srgb, var(--color-standby) 6%, white)); }
   .fleet-chip.chip-sleep { color: var(--color-sleep-deep); border-color: color-mix(in srgb, var(--color-sleep) 38%, transparent); background: linear-gradient(135deg, color-mix(in srgb, var(--color-sleep) 13%, white), color-mix(in srgb, var(--color-sleep) 6%, white)); }
+  .fleet-chip.chip-unverified { color: var(--text-muted); border-color: var(--color-border-strong); background: var(--bg-inset); }
   .fleet-dot { width: 6px; height: 6px; border-radius: var(--radius-pill); flex-shrink: 0; }
   .fleet-dot.dot-on { background: var(--color-on); box-shadow: 0 0 5px color-mix(in srgb, var(--color-on) 70%, transparent); }
   .fleet-dot.dot-standby { background: var(--color-standby); box-shadow: 0 0 5px color-mix(in srgb, var(--color-standby) 70%, transparent); }
   .fleet-dot.dot-sleep { background: var(--color-sleep); box-shadow: 0 0 5px color-mix(in srgb, var(--color-sleep) 60%, transparent); }
+  .fleet-dot.dot-unverified { background: transparent; border: 1.5px solid var(--text-muted); box-sizing: border-box; }
   .scan-progress {
     position: absolute;
     left: 0; right: 0; bottom: -1px;

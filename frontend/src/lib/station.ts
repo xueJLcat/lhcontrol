@@ -53,6 +53,14 @@ export function stateLabel(station: StationInfo): string {
   return station.powerStateName || ['sleep', 'on', 'standby', 'booting'][station.powerState] || 'unknown';
 }
 
+// Safe class-name counterpart of stateLabel: the display label prefers the
+// backend-provided powerStateName, which may carry arbitrary casing or
+// spacing and would break `state-...` selectors. Class names are derived
+// from the numeric state so they always match the stylesheet.
+export function stateClass(station: StationInfo): string {
+  return ['sleep', 'on', 'standby', 'booting'][station.powerState] ?? 'unknown';
+}
+
 export function channelLabel(channel: number): string {
   return channel > 0 ? `CH ${String(channel).padStart(2, '0')}` : 'CH --';
 }

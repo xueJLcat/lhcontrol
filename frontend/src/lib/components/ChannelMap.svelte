@@ -4,6 +4,9 @@
 
   export let stations: StationInfo[];
   export let onSelect: (address: string) => void;
+  // Address of the station whose details drawer is open, so its channel cell
+  // can stay highlighted while the user inspects the station.
+  export let selectedAddress: string | null = null;
   // Display-only channel resolver. The parent injects a short-lived memory so
   // transient backend channel wipes do not flip cells between occupied and
   // free/disabled. `current` still uses the live station data, so a resolved
@@ -66,6 +69,7 @@
         class:occupied={occupants.length > 0}
         class:stale={occupants.length > 0 && occupants.every((occupant) => !occupant.current)}
         class:conflict={occupants.filter((occupant) => occupant.current).length > 1 || conflictChannels.has(channel)}
+        class:selected={selectedAddress !== null && occupants.some((occupant) => occupant.address === selectedAddress)}
         style:--cm={occupants.length ? `var(--color-${occupants[0].state}, var(--text-muted))` : null}
         style:--cm-deep={occupants.length ? `var(--color-${occupants[0].state}-deep, var(--text-secondary))` : null}
         disabled={occupants.length === 0}
@@ -124,6 +128,11 @@
     grid-template-columns: repeat(16, 1fr);
     gap: 3px;
   }
+  @media (max-width: 780px) {
+    /* On narrow windows sixteen cells get too cramped to hit; wrap to two
+       rows of eight instead. */
+    .channel-map { grid-template-columns: repeat(8, 1fr); }
+  }
   .cm-cell {
     display: flex;
     align-items: center;
@@ -161,5 +170,12 @@
     background: linear-gradient(160deg, color-mix(in srgb, var(--color-danger) 15%, white), color-mix(in srgb, var(--color-danger) 6%, white));
     color: var(--fb-error);
     animation: conflict-pulse 2.4s var(--ease) infinite;
+  }
+  /* Selection ring marks the channel of the station whose details drawer is
+     open; stronger than the hover lift so it survives without interaction. */
+  .cm-cell.selected {
+    border-color: color-mix(in srgb, var(--color-primary) 65%, transparent);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-primary) 28%, transparent);
+    color: var(--color-primary-deep);
   }
 </style>

@@ -7,7 +7,7 @@
     LoaderCircle, Moon, Pause, SquarePen, TriangleAlert, X, Zap
   } from 'lucide-svelte';
   import type { PowerFeedback, PowerTarget, StationInfo } from '../types';
-  import { canSetPower, channelLabel, isCurrentPowerState, stateLabel } from '../station';
+  import { canSetPower, channelLabel, isCurrentPowerState, stateClass, stateLabel } from '../station';
   import { relativeTime } from '../relative-time';
   import { autofocus } from '../actions';
   import StateBadge from './StateBadge.svelte';
@@ -123,12 +123,16 @@
   }
 </script>
 
+<!-- Card-wide click is a mouse convenience; keyboard users open details
+     through the dedicated Details button. -->
+<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
 <div
-  class="station-card state-{stateLabel(station)}"
+  class="station-card state-{stateClass(station)}"
   class:offline={!station.isPresent}
   class:conflict={station.channelConflict}
   class:renaming
   class:flash
+  on:click={openDetails}
 >
   {#if renaming}
     <div class="rename-row">
@@ -136,6 +140,8 @@
         use:autofocus
         bind:value={localName}
         maxlength="32"
+        placeholder={station.originalName}
+        title="Save an empty name to restore the original name"
         aria-label="Station name"
         on:keydown={handleRenameKeydown}
         on:blur={handleRenameBlur}
@@ -146,7 +152,7 @@
     </div>
   {:else}
     <div class="card-top">
-      <span class="status-dot dot-{stateLabel(station)}" aria-hidden="true"></span>
+      <span class="status-dot dot-{stateClass(station)}" aria-hidden="true"></span>
       <h3 title={station.name}>{station.name}</h3>
       <button
         class="icon-btn rename-btn"
@@ -180,21 +186,25 @@
     {#if station.isPresent && station.presenceUncertain}<span class="muted-badge" title="Its connection could not be fully released before the last scan, so the advertisement may have been missed">presence uncertain</span>{/if}
     {#if station.isPresent && !station.presenceUncertain && !station.seenInLatestScan}<span class="muted-badge" title="Missed by one scan; retained until a second consecutive miss">scan stale</span>{/if}
   </div>
-  {#if feedback}
-    <div
-      class="power-feedback {feedback.kind}"
-      title={feedback.text}
-      in:fly={{ y: 4, duration: 160, easing: cubicOut }}
-    >
-      {#if feedback.kind === 'pending'}<LoaderCircle class="spin" size={11} />
-      {:else if feedback.kind === 'success'}<CircleCheck size={11} />
-      {:else if feedback.kind === 'warning'}<TriangleAlert size={11} />
-      {:else}<CircleX size={11} />{/if}
-      {feedback.text}
-    </div>
-  {/if}
+  <!-- The slot reserves the feedback line's height so cards in the grid row
+       never stretch when feedback appears or disappears. -->
+  <div class="feedback-slot">
+    {#if feedback}
+      <div
+        class="power-feedback {feedback.kind}"
+        title={feedback.text}
+        in:fly={{ y: 4, duration: 160, easing: cubicOut }}
+      >
+        {#if feedback.kind === 'pending'}<LoaderCircle class="spin" size={11} />
+        {:else if feedback.kind === 'success'}<CircleCheck size={11} />
+        {:else if feedback.kind === 'warning'}<TriangleAlert size={11} />
+        {:else}<CircleX size={11} />{/if}
+        {feedback.text}
+      </div>
+    {/if}
+  </div>
   <div class="card-actions">
-    <div class="power-segment" class:pop={popActive} aria-label={`Power control for ${station.name}`}>
+    <div class="power-segment" role="group" class:pop={popActive} aria-label={`Power control for ${station.name}`}>
       <div
         class="seg-thumb"
         class:seg-thumb-on={activePowerIndex === 0}
@@ -259,6 +269,7 @@
     flex-direction: column;
     gap: 0.42rem;
     box-shadow: var(--shadow-sm), inset 0 1px 0 rgba(255, 255, 255, 0.8);
+    cursor: pointer;
     transition: border-color var(--dur-2) var(--ease), background-color var(--dur-2) var(--ease),
       box-shadow var(--dur-2) var(--ease), transform var(--dur-2) var(--ease-spring);
   }
@@ -378,6 +389,13 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+  .feedback-slot {
+    display: flex;
+    align-items: center;
+    min-width: 0;
+    /* Fixed line height keeps grid rows stable while feedback comes and goes. */
+    min-height: 1.05rem;
   }
   .power-feedback > :global(svg) { flex-shrink: 0; }
   .power-feedback.pending { color: var(--fb-pending); }

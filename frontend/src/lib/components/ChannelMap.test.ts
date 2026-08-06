@@ -139,4 +139,21 @@ describe('ChannelMap', () => {
     expect(cell).toHaveClass('stale');
     expect(cell).not.toHaveClass('conflict');
   });
+
+  it('highlights the channel cell of the selected station', () => {
+    render(ChannelMap, {
+      props: {
+        stations: [station(), station({ name: 'LHB-B', address: 'BB', channel: 5 })],
+        onSelect: vi.fn(),
+        selectedAddress: '11:22:33:44:55:66'
+      }
+    });
+    expect(screen.getByRole('button', { name: 'CH 3 — LHB-A · on' })).toHaveClass('selected');
+    expect(screen.getByRole('button', { name: 'CH 5 — LHB-B · on' })).not.toHaveClass('selected');
+  });
+
+  it('does not highlight anything without a selection', () => {
+    render(ChannelMap, { props: { stations: [station()], onSelect: vi.fn() } });
+    expect(screen.getByRole('button', { name: 'CH 3 — LHB-A · on' })).not.toHaveClass('selected');
+  });
 });

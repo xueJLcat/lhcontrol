@@ -33,7 +33,9 @@ export function focusTrap(node: HTMLElement) {
   return {
     destroy() {
       node.removeEventListener('keydown', keydown);
-      previouslyFocused?.focus?.();
+      // The element that opened the dialog may have been removed from the
+      // list while the drawer was open; never focus a detached node.
+      if (previouslyFocused && previouslyFocused.isConnected) previouslyFocused.focus();
     }
   };
 }

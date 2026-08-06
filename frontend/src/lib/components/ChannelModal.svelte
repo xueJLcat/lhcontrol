@@ -85,10 +85,10 @@
   {#if hasUnknownVisibleChannel}
     <label class="risk"><input type="checkbox" bind:checked={confirmUnknownChannelRisk} disabled={busy || locked} /> I understand that a visible station has an unknown channel, so a conflict cannot be fully ruled out.</label>
   {/if}
-  {#if blockedReason}<div class="alert warning">{blockedReason}</div>{/if}
-  {#if error}<div class="alert" class:danger={!warning} class:warning>{error}</div>{/if}
+  {#if blockedReason}<div class="alert warning" role="status">{blockedReason}</div>{/if}
+  {#if error}<div class="alert" class:danger={!warning} class:warning role="status">{error}</div>{/if}
   {#if busy}
-    <p class="busy-note"><LoaderCircle class="spin" size={12} /> Writing channel and verifying the readback...</p>
+    <p class="busy-note" role="status"><LoaderCircle class="spin" size={12} /> Writing channel and verifying the readback...</p>
   {/if}
   <p class="hint">The value is only accepted after the base station reads back the requested channel. Failure will not trigger an automatic rollback.</p>
   <div class="modal-actions">

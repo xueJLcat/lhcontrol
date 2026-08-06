@@ -24,12 +24,16 @@
   import type { PowerFeedback, PowerTarget, StationInfo } from './lib/types';
   import {
     canSetPower, channelChangeBlockedReason, hasCurrentChannel, hasVerifiedPowerState, isCurrentPowerState,
-    powerStateValue, powerTargetLabel, sameStationInfo, stateLabel
+    powerTargetLabel, sameStationInfo, stateLabel
   } from './lib/station';
   import { formatBulkResult, formatTerminalScanResult, summarizeBulkResult } from './lib/result-format';
   import { clearToasts, pushToast } from './lib/toast';
   import { deriveOperationLocks, type GlobalOperation } from './lib/operation-state';
+  import { ExternalScanCoordinator, type ExternalScanEvent } from './lib/external-scan';
+  import { OperationGate } from './lib/operation-gate';
+  import { PowerFeedbackRegistry } from './lib/power-feedback';
   import { RevisionGate } from './lib/revision-gate';
+  import { ScanTimer } from './lib/scan-timer';
   import AppHeader from './lib/components/AppHeader.svelte';
   import StationCard from './lib/components/StationCard.svelte';
   import ChannelMap from './lib/components/ChannelMap.svelte';
@@ -40,17 +44,11 @@
 
   let stations: StationInfo[] = [];
   let statusMessage = 'Ready to scan.';
-  let statusEpoch = 0;
   let gattOperations = new Set<string>();
   let configOperations = new Set<string>();
   let powerTargetByAddress: Record<string, PowerTarget | undefined> = {};
-  let powerFeedbackByAddress: Record<string, PowerFeedback | undefined> = {};
-  const powerFeedbackTimers = new Map<string, ReturnType<typeof setTimeout>>();
-  const powerFeedbackRetentionMs = 20_000;
-  // Pending feedback is normally replaced when its operation settles. If that
-  // commit is legitimately dropped (a scan epoch superseded it), expire the
-  // stale pending note instead of showing "Switching..." forever.
-  const powerFeedbackPendingRetentionMs = 60_000;
+  let powerFeedbackMap: Record<string, PowerFeedback | undefined> = {};
+  const powerFeedback = new PowerFeedbackRegistry((next) => powerFeedbackMap = next);
   let globalOperation: GlobalOperation = 'idle';
   let bulkTarget: PowerTarget | null = null;
   let editingAddress: string | null = null;
@@ -65,148 +63,53 @@
   let cancelExternalScanStartedListener: (() => void) | null = null;
   let cancelExternalScanCancelledListener: (() => void) | null = null;
   let apiRunning = false;
+  let apiAddress = '';
   let apiError = '';
   let configWarnings: string[] = [];
   let configWritable = true;
   const reportedConfigWarnings = new Set<string>();
   let externalScanning = false;
-  let externalScanID: number | null = null;
-  let latestExternalScanID = 0;
-  let pendingExternalScanTerminal: ExternalScanEvent | null = null;
-  let externalScanRecoveryEpoch: number | null = null;
-  let externalScanRecoveryStatusEpoch: number | null = null;
   let stoppingScan = false;
   let stopRequestPending = false;
   let stopRequestGeneration = 0;
-  let scanStartedAt: number | null = null;
   let scanElapsed = 0;
-  let scanTimer: ReturnType<typeof setInterval> | null = null;
+  const scanTimer = new ScanTimer((seconds) => scanElapsed = seconds);
   const listRevisions = new RevisionGate();
   const apiRevisions = new RevisionGate();
-  let scanEpoch = 0;
-  let nextStationRevision = 0;
-  let stationRevisions = new Map<string, number>();
-  // Operation ownership tokens survive a scan-epoch bump (unlike
-  // stationRevisions), so an operation settling mid-scan can still release the
-  // busy flags it owns. A newer operation on the same station overwrites the
-  // token and protects its own flags from the older operation's cleanup.
-  const stationOpTokens = new Map<string, number>();
+  const gates = new OperationGate();
   let disposed = false;
   let startupPending = true;
 
-  interface ExternalScanEvent {
-    id: number;
-    stations?: StationInfo[];
-    error?: string;
-  }
-
-  async function matchesUnknownExternalScan(event: ExternalScanEvent): Promise<boolean> {
-    // The app may have attached after the start event. In that case adopt the
-    // first terminal ID only after confirming the backend scan has ended.
-    if (!externalScanning || externalScanID !== null) return false;
-    const epoch = scanEpoch;
-    const scanning = await IsScanning().catch(() => true);
-    return externalScanning && externalScanID === null && scanEpoch === epoch && !scanning;
-  }
-
-  function beginExternalScan(id: number | null) {
-    beginScanEpoch();
-    listRevisions.next();
-    prepareForScan(false);
-    externalScanRecoveryEpoch = null;
-    externalScanRecoveryStatusEpoch = null;
-    pendingExternalScanTerminal = null;
-    externalScanID = id;
-    externalScanning = true;
-    stoppingScan = false;
-    beginScanTimer();
-    statusMessage = 'Preparing external scan...';
-  }
-
-  function claimExternalScanTerminal(event: ExternalScanEvent): boolean {
-    if (!externalScanning || (externalScanID !== null && event.id !== externalScanID)) return false;
-    latestExternalScanID = Math.max(latestExternalScanID, event.id);
-    externalScanning = false;
-    externalScanID = null;
-    return true;
-  }
-
-  async function claimUnknownExternalScanTerminal(event: ExternalScanEvent): Promise<boolean> {
-    if (event.id <= latestExternalScanID || !externalScanning || externalScanID !== null ||
-      !(await matchesUnknownExternalScan(event))) return false;
-    // An adopted scan has no ID until its terminal event. Claim it before any
-    // further awaits so concurrent terminal notifications cannot both commit.
-    return claimExternalScanTerminal(event);
-  }
-
-  // A terminal event for a scan the UI never tracked must not be dropped: if a
-  // later IsScanning() result still reports that scan as running, adopting it
-  // would create a stale "scanning" state. Remember the newest untracked
-  // terminal so adoption can recover the finished outcome instead, and so its
-  // id can never be adopted through a delayed start event.
-  function rememberUntrackedExternalScanTerminal(event: ExternalScanEvent) {
-    if (externalScanning || externalScanID !== null) return;
-    if (event.id <= latestExternalScanID) return;
-    pendingExternalScanTerminal = event;
-    latestExternalScanID = event.id;
-  }
-
-  // Applies the terminal outcome of a scan that ended while untracked. The
-  // commit is gated like the terminal event handlers, and an incomplete status
-  // read leaves the recovery epochs pending so the periodic check retries.
-  async function recoverUntrackedExternalScan(): Promise<void> {
-    const statusOperation = beginStatusOperation();
-    const operationEpoch = beginScanEpoch();
-    const revision = listRevisions.next();
-    prepareForScan();
-    pendingExternalScanTerminal = null;
-    externalScanRecoveryEpoch = operationEpoch;
-    externalScanRecoveryStatusEpoch = statusOperation;
-    stoppingScan = false;
-    maybeEndScanTimer();
-    const capturedStationRevisions = new Map(stationRevisions);
-    const updated = await GetCurrentStationInfo().catch(() => null);
-    if (!canCommitOperation(operationEpoch) || !listRevisions.isCurrent(revision)) return;
-    if (updated) {
-      applyStationList(updated, revision, capturedStationRevisions);
-    }
-    const scanStatus = await GetScanStatus().catch(() => null);
-    if (disposed || !listRevisions.isCurrent(revision)) return;
-    if (updated && scanStatus) {
-      externalScanRecoveryEpoch = null;
-      externalScanRecoveryStatusEpoch = null;
-    }
-    if (!canCommitStatus(statusOperation)) return;
-    const found = scanStatus?.found ?? stations.filter((station) => station.seenInLatestScan).length;
-    statusMessage = formatTerminalScanResult({
-      state: scanStatus?.state ?? 'completed',
-      found,
-      known: stations.length,
-      error: scanStatus?.error,
-      warnings: scanStatus?.warnings,
-      external: true
-    });
-  }
-
-  async function adoptUnknownExternalScan(): Promise<void> {
-    // The scan observed by IsScanning may have terminated before this
-    // continuation ran; its terminal event then arrived while no listener
-    // tracked the scan. Recover that finished outcome instead of entering a
-    // stale scanning state.
-    if (pendingExternalScanTerminal) {
-      await recoverUntrackedExternalScan();
-      return;
-    }
-    beginExternalScan(null);
-  }
-
-  function beginStatusOperation(): number {
-    return ++statusEpoch;
-  }
-
-  function canCommitStatus(epoch: number): boolean {
-    return !disposed && epoch === statusEpoch;
-  }
+  // Coordination for scans started outside this UI (the HTTP API). All host
+  // callbacks write through component state so Svelte reactivity keeps the
+  // template in sync.
+  const externalScan = new ExternalScanCoordinator({
+    isDisposed: () => disposed,
+    localScanRunning: () => globalOperation === 'scanning',
+    externalScanning: () => externalScanning,
+    setExternalScanning: (value) => externalScanning = value,
+    scanEpoch: () => gates.currentScanEpoch,
+    statusEpoch: () => gates.currentStatusEpoch,
+    beginScanEpoch: () => gates.beginScanEpoch(),
+    beginStatusOperation: () => gates.beginStatusOperation(),
+    canCommitOperation: (epoch) => gates.canCommitOperation(epoch),
+    canCommitStatus: (epoch) => gates.canCommitStatus(epoch),
+    nextListRevision: () => listRevisions.next(),
+    isListRevisionCurrent: (revision) => listRevisions.isCurrent(revision),
+    snapshotStationRevisions: () => gates.snapshotStationRevisions(),
+    prepareForScan: (clearOperations) => prepareForScan(clearOperations),
+    applyStationList: (updated, revision, captured) => applyStationList(updated, revision, captured),
+    seenInLatestScanCount: () => stations.filter((station) => station.seenInLatestScan).length,
+    knownStationCount: () => stations.length,
+    setStatusMessage: (message) => statusMessage = message,
+    setStoppingScan: (value) => stoppingScan = value,
+    beginScanTimer: () => beginScanTimer(),
+    maybeEndScanTimer: () => maybeEndScanTimer(),
+    isScanning: () => IsScanning(),
+    getScanStatus: () => GetScanStatus(),
+    getCurrentStationInfo: () => GetCurrentStationInfo(),
+    notifyExternalScanFailure: (message) => pushToast(message)
+  });
 
   // Display-only channel memory. The backend deliberately wipes a station's
   // channel on transient capability loss (rediscovery, read errors), which
@@ -225,13 +128,19 @@
 
   // Keep the memory current before any derived list recomputes. This block
   // must stay above $: sortedStations so the cache is fresh when sort keys
-  // and child props are evaluated.
+  // and child props are evaluated. Entries for stations that left the list
+  // are dropped so long sessions do not accumulate stale addresses.
   $: {
     const now = Date.now();
+    const present = new Set<string>();
     for (const station of stations) {
+      present.add(station.address);
       if (station.channel > 0) {
         channelMemory.set(station.address, { channel: station.channel, at: now });
       }
+    }
+    for (const cached of [...channelMemory.keys()]) {
+      if (!present.has(cached)) channelMemory.delete(cached);
     }
   }
 
@@ -277,6 +186,9 @@
   $: fleetOn = stations.filter((station) => hasVerifiedPowerState(station, 'on')).length;
   $: fleetStandby = stations.filter((station) => hasVerifiedPowerState(station, 'standby')).length;
   $: fleetSleep = stations.filter((station) => hasVerifiedPowerState(station, 'sleep')).length;
+  // Stations that exist but have no verified state (stale, unconfirmed or
+  // booting) still count, so the summary never goes quiet while cards exist.
+  $: fleetUnverified = Math.max(0, stations.length - fleetOn - fleetStandby - fleetSleep);
   $: actionableOn = stations.filter((station) => canSetPower(station, 'on'));
   $: actionableStandby = stations.filter((station) => canSetPower(station, 'standby'));
   $: actionableSleep = stations.filter((station) => canSetPower(station, 'sleep'));
@@ -319,27 +231,13 @@
   }
 
   function beginScanTimer() {
-    if (scanTimer) return;
-    scanStartedAt = Date.now();
-    scanElapsed = 0;
-    scanTimer = setInterval(() => {
-      if (scanStartedAt !== null) scanElapsed = Math.floor((Date.now() - scanStartedAt) / 1000);
-    }, 1000);
-  }
-
-  function endScanTimer() {
-    if (scanTimer) {
-      clearInterval(scanTimer);
-      scanTimer = null;
-    }
-    scanStartedAt = null;
-    scanElapsed = 0;
+    scanTimer.begin();
   }
 
   function maybeEndScanTimer() {
     // A local scan and an external scan can overlap; the timer belongs to
     // whichever is still running, so only stop when both have finished.
-    if (globalOperation !== 'scanning' && !externalScanning) endScanTimer();
+    if (globalOperation !== 'scanning' && !externalScanning) scanTimer.end();
   }
 
   function setGattBusy(address: string, busy: boolean) {
@@ -356,61 +254,6 @@
     configOperations = next;
   }
 
-  function clearPowerFeedbackTimer(address: string) {
-    const timer = powerFeedbackTimers.get(address);
-    if (timer) clearTimeout(timer);
-    powerFeedbackTimers.delete(address);
-  }
-
-  function clearPowerFeedback(address: string) {
-    clearPowerFeedbackTimer(address);
-    if (!powerFeedbackByAddress[address]) return;
-    const next = { ...powerFeedbackByAddress };
-    delete next[address];
-    powerFeedbackByAddress = next;
-  }
-
-  function clearAllPowerFeedback() {
-    for (const timer of powerFeedbackTimers.values()) clearTimeout(timer);
-    powerFeedbackTimers.clear();
-    powerFeedbackByAddress = {};
-  }
-
-  function setPowerFeedback(
-    address: string,
-    feedback: Omit<PowerFeedback, 'createdAt'>
-  ) {
-    clearPowerFeedbackTimer(address);
-    const createdAt = Date.now();
-    powerFeedbackByAddress = {
-      ...powerFeedbackByAddress,
-      [address]: { ...feedback, createdAt }
-    };
-    const retentionMs = feedback.kind === 'pending'
-      ? powerFeedbackPendingRetentionMs
-      : powerFeedbackRetentionMs;
-    powerFeedbackTimers.set(address, setTimeout(() => {
-      if (powerFeedbackByAddress[address]?.createdAt === createdAt) {
-        clearPowerFeedback(address);
-      }
-    }, retentionMs));
-  }
-
-  function reconcilePowerFeedback(updated: StationInfo[]) {
-    for (const station of updated) {
-      const feedback = powerFeedbackByAddress[station.address];
-      if (!feedback || feedback.kind === 'pending') continue;
-      const targetChanged = feedback.target !== undefined &&
-        station.powerFresh && station.powerStateConfirmed &&
-        station.powerState !== powerStateValue(feedback.target);
-      const feedbackReadAt = feedback.readAt ? Date.parse(feedback.readAt) : Number.NaN;
-      const stationReadAt = station.lastPowerReadAt ? Date.parse(station.lastPowerReadAt) : Number.NaN;
-      const newerRead = Number.isFinite(feedbackReadAt) && Number.isFinite(stationReadAt) &&
-        stationReadAt > feedbackReadAt;
-      if (targetChanged || newerRead) clearPowerFeedback(station.address);
-    }
-  }
-
   function commitStations(updated: StationInfo[]) {
     // Reuse the previous object for unchanged stations so no-op background
     // refreshes do not re-render cards or retrigger CSS transitions.
@@ -419,30 +262,11 @@
       const previous = previousByAddress.get(station.address);
       return previous && sameStationInfo(previous, station) ? previous : station;
     });
-    reconcilePowerFeedback(stations);
+    powerFeedback.reconcile(stations);
   }
 
   function gattLockedFor(address: string): boolean {
     return stationLocked || (gattCapacityReached && !gattOperations.has(address));
-  }
-
-  function stationRevision(address: string): number {
-    return stationRevisions.get(address) ?? 0;
-  }
-
-  function beginStationOperationRevision(address: string): number {
-    const revision = ++nextStationRevision;
-    stationRevisions = new Map(stationRevisions).set(address, revision);
-    stationOpTokens.set(address, revision);
-    return revision;
-  }
-
-  function canCommitStationOperation(epoch: number, address: string, revision: number): boolean {
-    return canCommitOperation(epoch) && stationRevision(address) === revision;
-  }
-
-  function canCleanupStationOperation(address: string, revision: number): boolean {
-    return !disposed && stationOpTokens.get(address) === revision;
   }
 
   function applyStationList(
@@ -459,28 +283,18 @@
     const currentByAddress = new Map(stations.map((station) => [station.address, station]));
     const incomingAddresses = new Set(incoming.map((station) => station.address));
     const merged = incoming.map((station) =>
-      stationRevision(station.address) === (capturedStationRevisions.get(station.address) ?? 0)
+      gates.stationRevision(station.address) === (capturedStationRevisions.get(station.address) ?? 0)
         ? station
         : currentByAddress.get(station.address) ?? station
     );
     for (const current of stations) {
       if (!incomingAddresses.has(current.address) &&
-        stationRevision(current.address) !== (capturedStationRevisions.get(current.address) ?? 0)) {
+        gates.stationRevision(current.address) !== (capturedStationRevisions.get(current.address) ?? 0)) {
         merged.push(current);
       }
     }
     commitStations(merged);
     return true;
-  }
-
-  function canCommitOperation(epoch: number): boolean {
-    return !disposed && epoch === scanEpoch;
-  }
-
-  function beginScanEpoch(): number {
-    scanEpoch += 1;
-    stationRevisions = new Map();
-    return scanEpoch;
   }
 
   function prepareForScan(clearOperations = true) {
@@ -494,10 +308,10 @@
     if (clearOperations) {
       gattOperations = new Set();
       configOperations = new Set();
-      stationOpTokens.clear();
+      gates.clearOperationTokens();
     }
     powerTargetByAddress = {};
-    clearAllPowerFeedback();
+    powerFeedback.clearAll();
   }
 
   function mergeStationUpdates(updated: StationInfo[]) {
@@ -515,106 +329,20 @@
   }
 
   onMount(async () => {
-    const startupScanEpoch = scanEpoch;
+    const startupScanEpoch = gates.currentScanEpoch;
     refreshAPIStatus();
     apiStatusInterval = setInterval(refreshAPIStatus, 15000);
     cancelExternalScanStartedListener = EventsOn('external-scan-started', (value: unknown) => {
-      if (disposed) return;
-      const event = value as ExternalScanEvent;
-      if (event.id <= latestExternalScanID) return;
-      latestExternalScanID = event.id;
-      beginExternalScan(event.id);
+      externalScan.handleStarted(value as ExternalScanEvent);
     });
-    cancelExternalScanListener = EventsOn('external-scan-completed', async (value: unknown) => {
-      const event = value as ExternalScanEvent;
-      if (externalScanID === null
-        ? !(await claimUnknownExternalScanTerminal(event))
-        : !claimExternalScanTerminal(event)) {
-        rememberUntrackedExternalScanTerminal(event);
-        return;
-      }
-      const statusOperation = beginStatusOperation();
-      const operationEpoch = beginScanEpoch();
-      const revision = listRevisions.next();
-      prepareForScan();
-      externalScanRecoveryEpoch = operationEpoch;
-      externalScanRecoveryStatusEpoch = statusOperation;
-      stoppingScan = false;
-      maybeEndScanTimer();
-      const capturedStationRevisions = new Map(stationRevisions);
-      const scanStatus = await GetScanStatus().catch(() => null);
-      if (disposed || !listRevisions.isCurrent(revision)) return;
-      if (scanStatus) {
-        externalScanRecoveryEpoch = null;
-        externalScanRecoveryStatusEpoch = null;
-      }
-      if (!applyStationList(event.stations || [], revision, capturedStationRevisions)) return;
-      if (!canCommitStatus(statusOperation)) return;
-      const found = scanStatus?.found ?? stations.filter((station) => station.seenInLatestScan).length;
-      statusMessage = formatTerminalScanResult({
-        state: 'completed', found, known: stations.length, warnings: scanStatus?.warnings, external: true
-      });
+    cancelExternalScanListener = EventsOn('external-scan-completed', (value: unknown) => {
+      externalScan.handleCompleted(value as ExternalScanEvent);
     });
-    cancelExternalScanFailureListener = EventsOn('external-scan-failed', async (value: unknown) => {
-      const event = value as ExternalScanEvent;
-      if (externalScanID === null
-        ? !(await claimUnknownExternalScanTerminal(event))
-        : !claimExternalScanTerminal(event)) {
-        rememberUntrackedExternalScanTerminal(event);
-        return;
-      }
-      const statusOperation = beginStatusOperation();
-      const message = event.error || 'unknown error';
-      const operationEpoch = beginScanEpoch();
-      const revision = listRevisions.next();
-      prepareForScan();
-      externalScanRecoveryEpoch = operationEpoch;
-      externalScanRecoveryStatusEpoch = statusOperation;
-      if (globalOperation !== 'scanning') stoppingScan = false;
-      maybeEndScanTimer();
-      const capturedStationRevisions = new Map(stationRevisions);
-      const updated = await GetCurrentStationInfo().catch(() => null);
-      if (!canCommitOperation(operationEpoch) || !listRevisions.isCurrent(revision)) return;
-      if (updated) {
-        applyStationList(updated, revision, capturedStationRevisions);
-      }
-      const scanStatus = await GetScanStatus().catch(() => null);
-      if (disposed || !listRevisions.isCurrent(revision)) return;
-      if (updated && scanStatus) {
-        externalScanRecoveryEpoch = null;
-        externalScanRecoveryStatusEpoch = null;
-      }
-      if (!canCommitStatus(statusOperation)) return;
-      statusMessage = formatTerminalScanResult({
-        state: 'failed', error: message, known: stations.length,
-        warnings: scanStatus?.warnings, external: true
-      });
-      pushToast(`External scan failed: ${message}`);
+    cancelExternalScanFailureListener = EventsOn('external-scan-failed', (value: unknown) => {
+      externalScan.handleFailed(value as ExternalScanEvent);
     });
-    cancelExternalScanCancelledListener = EventsOn('external-scan-cancelled', async (value: unknown) => {
-      const event = value as ExternalScanEvent;
-      if (externalScanID === null
-        ? !(await claimUnknownExternalScanTerminal(event))
-        : !claimExternalScanTerminal(event)) {
-        rememberUntrackedExternalScanTerminal(event);
-        return;
-      }
-      const statusOperation = beginStatusOperation();
-      const operationEpoch = beginScanEpoch();
-      const revision = listRevisions.next();
-      prepareForScan();
-      externalScanRecoveryEpoch = operationEpoch;
-      externalScanRecoveryStatusEpoch = statusOperation;
-      if (globalOperation !== 'scanning') stoppingScan = false;
-      maybeEndScanTimer();
-      const capturedStationRevisions = new Map(stationRevisions);
-      const updated = await GetCurrentStationInfo().catch(() => null);
-      if (!canCommitOperation(operationEpoch) || !listRevisions.isCurrent(revision)) return;
-      if (updated) {
-        applyStationList(updated, revision, capturedStationRevisions);
-      }
-      if (!canCommitStatus(statusOperation)) return;
-      statusMessage = 'Scan stopped.';
+    cancelExternalScanCancelledListener = EventsOn('external-scan-cancelled', (value: unknown) => {
+      externalScan.handleCancelled(value as ExternalScanEvent);
     });
     statusCheckInterval = setInterval(periodicStatusCheck, 15000);
     const startupScanning = await IsScanning().catch(() => false);
@@ -623,9 +351,9 @@
     startupPending = false;
     // An external scan event may have arrived while this initial query was
     // pending. Do not let its older result overwrite the newer event state.
-    if (disposed || startupScanEpoch !== scanEpoch) return;
+    if (disposed || startupScanEpoch !== gates.currentScanEpoch) return;
     if (startupScanning) {
-      await adoptUnknownExternalScan();
+      await externalScan.adoptUnknown();
     } else {
       await handleScanClick();
     }
@@ -637,6 +365,7 @@
       if (disposed || !apiRevisions.isCurrent(revision)) return;
       apiRunning = status.running;
       apiError = status.error;
+      apiAddress = status.address;
       configWarnings = status.warnings ?? [];
       configWritable = status.configWritable ?? true;
       const currentWarnings = new Set(configWarnings);
@@ -657,13 +386,14 @@
 
   onDestroy(() => {
     disposed = true;
+    gates.dispose();
     clearToasts();
     listRevisions.dispose();
     apiRevisions.dispose();
-    endScanTimer();
+    scanTimer.dispose();
     if (statusCheckInterval) clearInterval(statusCheckInterval);
     if (apiStatusInterval) clearInterval(apiStatusInterval);
-    clearAllPowerFeedback();
+    powerFeedback.clearAll();
     cancelExternalScanListener?.();
     cancelExternalScanFailureListener?.();
     cancelExternalScanStartedListener?.();
@@ -673,49 +403,29 @@
   async function periodicStatusCheck() {
     if (startupPending || isStatusChecking || isLoading || isBulkLoading || anyDeviceOperation) return;
     globalOperation = 'status-refresh';
-    const statusOperation = statusEpoch;
+    const statusOperation = gates.currentStatusEpoch;
     const revision = listRevisions.next();
-    const capturedStationRevisions = new Map(stationRevisions);
+    const capturedStationRevisions = gates.snapshotStationRevisions();
     try {
       const scanning = await IsScanning();
       if (disposed || !listRevisions.isCurrent(revision)) return;
       const wasExternalScanning = externalScanning;
       if (scanning && !isLoading && !externalScanning) {
-        await adoptUnknownExternalScan();
+        await externalScan.adoptUnknown();
         return;
       }
       externalScanning = scanning && !isLoading;
       if (!scanning) {
         stoppingScan = false;
         if (wasExternalScanning) {
-          externalScanRecoveryEpoch = scanEpoch;
-          externalScanRecoveryStatusEpoch = statusEpoch;
+          externalScan.markRecoveryPending();
         }
-        if (externalScanRecoveryEpoch === scanEpoch) {
-          if (!applyStationList(await GetCurrentStationInfo(), revision, capturedStationRevisions)) {
-            return;
-          }
-          const scanStatus = await GetScanStatus().catch(() => null);
-          if (disposed || !listRevisions.isCurrent(revision)) return;
-          if (!scanStatus) {
-            return;
-          }
-          externalScanRecoveryEpoch = null;
-          const canWriteTerminalStatus = externalScanRecoveryStatusEpoch === statusOperation && canCommitStatus(statusOperation);
-          externalScanRecoveryStatusEpoch = null;
-          if (!canWriteTerminalStatus) return;
-          const found = scanStatus?.found ?? stations.filter((station) => station.seenInLatestScan).length;
-          statusMessage = formatTerminalScanResult({
-            state: scanStatus?.state ?? 'completed',
-            found, known: stations.length,
-            error: scanStatus?.error,
-            warnings: scanStatus?.warnings,
-            external: true
-          });
-        } else if (pendingExternalScanTerminal) {
+        if (externalScan.hasPendingRecovery()) {
+          await externalScan.recoverTrackedTerminal(revision, statusOperation, capturedStationRevisions);
+        } else if (externalScan.hasPendingTerminal()) {
           // A scan ended while no listener tracked it. Apply its terminal
           // outcome now instead of waiting for the next external scan event.
-          await recoverUntrackedExternalScan();
+          await externalScan.recoverUntracked();
           return;
         } else if (!applyStationList(await CheckAllStationStatuses(), revision, capturedStationRevisions)) return;
         maybeEndScanTimer();
@@ -738,7 +448,7 @@
       console.error('Periodic status check failed:', error);
       const fallback = await GetCurrentStationInfo().catch(() => stations);
       if (!applyStationList(fallback, revision, capturedStationRevisions)) return;
-      if (canCommitStatus(statusOperation)) statusMessage = `Status refresh incomplete: ${error}`;
+      if (gates.canCommitStatus(statusOperation)) statusMessage = `Status refresh incomplete: ${error}`;
     } finally {
       if (!disposed && globalOperation === 'status-refresh') globalOperation = 'idle';
     }
@@ -753,20 +463,17 @@
     // The old stop's finally never clears stoppingScan while a scan runs,
     // so this reset cannot be clobbered.
     stoppingScan = false;
-    pendingExternalScanTerminal = null;
+    externalScan.resetForLocalScan();
     globalOperation = 'scanning';
-    externalScanID = null;
-    externalScanRecoveryEpoch = null;
-    externalScanRecoveryStatusEpoch = null;
-    const statusOperation = beginStatusOperation();
+    const statusOperation = gates.beginStatusOperation();
     beginScanTimer();
-    const operationEpoch = beginScanEpoch();
+    const operationEpoch = gates.beginScanEpoch();
     const revision = listRevisions.next();
     statusMessage = 'Scanning for base stations...';
     try {
       if (!applyStationList(await ScanAndFetchStations(), revision)) return;
       const scanStatus = await GetScanStatus().catch(() => null);
-      if (!canCommitOperation(operationEpoch) || !listRevisions.isCurrent(revision) || !canCommitStatus(statusOperation)) return;
+      if (!gates.canCommitOperation(operationEpoch) || !listRevisions.isCurrent(revision) || !gates.canCommitStatus(statusOperation)) return;
       const found = scanStatus?.found ?? stations.filter((station) => station.seenInLatestScan).length;
       statusMessage = formatTerminalScanResult({
         state: scanStatus?.state ?? 'completed',
@@ -775,12 +482,12 @@
         warnings: scanStatus?.warnings
       });
     } catch (error) {
-      if (!canCommitOperation(operationEpoch) || !listRevisions.isCurrent(revision) || !canCommitStatus(statusOperation)) return;
+      if (!gates.canCommitOperation(operationEpoch) || !listRevisions.isCurrent(revision) || !gates.canCommitStatus(statusOperation)) return;
       const updated = await GetCurrentStationInfo().catch(() => null);
-      if (!canCommitOperation(operationEpoch) || !listRevisions.isCurrent(revision)) return;
+      if (!gates.canCommitOperation(operationEpoch) || !listRevisions.isCurrent(revision)) return;
       if (updated) applyStationList(updated, revision);
       const scanStatus = await GetScanStatus().catch(() => null);
-      if (!canCommitOperation(operationEpoch) || !listRevisions.isCurrent(revision) || !canCommitStatus(statusOperation)) return;
+      if (!gates.canCommitOperation(operationEpoch) || !listRevisions.isCurrent(revision) || !gates.canCommitStatus(statusOperation)) return;
       if (stoppingScan || scanStatus?.state === 'cancelled') {
         if (!stopRequestPending) stoppingScan = false;
         statusMessage = 'Scan stopped.';
@@ -797,54 +504,25 @@
 
   async function handleStopScan() {
     if (!scanningActive || stoppingScan) return;
-    const operationEpoch = scanEpoch;
+    const operationEpoch = gates.currentScanEpoch;
     const requestGeneration = ++stopRequestGeneration;
     stoppingScan = true;
     stopRequestPending = true;
     statusMessage = 'Stopping scan...';
     try {
       await StopScan();
-      if (!canCommitOperation(operationEpoch)) return;
+      if (!gates.canCommitOperation(operationEpoch)) return;
       stopRequestPending = false;
       if (!stoppingScan) return;
       if (externalScanning) {
-        const stillScanning = await IsScanning().catch(() => true);
-        if (!canCommitOperation(operationEpoch) || stopRequestGeneration !== requestGeneration) return;
-        if (stillScanning) {
-          statusMessage = 'Stopping scan...';
-        } else {
-          externalScanning = false;
-          externalScanID = null;
-          stoppingScan = false;
-          externalScanRecoveryEpoch = scanEpoch;
-          externalScanRecoveryStatusEpoch = statusEpoch;
-          const revision = listRevisions.next();
-          const capturedStationRevisions = new Map(stationRevisions);
-          const updated = await GetCurrentStationInfo().catch(() => null);
-          if (!canCommitOperation(operationEpoch) || !listRevisions.isCurrent(revision)) return;
-          if (!updated || !applyStationList(updated, revision, capturedStationRevisions)) return;
-          const scanStatus = await GetScanStatus().catch(() => null);
-          if (!canCommitOperation(operationEpoch) || !listRevisions.isCurrent(revision)) return;
-          if (!scanStatus) return;
-          externalScanRecoveryEpoch = null;
-          const canWriteTerminalStatus = externalScanRecoveryStatusEpoch === statusEpoch;
-          externalScanRecoveryStatusEpoch = null;
-          if (canWriteTerminalStatus) {
-            const found = scanStatus?.found ?? stations.filter((station) => station.seenInLatestScan).length;
-            statusMessage = formatTerminalScanResult({
-              state: scanStatus?.state ?? 'cancelled', found, known: stations.length,
-              error: scanStatus?.error, warnings: scanStatus?.warnings, external: true
-            });
-          }
-          maybeEndScanTimer();
-        }
+        await externalScan.finishStop(operationEpoch, () => stopRequestGeneration === requestGeneration);
       } else {
         if (globalOperation !== 'scanning') stoppingScan = false;
         statusMessage = 'Scan stopped.';
         maybeEndScanTimer();
       }
     } catch (error) {
-      if (!canCommitOperation(operationEpoch)) return;
+      if (!gates.canCommitOperation(operationEpoch)) return;
       stopRequestPending = false;
       stoppingScan = false;
       statusMessage = `Unable to stop scan: ${error}`;
@@ -860,7 +538,7 @@
   }
 
   async function fetchLatestList(revision = listRevisions.next()): Promise<boolean> {
-    const capturedStationRevisions = new Map(stationRevisions);
+    const capturedStationRevisions = gates.snapshotStationRevisions();
     try {
       return applyStationList(await GetCurrentStationInfo(), revision, capturedStationRevisions);
     } catch {
@@ -874,7 +552,7 @@
     operationRevision: number
   ): Promise<StationInfo | null> {
     const updated = await GetCurrentStationInfo().catch(() => null);
-    if (!canCommitStationOperation(epoch, address, operationRevision)) return null;
+    if (!gates.canCommitStationOperation(epoch, address, operationRevision)) return null;
     const station = updated?.find((item) => item.address === address) ?? null;
     if (station) {
       mergeStationUpdates([station]);
@@ -895,12 +573,12 @@
   async function setPower(station: StationInfo, state: PowerTarget) {
     if (!canSetPower(station, state) || stationBusy(station.address) || gattLockedFor(station.address)) return;
     const targetLabel = powerTargetLabel(state);
-    const operationEpoch = scanEpoch;
-    const statusOperation = beginStatusOperation();
-    const operationRevision = beginStationOperationRevision(station.address);
+    const operationEpoch = gates.currentScanEpoch;
+    const statusOperation = gates.beginStatusOperation();
+    const operationRevision = gates.beginStationOperationRevision(station.address);
     setGattBusy(station.address, true);
     powerTargetByAddress = { ...powerTargetByAddress, [station.address]: state };
-    setPowerFeedback(station.address, {
+    powerFeedback.set(station.address, {
       kind: 'pending',
       text: `Switching to ${targetLabel}…`,
       target: state
@@ -908,9 +586,9 @@
     statusMessage = `Setting ${station.name} to ${targetLabel}…`;
     try {
       const result = await SetStationPower(station.address, state);
-      if (!canCommitStationOperation(operationEpoch, station.address, operationRevision)) return;
+      if (!gates.canCommitStationOperation(operationEpoch, station.address, operationRevision)) return;
       mergeStationUpdates([result.station]);
-      setPowerFeedback(station.address, result.skipped
+      powerFeedback.set(station.address, result.skipped
         ? {
             kind: 'success', text: `Already ${targetLabel}`, target: state,
             readAt: result.station.lastPowerReadAt
@@ -928,7 +606,7 @@
             target: state,
             readAt: result.station.lastPowerReadAt
           });
-      if (canCommitStatus(statusOperation)) {
+      if (gates.canCommitStatus(statusOperation)) {
         statusMessage = result.skipped
           ? `${station.name} is already ${targetLabel}; no command was sent.`
           : result.confirmed
@@ -938,22 +616,22 @@
             : `${station.name}: ${targetLabel} command sent; this firmware cannot confirm the state.`;
       }
     } catch (error) {
-      if (!canCommitStationOperation(operationEpoch, station.address, operationRevision)) return;
+      if (!gates.canCommitStationOperation(operationEpoch, station.address, operationRevision)) return;
       const errorText = String(error);
       const actual = await fetchStationUpdate(station.address, operationEpoch, operationRevision);
-      if (!canCommitStationOperation(operationEpoch, station.address, operationRevision)) return;
-      setPowerFeedback(station.address, {
+      if (!gates.canCommitStationOperation(operationEpoch, station.address, operationRevision)) return;
+      powerFeedback.set(station.address, {
         kind: 'error',
         text: `Failed · ${powerReadbackLabel(actual)}`,
         target: state,
         readAt: actual?.lastPowerReadAt
       });
-      if (canCommitStatus(statusOperation)) {
+      if (gates.canCommitStatus(statusOperation)) {
         statusMessage = `Power change failed for ${station.name}: ${errorText}`;
         pushToast(`Power change failed for ${station.name}: ${errorText}`);
       }
     } finally {
-      if (canCleanupStationOperation(station.address, operationRevision)) {
+      if (gates.canCleanupStationOperation(station.address, operationRevision)) {
         powerTargetByAddress = { ...powerTargetByAddress, [station.address]: undefined };
         setGattBusy(station.address, false);
       }
@@ -975,17 +653,17 @@
     // capabilities and returns a result for every known station.
     if (bulkLocked || actionablePowerStations(state).length === 0) return;
     globalOperation = 'bulk-power';
-    const statusOperation = beginStatusOperation();
+    const statusOperation = gates.beginStatusOperation();
     bulkTarget = state;
     const targetLabel = powerTargetLabel(state);
-    const operationEpoch = scanEpoch;
+    const operationEpoch = gates.currentScanEpoch;
     statusMessage = `Setting all available stations to ${targetLabel}…`;
     try {
       const result = await SetAllStationsPowerDetailed(state);
-      if (!canCommitOperation(operationEpoch)) return;
+      if (!gates.canCommitOperation(operationEpoch)) return;
       mergeStationUpdates(result.results.map((item) => item.station).filter((item) => Boolean(item?.address)));
       await fetchLatestList();
-      if (!canCommitOperation(operationEpoch)) return;
+      if (!gates.canCommitOperation(operationEpoch)) return;
       for (const item of result.results) {
         const feedback: Pick<PowerFeedback, 'kind' | 'text'> = item.skipped
           ? item.success && item.confirmed
@@ -996,24 +674,24 @@
               : item.success && item.commandSent
               ? { kind: 'warning', text: `${targetLabel} sent · ${item.error || 'status unavailable'}` }
               : { kind: 'error', text: item.error || `Failed to set ${targetLabel}` };
-        setPowerFeedback(item.address, {
+        powerFeedback.set(item.address, {
           ...feedback,
           target: state,
           readAt: item.station?.lastPowerReadAt
         });
       }
       const summary = summarizeBulkResult(result.results);
-      if (!canCommitStatus(statusOperation)) return;
+      if (!gates.canCommitStatus(statusOperation)) return;
       statusMessage = formatBulkResult(targetLabel, summary);
       const toastKind = summary.failed.length ? 'error'
         : summary.unconfirmed || summary.skipped ? 'warning'
           : 'success';
       pushToast(`Bulk ${targetLabel}: ${formatBulkResult(targetLabel, summary)}`, toastKind);
     } catch (error) {
-      if (!canCommitOperation(operationEpoch)) return;
+      if (!gates.canCommitOperation(operationEpoch)) return;
       await fetchLatestList();
-      if (!canCommitOperation(operationEpoch)) return;
-      if (canCommitStatus(statusOperation)) {
+      if (!gates.canCommitOperation(operationEpoch)) return;
+      if (gates.canCommitStatus(statusOperation)) {
         statusMessage = `Bulk ${targetLabel} operation partially failed: ${error}`;
         pushToast(`Bulk ${targetLabel} operation partially failed: ${error}`);
       }
@@ -1038,36 +716,36 @@
     if (stationBusy(station.address) || stationLocked) {
       // Keep the row open for a retry and explain why the submission did
       // nothing; a silent rejection leaves the user typing into a dead input.
-      const statusOperation = beginStatusOperation();
+      const statusOperation = gates.beginStatusOperation();
       const reason = `Rename blocked: another operation is in progress for ${station.name}.`;
-      if (canCommitStatus(statusOperation)) statusMessage = reason;
+      if (gates.canCommitStatus(statusOperation)) statusMessage = reason;
       pushToast(reason, 'warning');
       return;
     }
     cancelRename();
     if (name === station.name) return;
     setConfigBusy(station.address, true);
-    const statusOperation = beginStatusOperation();
-    const operationEpoch = scanEpoch;
-    const operationRevision = beginStationOperationRevision(station.address);
+    const statusOperation = gates.beginStatusOperation();
+    const operationEpoch = gates.currentScanEpoch;
+    const operationRevision = gates.beginStationOperationRevision(station.address);
     try {
       await RenameStationByAddress(station.address, name);
-      if (!canCommitStationOperation(operationEpoch, station.address, operationRevision)) return;
+      if (!gates.canCommitStationOperation(operationEpoch, station.address, operationRevision)) return;
       await fetchStationUpdate(station.address, operationEpoch, operationRevision);
-      if (!canCommitStationOperation(operationEpoch, station.address, operationRevision)) return;
+      if (!gates.canCommitStationOperation(operationEpoch, station.address, operationRevision)) return;
       stations = stations.map((current) => current.address === station.address
         ? withStationChanges(current, { name: name || current.originalName })
         : current);
-      if (canCommitStatus(statusOperation)) statusMessage = name ? `Renamed to ${name}.` : `Reset name for ${station.originalName}.`;
+      if (gates.canCommitStatus(statusOperation)) statusMessage = name ? `Renamed to ${name}.` : `Reset name for ${station.originalName}.`;
     } catch (error) {
-      if (!canCommitStationOperation(operationEpoch, station.address, operationRevision)) return;
-      if (canCommitStatus(statusOperation)) {
+      if (!gates.canCommitStationOperation(operationEpoch, station.address, operationRevision)) return;
+      if (gates.canCommitStatus(statusOperation)) {
         statusMessage = `Error renaming: ${error}`;
         pushToast(`Error renaming: ${error}`);
       }
     } finally {
       refreshAPIStatus();
-      if (canCleanupStationOperation(station.address, operationRevision)) {
+      if (gates.canCleanupStationOperation(station.address, operationRevision)) {
         setConfigBusy(station.address, false);
       }
     }
@@ -1076,25 +754,25 @@
   async function identify(station: StationInfo) {
     if (stationBusy(station.address) || gattLockedFor(station.address)) return;
     setGattBusy(station.address, true);
-    const statusOperation = beginStatusOperation();
-    const operationEpoch = scanEpoch;
-    const operationRevision = beginStationOperationRevision(station.address);
+    const statusOperation = gates.beginStatusOperation();
+    const operationEpoch = gates.currentScanEpoch;
+    const operationRevision = gates.beginStationOperationRevision(station.address);
     try {
       await IdentifyStation(station.address);
-      if (!canCommitStationOperation(operationEpoch, station.address, operationRevision)) return;
+      if (!gates.canCommitStationOperation(operationEpoch, station.address, operationRevision)) return;
       await fetchStationUpdate(station.address, operationEpoch, operationRevision);
-      if (!canCommitStationOperation(operationEpoch, station.address, operationRevision)) return;
-      if (canCommitStatus(statusOperation)) statusMessage = `Identify signal sent to ${station.name}.`;
+      if (!gates.canCommitStationOperation(operationEpoch, station.address, operationRevision)) return;
+      if (gates.canCommitStatus(statusOperation)) statusMessage = `Identify signal sent to ${station.name}.`;
     } catch (error) {
-      if (!canCommitStationOperation(operationEpoch, station.address, operationRevision)) return;
+      if (!gates.canCommitStationOperation(operationEpoch, station.address, operationRevision)) return;
       await fetchStationUpdate(station.address, operationEpoch, operationRevision);
-      if (!canCommitStationOperation(operationEpoch, station.address, operationRevision)) return;
-      if (canCommitStatus(statusOperation)) {
+      if (!gates.canCommitStationOperation(operationEpoch, station.address, operationRevision)) return;
+      if (gates.canCommitStatus(statusOperation)) {
         statusMessage = `Identify failed for ${station.name}: ${error}`;
         pushToast(`Identify failed for ${station.name}: ${error}`);
       }
     } finally {
-      if (canCleanupStationOperation(station.address, operationRevision)) {
+      if (gates.canCleanupStationOperation(station.address, operationRevision)) {
         setGattBusy(station.address, false);
       }
     }
@@ -1103,14 +781,14 @@
   async function refreshCapabilities(station: StationInfo) {
     if (stationBusy(station.address) || gattLockedFor(station.address)) return;
     setGattBusy(station.address, true);
-    const statusOperation = beginStatusOperation();
-    const operationEpoch = scanEpoch;
-    const operationRevision = beginStationOperationRevision(station.address);
+    const statusOperation = gates.beginStatusOperation();
+    const operationEpoch = gates.currentScanEpoch;
+    const operationRevision = gates.beginStationOperationRevision(station.address);
     try {
       const updated = await RefreshStationCapabilities(station.address);
-      if (!canCommitStationOperation(operationEpoch, station.address, operationRevision)) return;
+      if (!gates.canCommitStationOperation(operationEpoch, station.address, operationRevision)) return;
       stations = stations.map((current) => current.address === station.address ? updated : current);
-      if (canCommitStatus(statusOperation)) {
+      if (gates.canCommitStatus(statusOperation)) {
         const message = updated.lastError
           ? `Capabilities refreshed for ${station.name}, but some values are unavailable: ${updated.lastError}`
           : `Capabilities refreshed for ${station.name}.`;
@@ -1118,15 +796,15 @@
         if (updated.lastError) pushToast(message, 'warning');
       }
     } catch (error) {
-      if (!canCommitStationOperation(operationEpoch, station.address, operationRevision)) return;
+      if (!gates.canCommitStationOperation(operationEpoch, station.address, operationRevision)) return;
       await fetchStationUpdate(station.address, operationEpoch, operationRevision);
-      if (!canCommitStationOperation(operationEpoch, station.address, operationRevision)) return;
-      if (canCommitStatus(statusOperation)) {
+      if (!gates.canCommitStationOperation(operationEpoch, station.address, operationRevision)) return;
+      if (gates.canCommitStatus(statusOperation)) {
         statusMessage = `Capability refresh failed for ${station.name}: ${error}`;
         pushToast(`Capability refresh failed for ${station.name}: ${error}`);
       }
     } finally {
-      if (canCleanupStationOperation(station.address, operationRevision)) {
+      if (gates.canCleanupStationOperation(station.address, operationRevision)) {
         setGattBusy(station.address, false);
       }
     }
@@ -1158,31 +836,27 @@
     // the write is in flight, and the post-await status messages must not
     // dereference a null selectedStation.
     const stationName = selectedStation.name;
-    const statusOperation = beginStatusOperation();
-    const operationEpoch = scanEpoch;
-    const operationRevision = beginStationOperationRevision(address);
+    const statusOperation = gates.beginStatusOperation();
+    const operationEpoch = gates.currentScanEpoch;
+    const operationRevision = gates.beginStationOperationRevision(address);
     setGattBusy(address, true);
     channelError = '';
     channelWarning = false;
     try {
-      const result = await SetStationChannel(address, targetChannel, allowUnknownConflictRisk) as Awaited<ReturnType<typeof SetStationChannel>> & {
-        commandSent?: boolean;
-        confirmed?: boolean;
-        confirmationError?: string;
-      };
-      if (!canCommitStationOperation(operationEpoch, address, operationRevision)) return;
+      const result = await SetStationChannel(address, targetChannel, allowUnknownConflictRisk);
+      if (!gates.canCommitStationOperation(operationEpoch, address, operationRevision)) return;
       let actual = result.station?.address ? result.station : null;
       if (actual) {
         mergeStationUpdates([actual]);
       } else {
         actual = await fetchStationUpdate(address, operationEpoch, operationRevision);
-        if (!canCommitStationOperation(operationEpoch, address, operationRevision)) return;
+        if (!gates.canCommitStationOperation(operationEpoch, address, operationRevision)) return;
       }
       if (result.confirmed === false) {
         const warning = result.confirmationError || 'Channel readback is unavailable.';
         channelError = `Channel command sent but unconfirmed: ${warning} Readback: ${channelReadbackLabel(actual)}.`;
         channelWarning = true;
-        if (canCommitStatus(statusOperation)) statusMessage = `${stationName}: channel command sent, but confirmation failed. ${warning}`;
+        if (gates.canCommitStatus(statusOperation)) statusMessage = `${stationName}: channel command sent, but confirmation failed. ${warning}`;
         return;
       }
       if (!actual) {
@@ -1191,21 +865,21 @@
           : station));
       }
       channelEditorOpen = false;
-      if (canCommitStatus(statusOperation)) statusMessage = result.commandSent
+      if (gates.canCommitStatus(statusOperation)) statusMessage = result.commandSent
         ? `Channel changed from ${result.previousChannel || 'unknown'} to ${result.channel}. ${result.warnings.join(' ')}`
         : `Channel already set to ${result.channel}; no command was sent. ${result.warnings.join(' ')}`;
     } catch (error) {
-      if (!canCommitStationOperation(operationEpoch, address, operationRevision)) return;
+      if (!gates.canCommitStationOperation(operationEpoch, address, operationRevision)) return;
       const actual = await fetchStationUpdate(address, operationEpoch, operationRevision);
-      if (!canCommitStationOperation(operationEpoch, address, operationRevision)) return;
+      if (!gates.canCommitStationOperation(operationEpoch, address, operationRevision)) return;
       channelError = `${String(error)} Readback: ${channelReadbackLabel(actual)}.`;
       channelWarning = false;
-      if (canCommitStatus(statusOperation)) {
+      if (gates.canCommitStatus(statusOperation)) {
         statusMessage = `Channel change failed: ${channelError}`;
         pushToast(statusMessage);
       }
     } finally {
-      if (canCleanupStationOperation(address, operationRevision)) {
+      if (gates.canCleanupStationOperation(address, operationRevision)) {
         setGattBusy(address, false);
       }
     }
@@ -1239,6 +913,7 @@
     onCount={fleetOn}
     standbyCount={fleetStandby}
     sleepCount={fleetSleep}
+    unverifiedCount={fleetUnverified}
     onScan={handleScanClick}
     onStop={handleStopScan}
     stopping={stoppingScan}
@@ -1250,7 +925,7 @@
       <div class="alert danger" title={conflictDetails} transition:fade={{ duration: 180 }}><CircleAlert size={18} /> <span class="alert-text">Channel conflict: {conflictDetails}</span></div>
     {/if}
     {#if sortedStations.length}
-      <ChannelMap stations={sortedStations} channelOf={displayChannel} onSelect={(address) => selectedAddress = address} />
+      <ChannelMap stations={sortedStations} channelOf={displayChannel} selectedAddress={selectedAddress} onSelect={(address) => selectedAddress = address} />
       <div class="station-grid">
         {#each sortedStations as station, index (station.address)}
           <div
@@ -1262,7 +937,7 @@
               {station}
               channelDisplay={displayChannel(station)}
               renaming={editingAddress === station.address}
-              feedback={powerFeedbackByAddress[station.address]}
+              feedback={powerFeedbackMap[station.address]}
               pendingTarget={powerTargetByAddress[station.address]}
               gattBusy={gattOperations.has(station.address)}
               configBusy={configOperations.has(station.address)}
@@ -1294,7 +969,7 @@
     {/if}
   </main>
 
-  <StatusFooter {statusMessage} {apiRunning} {apiError} {configWarnings} {configWritable} />
+  <StatusFooter {statusMessage} {apiRunning} {apiError} {apiAddress} {configWarnings} {configWritable} />
 </div>
 
 {#if selectedStation}

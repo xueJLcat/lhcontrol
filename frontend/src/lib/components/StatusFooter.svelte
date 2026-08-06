@@ -5,8 +5,11 @@
   export let statusMessage: string;
   export let apiRunning: boolean;
   export let apiError: string;
+  export let apiAddress = '';
   export let configWarnings: string[] = [];
   export let configWritable = true;
+
+  $: apiTitle = apiError || (apiAddress ? `HTTP API ${apiAddress}` : 'HTTP API unavailable');
 </script>
 
 <footer>
@@ -25,7 +28,7 @@
       {configWritable ? 'Config warning' : 'Config read-only'}
     </span>
   {/if}
-  <span class="api-status" class:ok={apiRunning} title={apiError || 'HTTP API 127.0.0.1:7575'}>
+  <span class="api-status" class:ok={apiRunning} title={apiTitle}>
     <span class="api-dot" aria-hidden="true"></span>
     {apiRunning ? 'API ready' : 'API offline'}
   </span>

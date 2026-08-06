@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { sameStationInfo } from './station';
+import { sameStationInfo, stateClass } from './station';
 import type { StationInfo } from './types';
 
 function station(overrides: Partial<StationInfo> = {}): StationInfo {
@@ -51,6 +51,24 @@ function station(overrides: Partial<StationInfo> = {}): StationInfo {
     ...overrides
   } as StationInfo;
 }
+
+describe('stateClass', () => {
+  it('maps numeric states to stylesheet-safe class names', () => {
+    expect(stateClass(station({ powerState: 0 }))).toBe('sleep');
+    expect(stateClass(station({ powerState: 1 }))).toBe('on');
+    expect(stateClass(station({ powerState: 2 }))).toBe('standby');
+    expect(stateClass(station({ powerState: 3 }))).toBe('booting');
+  });
+
+  it('falls back to unknown for unreported or out-of-range states', () => {
+    expect(stateClass(station({ powerState: -1 }))).toBe('unknown');
+    expect(stateClass(station({ powerState: 7 }))).toBe('unknown');
+  });
+
+  it('ignores the backend label so odd casing cannot break selectors', () => {
+    expect(stateClass(station({ powerState: 1, powerStateName: 'ON now' }))).toBe('on');
+  });
+});
 
 describe('sameStationInfo', () => {
   it('accepts the same reference and equal snapshots', () => {

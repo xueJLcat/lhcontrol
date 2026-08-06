@@ -4,19 +4,19 @@
   import { dismissToast, toasts } from '../toast';
 </script>
 
-{#if $toasts.length}
-  <div class="toast-stack" aria-live="polite">
-    {#each $toasts as toast (toast.id)}
-      <div class="toast {toast.kind}" transition:fly={{ x: 24, duration: 220 }}>
-        {#if toast.kind === 'success'}<CircleCheck size={15} />
-        {:else if toast.kind === 'info'}<Info size={15} />
-        {:else}<CircleAlert size={15} />{/if}
-        <span class="toast-text">{toast.text}</span>
-        <button class="icon-btn" title="Dismiss" on:click={() => dismissToast(toast.id)}><X size={14} /></button>
-      </div>
-    {/each}
-  </div>
-{/if}
+<!-- The live region stays mounted even when empty: screen readers only
+     announce insertions into a region that already exists. -->
+<div class="toast-stack" aria-live="polite">
+  {#each $toasts as toast (toast.id)}
+    <div class="toast {toast.kind}" transition:fly={{ x: 24, duration: 220 }}>
+      {#if toast.kind === 'success'}<CircleCheck size={15} />
+      {:else if toast.kind === 'info'}<Info size={15} />
+      {:else}<CircleAlert size={15} />{/if}
+      <span class="toast-text">{toast.text}</span>
+      <button class="icon-btn" title="Dismiss" aria-label="Dismiss notification" on:click={() => dismissToast(toast.id)}><X size={14} /></button>
+    </div>
+  {/each}
+</div>
 
 <style>
   .toast-stack {

@@ -2,9 +2,9 @@
   import { onMount } from 'svelte';
   import { cubicOut } from 'svelte/easing';
   import { fly } from 'svelte/transition';
-  import { CircleCheck, Eye, RefreshCw, Settings2, X } from 'lucide-svelte';
+  import { CircleCheck, Eye, LoaderCircle, RefreshCw, Settings2, X } from 'lucide-svelte';
   import type { Capabilities, StationInfo } from '../types';
-  import { channelChangeBlockedReason, stateLabel } from '../station';
+  import { channelChangeBlockedReason, stateClass, stateLabel } from '../station';
   import { relativeTime } from '../relative-time';
   import { focusTrap } from '../actions';
   import StateBadge from './StateBadge.svelte';
@@ -78,7 +78,7 @@
   <section>
     <h4>Status</h4>
     <dl>
-      <dt>Power</dt><dd><span class="state-text state-text-{stateLabel(station)}">{stateLabel(station)}</span> · {station.powerFresh ? station.powerStateConfirmed ? 'confirmed' : 'unverified' : 'last known, stale'} (raw {station.rawPowerState})</dd>
+      <dt>Power</dt><dd><span class="state-text state-text-{stateClass(station)}">{stateLabel(station)}</span> · {station.powerFresh ? station.powerStateConfirmed ? 'confirmed' : 'unverified' : 'last known, stale'} (raw {station.rawPowerState})</dd>
       <dt>Channel</dt><dd class="mono">{station.channel || 'Unable to verify'}</dd>
       <dt>Connection</dt><dd>{station.connectionState}</dd>
       <dt>Last seen</dt><dd title={station.lastSeenAt || undefined}>{relativeTime(station.lastSeenAt, now) || '—'}</dd>
@@ -91,8 +91,8 @@
       <div class="alert">Capabilities could not be verified. Power commands will retry discovery; unsupported operations will be reported.</div>
     {/if}
     <div class="drawer-actions">
-      <button class="btn" on:click={() => onRefresh(station)} disabled={busy || locked}><RefreshCw size={15} /> Refresh capabilities</button>
-      <button class="btn" on:click={() => onIdentify(station)} disabled={busy || locked} title={station.capabilities.identify ? 'Send the identify signal' : 'Recheck support and identify'}><Eye size={15} /> Identify</button>
+      <button class="btn" on:click={() => onRefresh(station)} disabled={busy || locked}>{#if busy}<LoaderCircle class="spin" size={15} />{:else}<RefreshCw size={15} />{/if} Refresh capabilities</button>
+      <button class="btn" on:click={() => onIdentify(station)} disabled={busy || locked} title={station.capabilities.identify ? 'Send the identify signal' : 'Recheck support and identify'}>{#if busy}<LoaderCircle class="spin" size={15} />{:else}<Eye size={15} />{/if} Identify</button>
       <button
         class="btn primary"
         on:click={() => onOpenChannelEditor(station)}
