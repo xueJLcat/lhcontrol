@@ -7,6 +7,7 @@ afterEach(cleanup);
 
 function renderHeader(overrides: Record<string, unknown> = {}) {
   const onBulkPower = vi.fn();
+  const onOpenSettings = vi.fn();
   render(AppHeader, {
     props: {
       scanning: false,
@@ -23,10 +24,11 @@ function renderHeader(overrides: Record<string, unknown> = {}) {
       onScan: vi.fn(),
       onStop: vi.fn(),
       onBulkPower,
+      onOpenSettings,
       ...overrides
     }
   });
-  return onBulkPower;
+  return { onBulkPower, onOpenSettings };
 }
 
 describe('AppHeader bulk controls', () => {
@@ -51,9 +53,15 @@ describe('AppHeader bulk controls', () => {
   });
 
   it('dispatches the selected bulk target', async () => {
-    const onBulkPower = renderHeader();
+    const { onBulkPower } = renderHeader();
     await fireEvent.click(screen.getByRole('button', { name: 'Standby' }));
     expect(onBulkPower).toHaveBeenCalledWith('standby');
+  });
+
+  it('opens the settings drawer from the gear button', async () => {
+    const { onOpenSettings } = renderHeader();
+    await fireEvent.click(screen.getByRole('button', { name: 'Open settings' }));
+    expect(onOpenSettings).toHaveBeenCalledTimes(1);
   });
 
   it('shows scan progress for an external scan as well as a local scan', () => {

@@ -10,6 +10,10 @@ export function GetAPIStatus() {
   return window['go']['main']['App']['GetAPIStatus']();
 }
 
+export function GetBluetoothAdapter() {
+  return window['go']['main']['App']['GetBluetoothAdapter']();
+}
+
 export function GetCurrentStationInfo() {
   return window['go']['main']['App']['GetCurrentStationInfo']();
 }
@@ -24,6 +28,10 @@ export function IdentifyStation(arg1) {
 
 export function IsScanning() {
   return window['go']['main']['App']['IsScanning']();
+}
+
+export function ListBluetoothAdapters() {
+  return window['go']['main']['App']['ListBluetoothAdapters']();
 }
 
 export function PowerOffAllStations() {
@@ -68,6 +76,10 @@ export function SetAllStationsPower(arg1) {
 
 export function SetAllStationsPowerDetailed(arg1) {
   return window['go']['main']['App']['SetAllStationsPowerDetailed'](arg1);
+}
+
+export function SetBluetoothAdapter(arg1) {
+  return window['go']['main']['App']['SetBluetoothAdapter'](arg1);
 }
 
 export function SetStationChannel(arg1, arg2, arg3) {

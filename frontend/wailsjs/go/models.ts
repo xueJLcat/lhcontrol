@@ -1,5 +1,19 @@
 export namespace bluetooth {
 	
+	export class AdapterInfo {
+	    deviceId: string;
+	    name: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new AdapterInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.deviceId = source["deviceId"];
+	        this.name = source["name"];
+	    }
+	}
 	export class Capabilities {
 	    powerRead: boolean;
 	    powerWrite: boolean;

@@ -1,4 +1,4 @@
-import type { main, station } from '../../wailsjs/go/models';
+import type { bluetooth, main, station } from '../../wailsjs/go/models';
 import type { PowerTarget } from './types';
 import * as bindings from '../../wailsjs/go/main/App';
 
@@ -22,6 +22,10 @@ export function GetAPIStatus(): Promise<main.APIStatus> {
   return call(() => bindings.GetAPIStatus());
 }
 
+export function GetBluetoothAdapter(): Promise<string> {
+  return call(() => bindings.GetBluetoothAdapter());
+}
+
 export function GetCurrentStationInfo(): Promise<station.StationInfo[]> {
   return call(() => bindings.GetCurrentStationInfo());
 }
@@ -38,6 +42,10 @@ export function IsScanning(): Promise<boolean> {
   return call(() => bindings.IsScanning());
 }
 
+export function ListBluetoothAdapters(): Promise<bluetooth.AdapterInfo[]> {
+  return call(() => bindings.ListBluetoothAdapters());
+}
+
 export function RefreshStationCapabilities(address: string): Promise<station.StationInfo> {
   return call(() => bindings.RefreshStationCapabilities(address));
 }
@@ -52,6 +60,10 @@ export function ScanAndFetchStations(): Promise<station.StationInfo[]> {
 
 export function SetAllStationsPowerDetailed(target: PowerTarget): Promise<station.BulkPowerResult> {
   return call(() => bindings.SetAllStationsPowerDetailed(target));
+}
+
+export function SetBluetoothAdapter(deviceID: string): Promise<void> {
+  return call(() => bindings.SetBluetoothAdapter(deviceID));
 }
 
 export function SetStationChannel(address: string, channel: number, allowUnknownConflictRisk: boolean): Promise<station.ChannelChangeResult> {

@@ -7,14 +7,17 @@ import { pushToast } from './lib/toast';
 const api = vi.hoisted(() => ({
   CheckAllStationStatuses: vi.fn(),
   GetAPIStatus: vi.fn(),
+  GetBluetoothAdapter: vi.fn(),
   GetCurrentStationInfo: vi.fn(),
   GetScanStatus: vi.fn(),
   IdentifyStation: vi.fn(),
   IsScanning: vi.fn(),
+  ListBluetoothAdapters: vi.fn(),
   RefreshStationCapabilities: vi.fn(),
   RenameStationByAddress: vi.fn(),
   ScanAndFetchStations: vi.fn(),
   SetAllStationsPowerDetailed: vi.fn(),
+  SetBluetoothAdapter: vi.fn(),
   SetStationChannel: vi.fn(),
   SetStationPower: vi.fn(),
   StopScan: vi.fn()
@@ -71,6 +74,9 @@ beforeEach(() => {
   api.GetCurrentStationInfo.mockResolvedValue([createStation()]);
   api.CheckAllStationStatuses.mockResolvedValue([createStation()]);
   api.StopScan.mockResolvedValue(undefined);
+  api.ListBluetoothAdapters.mockResolvedValue([]);
+  api.GetBluetoothAdapter.mockResolvedValue('');
+  api.SetBluetoothAdapter.mockResolvedValue(undefined);
 });
 
 afterEach(() => {
@@ -1912,5 +1918,74 @@ describe('App asynchronous operations', () => {
     expect(screen.getByText('LHB-NEW')).toBeInTheDocument();
     expect(screen.queryByText('LHB-OLD')).not.toBeInTheDocument();
     expect(screen.queryByText(/Status refresh incomplete/)).not.toBeInTheDocument();
+  });
+});
+
+describe('App settings drawer', () => {
+  it('opens the settings drawer and loads the adapter preference', async () => {
+    api.ListBluetoothAdapters.mockResolvedValue([
+      { deviceId: 'BT-1', name: 'Intel Wireless Bluetooth' },
+      { deviceId: 'BT-2', name: 'CSR Dongle' }
+    ]);
+    api.GetBluetoothAdapter.mockResolvedValue('BT-1');
+    render(App);
+    await screen.findByText('LHB-TEST');
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Open settings' }));
+    expect(await screen.findByRole('dialog', { name: 'Settings' })).toBeInTheDocument();
+    expect(api.ListBluetoothAdapters).toHaveBeenCalledOnce();
+    expect(api.GetBluetoothAdapter).toHaveBeenCalledOnce();
+    expect(screen.getByText('Intel Wireless Bluetooth')).toBeInTheDocument();
+    const selected = screen.getAllByRole('radio').find((radio) => (radio as HTMLInputElement).checked);
+    expect((selected as HTMLInputElement).value).toBe('BT-1');
+  });
+
+  it('closes the settings drawer with Escape', async () => {
+    render(App);
+    await screen.findByText('LHB-TEST');
+    await fireEvent.click(screen.getByRole('button', { name: 'Open settings' }));
+    await screen.findByRole('dialog', { name: 'Settings' });
+
+    await fireEvent.keyDown(window, { key: 'Escape' });
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Settings' })).not.toBeInTheDocument());
+  });
+
+  it('saves a new adapter preference and reports the result', async () => {
+    api.ListBluetoothAdapters.mockResolvedValue([{ deviceId: 'BT-1', name: 'Intel Wireless Bluetooth' }]);
+    render(App);
+    await screen.findByText('LHB-TEST');
+    await fireEvent.click(screen.getByRole('button', { name: 'Open settings' }));
+    await screen.findByRole('dialog', { name: 'Settings' });
+
+    await fireEvent.click(screen.getByText('Intel Wireless Bluetooth'));
+    await waitFor(() => expect(api.SetBluetoothAdapter).toHaveBeenCalledWith('BT-1'));
+    expect(pushToast).toHaveBeenCalledWith('Bluetooth adapter preference saved.', 'success');
+  });
+
+  it('rolls the selection back when saving fails', async () => {
+    api.ListBluetoothAdapters.mockResolvedValue([{ deviceId: 'BT-1', name: 'Intel Wireless Bluetooth' }]);
+    api.GetBluetoothAdapter.mockResolvedValue('BT-1');
+    api.SetBluetoothAdapter.mockRejectedValue(new Error('config locked'));
+    render(App);
+    await screen.findByText('LHB-TEST');
+    await fireEvent.click(screen.getByRole('button', { name: 'Open settings' }));
+    await screen.findByRole('dialog', { name: 'Settings' });
+
+    await fireEvent.click(screen.getByText('Default'));
+    await waitFor(() => expect(api.SetBluetoothAdapter).toHaveBeenCalledWith(''));
+    expect(pushToast).toHaveBeenCalledWith('Bluetooth adapter preference could not be saved: Error: config locked');
+    const selected = screen.getAllByRole('radio').find((radio) => (radio as HTMLInputElement).checked);
+    expect((selected as HTMLInputElement).value).toBe('BT-1');
+  });
+
+  it('replaces the settings drawer when a station is selected', async () => {
+    render(App);
+    await screen.findByText('LHB-TEST');
+    await fireEvent.click(screen.getByRole('button', { name: 'Open settings' }));
+    await screen.findByRole('dialog', { name: 'Settings' });
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Details for LHB-TEST' }));
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Settings' })).not.toBeInTheDocument());
+    expect(screen.getByRole('dialog', { name: 'Station details' })).toBeInTheDocument();
   });
 });

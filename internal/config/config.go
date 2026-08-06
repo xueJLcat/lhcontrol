@@ -13,6 +13,7 @@ import (
 type Config struct {
 	RenamedStations          map[string]string `json:"renamedStations"`
 	RenamedStationsByAddress map[string]string `json:"renamedStationsByAddress"`
+	BluetoothAdapter         string            `json:"bluetoothAdapter"`
 	persistenceBlockedErr    error
 	lastPersistenceErr       error
 	mutex                    sync.RWMutex
@@ -21,6 +22,7 @@ type Config struct {
 type persistedConfig struct {
 	RenamedStations          map[string]string `json:"renamedStations"`
 	RenamedStationsByAddress map[string]string `json:"renamedStationsByAddress,omitempty"`
+	BluetoothAdapter         string            `json:"bluetoothAdapter,omitempty"`
 }
 
 var (
@@ -69,6 +71,7 @@ func (c *Config) Load() error {
 			c.mutex.Lock()
 			c.RenamedStations = make(map[string]string)
 			c.RenamedStationsByAddress = make(map[string]string)
+			c.BluetoothAdapter = ""
 			c.persistenceBlockedErr = nil
 			c.lastPersistenceErr = nil
 			c.mutex.Unlock()
@@ -100,6 +103,7 @@ func (c *Config) Load() error {
 		c.mutex.Lock()
 		c.RenamedStations = make(map[string]string)
 		c.RenamedStationsByAddress = make(map[string]string)
+		c.BluetoothAdapter = ""
 		c.persistenceBlockedErr = nil
 		c.lastPersistenceErr = nil
 		c.mutex.Unlock()
@@ -114,6 +118,7 @@ func (c *Config) Load() error {
 	c.mutex.Lock()
 	c.RenamedStations = loaded.RenamedStations
 	c.RenamedStationsByAddress = loaded.RenamedStationsByAddress
+	c.BluetoothAdapter = loaded.BluetoothAdapter
 	c.persistenceBlockedErr = nil
 	c.lastPersistenceErr = nil
 	c.mutex.Unlock()
@@ -155,6 +160,7 @@ func (c *Config) saveLocked() error {
 	snapshot := persistedConfig{
 		RenamedStations:          make(map[string]string, len(c.RenamedStations)),
 		RenamedStationsByAddress: make(map[string]string, len(c.RenamedStationsByAddress)),
+		BluetoothAdapter:         c.BluetoothAdapter,
 	}
 	for originalName, renamedName := range c.RenamedStations {
 		snapshot.RenamedStations[originalName] = renamedName
@@ -332,6 +338,28 @@ func (c *Config) SetRenamedStationByAddress(address, originalName, newName strin
 		} else {
 			delete(c.RenamedStations, originalName)
 		}
+		return err
+	}
+	return nil
+}
+
+// GetBluetoothAdapter returns the persisted preferred Bluetooth adapter
+// device ID. An empty string means "no preference".
+func (c *Config) GetBluetoothAdapter() string {
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	return c.BluetoothAdapter
+}
+
+// SetBluetoothAdapter persists the preferred Bluetooth adapter device ID and
+// rolls the value back if persistence fails.
+func (c *Config) SetBluetoothAdapter(deviceID string) error {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	previous := c.BluetoothAdapter
+	c.BluetoothAdapter = deviceID
+	if err := c.saveLocked(); err != nil {
+		c.BluetoothAdapter = previous
 		return err
 	}
 	return nil

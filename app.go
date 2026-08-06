@@ -311,6 +311,24 @@ func (a *App) startup(ctx context.Context) {
 		log.Printf("Error loading config: %v", configLoadErr)
 	}
 
+	if preferredAdapter := a.config.GetBluetoothAdapter(); preferredAdapter != "" {
+		adapters, err := bluetooth.ListAdapters()
+		if err != nil {
+			log.Printf("Could not verify preferred Bluetooth adapter: %v", err)
+		} else {
+			found := false
+			for _, adapter := range adapters {
+				if adapter.DeviceID == preferredAdapter {
+					found = true
+					break
+				}
+			}
+			if !found {
+				log.Printf("Preferred Bluetooth adapter %q is no longer available; falling back to the system default", preferredAdapter)
+			}
+		}
+	}
+
 	registerAPIRoutes(a.api, a.stationManager, scanEventCallbacks{
 		nextID: func() uint64 {
 			return a.externalScanID.Add(1)
@@ -613,6 +631,43 @@ func (a *App) RenameStationByAddress(address string, newName string) error {
 
 func (a *App) SaveConfig() error {
 	err := a.stationManager.SaveConfig()
+	a.setConfigPersistenceStatus()
+	return err
+}
+
+// ListBluetoothAdapters returns the Bluetooth radios known to the operating
+// system, in enumeration order.
+func (a *App) ListBluetoothAdapters() ([]bluetooth.AdapterInfo, error) {
+	return bluetooth.ListAdapters()
+}
+
+// GetBluetoothAdapter returns the persisted preferred Bluetooth adapter
+// device ID. An empty string means "no preference".
+func (a *App) GetBluetoothAdapter() string {
+	return a.config.GetBluetoothAdapter()
+}
+
+// SetBluetoothAdapter persists the preferred Bluetooth adapter device ID.
+// An empty deviceID clears the preference back to the default.
+func (a *App) SetBluetoothAdapter(deviceID string) error {
+	if deviceID != "" {
+		adapters, err := bluetooth.ListAdapters()
+		if err != nil {
+			return err
+		}
+		found := false
+		for _, adapter := range adapters {
+			if adapter.DeviceID == deviceID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("Bluetooth adapter %q was not found", deviceID)
+		}
+	}
+	log.Printf("Setting preferred Bluetooth adapter to %q", deviceID)
+	err := a.config.SetBluetoothAdapter(deviceID)
 	a.setConfigPersistenceStatus()
 	return err
 }

@@ -5,20 +5,23 @@
   import { fade } from 'svelte/transition';
   import {
     CheckAllStationStatuses,
+    GetBluetoothAdapter,
     GetCurrentStationInfo,
     GetScanStatus,
     IdentifyStation,
     IsScanning,
+    ListBluetoothAdapters,
     RefreshStationCapabilities,
     RenameStationByAddress,
     ScanAndFetchStations,
     SetAllStationsPowerDetailed,
+    SetBluetoothAdapter,
     SetStationChannel,
     SetStationPower,
     StopScan
   } from './lib/backend';
   import { EventsOn } from '../wailsjs/runtime/runtime';
-  import { station as stationModels } from '../wailsjs/go/models';
+  import { bluetooth as bluetoothModels, station as stationModels } from '../wailsjs/go/models';
   import { Activity, CircleAlert, Radar } from 'lucide-svelte';
   import type { PowerFeedback, PowerTarget, StationInfo } from './lib/types';
   import { classifyScanError, type ScanErrorInfo } from './lib/scan-error';
@@ -41,6 +44,7 @@
   import StationCard from './lib/components/StationCard.svelte';
   import ChannelMap from './lib/components/ChannelMap.svelte';
   import DetailsDrawer from './lib/components/DetailsDrawer.svelte';
+  import SettingsDrawer from './lib/components/SettingsDrawer.svelte';
   import ChannelModal from './lib/components/ChannelModal.svelte';
   import StatusFooter from './lib/components/StatusFooter.svelte';
   import Toast from './lib/components/Toast.svelte';
@@ -63,6 +67,12 @@
   let channelWarning = $state(false);
   let scanError = $state<ScanErrorInfo | null>(null);
   let bulkConfirmTarget = $state<PowerTarget | null>(null);
+  let settingsOpen = $state(false);
+  let settingsAdapters = $state<bluetoothModels.AdapterInfo[]>([]);
+  let settingsLoading = $state(false);
+  let settingsError = $state<string | null>(null);
+  let preferredAdapterId = $state('');
+  let adapterSaving = $state(false);
   let statusCheckInterval: ReturnType<typeof setInterval> | null = null;
   let cancelExternalScanListener: (() => void) | null = null;
   let cancelExternalScanFailureListener: (() => void) | null = null;
@@ -702,6 +712,53 @@
     bulkConfirmTarget = null;
   }
 
+  // The two drawers are mutually exclusive: opening station details must
+  // replace the settings drawer so the overlays never stack on each other.
+  $effect(() => {
+    if (selectedAddress !== null) settingsOpen = false;
+  });
+
+  function openSettings() {
+    selectedAddress = null;
+    settingsOpen = true;
+    void loadAdapterSettings();
+  }
+
+  function closeSettings() {
+    settingsOpen = false;
+  }
+
+  async function loadAdapterSettings() {
+    settingsLoading = true;
+    settingsError = null;
+    try {
+      const [adapters, current] = await Promise.all([ListBluetoothAdapters(), GetBluetoothAdapter()]);
+      settingsAdapters = adapters ?? [];
+      preferredAdapterId = current ?? '';
+    } catch (error) {
+      settingsError = String(error);
+    } finally {
+      settingsLoading = false;
+    }
+  }
+
+  async function selectAdapter(deviceId: string) {
+    if (adapterSaving || deviceId === preferredAdapterId) return;
+    const previous = preferredAdapterId;
+    // Optimistic update keeps the radio responsive; failures roll back.
+    preferredAdapterId = deviceId;
+    adapterSaving = true;
+    try {
+      await SetBluetoothAdapter(deviceId);
+      pushToast(deviceId === '' ? 'Bluetooth adapter preference cleared.' : 'Bluetooth adapter preference saved.', 'success');
+    } catch (error) {
+      preferredAdapterId = previous;
+      pushToast(`Bluetooth adapter preference could not be saved: ${String(error)}`);
+    } finally {
+      adapterSaving = false;
+    }
+  }
+
   async function confirmBulkPower() {
     const state = bulkConfirmTarget;
     bulkConfirmTarget = null;
@@ -949,6 +1006,8 @@
       closeChannelEditor();
     } else if (bulkConfirmTarget) {
       cancelBulkPower();
+    } else if (settingsOpen) {
+      closeSettings();
     } else if (selectedAddress) {
       selectedAddress = null;
     }
@@ -957,7 +1016,7 @@
 
 <svelte:window onkeydown={handleGlobalKeydown} />
 
-<div class="app-container" inert={selectedStation !== null}>
+<div class="app-container" inert={selectedStation !== null || settingsOpen}>
   <AppHeader
     scanning={scanningActive}
     {isBulkLoading}
@@ -980,6 +1039,7 @@
     onStop={handleStopScan}
     stopping={stoppingScan}
     onBulkPower={handleBulkPower}
+    onOpenSettings={openSettings}
   />
 
   <main>
@@ -1058,6 +1118,26 @@
     onRefresh={refreshCapabilities}
     onIdentify={identify}
     onOpenChannelEditor={openChannelEditor}
+  />
+{/if}
+
+{#if settingsOpen}
+  <div
+    class="scrim"
+    role="presentation"
+    transition:fade={dur({ duration: 200 })}
+    onclick={closeSettings}
+  ></div>
+  <SettingsDrawer
+    adapters={settingsAdapters}
+    loading={settingsLoading}
+    loadError={settingsError}
+    selectedDeviceId={preferredAdapterId}
+    busy={adapterSaving}
+    inactive={channelEditorOpen || Boolean(bulkConfirmTarget)}
+    onClose={closeSettings}
+    onRefresh={loadAdapterSettings}
+    onSelect={selectAdapter}
   />
 {/if}
 

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
   import { fade } from 'svelte/transition';
-  import { LoaderCircle, RefreshCw, Square, Zap } from 'lucide-svelte';
+  import { LoaderCircle, RefreshCw, Settings, Square, Zap } from 'lucide-svelte';
   import type { PowerTarget } from '../types';
   import { dur } from '../motion';
   import logo from '../../assets/images/logo-universal.png';
@@ -27,7 +27,8 @@
     onScan,
     onStop,
     stopping = false,
-    onBulkPower
+    onBulkPower,
+    onOpenSettings
   }: {
     scanning: boolean;
     isBulkLoading: boolean;
@@ -50,6 +51,7 @@
     onStop: () => void;
     stopping?: boolean;
     onBulkPower: (state: PowerTarget) => void;
+    onOpenSettings: () => void;
   } = $props();
 
   const fleetTotal = $derived(onCount + standbyCount + sleepCount);
@@ -129,6 +131,9 @@
         <button class="seg-sleep" class:pending={bulkTarget === 'sleep'} class:active={allSleep} onclick={() => onBulkPower('sleep')} disabled={scanning || bulkLocked || !canSleep} title={!canSleep ? 'No actionable station' : bulkLocked ? 'Bluetooth operation in progress' : 'Put all known stations to sleep'}>Sleep</button>
       </div>
     </div>
+    <button class="btn settings-btn" title="Settings" aria-label="Open settings" onclick={onOpenSettings} aria-haspopup="dialog">
+      <Settings size={16} />
+    </button>
   </div>
   {#if untrustedCount > 0}
     <p class="bulk-scope">
@@ -202,6 +207,14 @@
   .bulk-power { flex: 1; min-width: 0; }
   .bulk-seg { flex: 1; display: flex; min-width: 0; }
   .bulk-power button { flex: 1; min-width: 0; }
+  /* Square icon-only button closing the actions row; keeps the row height. */
+  .settings-btn {
+    flex: 0 0 auto;
+    min-width: 34px;
+    padding: 0.45rem 0.55rem;
+    color: var(--text-secondary);
+  }
+  .settings-btn:hover:not(:disabled) { color: var(--color-primary); }
   .fleet-summary {
     display: flex;
     align-items: center;
