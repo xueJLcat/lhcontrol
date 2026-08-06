@@ -893,3 +893,24 @@ func TestAutoSleepSettingsBindings(t *testing.T) {
 		t.Fatalf("auto-sleep settings after simulated restart = %+v", got)
 	}
 }
+
+func TestLanguageBindingsPersistAndValidate(t *testing.T) {
+	t.Setenv("AppData", t.TempDir())
+	app := NewApp()
+	if got := app.GetLanguage(); got != "" {
+		t.Fatalf("fresh language = %q, want system default marker", got)
+	}
+	if err := app.SetLanguage("fr"); err == nil {
+		t.Fatal("SetLanguage() accepted unsupported language")
+	}
+	if err := app.SetLanguage("zh-CN"); err != nil {
+		t.Fatalf("SetLanguage() error = %v", err)
+	}
+	restarted := NewApp()
+	if err := restarted.config.Load(); err != nil {
+		t.Fatalf("config.Load() error = %v", err)
+	}
+	if got := restarted.GetLanguage(); got != "zh-CN" {
+		t.Fatalf("language after simulated restart = %q, want zh-CN", got)
+	}
+}

@@ -12,10 +12,16 @@ import (
 	"lhcontrol/internal/autosleep"
 )
 
+const (
+	LanguageEnglish           = "en"
+	LanguageSimplifiedChinese = "zh-CN"
+)
+
 type Config struct {
 	RenamedStations          map[string]string  `json:"renamedStations"`
 	RenamedStationsByAddress map[string]string  `json:"renamedStationsByAddress"`
 	AutoSleep                autosleep.Settings `json:"autoSleep"`
+	Language                 string             `json:"language,omitempty"`
 	persistenceBlockedErr    error
 	lastPersistenceErr       error
 	mutex                    sync.RWMutex
@@ -25,6 +31,7 @@ type persistedConfig struct {
 	RenamedStations          map[string]string   `json:"renamedStations"`
 	RenamedStationsByAddress map[string]string   `json:"renamedStationsByAddress,omitempty"`
 	AutoSleep                *autosleep.Settings `json:"autoSleep,omitempty"`
+	Language                 string              `json:"language,omitempty"`
 }
 
 var (
@@ -75,6 +82,7 @@ func (c *Config) Load() error {
 			c.RenamedStations = make(map[string]string)
 			c.RenamedStationsByAddress = make(map[string]string)
 			c.AutoSleep = autosleep.DefaultSettings()
+			c.Language = ""
 			c.persistenceBlockedErr = nil
 			c.lastPersistenceErr = nil
 			c.mutex.Unlock()
@@ -107,6 +115,7 @@ func (c *Config) Load() error {
 		c.RenamedStations = make(map[string]string)
 		c.RenamedStationsByAddress = make(map[string]string)
 		c.AutoSleep = autosleep.DefaultSettings()
+		c.Language = ""
 		c.persistenceBlockedErr = nil
 		c.lastPersistenceErr = nil
 		c.mutex.Unlock()
@@ -122,10 +131,18 @@ func (c *Config) Load() error {
 	c.RenamedStations = loaded.RenamedStations
 	c.RenamedStationsByAddress = loaded.RenamedStationsByAddress
 	c.AutoSleep = sanitizeAutoSleep(loaded.AutoSleep)
+	c.Language = sanitizeLanguage(loaded.Language)
 	c.persistenceBlockedErr = nil
 	c.lastPersistenceErr = nil
 	c.mutex.Unlock()
 	return nil
+}
+
+func sanitizeLanguage(language string) string {
+	if language == LanguageEnglish || language == LanguageSimplifiedChinese {
+		return language
+	}
+	return ""
 }
 
 // sanitizeAutoSleep repairs a persisted value that fails validation (for
@@ -180,6 +197,7 @@ func (c *Config) saveLocked() error {
 	snapshot := persistedConfig{
 		RenamedStations:          make(map[string]string, len(c.RenamedStations)),
 		RenamedStationsByAddress: make(map[string]string, len(c.RenamedStationsByAddress)),
+		Language:                 c.Language,
 	}
 	if c.AutoSleep != (autosleep.Settings{}) {
 		autoSleep := c.AutoSleep
@@ -386,6 +404,31 @@ func (c *Config) SetAutoSleep(settings autosleep.Settings) error {
 	c.AutoSleep = settings
 	if err := c.saveLocked(); err != nil {
 		c.AutoSleep = previous
+		return err
+	}
+	return nil
+}
+
+// GetLanguage returns the explicitly persisted UI language. An empty value
+// means that the frontend should follow the operating-system language.
+func (c *Config) GetLanguage() string {
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	return c.Language
+}
+
+// SetLanguage validates and persists the UI language, rolling the in-memory
+// value back when the atomic configuration write fails.
+func (c *Config) SetLanguage(language string) error {
+	if language != LanguageEnglish && language != LanguageSimplifiedChinese {
+		return fmt.Errorf("unsupported language %q", language)
+	}
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	previous := c.Language
+	c.Language = language
+	if err := c.saveLocked(); err != nil {
+		c.Language = previous
 		return err
 	}
 	return nil

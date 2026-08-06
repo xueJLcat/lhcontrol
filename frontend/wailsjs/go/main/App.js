@@ -18,6 +18,10 @@ export function GetCurrentStationInfo() {
   return window['go']['main']['App']['GetCurrentStationInfo']();
 }
 
+export function GetLanguage() {
+  return window['go']['main']['App']['GetLanguage']();
+}
+
 export function GetScanStatus() {
   return window['go']['main']['App']['GetScanStatus']();
 }
@@ -80,6 +84,10 @@ export function SetAllStationsPowerDetailed(arg1) {
 
 export function SetAutoSleepSettings(arg1) {
   return window['go']['main']['App']['SetAutoSleepSettings'](arg1);
+}
+
+export function SetLanguage(arg1) {
+  return window['go']['main']['App']['SetLanguage'](arg1);
 }
 
 export function SetStationChannel(arg1, arg2, arg3) {

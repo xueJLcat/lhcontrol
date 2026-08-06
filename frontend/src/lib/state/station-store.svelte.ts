@@ -30,6 +30,7 @@ import { RevisionGate } from '../revision-gate';
 import { ScanTimer } from '../scan-timer';
 import { ApiStatusPoller } from '../api-status-poller';
 import { ChannelMemory } from '../channel-memory';
+import { t, withDetail } from '../i18n.svelte';
 
 export interface AutoSleepEvent {
   phase: 'started' | 'completed' | 'cancelled' | 'skipped' | 'failed';
@@ -61,7 +62,7 @@ export interface StationStoreUi {
 // the two render-cycle hooks via syncChannelMemory() and explicit calls.
 export class StationStore {
   stations = $state<StationInfo[]>([]);
-  statusMessage = $state('Ready to scan.');
+  statusMessage = $state(t('Ready to scan.'));
   gattOperations = $state(new Set<string>());
   configOperations = $state(new Set<string>());
   powerTargetByAddress = $state<Record<string, PowerTarget | undefined>>({});
@@ -498,8 +499,8 @@ export class StationStore {
           if (!this.disposed && this.listRevisions.isCurrent(revision) && scanStatus &&
             !this.stoppingScan && !this.stopRequestPending) {
             this.statusMessage = scanStatus.state === 'starting'
-              ? 'Preparing external scan...'
-              : 'External scan in progress...';
+              ? t('Preparing external scan...')
+              : t('External scan in progress...');
           }
         }
       }
@@ -511,7 +512,7 @@ export class StationStore {
       // While the scan recovery card is up the Bluetooth outage is already
       // explained; repeating this failure in the status line every poll
       // cycle only re-surfaces the same error.
-      if (this.gates.canCommitStatus(statusOperation) && !this.scanError) this.statusMessage = `Status refresh incomplete: ${error}`;
+      if (this.gates.canCommitStatus(statusOperation) && !this.scanError) this.statusMessage = withDetail('Status refresh incomplete', error);
     } finally {
       if (!this.disposed && this.globalOperation === 'status-refresh') this.globalOperation = 'idle';
     }
@@ -532,7 +533,7 @@ export class StationStore {
     this.beginScanTimer();
     const operationEpoch = this.gates.beginScanEpoch();
     const revision = this.listRevisions.next();
-    this.statusMessage = 'Scanning for base stations...';
+    this.statusMessage = t('Scanning for base stations...');
     try {
       if (!this.applyStationList(await ScanAndFetchStations(), revision)) return;
       const scanStatus = await GetScanStatus().catch(() => null);
@@ -554,7 +555,7 @@ export class StationStore {
       if (!this.gates.canCommitOperation(operationEpoch) || !this.listRevisions.isCurrent(revision) || !this.gates.canCommitStatus(statusOperation)) return;
       if (this.stoppingScan || scanStatus?.state === 'cancelled') {
         if (!this.stopRequestPending) this.stoppingScan = false;
-        this.statusMessage = 'Scan stopped.';
+        this.statusMessage = t('Scan stopped.');
         this.scanError = null;
       } else {
         // The persistent recovery card carries the heading, guidance and raw
@@ -563,8 +564,8 @@ export class StationStore {
         const classified = classifyScanError(error);
         this.scanError = classified;
         this.statusMessage = classified.kind === 'unknown'
-          ? 'Scan failed.'
-          : `Scan failed: ${scanErrorCopy(classified).heading}`;
+          ? t('Scan failed.')
+          : t('Scan failed: {heading}', { heading: scanErrorCopy(classified).heading });
       }
     } finally {
       if (!this.disposed && this.globalOperation === 'scanning') this.globalOperation = 'idle';
@@ -579,7 +580,7 @@ export class StationStore {
     const requestGeneration = ++this.stopRequestGeneration;
     this.stoppingScan = true;
     this.stopRequestPending = true;
-    this.statusMessage = 'Stopping scan...';
+    this.statusMessage = t('Stopping scan...');
     try {
       await StopScan();
       if (!this.gates.canCommitOperation(operationEpoch)) return;
@@ -589,14 +590,14 @@ export class StationStore {
         await this.externalScan.finishStop(operationEpoch, () => this.stopRequestGeneration === requestGeneration);
       } else {
         if (this.globalOperation !== 'scanning') this.stoppingScan = false;
-        this.statusMessage = 'Scan stopped.';
+        this.statusMessage = t('Scan stopped.');
         this.maybeEndScanTimer();
       }
     } catch (error) {
       if (!this.gates.canCommitOperation(operationEpoch)) return;
       this.stopRequestPending = false;
       this.stoppingScan = false;
-      this.statusMessage = `Unable to stop scan: ${error}`;
+      this.statusMessage = withDetail('Unable to stop scan', error);
       pushToast(this.statusMessage);
     } finally {
       // Terminal scan events can advance scanEpoch before StopScan settles.
@@ -632,13 +633,13 @@ export class StationStore {
   }
 
   private powerReadbackLabel(station: StationInfo | null): string {
-    if (!station || station.powerState < 0) return 'unavailable';
-    return `${station.powerFresh ? 'actual' : 'last-known'} ${stateLabel(station)}`;
+    if (!station || station.powerState < 0) return t('unavailable');
+    return `${t(station.powerFresh ? 'actual' : 'last-known')} ${stateLabel(station)}`;
   }
 
   private channelReadbackLabel(station: StationInfo | null): string {
-    if (!station || station.channel <= 0) return 'unavailable';
-    return `${station.channelFresh ? 'actual' : 'last-known'} ${station.channel}`;
+    if (!station || station.channel <= 0) return t('unavailable');
+    return `${t(station.channelFresh ? 'actual' : 'last-known')} ${station.channel}`;
   }
 
   async setPower(station: StationInfo, state: PowerTarget) {
@@ -651,40 +652,40 @@ export class StationStore {
     this.powerTargetByAddress = { ...this.powerTargetByAddress, [station.address]: state };
     this.powerFeedback.set(station.address, {
       kind: 'pending',
-      text: `Switching to ${targetLabel}…`,
+      text: t('Switching to {target}…', { target: targetLabel }),
       target: state
     });
-    this.statusMessage = `Setting ${station.name} to ${targetLabel}…`;
+    this.statusMessage = t('Setting {name} to {target}…', { name: station.name, target: targetLabel });
     try {
       const result = await SetStationPower(station.address, state);
       if (!this.gates.canCommitStationOperation(operationEpoch, station.address, operationRevision)) return;
       this.mergeStationUpdates([result.station]);
       this.powerFeedback.set(station.address, result.skipped
         ? {
-            kind: 'success', text: `Already ${targetLabel}`, target: state,
+            kind: 'success', text: t('Already {target}', { target: targetLabel }), target: state,
             readAt: result.station.lastPowerReadAt
           }
         : result.confirmed
         ? {
-            kind: 'success', text: `${targetLabel} confirmed`, target: state,
+            kind: 'success', text: t('{target} confirmed', { target: targetLabel }), target: state,
             readAt: result.station.lastPowerReadAt
           }
         : {
             kind: 'warning',
             text: result.confirmationError
-              ? `${targetLabel} sent · confirmation failed`
-              : `${targetLabel} sent · status unavailable`,
+              ? t('{target} sent · confirmation failed', { target: targetLabel })
+              : t('{target} sent · status unavailable', { target: targetLabel }),
             target: state,
             readAt: result.station.lastPowerReadAt
           });
       if (this.gates.canCommitStatus(statusOperation)) {
         this.statusMessage = result.skipped
-          ? `${station.name} is already ${targetLabel}; no command was sent.`
+          ? t('{name} is already {target}; no command was sent.', { name: station.name, target: targetLabel })
           : result.confirmed
-          ? `${station.name} is ${targetLabel}.`
+          ? t('{name} is {target}.', { name: station.name, target: targetLabel })
           : result.confirmationError
-            ? `${station.name}: command sent, but confirmation failed. ${result.confirmationError}`
-            : `${station.name}: ${targetLabel} command sent; this firmware cannot confirm the state.`;
+            ? t('{name}: command sent, but confirmation failed. {detail}', { name: station.name, detail: result.confirmationError })
+            : t('{name}: {target} command sent; this firmware cannot confirm the state.', { name: station.name, target: targetLabel });
       }
     } catch (error) {
       if (!this.gates.canCommitStationOperation(operationEpoch, station.address, operationRevision)) return;
@@ -693,13 +694,13 @@ export class StationStore {
       if (!this.gates.canCommitStationOperation(operationEpoch, station.address, operationRevision)) return;
       this.powerFeedback.set(station.address, {
         kind: 'error',
-        text: `Failed · ${this.powerReadbackLabel(actual)}`,
+        text: t('Failed · {readback}', { readback: this.powerReadbackLabel(actual) }),
         target: state,
         readAt: actual?.lastPowerReadAt
       });
       if (this.gates.canCommitStatus(statusOperation)) {
-        this.statusMessage = `Power change failed for ${station.name}: ${errorText}`;
-        pushToast(`Power change failed for ${station.name}: ${errorText}`);
+        this.statusMessage = `${t('Power change failed for {name}', { name: station.name })}: ${errorText}`;
+        pushToast(this.statusMessage);
       }
     } finally {
       if (this.gates.canCleanupStationOperation(station.address, operationRevision)) {
@@ -736,7 +737,7 @@ export class StationStore {
     this.bulkTarget = state;
     const targetLabel = powerTargetLabel(state);
     const operationEpoch = this.gates.currentScanEpoch;
-    this.statusMessage = `Setting all available stations to ${targetLabel}…`;
+    this.statusMessage = t('Setting all available stations to {target}…', { target: targetLabel });
     try {
       const result = await SetAllStationsPowerDetailed(state);
       if (!this.gates.canCommitOperation(operationEpoch)) return;
@@ -746,13 +747,13 @@ export class StationStore {
       for (const item of result.results) {
         const feedback: Pick<PowerFeedback, 'kind' | 'text'> = item.skipped
           ? item.success && item.confirmed
-            ? { kind: 'success', text: `Already ${targetLabel}` }
-            : { kind: 'warning', text: `Skipped · ${item.reason || 'not actionable'}` }
+            ? { kind: 'success', text: t('Already {target}', { target: targetLabel }) }
+            : { kind: 'warning', text: t('Skipped · {reason}', { reason: item.reason || t('not actionable') }) }
             : item.success && item.confirmed
-              ? { kind: 'success', text: `${targetLabel} confirmed` }
+              ? { kind: 'success', text: t('{target} confirmed', { target: targetLabel }) }
               : item.success && item.commandSent
-              ? { kind: 'warning', text: `${targetLabel} sent · ${item.error || 'status unavailable'}` }
-              : { kind: 'error', text: item.error || `Failed to set ${targetLabel}` };
+              ? { kind: 'warning', text: t('{target} sent · {detail}', { target: targetLabel, detail: item.error || t('status unavailable') }) }
+              : { kind: 'error', text: item.error || t('Failed to set {target}', { target: targetLabel }) };
         this.powerFeedback.set(item.address, {
           ...feedback,
           target: state,
@@ -771,8 +772,8 @@ export class StationStore {
       await this.fetchLatestList();
       if (!this.gates.canCommitOperation(operationEpoch)) return;
       if (this.gates.canCommitStatus(statusOperation)) {
-        this.statusMessage = `Bulk ${targetLabel} operation partially failed: ${error}`;
-        pushToast(`Bulk ${targetLabel} operation partially failed: ${error}`);
+        this.statusMessage = `${t('Bulk {target} operation partially failed', { target: targetLabel })}: ${String(error)}`;
+        pushToast(this.statusMessage);
       }
     } finally {
       if (!this.disposed) {
@@ -796,7 +797,7 @@ export class StationStore {
       // Keep the row open for a retry and explain why the submission did
       // nothing; a silent rejection leaves the user typing into a dead input.
       const statusOperation = this.gates.beginStatusOperation();
-      const reason = `Rename blocked: another operation is in progress for ${station.name}.`;
+      const reason = t('Rename blocked: another operation is in progress for {name}.', { name: station.name });
       if (this.gates.canCommitStatus(statusOperation)) this.statusMessage = reason;
       pushToast(reason, 'warning');
       return;
@@ -815,12 +816,12 @@ export class StationStore {
       this.stations = this.stations.map((current) => current.address === station.address
         ? this.withStationChanges(current, { name: name || current.originalName })
         : current);
-      if (this.gates.canCommitStatus(statusOperation)) this.statusMessage = name ? `Renamed to ${name}.` : `Reset name for ${station.originalName}.`;
+      if (this.gates.canCommitStatus(statusOperation)) this.statusMessage = name ? t('Renamed to {name}.', { name }) : t('Reset name for {name}.', { name: station.originalName });
     } catch (error) {
       if (!this.gates.canCommitStationOperation(operationEpoch, station.address, operationRevision)) return;
       if (this.gates.canCommitStatus(statusOperation)) {
-        this.statusMessage = `Error renaming: ${error}`;
-        pushToast(`Error renaming: ${error}`);
+        this.statusMessage = withDetail('Error renaming', error);
+        pushToast(this.statusMessage);
       }
     } finally {
       this.apiStatus.refresh();
@@ -841,14 +842,14 @@ export class StationStore {
       if (!this.gates.canCommitStationOperation(operationEpoch, station.address, operationRevision)) return;
       await this.fetchStationUpdate(station.address, operationEpoch, operationRevision);
       if (!this.gates.canCommitStationOperation(operationEpoch, station.address, operationRevision)) return;
-      if (this.gates.canCommitStatus(statusOperation)) this.statusMessage = `Identify signal sent to ${station.name}.`;
+      if (this.gates.canCommitStatus(statusOperation)) this.statusMessage = t('Identify signal sent to {name}.', { name: station.name });
     } catch (error) {
       if (!this.gates.canCommitStationOperation(operationEpoch, station.address, operationRevision)) return;
       await this.fetchStationUpdate(station.address, operationEpoch, operationRevision);
       if (!this.gates.canCommitStationOperation(operationEpoch, station.address, operationRevision)) return;
       if (this.gates.canCommitStatus(statusOperation)) {
-        this.statusMessage = `Identify failed for ${station.name}: ${error}`;
-        pushToast(`Identify failed for ${station.name}: ${error}`);
+        this.statusMessage = `${t('Identify failed for {name}', { name: station.name })}: ${String(error)}`;
+        pushToast(this.statusMessage);
       }
     } finally {
       if (this.gates.canCleanupStationOperation(station.address, operationRevision)) {
@@ -869,8 +870,8 @@ export class StationStore {
       this.stations = this.stations.map((current) => current.address === station.address ? updated : current);
       if (this.gates.canCommitStatus(statusOperation)) {
         const message = updated.lastError
-          ? `Capabilities refreshed for ${station.name}, but some values are unavailable: ${updated.lastError}`
-          : `Capabilities refreshed for ${station.name}.`;
+          ? `${t('Capabilities refreshed for {name}, but some values are unavailable', { name: station.name })}: ${updated.lastError}`
+          : t('Capabilities refreshed for {name}.', { name: station.name });
         this.statusMessage = message;
         if (updated.lastError) pushToast(message, 'warning');
       }
@@ -879,8 +880,8 @@ export class StationStore {
       await this.fetchStationUpdate(station.address, operationEpoch, operationRevision);
       if (!this.gates.canCommitStationOperation(operationEpoch, station.address, operationRevision)) return;
       if (this.gates.canCommitStatus(statusOperation)) {
-        this.statusMessage = `Capability refresh failed for ${station.name}: ${error}`;
-        pushToast(`Capability refresh failed for ${station.name}: ${error}`);
+        this.statusMessage = `${t('Capability refresh failed for {name}', { name: station.name })}: ${String(error)}`;
+        pushToast(this.statusMessage);
       }
     } finally {
       if (this.gates.canCleanupStationOperation(station.address, operationRevision)) {
@@ -892,6 +893,11 @@ export class StationStore {
   clearChannelEditorFeedback() {
     this.channelError = '';
     this.channelWarning = false;
+  }
+
+  resetLocalizedMessages() {
+    this.statusMessage = t('Ready to scan.');
+    this.powerFeedback.clearAll();
   }
 
   async saveChannel(station: StationInfo, targetChannel: number, allowUnknownConflictRisk: boolean) {
@@ -927,9 +933,9 @@ export class StationStore {
       }
       if (result.confirmed === false) {
         const warning = result.confirmationError || 'Channel readback is unavailable.';
-        this.channelError = `Channel command sent but unconfirmed: ${warning} Readback: ${this.channelReadbackLabel(actual)}.`;
+        this.channelError = `${t('Channel command sent but unconfirmed')}: ${warning} ${t('Readback')}: ${this.channelReadbackLabel(actual)}.`;
         this.channelWarning = true;
-        if (this.gates.canCommitStatus(statusOperation)) this.statusMessage = `${stationName}: channel command sent, but confirmation failed. ${warning}`;
+        if (this.gates.canCommitStatus(statusOperation)) this.statusMessage = t('{name}: channel command sent, but confirmation failed. {detail}', { name: stationName, detail: warning });
         return;
       }
       if (!actual) {
@@ -939,16 +945,16 @@ export class StationStore {
       }
       this.ui.closeChannelEditor();
       if (this.gates.canCommitStatus(statusOperation)) this.statusMessage = result.commandSent
-        ? `Channel changed from ${result.previousChannel || 'unknown'} to ${result.channel}. ${result.warnings.join(' ')}`
-        : `Channel already set to ${result.channel}; no command was sent. ${result.warnings.join(' ')}`;
+        ? t('Channel changed from {previous} to {channel}. {warnings}', { previous: result.previousChannel || t('unknown'), channel: result.channel, warnings: result.warnings.join(' ') })
+        : t('Channel already set to {channel}; no command was sent. {warnings}', { channel: result.channel, warnings: result.warnings.join(' ') });
     } catch (error) {
       if (!this.gates.canCommitStationOperation(operationEpoch, address, operationRevision)) return;
       const actual = await this.fetchStationUpdate(address, operationEpoch, operationRevision);
       if (!this.gates.canCommitStationOperation(operationEpoch, address, operationRevision)) return;
-      this.channelError = `${String(error)} Readback: ${this.channelReadbackLabel(actual)}.`;
+      this.channelError = `${String(error)} ${t('Readback')}: ${this.channelReadbackLabel(actual)}.`;
       this.channelWarning = false;
       if (this.gates.canCommitStatus(statusOperation)) {
-        this.statusMessage = `Channel change failed: ${this.channelError}`;
+        this.statusMessage = `${t('Channel change failed')}: ${this.channelError}`;
         pushToast(this.statusMessage);
       }
     } finally {
@@ -969,8 +975,8 @@ export class StationStore {
         // This lifecycle now owns the global status line. Invalidate a status
         // refresh that began before automatic sleep acquired the backend.
         this.gates.beginStatusOperation();
-        this.statusMessage = 'Auto sleep: scanning and putting all stations to sleep...';
-        pushToast('Session ended — scanning and putting all stations to sleep.', 'info');
+        this.statusMessage = t('Auto sleep: scanning and putting all stations to sleep...');
+        pushToast(t('Session ended — scanning and putting all stations to sleep.'), 'info');
         break;
       case 'completed': {
         this.autoSleepRunning = false;
@@ -978,13 +984,15 @@ export class StationStore {
         const success = event.success ?? 0;
         const failed = event.failed ?? 0;
         const skipped = event.skipped ?? 0;
-        this.statusMessage = `Auto sleep finished: ${success} succeeded, ${failed} failed, ${skipped} skipped.`;
+        this.statusMessage = t('Auto sleep finished: {success} succeeded, {failed} failed, {skipped} skipped.', { success, failed, skipped });
         if (failed > 0) {
-          pushToast(`Auto sleep finished: ${success} succeeded, ${failed} failed${skipped ? `, ${skipped} skipped` : ''}.`, 'warning');
+          pushToast(skipped
+            ? t('Auto sleep finished: {success} succeeded, {failed} failed, {skipped} skipped.', { success, failed, skipped })
+            : t('Auto sleep finished: {success} succeeded, {failed} failed.', { success, failed }), 'warning');
         } else if (skipped > 0) {
-          pushToast(`Auto sleep finished: ${success} succeeded, ${skipped} skipped.`, 'warning');
+          pushToast(t('Auto sleep finished: {success} succeeded, {skipped} skipped.', { success, skipped }), 'warning');
         } else {
-          pushToast(`Auto sleep finished: ${success} station(s) put to sleep.`, 'success');
+          pushToast(t('Auto sleep finished: {success} station(s) put to sleep.', { success }), 'success');
         }
         break;
       }
@@ -995,23 +1003,23 @@ export class StationStore {
         const failed = event.failed ?? 0;
         const skipped = event.skipped ?? 0;
         const details = success || failed || skipped
-          ? `${success} succeeded, ${failed} failed, ${skipped} skipped`
-          : 'no station commands completed';
-        this.statusMessage = `Auto sleep cancelled: ${details}.`;
-        pushToast(`Auto sleep cancelled: ${details}.`, success || failed ? 'warning' : 'info');
+          ? t('{success} succeeded, {failed} failed, {skipped} skipped', { success, failed, skipped })
+          : t('no station commands completed');
+        this.statusMessage = t('Auto sleep cancelled: {details}.', { details });
+        pushToast(this.statusMessage, success || failed ? 'warning' : 'info');
         break;
       }
       case 'skipped':
         this.autoSleepRunning = false;
         this.gates.beginStatusOperation();
-        this.statusMessage = `Auto sleep skipped: ${event.error || 'Bluetooth busy'}.`;
+        this.statusMessage = `${t('Auto sleep skipped')}: ${event.error || t('Bluetooth busy')}.`;
         pushToast(this.statusMessage, 'info');
         break;
       case 'failed':
         this.autoSleepRunning = false;
         this.gates.beginStatusOperation();
-        this.statusMessage = `Auto sleep failed: ${event.error || 'unknown error'}.`;
-        pushToast(`Auto sleep failed: ${event.error || 'unknown error'}.`);
+        this.statusMessage = `${t('Auto sleep failed')}: ${event.error || t('unknown error')}.`;
+        pushToast(this.statusMessage);
         break;
     }
   }

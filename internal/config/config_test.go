@@ -450,3 +450,65 @@ func TestLoadSanitizesInvalidPersistedAutoSleep(t *testing.T) {
 		t.Fatalf("sanitization kept invalid delay %d", got.DelaySeconds)
 	}
 }
+
+func TestLanguagePersistsAcrossReloads(t *testing.T) {
+	t.Setenv("AppData", t.TempDir())
+	cfg := NewConfig()
+	if got := cfg.GetLanguage(); got != "" {
+		t.Fatalf("fresh language = %q, want system default marker", got)
+	}
+	if err := cfg.SetLanguage(LanguageSimplifiedChinese); err != nil {
+		t.Fatalf("SetLanguage() error = %v", err)
+	}
+	reloaded := NewConfig()
+	if err := reloaded.Load(); err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if got := reloaded.GetLanguage(); got != LanguageSimplifiedChinese {
+		t.Fatalf("reloaded language = %q, want %q", got, LanguageSimplifiedChinese)
+	}
+}
+
+func TestSetLanguageRejectsInvalidValue(t *testing.T) {
+	t.Setenv("AppData", t.TempDir())
+	cfg := NewConfig()
+	if err := cfg.SetLanguage("zh-TW"); err == nil {
+		t.Fatal("SetLanguage() accepted unsupported locale")
+	}
+	if got := cfg.GetLanguage(); got != "" {
+		t.Fatalf("invalid language changed value to %q", got)
+	}
+}
+
+func TestSetLanguageRollsBackWhenPersistenceFails(t *testing.T) {
+	t.Setenv("AppData", t.TempDir())
+	originalWriter := configFileWriter
+	configFileWriter = func(string, []byte, os.FileMode) error { return errors.New("disk full") }
+	t.Cleanup(func() { configFileWriter = originalWriter })
+	cfg := NewConfig()
+	if err := cfg.SetLanguage(LanguageSimplifiedChinese); err == nil {
+		t.Fatal("SetLanguage() unexpectedly succeeded")
+	}
+	if got := cfg.GetLanguage(); got != "" {
+		t.Fatalf("failed save retained language %q", got)
+	}
+}
+
+func TestLoadSanitizesUnknownLanguage(t *testing.T) {
+	configRoot := t.TempDir()
+	t.Setenv("AppData", configRoot)
+	configDirectory := filepath.Join(configRoot, "lhcontrol")
+	if err := os.MkdirAll(configDirectory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configDirectory, "config.json"), []byte(`{"language":"fr"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := NewConfig()
+	if err := cfg.Load(); err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if got := cfg.GetLanguage(); got != "" {
+		t.Fatalf("unknown persisted language = %q, want system default marker", got)
+	}
+}

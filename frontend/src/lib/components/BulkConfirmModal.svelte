@@ -6,6 +6,7 @@
   import { powerTargetLabel } from '../station';
   import { focusTrap } from '../actions';
   import { dur } from '../motion';
+  import { t } from '../i18n.svelte';
 
   let {
     target,
@@ -27,9 +28,9 @@
     onConfirm: () => void;
   } = $props();
 
-  const targetLabel = $derived(powerTargetLabel(target).toLowerCase());
-  const confirmVerb = $derived(target === 'on' ? 'Turn on' : target === 'standby' ? 'Set to standby' : 'Put to sleep');
-  const confirmLabel = $derived(`${confirmVerb} ${actionableCount} ${actionableCount === 1 ? 'station' : 'stations'}`);
+  const targetLabel = $derived(powerTargetLabel(target));
+  const confirmVerb = $derived(t(target === 'on' ? 'Turn on' : target === 'standby' ? 'Set to standby' : 'Put to sleep'));
+  const confirmLabel = $derived(t(actionableCount === 1 ? '{verb} {count} station' : '{verb} {count} stations', { verb: confirmVerb, count: actionableCount }));
 </script>
 
 <!-- The dialog stops propagation so clicks inside it never dismiss the
@@ -39,30 +40,29 @@
   class="modal"
   role="dialog"
   aria-modal="true"
-  aria-label="Confirm bulk power"
+  aria-label={t('Confirm bulk power')}
   tabindex="-1"
   use:focusTrap
   transition:scale={dur({ start: 0.96, duration: 180, easing: cubicOut })}
   onclick={(event) => event.stopPropagation()}
 >
   <div class="drawer-head">
-    <div><small>Bulk power</small><h2>Set all known stations to {targetLabel}</h2></div>
-    <button type="button" class="icon-btn" title="Close" aria-label="Close bulk power confirmation" onclick={onCancel} disabled={busy}><X size={18} /></button>
+    <div><small>{t('Bulk power')}</small><h2>{t('Set all known stations to {target}', { target: targetLabel })}</h2></div>
+    <button type="button" class="icon-btn" title={t('Close')} aria-label={t('Close bulk power confirmation')} onclick={onCancel} disabled={busy}><X size={18} /></button>
   </div>
   <p class="modal-note">
     <TriangleAlert size={14} aria-hidden="true" />
-    Some stations are not fully verified. Commands are sent to every station the
-    backend still considers reachable; results may come back unconfirmed.
+    {t('Some stations are not fully verified. Commands are sent to every station the backend still considers reachable; results may come back unconfirmed.')}
   </p>
   <dl class="scope">
-    <dt>Visible &amp; verified</dt><dd class="mono">{visibleCount}</dd>
-    {#if uncertainCount > 0}<dt>Presence uncertain</dt><dd class="mono">{uncertainCount}</dd>{/if}
-    {#if invisibleCount > 0}<dt>Not seen in latest scan</dt><dd class="mono">{invisibleCount}</dd>{/if}
-    <dt>Actionable for {targetLabel}</dt><dd class="mono">{actionableCount}</dd>
+    <dt>{t('Visible & verified')}</dt><dd class="mono">{visibleCount}</dd>
+    {#if uncertainCount > 0}<dt>{t('Presence uncertain')}</dt><dd class="mono">{uncertainCount}</dd>{/if}
+    {#if invisibleCount > 0}<dt>{t('Not seen in latest scan')}</dt><dd class="mono">{invisibleCount}</dd>{/if}
+    <dt>{t('Actionable for {target}', { target: targetLabel })}</dt><dd class="mono">{actionableCount}</dd>
   </dl>
-  {#if busy}<p class="busy-note" role="status"><LoaderCircle class="spin" size={12} /> Applying bulk power...</p>{/if}
+  {#if busy}<p class="busy-note" role="status"><LoaderCircle class="spin" size={12} /> {t('Applying bulk power...')}</p>{/if}
   <div class="modal-actions">
-    <button class="btn" onclick={onCancel} disabled={busy}>Cancel</button>
+    <button class="btn" onclick={onCancel} disabled={busy}>{t('Cancel')}</button>
     <button class="btn primary" onclick={onConfirm} disabled={busy || actionableCount === 0}>{confirmLabel}</button>
   </div>
 </div>

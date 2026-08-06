@@ -6,6 +6,7 @@
   import type { PowerFeedback, PowerTarget, StationInfo } from '../types';
   import type { ScanErrorInfo } from '../scan-error';
   import { dur } from '../motion';
+  import { t } from '../i18n.svelte';
   import ChannelMap from './ChannelMap.svelte';
   import ScanRecovery from './ScanRecovery.svelte';
   import StationCard from './StationCard.svelte';
@@ -58,7 +59,7 @@
 </script>
 
 {#if conflictDetails}
-  <div class="alert danger" title={conflictDetails} transition:fade={dur({ duration: 180 })}><CircleAlert size={18} /> <span class="alert-text">Channel conflict: {conflictDetails}</span></div>
+  <div class="alert danger" title={conflictDetails} transition:fade={dur({ duration: 180 })}><CircleAlert size={18} /> <span class="alert-text">{t('Channel conflict: {detail}', { detail: conflictDetails })}</span></div>
 {/if}
 {#if scanError && !isLoading && !externalScanning}
   <ScanRecovery
@@ -97,13 +98,13 @@
 {:else if isLoading || externalScanning}
   <div class="empty scan" in:fade={dur({ duration: 180 })}>
     <div class="empty-icon"><Radar size={40} /></div>
-    <p>{isLoading ? 'Scanning for base stations...' : 'External scan in progress...'}{scanElapsed >= 1 ? ` ${scanElapsed}s` : ''}</p>
-    <p class="scan-sub">{scanElapsed >= 6 ? 'Reading station states...' : 'Discovering nearby stations...'}</p>
+    <p>{t(isLoading ? 'Scanning for base stations...' : 'External scan in progress...')}{scanElapsed >= 1 ? ` ${scanElapsed}s` : ''}</p>
+    <p class="scan-sub">{t(scanElapsed >= 6 ? 'Reading station states...' : 'Discovering nearby stations...')}</p>
   </div>
 {:else if !scanError}
   <div class="empty">
     <div class="empty-icon"><Activity size={40} /></div>
-    <p>No base stations found.</p>
+    <p>{t('No base stations found.')}</p>
   </div>
 {/if}
 

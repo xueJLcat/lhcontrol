@@ -6,6 +6,7 @@
   import { channelChangeBlockedReason } from '../station';
   import { focusTrap } from '../actions';
   import { dur } from '../motion';
+  import { t } from '../i18n.svelte';
 
   let {
     station,
@@ -63,24 +64,24 @@
   class="modal"
   role="dialog"
   aria-modal="true"
-  aria-label="Change channel"
+  aria-label={t('Change channel')}
   tabindex="-1"
   use:focusTrap
   transition:scale={dur({ start: 0.96, duration: 180, easing: cubicOut })}
   onclick={(event) => event.stopPropagation()}
 >
   <div class="drawer-head">
-    <div><small>Safe channel change</small><h2>{station.name}</h2></div>
-    <button type="button" class="icon-btn" title="Close" aria-label="Close channel editor" onclick={onClose} disabled={busy}><X size={18} /></button>
+    <div><small>{t('Safe channel change')}</small><h2>{station.name}</h2></div>
+    <button type="button" class="icon-btn" title={t('Close')} aria-label={t('Close channel editor')} onclick={onClose} disabled={busy}><X size={18} /></button>
   </div>
   <dl class="def-list">
-    <dt>Original name</dt><dd>{station.originalName}</dd>
-    <dt>Address</dt><dd class="mono">{station.address}</dd>
-    <dt>Current channel</dt><dd class="mono">{station.channel || 'Unknown'}</dd>
+    <dt>{t('Original name')}</dt><dd>{station.originalName}</dd>
+    <dt>{t('Address')}</dt><dd class="mono">{station.address}</dd>
+    <dt>{t('Current channel')}</dt><dd class="mono">{station.channel || t('Unknown')}</dd>
   </dl>
   <fieldset class="ch-field">
-    <legend>Target channel</legend>
-    <div class="ch-grid" role="group" aria-label="Target channel">
+    <legend>{t('Target channel')}</legend>
+    <div class="ch-grid" role="group" aria-label={t('Target channel')}>
       {#each Array.from({ length: 16 }, (_, index) => index + 1) as channel}
         <!-- Occupied cells stay focusable and keep their tooltip: Chromium
              suppresses hover events and title tooltips on truly disabled
@@ -94,28 +95,28 @@
           disabled={busy || locked}
           aria-disabled={occupiedChannels.has(channel)}
           aria-label={occupiedChannels.has(channel)
-            ? `Channel ${channel}, occupied by ${occupiedChannels.get(channel)?.join(', ')}`
+            ? t('Channel {channel}, occupied by {names}', { channel, names: occupiedChannels.get(channel)?.join(', ') ?? '' })
             : undefined}
-          title={occupiedChannels.has(channel) ? `Occupied by ${occupiedChannels.get(channel)?.join(', ')}` : `Channel ${channel}`}
+          title={occupiedChannels.has(channel) ? t('Occupied by {names}', { names: occupiedChannels.get(channel)?.join(', ') ?? '' }) : t('Channel {channel}', { channel })}
           aria-pressed={targetChannel === channel}
           onclick={() => { if (!occupiedChannels.has(channel)) targetChannel = channel; }}
         >{channel}{#if station.channel > 0 && station.channel === channel}<span class="ch-dot" aria-hidden="true"></span>{/if}</button>
       {/each}
     </div>
-    <p class="hint ch-hint">Struck-through channels are occupied by a visible station. The dot marks the current channel.</p>
+    <p class="hint ch-hint">{t('Struck-through channels are occupied by a visible station. The dot marks the current channel.')}</p>
   </fieldset>
   {#if hasUnknownVisibleChannel}
-    <label class="risk"><input type="checkbox" bind:checked={confirmUnknownChannelRisk} disabled={busy || locked} /> I understand that a visible station has an unknown channel, so a conflict cannot be fully ruled out.</label>
+    <label class="risk"><input type="checkbox" bind:checked={confirmUnknownChannelRisk} disabled={busy || locked} /> {t('I understand that a visible station has an unknown channel, so a conflict cannot be fully ruled out.')}</label>
   {/if}
   {#if blockedReason}<div class="alert warning" role="status">{blockedReason}</div>{/if}
   {#if error}<div class="alert" class:danger={!warning} class:warning role="status">{error}</div>{/if}
   {#if busy}
-    <p class="busy-note" role="status"><LoaderCircle class="spin" size={12} /> Writing channel and verifying the readback...</p>
+    <p class="busy-note" role="status"><LoaderCircle class="spin" size={12} /> {t('Writing channel and verifying the readback...')}</p>
   {/if}
-  <p class="hint">The value is only accepted after the base station reads back the requested channel. Failure will not trigger an automatic rollback.</p>
+  <p class="hint">{t('The value is only accepted after the base station reads back the requested channel. Failure will not trigger an automatic rollback.')}</p>
   <div class="modal-actions">
-    <button class="btn" onclick={() => onIdentify(station)} disabled={busy || locked}><Eye size={15} /> Identify this station</button>
-    <button class="btn primary" onclick={save} disabled={saveDisabled}>Confirm change</button>
+    <button class="btn" onclick={() => onIdentify(station)} disabled={busy || locked}><Eye size={15} /> {t('Identify this station')}</button>
+    <button class="btn primary" onclick={save} disabled={saveDisabled}>{t('Confirm change')}</button>
   </div>
 </div>
 

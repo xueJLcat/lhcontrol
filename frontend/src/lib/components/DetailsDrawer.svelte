@@ -8,6 +8,7 @@
   import { relativeTime } from '../relative-time';
   import { focusTrap } from '../actions';
   import { dur } from '../motion';
+  import { t, type TranslationKey } from '../i18n.svelte';
   import StateBadge from './StateBadge.svelte';
 
   let {
@@ -39,7 +40,7 @@
     return () => clearInterval(timer);
   });
 
-  const capabilityGroups: { label: string; entries: [keyof Capabilities, string][] }[] = [
+  const capabilityGroups: { label: TranslationKey; entries: [keyof Capabilities, TranslationKey][] }[] = [
     { label: 'Power', entries: [['powerRead', 'read'], ['powerWrite', 'write'], ['powerNotify', 'notify'], ['standby', 'standby']] },
     { label: 'Channel', entries: [['channelRead', 'read'], ['channelWrite', 'write'], ['channelNotify', 'notify']] },
     { label: 'Other', entries: [['identify', 'identify'], ['deviceInformation', 'device info']] }
@@ -53,9 +54,9 @@
     station.metadata.hardwareRevision ||
     station.metadata.firmwareRevision
   ));
-  const metadataStatus = $derived(station.metadataFresh
+  const metadataStatus = $derived(t(station.metadataFresh
     ? 'loaded and fresh'
-    : hasCachedMetadata ? 'cached, stale' : 'unavailable');
+    : hasCachedMetadata ? 'cached, stale' : 'unavailable'));
   const channelBlockedReason = $derived(channelChangeBlockedReason(station));
   // Rendered like the backend diagnostics (0x09); -1 means no readback yet.
   const rawPowerLabel = $derived(station.rawPowerState < 0
@@ -69,7 +70,7 @@
   aria-modal={inactive ? undefined : 'true'}
   aria-hidden={inactive ? 'true' : undefined}
   inert={inactive}
-  aria-label="Station details"
+  aria-label={t('Station details')}
   tabindex="-1"
   use:focusTrap
   in:fly={dur({ x: 64, duration: 320, easing: cubicOut })}
@@ -77,79 +78,80 @@
 >
   <div class="drawer-head">
     <div>
-      <small>Station details</small>
+      <small>{t('Station details')}</small>
       <div class="drawer-title">
         <h2>{station.name}</h2>
         <StateBadge
           label={stateLabel(station)}
+          state={stateClass(station)}
           unverified={station.powerState >= 0 && station.powerFresh && !station.powerStateConfirmed}
           stale={station.powerState >= 0 && !station.powerFresh}
           booting={station.powerFresh && station.powerState === 3}
         />
       </div>
     </div>
-    <button type="button" class="icon-btn" title="Close" aria-label="Close station details" onclick={onClose}><X size={18} /></button>
+    <button type="button" class="icon-btn" title={t('Close')} aria-label={t('Close station details')} onclick={onClose}><X size={18} /></button>
   </div>
 
   <section>
-    <h4>Status</h4>
+    <h4>{t('Status')}</h4>
     <dl class="def-list">
-      <dt>Power</dt><dd><span class="state-text state-text-{stateClass(station)}">{stateLabel(station)}</span> · {station.powerFresh ? station.powerStateConfirmed ? 'confirmed' : 'unverified' : 'last known, stale'} (raw {rawPowerLabel})</dd>
-      <dt>Channel</dt><dd class="mono">{station.channel || 'Unable to verify'}</dd>
-      <dt>Connection</dt><dd>{station.connectionState}</dd>
-      <dt>Last seen</dt><dd title={station.lastSeenAt || undefined}>{relativeTime(station.lastSeenAt, now) || '—'}</dd>
-      <dt>Last status read</dt><dd title={station.lastReadAt || undefined}>{relativeTime(station.lastReadAt, now) || '—'}</dd>
-      <dt>Power data</dt><dd title={station.lastPowerReadAt || undefined}>{station.powerFresh ? 'fresh' : 'stale or unavailable'} · {relativeTime(station.lastPowerReadAt, now) || 'never'}</dd>
-      <dt>Channel data</dt><dd title={station.lastChannelReadAt || undefined}>{station.channelFresh ? 'fresh' : 'stale or unavailable'} · {relativeTime(station.lastChannelReadAt, now) || 'never'}</dd>
+      <dt>{t('Power')}</dt><dd><span class="state-text state-text-{stateClass(station)}">{stateLabel(station)}</span> · {t(station.powerFresh ? station.powerStateConfirmed ? 'confirmed' : 'unverified' : 'last known, stale')} (raw {rawPowerLabel})</dd>
+      <dt>{t('Channel')}</dt><dd class="mono">{station.channel || t('Unable to verify')}</dd>
+      <dt>{t('Connection')}</dt><dd>{station.connectionState === 'connected' ? t('connected') : station.connectionState === 'disconnected' ? t('disconnected') : station.connectionState}</dd>
+      <dt>{t('Last seen')}</dt><dd title={station.lastSeenAt || undefined}>{relativeTime(station.lastSeenAt, now) || '—'}</dd>
+      <dt>{t('Last status read')}</dt><dd title={station.lastReadAt || undefined}>{relativeTime(station.lastReadAt, now) || '—'}</dd>
+      <dt>{t('Power data')}</dt><dd title={station.lastPowerReadAt || undefined}>{t(station.powerFresh ? 'fresh' : 'stale or unavailable')} · {relativeTime(station.lastPowerReadAt, now) || t('never')}</dd>
+      <dt>{t('Channel data')}</dt><dd title={station.lastChannelReadAt || undefined}>{t(station.channelFresh ? 'fresh' : 'stale or unavailable')} · {relativeTime(station.lastChannelReadAt, now) || t('never')}</dd>
     </dl>
     {#if station.lastError}<div class="alert danger">{station.lastError}</div>{/if}
     {#if !station.capabilitiesKnown}
-      <div class="alert">Capabilities could not be verified. Power commands will retry discovery; unsupported operations will be reported.</div>
+      <div class="alert">{t('Capabilities could not be verified. Power commands will retry discovery; unsupported operations will be reported.')}</div>
     {/if}
     <div class="drawer-actions">
-      <button class="btn" onclick={() => onRefresh(station)} disabled={busy || locked}>{#if busy}<LoaderCircle class="spin" size={15} />{:else}<RefreshCw size={15} />{/if} Refresh capabilities</button>
-      <button class="btn" onclick={() => onIdentify(station)} disabled={busy || locked} title={station.capabilities.identify ? 'Send the identify signal' : 'Recheck support and identify'}>{#if busy}<LoaderCircle class="spin" size={15} />{:else}<Eye size={15} />{/if} Identify</button>
+      <button class="btn" onclick={() => onRefresh(station)} disabled={busy || locked}>{#if busy}<LoaderCircle class="spin" size={15} />{:else}<RefreshCw size={15} />{/if} {t('Refresh capabilities')}</button>
+      <button class="btn" onclick={() => onIdentify(station)} disabled={busy || locked} title={t(station.capabilities.identify ? 'Send the identify signal' : 'Recheck support and identify')}>{#if busy}<LoaderCircle class="spin" size={15} />{:else}<Eye size={15} />{/if} {t('Identify')}</button>
       <button
         class="btn primary"
         onclick={() => onOpenChannelEditor(station)}
         disabled={Boolean(channelBlockedReason) || busy || locked}
-        title={channelBlockedReason || 'Recheck support and change Channel safely'}
-      ><Settings2 size={15} /> Change Channel</button>
+        title={channelBlockedReason || t('Recheck support and change Channel safely')}
+      ><Settings2 size={15} /> {t('Change Channel')}</button>
     </div>
-    {#if station.capabilities.identify}<p class="hint">Identify may wake a sleeping base station.</p>{/if}
+    {#if station.capabilities.identify}<p class="hint">{t('Identify may wake a sleeping base station.')}</p>{/if}
     {#if channelBlockedReason}<p class="hint warning-text">{channelBlockedReason}</p>{/if}
   </section>
 
   <section>
-    <h4>Identity</h4>
+    <h4>{t('Identity')}</h4>
     <dl class="def-list">
-      <dt>Original name</dt><dd>{station.originalName}</dd>
-      <dt>Address</dt><dd class="mono">{station.address}</dd>
-      <dt>Metadata</dt><dd title={station.metadataReadAt || undefined}>{metadataStatus} · {relativeTime(station.metadataReadAt, now) || 'never'}</dd>
+      <dt>{t('Original name')}</dt><dd>{station.originalName}</dd>
+      <dt>{t('Address')}</dt><dd class="mono">{station.address}</dd>
+      <dt>{t('Metadata')}</dt><dd title={station.metadataReadAt || undefined}>{metadataStatus} · {relativeTime(station.metadataReadAt, now) || t('never')}</dd>
     </dl>
   </section>
 
   <section>
-    <h4>Device information</h4>
+    <h4>{t('Device information')}</h4>
     <dl class="def-list">
-      <dt>Manufacturer</dt><dd>{station.metadata.manufacturer || '—'}</dd>
-      <dt>Model</dt><dd>{station.metadata.model || '—'}</dd>
-      <dt>Serial number</dt><dd class="mono">{station.metadata.serialNumber || '—'}</dd>
-      <dt>Hardware</dt><dd class="mono">{station.metadata.hardwareRevision || '—'}</dd>
-      <dt>Firmware</dt><dd class="mono">{station.metadata.firmwareRevision || '—'}</dd>
+      <dt>{t('Manufacturer')}</dt><dd>{station.metadata.manufacturer || '—'}</dd>
+      <dt>{t('Model')}</dt><dd>{station.metadata.model || '—'}</dd>
+      <dt>{t('Serial number')}</dt><dd class="mono">{station.metadata.serialNumber || '—'}</dd>
+      <dt>{t('Hardware')}</dt><dd class="mono">{station.metadata.hardwareRevision || '—'}</dd>
+      <dt>{t('Firmware')}</dt><dd class="mono">{station.metadata.firmwareRevision || '—'}</dd>
     </dl>
   </section>
 
   <section>
-    <h4>Capabilities</h4>
+    <h4>{t('Capabilities')}</h4>
     <div class="capability-groups">
       {#each capabilityGroups as group}
         <div class="capability-group">
-          <span class="group-label">{group.label}</span>
+          <span class="group-label">{t(group.label)}</span>
           <div class="capabilities">
             {#each group.entries as [key, label]}
               <span class:supported={station.capabilitiesKnown && station.capabilities[key]}>
-                {#if station.capabilitiesKnown && station.capabilities[key]}<CircleCheck size={10} />{/if}{label}
+                {#if station.capabilitiesKnown && station.capabilities[key]}<CircleCheck size={10} />{/if}{t(label)}
               </span>
             {/each}
           </div>

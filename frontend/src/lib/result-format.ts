@@ -1,4 +1,5 @@
 import type { station } from '../../wailsjs/go/models';
+import { locale, t } from './i18n.svelte';
 
 export interface TerminalScanResult {
   state: string;
@@ -10,27 +11,27 @@ export interface TerminalScanResult {
 }
 
 export function formatTerminalScanResult(result: TerminalScanResult): string {
-  const prefix = result.external ? 'External scan' : 'Scan';
+  const prefix = t(result.external ? 'External scan' : 'Scan');
   const warnings = result.warnings?.filter(Boolean).join(' ') ?? '';
 
   switch (result.state) {
     case 'cancelled':
-      return warnings ? `${prefix} stopped. ${warnings}` : `${prefix} stopped.`;
+      return `${t('{prefix} stopped.', { prefix })}${warnings ? ` ${warnings}` : ''}`;
     case 'failed': {
       const err = result.error ? `: ${result.error}` : '';
-      const base = `${prefix} failed${err}`;
+      const base = `${t('{prefix} failed', { prefix })}${err}`;
       return warnings ? `${base} ${warnings}` : base;
     }
     default: {
       const found = result.found ?? 0;
       const known = result.known ?? 0;
-      const knownLabel = known === 1 ? '1 known station.' : `${known} known stations.`;
+      const knownLabel = t(known === 1 ? '{count} known station.' : '{count} known stations.', { count: known });
       const summary = found
-        ? `found ${found}; ${knownLabel}`
-        : 'no stations found in this scan.';
+        ? t('found {found}; {knownLabel}', { found, knownLabel })
+        : t('no stations found in this scan.');
       const message = result.external
-        ? `${prefix} completed: ${summary}`
-        : `${summary[0].toUpperCase()}${summary.slice(1)}`;
+        ? t('{prefix} completed: {summary}', { prefix, summary })
+        : locale() === 'en' ? `${summary[0].toUpperCase()}${summary.slice(1)}` : summary;
       return warnings ? `${message} ${warnings}` : message;
     }
   }
@@ -56,8 +57,13 @@ export function summarizeBulkResult(results: station.BulkPowerStationResult[]): 
 }
 
 export function formatBulkResult(target: string, summary: BulkResultSummary): string {
-  const counts = `${summary.confirmed} confirmed; ${summary.unconfirmed} sent but unconfirmed; ${summary.alreadyAtTarget} already at target; ${summary.skipped} skipped`;
+  const counts = t('{confirmed} confirmed; {unconfirmed} sent but unconfirmed; {already} already at target; {skipped} skipped', {
+    confirmed: summary.confirmed,
+    unconfirmed: summary.unconfirmed,
+    already: summary.alreadyAtTarget,
+    skipped: summary.skipped
+  });
   return summary.failed.length
-    ? `${counts}; ${summary.failed.length} failed for ${target}: ${summary.failed.map((item) => `${item.name || item.address}: ${item.error || 'command failed'}`).join(' | ')}`
-    : `${counts} for ${target}.`;
+    ? `${t('{counts}; {failed} failed for {target}', { counts, failed: summary.failed.length, target })}: ${summary.failed.map((item) => `${item.name || item.address}: ${item.error || t('command failed')}`).join(' | ')}`
+    : t('{counts} for {target}.', { counts, target });
 }

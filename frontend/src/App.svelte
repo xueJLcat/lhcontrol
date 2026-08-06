@@ -97,6 +97,11 @@
     settingsOpen = false;
   }
 
+  function handleLanguageChanged() {
+    clearToasts();
+    store.resetLocalizedMessages();
+  }
+
   function openChannelEditor() {
     store.clearChannelEditorFeedback();
     channelEditorOpen = true;
@@ -225,6 +230,7 @@
   <SettingsPanel
     inactive={channelEditorOpen || Boolean(bulkConfirmTarget)}
     onClose={closeSettings}
+    onLanguageChanged={handleLanguageChanged}
   />
 {/if}
 

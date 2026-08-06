@@ -26,6 +26,10 @@ export function GetAutoSleepSettings(): Promise<autosleep.Settings> {
   return call(() => bindings.GetAutoSleepSettings());
 }
 
+export function GetLanguage(): Promise<string> {
+  return call(() => bindings.GetLanguage());
+}
+
 export function GetCurrentStationInfo(): Promise<station.StationInfo[]> {
   return call(() => bindings.GetCurrentStationInfo());
 }
@@ -64,6 +68,10 @@ export function SetAllStationsPowerDetailed(target: PowerTarget): Promise<statio
 
 export function SetAutoSleepSettings(settings: autosleep.Settings): Promise<void> {
   return call(() => bindings.SetAutoSleepSettings(settings));
+}
+
+export function SetLanguage(language: string): Promise<void> {
+  return call(() => bindings.SetLanguage(language));
 }
 
 export function SetStationChannel(address: string, channel: number, allowUnknownConflictRisk: boolean): Promise<station.ChannelChangeResult> {

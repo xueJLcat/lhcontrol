@@ -1,11 +1,12 @@
 import type { Capabilities, Metadata, PowerTarget, StationInfo } from './types';
+import { locale, t } from './i18n.svelte';
 
 export function powerStateValue(state: PowerTarget): number {
   return state === 'sleep' ? 0 : state === 'on' ? 1 : 2;
 }
 
 export function powerTargetLabel(state: PowerTarget): string {
-  return state === 'sleep' ? 'Sleep' : state === 'on' ? 'On' : 'Standby';
+  return state === 'sleep' ? t('Sleep') : state === 'on' ? t('On') : t('Standby');
 }
 
 export function isCurrentPowerState(station: StationInfo, state: PowerTarget): boolean {
@@ -41,10 +42,10 @@ export function isFreshBooting(station: StationInfo): boolean {
 
 export function channelChangeBlockedReason(station: StationInfo): string {
   if (!station.scanFresh) {
-    return 'Run a new scan before changing the channel.';
+    return t('Run a new scan before changing the channel.');
   }
   if (isFreshBooting(station)) {
-    return 'Wait for the station to finish booting before changing its channel.';
+    return t('Wait for the station to finish booting before changing its channel.');
   }
   return '';
 }
@@ -65,7 +66,8 @@ export function canSetPower(station: StationInfo, state: PowerTarget): boolean {
 }
 
 export function stateLabel(station: StationInfo): string {
-  return station.powerStateName || ['sleep', 'on', 'standby', 'booting'][station.powerState] || 'unknown';
+  if (locale() === 'en') return ['sleep', 'on', 'standby', 'booting'][station.powerState] || 'unknown';
+  return [t('Sleep'), t('On'), t('Standby'), t('Booting')][station.powerState] || t('Unknown');
 }
 
 // Safe class-name counterpart of stateLabel: the display label prefers the

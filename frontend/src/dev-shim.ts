@@ -40,6 +40,7 @@ if (import.meta.env.DEV && isRuntimeMissing()) {
       configWritable: true
     }),
     GetAutoSleepSettings: () => Promise.resolve({ enabled: false, target: 'steamvr', delaySeconds: 300 }),
+	GetLanguage: () => Promise.resolve(''),
     GetCurrentStationInfo: () => Promise.resolve([]),
     GetScanStatus: () => Promise.resolve({ state: 'completed', found: 0, error: '', warnings: [] }),
     IdentifyStation: unavailable('IdentifyStation'),
@@ -50,6 +51,7 @@ if (import.meta.env.DEV && isRuntimeMissing()) {
     ScanAndFetchStations: () => new Promise((resolve) => setTimeout(() => resolve([]), 400)),
     SetAllStationsPowerDetailed: () => Promise.reject(new Error('SetAllStationsPowerDetailed is unavailable in the browser development preview')),
     SetAutoSleepSettings: unavailable('SetAutoSleepSettings'),
+	SetLanguage: unavailable('SetLanguage'),
     SetStationChannel: unavailable('SetStationChannel'),
     SetStationPower: unavailable('SetStationPower'),
     StopScan: () => Promise.resolve(undefined)

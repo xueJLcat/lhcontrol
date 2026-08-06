@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { StationInfo } from '../types';
   import { hasCurrentChannel, stateClass, stateLabel } from '../station';
+  import { t } from '../i18n.svelte';
 
   let {
     stations,
@@ -53,9 +54,9 @@
   ));
 
   function cellLabel(channel: number, occupants: Occupant[]): string {
-    if (!occupants.length) return `CH ${channel} — free`;
+    if (!occupants.length) return t('CH {channel} — free', { channel });
     const names = occupants.map((occupant) =>
-      `${occupant.name} · ${occupant.state}${occupant.current ? '' : ' · last-known'}`
+      occupant.current ? `${occupant.name} · ${occupant.state}` : t('{name} · {state} · last-known', { name: occupant.name, state: occupant.state })
     ).join(', ');
     return `CH ${channel} — ${names}`;
   }
@@ -63,15 +64,15 @@
 
 <section class="cm-panel">
   <div class="cm-head">
-    <h3>Optical channels</h3>
+    <h3>{t('Optical channels')}</h3>
     <div class="cm-legend" aria-hidden="true">
-      <span class="lg lg-on">On</span>
-      <span class="lg lg-standby">Standby</span>
-      <span class="lg lg-sleep">Sleep</span>
-      <span class="lg lg-booting">Booting</span>
+      <span class="lg lg-on">{t('On')}</span>
+      <span class="lg lg-standby">{t('Standby')}</span>
+      <span class="lg lg-sleep">{t('Sleep')}</span>
+      <span class="lg lg-booting">{t('Booting')}</span>
     </div>
   </div>
-  <div class="channel-map" role="group" aria-label="Channel occupancy">
+  <div class="channel-map" role="group" aria-label={t('Channel occupancy')}>
     {#each Array.from({ length: 16 }, (_, index) => index + 1) as channel}
       {@const occupants = byChannel.get(channel) ?? []}
       <button

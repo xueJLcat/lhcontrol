@@ -1,11 +1,12 @@
 <script lang="ts">
   import { cubicOut } from 'svelte/easing';
   import { fly } from 'svelte/transition';
-  import { Bluetooth, LoaderCircle, MoonStar, RefreshCw, X } from 'lucide-svelte';
+  import { Bluetooth, Languages, LoaderCircle, MoonStar, RefreshCw, X } from 'lucide-svelte';
   import { autosleep } from '../../../wailsjs/go/models';
   import type { bluetooth } from '../../../wailsjs/go/models';
   import { focusTrap } from '../actions';
   import { dur } from '../motion';
+  import { t, type Locale } from '../i18n.svelte';
 
   const MIN_DELAY_MINUTES = 1;
   const MAX_DELAY_MINUTES = 120;
@@ -17,11 +18,14 @@
     autoSleep,
     autoSleepError = null,
     autoSleepBusy = false,
+    language = 'en',
+    languageBusy = false,
     inactive = false,
     onClose,
     onRefresh,
     onAutoSleepChange,
-    onAutoSleepRetry
+    onAutoSleepRetry,
+    onLanguageChange = () => {}
   }: {
     adapters: bluetooth.AdapterInfo[];
     loading: boolean;
@@ -29,11 +33,14 @@
     autoSleep: autosleep.Settings | null;
     autoSleepError?: string | null;
     autoSleepBusy?: boolean;
+    language?: Locale;
+    languageBusy?: boolean;
     inactive?: boolean;
     onClose: () => void;
     onRefresh: () => void;
     onAutoSleepChange: (settings: autosleep.Settings) => void;
     onAutoSleepRetry?: () => void;
+    onLanguageChange?: (language: Locale) => void;
   } = $props();
 
   // The delay input keeps a draft copy so typing never saves; only commit
@@ -63,7 +70,7 @@
   aria-modal={inactive ? undefined : 'true'}
   aria-hidden={inactive ? 'true' : undefined}
   inert={inactive}
-  aria-label="Settings"
+  aria-label={t('Settings')}
   tabindex="-1"
   use:focusTrap
   in:fly={dur({ x: 64, duration: 320, easing: cubicOut })}
@@ -71,23 +78,38 @@
 >
   <div class="drawer-head">
     <div>
-      <small>Settings</small>
-      <div class="drawer-title"><h2>Preferences</h2></div>
+      <small>{t('Settings')}</small>
+      <div class="drawer-title"><h2>{t('Preferences')}</h2></div>
     </div>
-    <button type="button" class="icon-btn" title="Close" aria-label="Close settings" onclick={onClose}><X size={18} /></button>
+    <button type="button" class="icon-btn" title={t('Close')} aria-label={t('Close settings')} onclick={onClose}><X size={18} /></button>
   </div>
 
   <section>
-    <h4><Bluetooth size={12} /> Bluetooth adapter</h4>
+    <h4><Languages size={12} /> {t('Language')}</h4>
+    <div class="adapter-list" role="radiogroup" aria-label={t('Display language')}>
+      <label class="adapter-option" class:selected={language === 'en'}>
+        <input type="radio" name="display-language" value="en" checked={language === 'en'} disabled={languageBusy} onchange={() => onLanguageChange('en')} />
+        <span class="adapter-name">English</span>
+      </label>
+      <label class="adapter-option" class:selected={language === 'zh-CN'}>
+        <input type="radio" name="display-language" value="zh-CN" checked={language === 'zh-CN'} disabled={languageBusy} onchange={() => onLanguageChange('zh-CN')} />
+        <span class="adapter-name">简体中文</span>
+      </label>
+    </div>
+    <p class="hint">{t('Changes apply immediately and are saved for the next start.')}</p>
+  </section>
+
+  <section>
+    <h4><Bluetooth size={12} /> {t('Bluetooth adapter')}</h4>
     {#if loading}
-      <p class="hint loading"><LoaderCircle class="spin" size={14} /> Detecting Bluetooth adapters...</p>
+      <p class="hint loading"><LoaderCircle class="spin" size={14} /> {t('Detecting Bluetooth adapters...')}</p>
     {:else if loadError}
       <div class="alert danger">{loadError}</div>
       <div class="drawer-actions">
-        <button class="btn" onclick={onRefresh}><RefreshCw size={15} /> Retry</button>
+        <button class="btn" onclick={onRefresh}><RefreshCw size={15} /> {t('Retry')}</button>
       </div>
     {:else}
-      <div class="adapter-list" aria-label="Detected Bluetooth adapters">
+      <div class="adapter-list" aria-label={t('Detected Bluetooth adapters')}>
         {#each adapters as adapter (adapter.deviceId)}
           <div class="adapter-option">
             <span class="adapter-text">
@@ -96,42 +118,40 @@
             </span>
           </div>
         {:else}
-          <p class="hint">No Bluetooth adapters were detected on this system.</p>
+          <p class="hint">{t('No Bluetooth adapters were detected on this system.')}</p>
         {/each}
       </div>
       <div class="drawer-actions">
         <button class="btn" onclick={onRefresh} disabled={loading}>
           {#if loading}<LoaderCircle class="spin" size={15} />{:else}<RefreshCw size={15} />{/if}
-          Refresh adapters
+          {t('Refresh adapters')}
         </button>
       </div>
       <p class="hint">
-        Windows controls which radio handles BLE discovery and connections.
-        The application cannot route a Lighthouse operation through one
-        specific adapter.
+        {t('Windows controls which radio handles BLE discovery and connections. The application cannot route a Lighthouse operation through one specific adapter.')}
       </p>
     {/if}
   </section>
 
   <section>
-    <h4><MoonStar size={12} /> Auto sleep</h4>
+    <h4><MoonStar size={12} /> {t('Auto sleep')}</h4>
     {#if autoSleep}
       <label class="switch-row">
         <span class="adapter-text">
-          <span class="adapter-name">Sleep all stations after a session ends</span>
-          <span class="adapter-desc">Scans and puts every known station to sleep</span>
+          <span class="adapter-name">{t('Sleep all stations after a session ends')}</span>
+          <span class="adapter-desc">{t('Scans and puts every known station to sleep')}</span>
         </span>
         <input
           type="checkbox"
           class="switch"
-          aria-label="Enable auto sleep"
+          aria-label={t('Enable auto sleep')}
           checked={autoSleep.enabled}
           disabled={autoSleepBusy}
           onchange={() => onAutoSleepChange(autosleep.Settings.createFrom({ ...autoSleep, enabled: !autoSleep.enabled }))}
         />
       </label>
       {#if autoSleep.enabled}
-        <div class="adapter-list" role="radiogroup" aria-label="Auto sleep trigger">
+        <div class="adapter-list" role="radiogroup" aria-label={t('Auto sleep trigger')}>
           <label class="adapter-option" class:selected={autoSleep.target === 'steamvr'}>
             <input
               type="radio"
@@ -143,7 +163,7 @@
             />
             <span class="adapter-text">
               <span class="adapter-name">SteamVR</span>
-              <span class="adapter-desc">vrserver.exe — also fires while the Steam client stays open</span>
+              <span class="adapter-desc">vrserver.exe — {t('fires while the Steam client stays open')}</span>
             </span>
           </label>
           <label class="adapter-option" class:selected={autoSleep.target === 'steam'}>
@@ -157,12 +177,12 @@
             />
             <span class="adapter-text">
               <span class="adapter-name">Steam</span>
-              <span class="adapter-desc">steam.exe — fires only when the Steam client fully exits</span>
+              <span class="adapter-desc">steam.exe — {t('fires only when the Steam client fully exits')}</span>
             </span>
           </label>
         </div>
         <div class="delay-row">
-          <label for="auto-sleep-delay">Wait before sleeping</label>
+          <label for="auto-sleep-delay">{t('Wait before sleeping')}</label>
           <span class="delay-input">
             <input
               id="auto-sleep-delay"
@@ -174,24 +194,20 @@
               onchange={commitDelay}
               disabled={autoSleepBusy}
             />
-            minutes
+            {t('minutes')}
           </span>
         </div>
       {/if}
       <p class="hint">
-        The timer starts when the watched process closes. Reopening it cancels
-        pending or in-progress automatic sleep. Commands already completed are
-        kept and reported; commands not yet sent are skipped. When the timer
-        fires, a Bluetooth operation from you skips this round instead of retrying.
-        Settings are saved and restored on the next start.
+        {t('The timer starts when the watched process closes. Reopening it cancels pending or in-progress automatic sleep. Commands already completed are kept and reported; commands not yet sent are skipped. When the timer fires, a Bluetooth operation from you skips this round instead of retrying. Settings are saved and restored on the next start.')}
       </p>
     {:else if autoSleepError}
       <div class="alert danger">{autoSleepError}</div>
       <div class="drawer-actions">
-        <button class="btn" onclick={() => onAutoSleepRetry?.()}><RefreshCw size={15} /> Retry</button>
+        <button class="btn" onclick={() => onAutoSleepRetry?.()}><RefreshCw size={15} /> {t('Retry')}</button>
       </div>
     {:else}
-      <p class="hint loading"><LoaderCircle class="spin" size={14} /> Loading auto sleep settings...</p>
+      <p class="hint loading"><LoaderCircle class="spin" size={14} /> {t('Loading auto sleep settings...')}</p>
     {/if}
   </section>
 </div>
@@ -255,6 +271,11 @@
       border-color var(--dur-1) var(--ease),
       background-color var(--dur-1) var(--ease),
       box-shadow var(--dur-1) var(--ease);
+  }
+  .adapter-option.selected {
+    border-color: var(--color-primary);
+    background: color-mix(in srgb, var(--color-primary) 9%, var(--bg-input));
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-primary) 10%, transparent);
   }
   .adapter-text { display: flex; flex-direction: column; gap: 0.1rem; min-width: 0; }
   .adapter-name {

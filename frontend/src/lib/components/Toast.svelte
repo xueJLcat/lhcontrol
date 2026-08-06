@@ -3,19 +3,20 @@
   import { CircleAlert, CircleCheck, Info, X } from 'lucide-svelte';
   import { dismissToast, toasts } from '../toast';
   import { dur } from '../motion';
+  import { t } from '../i18n.svelte';
 </script>
 
 <!-- Each toast is its own live region: errors become assertive alerts so a
      blocking failure is announced immediately, while everything else stays
      polite. -->
-<div class="toast-stack" aria-label="Notifications">
+<div class="toast-stack" aria-label={t('Notifications')}>
   {#each $toasts as toast (toast.id)}
     <div class="toast {toast.kind}" role={toast.kind === 'error' ? 'alert' : 'status'} transition:fly={dur({ x: 24, duration: 220 })}>
       {#if toast.kind === 'success'}<CircleCheck size={15} />
       {:else if toast.kind === 'info'}<Info size={15} />
       {:else}<CircleAlert size={15} />{/if}
       <span class="toast-text">{toast.text}</span>
-      <button class="icon-btn" title="Dismiss" aria-label="Dismiss notification" onclick={() => dismissToast(toast.id)}><X size={14} /></button>
+      <button class="icon-btn" title={t('Dismiss')} aria-label={t('Dismiss notification')} onclick={() => dismissToast(toast.id)}><X size={14} /></button>
     </div>
   {/each}
 </div>

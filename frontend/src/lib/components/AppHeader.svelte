@@ -4,6 +4,7 @@
   import { LoaderCircle, RefreshCw, Settings, Square, Zap } from 'lucide-svelte';
   import type { PowerTarget } from '../types';
   import { dur } from '../motion';
+  import { t } from '../i18n.svelte';
   import logo from '../../assets/images/logo-universal.png';
 
   let {
@@ -95,27 +96,27 @@
       <span class="brand-logo"><img src={logo} alt="" /></span>
       <div class="brand-text">
         <h1>Lighthouse Control</h1>
-        <span>SteamVR base stations</span>
+        <span>{t('SteamVR base stations')}</span>
       </div>
     </div>
     {#if fleetTotal > 0 || unverifiedCount > 0}
-      <div class="fleet-summary" role="group" aria-label="Fleet power summary">
-        {#if onCount > 0}<span class="fleet-chip chip-on" transition:fade={dur({ duration: 160 })}><span class="fleet-dot dot-on"></span>{onCount} On</span>{/if}
-        {#if standbyCount > 0}<span class="fleet-chip chip-standby" transition:fade={dur({ duration: 160 })}><span class="fleet-dot dot-standby"></span>{standbyCount} Standby</span>{/if}
-        {#if sleepCount > 0}<span class="fleet-chip chip-sleep" transition:fade={dur({ duration: 160 })}><span class="fleet-dot dot-sleep"></span>{sleepCount} Sleep</span>{/if}
-        {#if unverifiedCount > 0}<span class="fleet-chip chip-unverified" title="State not confirmed by a fresh read" transition:fade={dur({ duration: 160 })}><span class="fleet-dot dot-unverified"></span>{unverifiedCount} Unconfirmed</span>{/if}
-        <span class="sr-only">Unconfirmed stations have a power state that was not confirmed by a fresh read.</span>
+      <div class="fleet-summary" role="group" aria-label={t('Fleet power summary')}>
+        {#if onCount > 0}<span class="fleet-chip chip-on" transition:fade={dur({ duration: 160 })}><span class="fleet-dot dot-on"></span>{onCount} {t('On')}</span>{/if}
+        {#if standbyCount > 0}<span class="fleet-chip chip-standby" transition:fade={dur({ duration: 160 })}><span class="fleet-dot dot-standby"></span>{standbyCount} {t('Standby')}</span>{/if}
+        {#if sleepCount > 0}<span class="fleet-chip chip-sleep" transition:fade={dur({ duration: 160 })}><span class="fleet-dot dot-sleep"></span>{sleepCount} {t('Sleep')}</span>{/if}
+        {#if unverifiedCount > 0}<span class="fleet-chip chip-unverified" title={t('State not confirmed by a fresh read')} transition:fade={dur({ duration: 160 })}><span class="fleet-dot dot-unverified"></span>{unverifiedCount} {t('Unconfirmed')}</span>{/if}
+        <span class="sr-only">{t('Unconfirmed stations have a power state that was not confirmed by a fresh read.')}</span>
       </div>
     {/if}
   </div>
   <div class="row-actions">
     <button class="btn primary scan-btn" onclick={scanning ? onStop : onScan} disabled={scanning ? stopping : scanLocked}>
-      {#if scanning && stopping}<LoaderCircle class="spin" size={15} /> Stopping...
-      {:else if scanning}<Square size={15} /> Stop
-      {:else}<RefreshCw size={15} /> Scan{/if}
+      {#if scanning && stopping}<LoaderCircle class="spin" size={15} /> {t('Stopping...')}
+      {:else if scanning}<Square size={15} /> {t('Stop')}
+      {:else}<RefreshCw size={15} /> {t('Scan')}{/if}
     </button>
-    <div class="bulk-power" role="group" aria-label="Set all known stations">
-      <span class="bulk-label">{#if isBulkLoading}<LoaderCircle class="spin" size={12} />{:else}<Zap size={12} />{/if} All</span>
+    <div class="bulk-power" role="group" aria-label={t('Set all known stations')}>
+      <span class="bulk-label">{#if isBulkLoading}<LoaderCircle class="spin" size={12} />{:else}<Zap size={12} />{/if} {t('All')}</span>
       <div class="bulk-seg" class:pop={bulkPopIndex >= 0}>
         <div
           class="seg-thumb"
@@ -126,18 +127,18 @@
           style:opacity={bulkActiveIndex >= 0 ? 1 : 0}
           aria-hidden="true"
         ></div>
-        <button class="seg-on" class:pending={bulkTarget === 'on'} class:active={allOn} onclick={() => onBulkPower('on')} disabled={scanning || bulkLocked || !canOn} title={!canOn ? 'No actionable station' : bulkLocked ? 'Bluetooth operation in progress' : 'Turn all known stations on'}>On</button>
-        <button class="seg-standby" class:pending={bulkTarget === 'standby'} class:active={allStandby} onclick={() => onBulkPower('standby')} disabled={scanning || bulkLocked || !canStandby} title={!canStandby ? 'No actionable station' : bulkLocked ? 'Bluetooth operation in progress' : 'Set all known stations to standby'}>Standby</button>
-        <button class="seg-sleep" class:pending={bulkTarget === 'sleep'} class:active={allSleep} onclick={() => onBulkPower('sleep')} disabled={scanning || bulkLocked || !canSleep} title={!canSleep ? 'No actionable station' : bulkLocked ? 'Bluetooth operation in progress' : 'Put all known stations to sleep'}>Sleep</button>
+        <button class="seg-on" class:pending={bulkTarget === 'on'} class:active={allOn} onclick={() => onBulkPower('on')} disabled={scanning || bulkLocked || !canOn} title={t(!canOn ? 'No actionable station' : bulkLocked ? 'Bluetooth operation in progress' : 'Turn all known stations on')}>{t('On')}</button>
+        <button class="seg-standby" class:pending={bulkTarget === 'standby'} class:active={allStandby} onclick={() => onBulkPower('standby')} disabled={scanning || bulkLocked || !canStandby} title={t(!canStandby ? 'No actionable station' : bulkLocked ? 'Bluetooth operation in progress' : 'Set all known stations to standby')}>{t('Standby')}</button>
+        <button class="seg-sleep" class:pending={bulkTarget === 'sleep'} class:active={allSleep} onclick={() => onBulkPower('sleep')} disabled={scanning || bulkLocked || !canSleep} title={t(!canSleep ? 'No actionable station' : bulkLocked ? 'Bluetooth operation in progress' : 'Put all known stations to sleep')}>{t('Sleep')}</button>
       </div>
     </div>
-    <button class="btn settings-btn" title="Settings" aria-label="Open settings" onclick={onOpenSettings} aria-haspopup="dialog">
+    <button class="btn settings-btn" title={t('Settings')} aria-label={t('Open settings')} onclick={onOpenSettings} aria-haspopup="dialog">
       <Settings size={16} />
     </button>
   </div>
   {#if untrustedCount > 0}
     <p class="bulk-scope">
-      {knownCount} known stations · {untrustedCount} not fully verified — bulk commands include them.
+      {t('{known} known stations · {untrusted} not fully verified — bulk commands include them.', { known: knownCount, untrusted: untrustedCount })}
     </p>
   {/if}
   {#if scanning}<div class="scan-progress" aria-hidden="true"></div>{/if}

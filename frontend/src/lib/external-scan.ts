@@ -1,5 +1,6 @@
 import type { station } from '../../wailsjs/go/models';
 import { formatTerminalScanResult } from './result-format';
+import { t } from './i18n.svelte';
 import type { StationInfo } from './types';
 
 export interface ExternalScanEvent {
@@ -99,7 +100,7 @@ export class ExternalScanCoordinator {
     this.host.setExternalScanning(true);
     this.host.setStoppingScan(false);
     this.host.beginScanTimer();
-    this.host.setStatusMessage('Preparing external scan...');
+    this.host.setStatusMessage(t('Preparing external scan...'));
   }
 
   async handleCompleted(event: ExternalScanEvent): Promise<void> {
@@ -143,7 +144,7 @@ export class ExternalScanCoordinator {
       return;
     }
     const statusOperation = this.host.beginStatusOperation();
-    const message = event.error || 'unknown error';
+    const message = event.error || t('unknown error');
     const operationEpoch = this.host.beginScanEpoch();
     const revision = this.host.nextListRevision();
     this.host.prepareForScan();
@@ -194,7 +195,7 @@ export class ExternalScanCoordinator {
       this.host.applyStationList(updated, revision, capturedStationRevisions);
     }
     if (!this.host.canCommitStatus(statusOperation)) return;
-    this.host.setStatusMessage('Scan stopped.');
+    this.host.setStatusMessage(t('Scan stopped.'));
   }
 
   // Applies the terminal outcome of a scan that ended while untracked. The
@@ -286,7 +287,7 @@ export class ExternalScanCoordinator {
     const stillScanning = await this.host.isScanning().catch(() => true);
     if (!this.host.canCommitOperation(operationEpoch) || !isStopRequestCurrent()) return 'aborted';
     if (stillScanning) {
-      this.host.setStatusMessage('Stopping scan...');
+      this.host.setStatusMessage(t('Stopping scan...'));
       return 'still-scanning';
     }
     this.host.setExternalScanning(false);

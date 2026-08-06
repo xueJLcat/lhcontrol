@@ -11,6 +11,7 @@
   import { relativeTime } from '../relative-time';
   import { autofocus } from '../actions';
   import { dur } from '../motion';
+  import { t } from '../i18n.svelte';
   import StateBadge from './StateBadge.svelte';
 
   let {
@@ -199,16 +200,16 @@
         bind:value={localName}
         maxlength="32"
         placeholder={station.originalName}
-        title="Save an empty name to restore the original name"
-        aria-label="Station name"
+        title={t('Save an empty name to restore the original name')}
+        aria-label={t('Station name')}
         aria-describedby={`rename-hint-${station.address}`}
         onkeydown={handleRenameKeydown}
         onblur={handleRenameBlur}
         onclick={(event) => event.stopPropagation()}
       />
-      <button type="button" class="icon-btn" title="Save name" aria-label="Save name" onmousedown={(event) => event.preventDefault()} onclick={(event) => { event.stopPropagation(); commitRename(); }}><Check size={16} /></button>
-      <button type="button" class="icon-btn" title="Cancel" aria-label="Cancel rename" onmousedown={(event) => event.preventDefault()} onclick={(event) => { event.stopPropagation(); discardRename(); }}><X size={16} /></button>
-      <span class="sr-only" id={`rename-hint-${station.address}`}>Saving an empty name restores the original name: {station.originalName}.</span>
+      <button type="button" class="icon-btn" title={t('Save name')} aria-label={t('Save name')} onmousedown={(event) => event.preventDefault()} onclick={(event) => { event.stopPropagation(); commitRename(); }}><Check size={16} /></button>
+      <button type="button" class="icon-btn" title={t('Cancel')} aria-label={t('Cancel rename')} onmousedown={(event) => event.preventDefault()} onclick={(event) => { event.stopPropagation(); discardRename(); }}><X size={16} /></button>
+      <span class="sr-only" id={`rename-hint-${station.address}`}>{t('Saving an empty name restores the original name: {name}.', { name: station.originalName })}</span>
     </div>
   {:else}
     <div class="card-top">
@@ -216,8 +217,8 @@
       <h3 title={station.name}>{station.name}</h3>
       <button
         class="icon-btn rename-btn"
-        title="Rename"
-        aria-label={`Rename ${station.name}`}
+        title={t('Rename')}
+        aria-label={t('Rename {name}', { name: station.name })}
         onclick={(event) => { event.stopPropagation(); onStartRename(station); }}
         disabled={gattBusy || configBusy || renameLocked}
       ><SquarePen size={13} /></button>
@@ -227,7 +228,7 @@
         class="channel-chip mono"
         class:warn={station.channelConflict}
         class:stale={channelLastKnown}
-        title={channelLastKnown ? 'Last known channel' : undefined}
+        title={channelLastKnown ? t('Last known channel') : undefined}
       >{channelLabel(shownChannel)}</span>
     </div>
   {/if}
@@ -236,15 +237,15 @@
   <div class="card-sub">
     <Bluetooth size={12} />
     <span class="mono addr">{station.address}</span>
-    <StateBadge label={stateLabel(station)} {unverified} stale={stalePower} booting={station.powerFresh && station.powerState === 3} />
+    <StateBadge label={stateLabel(station)} state={stateClass(station)} {unverified} stale={stalePower} booting={station.powerFresh && station.powerState === 3} />
     {#if stalePower}
-      <span class="fresh-icon stale" role="img" title={`Last known state; last successful read ${relativeTime(station.lastPowerReadAt) || 'unknown'}`} aria-label={`Last known state; last successful read ${relativeTime(station.lastPowerReadAt) || 'unknown'}`}><History size={11} aria-hidden="true" /></span>
+      <span class="fresh-icon stale" role="img" title={t('Last known state; last successful read {time}', { time: relativeTime(station.lastPowerReadAt) || t('unknown') })} aria-label={t('Last known state; last successful read {time}', { time: relativeTime(station.lastPowerReadAt) || t('unknown') })}><History size={11} aria-hidden="true" /></span>
     {:else if unverified}
-      <span class="fresh-icon unverified" role="img" title="State reported by the station but not confirmed by readback" aria-label="State reported by the station but not confirmed by readback"><CircleHelp size={11} aria-hidden="true" /></span>
+      <span class="fresh-icon unverified" role="img" title={t('State reported by the station but not confirmed by readback')} aria-label={t('State reported by the station but not confirmed by readback')}><CircleHelp size={11} aria-hidden="true" /></span>
     {/if}
-    {#if !station.isPresent}<span class="muted-badge" title="Not detected in the latest scan; direct power control can still be attempted">not visible<span class="sr-only"> — not detected in the latest scan, but direct power control can still be attempted</span></span>{/if}
-    {#if station.isPresent && station.presenceUncertain}<span class="muted-badge" title="Its connection could not be fully released before the last scan, so the advertisement may have been missed">presence uncertain<span class="sr-only"> — the connection could not be fully released before the last scan, so the advertisement may have been missed</span></span>{/if}
-    {#if station.isPresent && !station.presenceUncertain && !station.seenInLatestScan}<span class="muted-badge" title="Missed by one scan; retained until a second consecutive miss">scan stale<span class="sr-only"> — missed by one scan, retained until a second consecutive miss</span></span>{/if}
+    {#if !station.isPresent}<span class="muted-badge" title={t('Not detected in the latest scan; direct power control can still be attempted')}>{t('not visible')}<span class="sr-only"> — {t('not detected in the latest scan, but direct power control can still be attempted')}</span></span>{/if}
+    {#if station.isPresent && station.presenceUncertain}<span class="muted-badge" title={t('Its connection could not be fully released before the last scan, so the advertisement may have been missed')}>{t('presence uncertain')}<span class="sr-only"> — {t('the connection could not be fully released before the last scan, so the advertisement may have been missed')}</span></span>{/if}
+    {#if station.isPresent && !station.presenceUncertain && !station.seenInLatestScan}<span class="muted-badge" title={t('Missed by one scan; retained until a second consecutive miss')}>{t('scan stale')}<span class="sr-only"> — {t('missed by one scan, retained until a second consecutive miss')}</span></span>{/if}
   </div>
   {#if feedback}
     <div
@@ -261,7 +262,7 @@
     </div>
   {/if}
   <div class="card-actions">
-    <div class="power-segment" role="group" class:pop={popActive} aria-label={`Power control for ${station.name}`}>
+    <div class="power-segment" role="group" class:pop={popActive} aria-label={t('Power control for {name}', { name: station.name })}>
       <div
         class="seg-thumb"
         class:seg-thumb-on={activePowerIndex === 0}
@@ -276,33 +277,33 @@
         class:active={isCurrentPowerState(station, 'on')}
         class:pending={pendingTarget === 'on'}
         aria-pressed={isCurrentPowerState(station, 'on')}
-        aria-label={`Turn ${station.name} on`}
-        title="Turn lasers and motor on"
+        aria-label={t('Turn {name} on', { name: station.name })}
+        title={t('Turn lasers and motor on')}
         onclick={(event) => { event.stopPropagation(); onPower(station, 'on'); }}
         disabled={renaming || !canSetPower(station, 'on') || gattBusy || configBusy || gattLocked}
-      ><Zap size={12} /> On</button>
+      ><Zap size={12} /> {t('On')}</button>
       <button
         class="seg-standby"
         class:active={isCurrentPowerState(station, 'standby')}
         class:pending={pendingTarget === 'standby'}
         aria-pressed={isCurrentPowerState(station, 'standby')}
-        aria-label={`Set ${station.name} to standby`}
-        title="Lasers off, motor remains powered"
+        aria-label={t('Set {name} to standby', { name: station.name })}
+        title={t('Lasers off, motor remains powered')}
         onclick={(event) => { event.stopPropagation(); onPower(station, 'standby'); }}
         disabled={renaming || !canSetPower(station, 'standby') || gattBusy || configBusy || gattLocked}
-      ><Pause size={12} /> Standby</button>
+      ><Pause size={12} /> {t('Standby')}</button>
       <button
         class="seg-sleep"
         class:active={isCurrentPowerState(station, 'sleep')}
         class:pending={pendingTarget === 'sleep'}
         aria-pressed={isCurrentPowerState(station, 'sleep')}
-        aria-label={`Put ${station.name} to sleep`}
-        title="Turn lasers and motor off"
+        aria-label={t('Put {name} to sleep', { name: station.name })}
+        title={t('Turn lasers and motor off')}
         onclick={(event) => { event.stopPropagation(); onPower(station, 'sleep'); }}
         disabled={renaming || !canSetPower(station, 'sleep') || gattBusy || configBusy || gattLocked}
-      ><Moon size={12} /> Sleep</button>
+      ><Moon size={12} /> {t('Sleep')}</button>
     </div>
-    <button class="icon-btn details" title="Details" aria-label={`Details for ${station.name}`} onclick={(event) => { event.stopPropagation(); openDetails(); }} disabled={renaming}><ChevronRight size={17} /></button>
+    <button class="icon-btn details" title={t('Details')} aria-label={t('Details for {name}', { name: station.name })} onclick={(event) => { event.stopPropagation(); openDetails(); }} disabled={renaming}><ChevronRight size={17} /></button>
   </div>
 </div>
 

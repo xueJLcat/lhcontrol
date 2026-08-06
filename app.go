@@ -706,6 +706,19 @@ func (a *App) SetAutoSleepSettings(settings autosleep.Settings) error {
 	return nil
 }
 
+// GetLanguage returns the persisted UI language. An empty string tells the
+// frontend to follow the operating-system language for this launch.
+func (a *App) GetLanguage() string {
+	return a.config.GetLanguage()
+}
+
+// SetLanguage validates and persists the UI language.
+func (a *App) SetLanguage(language string) error {
+	err := a.config.SetLanguage(language)
+	a.setConfigPersistenceStatus()
+	return err
+}
+
 // applyAutoSleep (re)starts the auto-sleep watcher goroutine to match the
 // given settings. Calling it repeatedly is safe: the previous watcher is
 // cancelled and joined first.

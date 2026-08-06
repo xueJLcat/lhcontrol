@@ -37,48 +37,49 @@ export function scanErrorCopy(info: ScanErrorInfo): ScanErrorCopy {
   switch (info.kind) {
     case 'bluetooth-off':
       return {
-        heading: 'Bluetooth is unavailable',
-        explanation: 'The scan could not run because the Bluetooth radio is off or unavailable.',
+        heading: t('Bluetooth is unavailable'),
+        explanation: t('The scan could not run because the Bluetooth radio is off or unavailable.'),
         steps: [
-          'Open Windows Settings → Bluetooth & devices and turn Bluetooth on.',
-          'Wait a moment for the adapter to become ready, then retry the scan.'
+          t('Open Windows Settings → Bluetooth & devices and turn Bluetooth on.'),
+          t('Wait a moment for the adapter to become ready, then retry the scan.')
         ]
       };
     case 'adapter-missing':
       return {
-        heading: 'No Bluetooth adapter found',
-        explanation: 'The scan could not run because no Bluetooth adapter is present.',
+        heading: t('No Bluetooth adapter found'),
+        explanation: t('The scan could not run because no Bluetooth adapter is present.'),
         steps: [
-          'Plug in or re-enable the Bluetooth adapter.',
-          'Check Device Manager for a disabled or missing adapter, then retry the scan.'
+          t('Plug in or re-enable the Bluetooth adapter.'),
+          t('Check Device Manager for a disabled or missing adapter, then retry the scan.')
         ]
       };
     case 'permission':
       return {
-        heading: 'Bluetooth access was denied',
-        explanation: 'The scan could not run because this app is not allowed to use Bluetooth.',
+        heading: t('Bluetooth access was denied'),
+        explanation: t('The scan could not run because this app is not allowed to use Bluetooth.'),
         steps: [
-          'Grant Bluetooth permission to the app (or run it with the required rights).',
-          'Retry the scan once access is allowed.'
+          t('Grant Bluetooth permission to the app (or run it with the required rights).'),
+          t('Retry the scan once access is allowed.')
         ]
       };
     case 'timeout':
       return {
-        heading: 'The scan timed out',
-        explanation: 'The scan did not finish in time; the adapter may be busy or a station may be out of range.',
+        heading: t('The scan timed out'),
+        explanation: t('The scan did not finish in time; the adapter may be busy or a station may be out of range.'),
         steps: [
-          'Move closer to the base stations and keep the adapter unobstructed.',
-          'Retry the scan; repeated timeouts may indicate an adapter problem.'
+          t('Move closer to the base stations and keep the adapter unobstructed.'),
+          t('Retry the scan; repeated timeouts may indicate an adapter problem.')
         ]
       };
     default:
       return {
-        heading: 'Scan failed',
-        explanation: 'The scan could not be completed.',
+        heading: t('Scan failed'),
+        explanation: t('The scan could not be completed.'),
         steps: [
-          'Check that the Bluetooth adapter is connected and the base stations are powered.',
-          'Retry the scan; the error details below are preserved for diagnostics.'
+          t('Check that the Bluetooth adapter is connected and the base stations are powered.'),
+          t('Retry the scan; the error details below are preserved for diagnostics.')
         ]
       };
   }
 }
+import { t } from './i18n.svelte';

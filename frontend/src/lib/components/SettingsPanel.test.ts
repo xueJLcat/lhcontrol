@@ -5,7 +5,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const backend = vi.hoisted(() => ({
   GetAutoSleepSettings: vi.fn(),
   ListBluetoothAdapters: vi.fn(),
-  SetAutoSleepSettings: vi.fn()
+  SetAutoSleepSettings: vi.fn(),
+  SetLanguage: vi.fn()
 }));
 
 vi.mock('../backend', () => backend);
@@ -16,6 +17,7 @@ vi.mock('../toast', async (importOriginal) => {
 
 import SettingsPanel from './SettingsPanel.svelte';
 import { pushToast } from '../toast';
+import { setLocale } from '../i18n.svelte';
 
 afterEach(cleanup);
 
@@ -40,6 +42,8 @@ beforeEach(() => {
   ]);
   backend.GetAutoSleepSettings.mockResolvedValue({ enabled: false, target: 'steamvr', delaySeconds: 300 });
   backend.SetAutoSleepSettings.mockResolvedValue(undefined);
+  backend.SetLanguage.mockResolvedValue(undefined);
+  setLocale('en');
 });
 
 describe('SettingsPanel', () => {
@@ -81,5 +85,23 @@ describe('SettingsPanel', () => {
     await screen.findByRole('dialog', { name: 'Settings' });
     await fireEvent.click(screen.getByRole('button', { name: 'Close settings' }));
     expect(onClose).toHaveBeenCalledOnce();
+  });
+
+  it('switches language immediately and persists it', async () => {
+    render(SettingsPanel, { props: { onClose: vi.fn() } });
+    await screen.findByRole('dialog', { name: 'Settings' });
+    await fireEvent.click(screen.getByRole('radio', { name: '简体中文' }));
+    expect(await screen.findByRole('dialog', { name: '设置' })).toBeInTheDocument();
+    await waitFor(() => expect(backend.SetLanguage).toHaveBeenCalledWith('zh-CN'));
+  });
+
+  it('restores the previous language when saving fails', async () => {
+    backend.SetLanguage.mockRejectedValue(new Error('config locked'));
+    render(SettingsPanel, { props: { onClose: vi.fn() } });
+    await screen.findByRole('dialog', { name: 'Settings' });
+    await fireEvent.click(screen.getByRole('radio', { name: '简体中文' }));
+    await waitFor(() => expect(backend.SetLanguage).toHaveBeenCalledOnce());
+    expect(await screen.findByRole('dialog', { name: 'Settings' })).toBeInTheDocument();
+    expect(pushToast).toHaveBeenCalledWith('Language setting could not be saved: Error: config locked');
   });
 });

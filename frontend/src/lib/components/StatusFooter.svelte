@@ -2,6 +2,7 @@
   import { fade } from 'svelte/transition';
   import { Activity } from 'lucide-svelte';
   import { dur } from '../motion';
+  import { t } from '../i18n.svelte';
 
   let {
     statusMessage,
@@ -21,8 +22,8 @@
 
   let detail = $state<'config' | 'api' | null>(null);
 
-  const apiTitle = $derived(apiError || (apiAddress ? `HTTP API ${apiAddress}` : 'HTTP API unavailable'));
-  const configTitle = $derived(configWarnings.join('\n') || 'Configuration changes cannot be saved');
+  const apiTitle = $derived(apiError || (apiAddress ? `HTTP API ${apiAddress}` : t('HTTP API unavailable')));
+  const configTitle = $derived(configWarnings.join('\n') || t('Configuration changes cannot be saved'));
 
   function toggle(target: 'config' | 'api') {
     detail = detail === target ? null : target;
@@ -47,7 +48,7 @@
       aria-expanded={detail === 'config'}
       onclick={() => toggle('config')}
     >
-      {configWritable ? 'Config warning' : 'Config read-only'}
+      {configWritable ? t('Config warning') : t('Config read-only')}
     </button>
   {/if}
   <button
@@ -59,7 +60,7 @@
     onclick={() => toggle('api')}
   >
     <span class="api-dot" aria-hidden="true"></span>
-    {apiRunning ? 'API ready' : 'API offline'}
+    {apiRunning ? t('API ready') : t('API offline')}
   </button>
   <!-- The config detail panel shares the pill's visibility condition: when
        the pill disappears (API offline or warnings cleared) a leftover panel
@@ -67,7 +68,7 @@
   {#if detail === 'config' && apiRunning && (configWarnings.length > 0 || !configWritable)}
     <div class="footer-detail" transition:fade={dur({ duration: 140 })}>
       {#each configWarnings as warning}<p>{warning}</p>{/each}
-      {#if !configWritable}<p>Configuration changes cannot be saved.</p>{/if}
+      {#if !configWritable}<p>{t('Configuration changes cannot be saved.')}</p>{/if}
     </div>
   {:else if detail === 'api'}
     <div class="footer-detail" transition:fade={dur({ duration: 140 })}>

@@ -3,13 +3,15 @@
   import {
     GetAutoSleepSettings,
     ListBluetoothAdapters,
-    SetAutoSleepSettings
+    SetAutoSleepSettings,
+    SetLanguage
   } from '../backend';
   import { autosleep as autosleepModels, bluetooth as bluetoothModels } from '../../../wailsjs/go/models';
   import { pushToast } from '../toast';
+  import { locale, setLocale, t, withDetail, type Locale } from '../i18n.svelte';
   import SettingsDrawer from './SettingsDrawer.svelte';
 
-  let { inactive = false, onClose }: { inactive?: boolean; onClose: () => void } = $props();
+  let { inactive = false, onClose, onLanguageChanged = () => {} }: { inactive?: boolean; onClose: () => void; onLanguageChanged?: () => void } = $props();
 
   let adapters = $state<bluetoothModels.AdapterInfo[]>([]);
   let loading = $state(false);
@@ -17,6 +19,7 @@
   let autoSleepSettings = $state<autosleepModels.Settings | null>(null);
   let autoSleepError = $state<string | null>(null);
   let autoSleepBusy = $state(false);
+  let languageBusy = $state(false);
 
   // The panel only mounts while the settings drawer is open, so loading here
   // matches the previous open-time loading in App.
@@ -44,7 +47,7 @@
     } catch (error) {
       autoSleepSettings = null;
       autoSleepError = String(error);
-      pushToast(`Auto-sleep settings could not be loaded: ${String(error)}`);
+      pushToast(withDetail('Auto-sleep settings could not be loaded', error));
     }
   }
 
@@ -58,9 +61,26 @@
       await SetAutoSleepSettings(next);
     } catch (error) {
       autoSleepSettings = previous;
-      pushToast(`Auto-sleep settings could not be saved: ${String(error)}`);
+      pushToast(withDetail('Auto-sleep settings could not be saved', error));
     } finally {
       autoSleepBusy = false;
+    }
+  }
+
+  async function changeLanguage(next: Locale) {
+    if (languageBusy || next === locale()) return;
+    const previous = locale();
+    setLocale(next);
+    onLanguageChanged();
+    languageBusy = true;
+    try {
+      await SetLanguage(next);
+    } catch (error) {
+      setLocale(previous);
+      onLanguageChanged();
+      pushToast(`${t('Language setting could not be saved')}: ${String(error)}`);
+    } finally {
+      languageBusy = false;
     }
   }
 </script>
@@ -72,9 +92,12 @@
   autoSleep={autoSleepSettings}
   autoSleepError={autoSleepError}
   {autoSleepBusy}
+  language={locale()}
+  {languageBusy}
   {inactive}
   {onClose}
   onRefresh={loadAdapterSettings}
   onAutoSleepChange={changeAutoSleep}
   onAutoSleepRetry={loadAutoSleepSettings}
+  onLanguageChange={changeLanguage}
 />
