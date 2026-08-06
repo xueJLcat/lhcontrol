@@ -3,6 +3,7 @@
 package platform
 
 import (
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -25,6 +26,9 @@ var (
 	procCloseHandle                = kernel32.NewProc("CloseHandle")
 	procOpenProcess                = kernel32.NewProc("OpenProcess")
 	procQueryFullProcessImageNameW = kernel32.NewProc("QueryFullProcessImageNameW")
+	procCreateToolhelp32Snapshot   = kernel32.NewProc("CreateToolhelp32Snapshot")
+	procProcess32FirstW            = kernel32.NewProc("Process32FirstW")
+	procProcess32NextW             = kernel32.NewProc("Process32NextW")
 )
 
 // AcquireSingleInstance owns a named Windows mutex until the returned release
@@ -191,6 +195,77 @@ func defaultOwnProcessImageBaseName() (string, error) {
 		return "", err
 	}
 	return filepath.Base(executable), nil
+}
+
+// Toolhelp32 snapshot constants and structures (from tlhelp32.h).
+const thSnapProcess = 0x00000002
+
+type processEntry32W struct {
+	Size            uint32
+	Usage           uint32
+	ProcessID       uint32
+	DefaultHeapID   uintptr
+	ModuleID        uint32
+	Threads         uint32
+	ParentProcessID uint32
+	PriClassBase    int32
+	Flags           uint32
+	ExeFile         [syscall.MAX_PATH]uint16
+}
+
+// Injectable in tests.
+var runningProcessNames = toolhelpProcessNames
+
+// IsProcessRunning reports whether any running process image matches one of
+// the given base names (case-insensitive, e.g. "steam.exe").
+func IsProcessRunning(names ...string) (bool, error) {
+	if len(names) == 0 {
+		return false, nil
+	}
+	running, err := runningProcessNames()
+	if err != nil {
+		return false, err
+	}
+	for _, name := range names {
+		if _, ok := running[strings.ToLower(name)]; ok {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// toolhelpProcessNames snapshots the system process list and returns the set
+// of executable base names, lowercased. A process snapshot is cheaper than
+// per-process handle queries and needs no elevated privileges.
+func toolhelpProcessNames() (map[string]struct{}, error) {
+	snapshot, _, callErr := procCreateToolhelp32Snapshot.Call(thSnapProcess, 0)
+	if snapshot == uintptr(syscall.InvalidHandle) {
+		return nil, fmt.Errorf("create process snapshot: %w", callErr)
+	}
+	defer procCloseHandle.Call(snapshot)
+
+	names := make(map[string]struct{})
+	var entry processEntry32W
+	entry.Size = uint32(unsafe.Sizeof(entry))
+	ret, _, callErr := procProcess32FirstW.Call(snapshot, uintptr(unsafe.Pointer(&entry)))
+	if ret == 0 {
+		return nil, fmt.Errorf("read first process entry: %w", callErr)
+	}
+	for {
+		name := syscall.UTF16ToString(entry.ExeFile[:])
+		if name != "" {
+			names[strings.ToLower(name)] = struct{}{}
+		}
+		entry.Size = uint32(unsafe.Sizeof(entry))
+		ret, _, callErr = procProcess32NextW.Call(snapshot, uintptr(unsafe.Pointer(&entry)))
+		if ret == 0 {
+			if errno, ok := callErr.(syscall.Errno); ok && errno == syscall.ERROR_NO_MORE_FILES {
+				break
+			}
+			return nil, fmt.Errorf("read process entry: %w", callErr)
+		}
+	}
+	return names, nil
 }
 
 // BringWindowToFront finds the existing window, tries to set foreground, and flashes it (Windows specific)

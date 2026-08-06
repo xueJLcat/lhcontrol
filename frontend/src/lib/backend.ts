@@ -1,4 +1,4 @@
-import type { bluetooth, main, station } from '../../wailsjs/go/models';
+import type { autosleep, bluetooth, main, station } from '../../wailsjs/go/models';
 import type { PowerTarget } from './types';
 import * as bindings from '../../wailsjs/go/main/App';
 
@@ -20,6 +20,10 @@ export function CheckAllStationStatuses(): Promise<station.StationInfo[]> {
 
 export function GetAPIStatus(): Promise<main.APIStatus> {
   return call(() => bindings.GetAPIStatus());
+}
+
+export function GetAutoSleepSettings(): Promise<autosleep.Settings> {
+  return call(() => bindings.GetAutoSleepSettings());
 }
 
 export function GetBluetoothAdapter(): Promise<string> {
@@ -60,6 +64,10 @@ export function ScanAndFetchStations(): Promise<station.StationInfo[]> {
 
 export function SetAllStationsPowerDetailed(target: PowerTarget): Promise<station.BulkPowerResult> {
   return call(() => bindings.SetAllStationsPowerDetailed(target));
+}
+
+export function SetAutoSleepSettings(settings: autosleep.Settings): Promise<void> {
+  return call(() => bindings.SetAutoSleepSettings(settings));
 }
 
 export function SetBluetoothAdapter(deviceID: string): Promise<void> {

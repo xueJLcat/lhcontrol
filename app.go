@@ -11,8 +11,10 @@ import (
 	"sync/atomic"
 	"time"
 
+	"lhcontrol/internal/autosleep"
 	"lhcontrol/internal/bluetooth"
 	"lhcontrol/internal/config"
+	"lhcontrol/internal/platform"
 	"lhcontrol/internal/station"
 
 	"github.com/gofiber/fiber/v2"
@@ -107,6 +109,9 @@ type App struct {
 	apiGeneration     uint64
 	externalScanID    atomic.Uint64
 	shuttingDown      atomic.Bool
+	autoSleepMutex    sync.Mutex
+	autoSleepCancel   context.CancelFunc
+	autoSleepWG       sync.WaitGroup
 }
 
 type APIStatus struct {
@@ -328,6 +333,8 @@ func (a *App) startup(ctx context.Context) {
 			}
 		}
 	}
+
+	a.applyAutoSleep(a.config.GetAutoSleep())
 
 	registerAPIRoutes(a.api, a.stationManager, scanEventCallbacks{
 		nextID: func() uint64 {
@@ -672,10 +679,140 @@ func (a *App) SetBluetoothAdapter(deviceID string) error {
 	return err
 }
 
+// autoSleepEvent is the frontend payload for the "auto-sleep" event. Phase is
+// "started", "completed", "skipped" (user was operating Bluetooth) or
+// "failed".
+type autoSleepEvent struct {
+	Phase   string `json:"phase"`
+	Success int    `json:"success"`
+	Failed  int    `json:"failed"`
+	Error   string `json:"error,omitempty"`
+}
+
+// GetAutoSleepSettings returns the persisted automatic-sleep settings.
+func (a *App) GetAutoSleepSettings() autosleep.Settings {
+	return a.config.GetAutoSleep()
+}
+
+// SetAutoSleepSettings validates and persists the automatic-sleep settings,
+// then restarts the watcher so the change applies immediately.
+func (a *App) SetAutoSleepSettings(settings autosleep.Settings) error {
+	if err := settings.Validate(); err != nil {
+		return err
+	}
+	log.Printf("Setting auto-sleep: enabled=%v target=%s delay=%ds", settings.Enabled, settings.Target, settings.DelaySeconds)
+	err := a.config.SetAutoSleep(settings)
+	a.setConfigPersistenceStatus()
+	if err != nil {
+		return err
+	}
+	a.applyAutoSleep(settings)
+	return nil
+}
+
+// applyAutoSleep (re)starts the auto-sleep watcher goroutine to match the
+// given settings. Calling it repeatedly is safe: the previous watcher is
+// cancelled and joined first.
+func (a *App) applyAutoSleep(settings autosleep.Settings) {
+	a.autoSleepMutex.Lock()
+	defer a.autoSleepMutex.Unlock()
+	if a.autoSleepCancel != nil {
+		a.autoSleepCancel()
+		a.autoSleepWG.Wait()
+		a.autoSleepCancel = nil
+	}
+	if !settings.Enabled || a.shuttingDown.Load() {
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	a.autoSleepCancel = cancel
+	a.autoSleepWG.Add(1)
+	go func() {
+		defer a.autoSleepWG.Done()
+		watcher := &autosleep.Watcher{
+			Settings: settings,
+			IsRunning: func(name string) (bool, error) {
+				return platform.IsProcessRunning(name)
+			},
+			Trigger: a.runAutoSleep,
+		}
+		watcher.Run(ctx)
+	}()
+}
+
+// stopAutoSleep terminates the auto-sleep watcher and waits for it,
+// including a trigger action that may still be running.
+func (a *App) stopAutoSleep() {
+	a.autoSleepMutex.Lock()
+	defer a.autoSleepMutex.Unlock()
+	if a.autoSleepCancel != nil {
+		a.autoSleepCancel()
+		a.autoSleepWG.Wait()
+		a.autoSleepCancel = nil
+	}
+}
+
+func (a *App) emitAutoSleep(event autoSleepEvent) {
+	if a.ctx == nil || a.shuttingDown.Load() {
+		return
+	}
+	runtime.EventsEmit(a.ctx, "auto-sleep", event)
+}
+
+// runAutoSleep is the watcher trigger: rescan for base stations, then put
+// every known station to sleep. When the user is running a Bluetooth
+// operation this cycle is skipped without a retry, as configured.
+func (a *App) runAutoSleep(ctx context.Context) {
+	if a.shuttingDown.Load() || ctx.Err() != nil {
+		return
+	}
+	a.emitAutoSleep(autoSleepEvent{Phase: "started"})
+	log.Println("Auto-sleep: scanning for base stations")
+	_, scanErr := a.stationManager.ScanAndFetchStations()
+	switch {
+	case errors.Is(scanErr, station.ErrOperationInProgress):
+		log.Println("Auto-sleep skipped: another Bluetooth operation is in progress")
+		a.emitAutoSleep(autoSleepEvent{Phase: "skipped", Error: "another Bluetooth operation is in progress"})
+		return
+	case errors.Is(scanErr, station.ErrShuttingDown):
+		return
+	case scanErr != nil:
+		// The bulk sleep still targets every known station, so a failed scan
+		// degrades to the cached registry instead of aborting the feature.
+		log.Printf("Auto-sleep scan failed, continuing with known stations: %v", scanErr)
+	}
+	if a.shuttingDown.Load() || ctx.Err() != nil {
+		return
+	}
+	log.Println("Auto-sleep: putting all known stations to sleep")
+	result, err := a.stationManager.SetAllStationsPowerDetailed("sleep")
+	switch {
+	case errors.Is(err, station.ErrOperationInProgress):
+		log.Println("Auto-sleep skipped: another Bluetooth operation is in progress")
+		a.emitAutoSleep(autoSleepEvent{Phase: "skipped", Error: "another Bluetooth operation is in progress"})
+	case errors.Is(err, station.ErrShuttingDown):
+	case err != nil:
+		log.Printf("Auto-sleep failed: %v", err)
+		a.emitAutoSleep(autoSleepEvent{Phase: "failed", Error: err.Error()})
+	default:
+		success, failed := 0, 0
+		for _, entry := range result.Results {
+			if entry.Success {
+				success++
+			} else {
+				failed++
+			}
+		}
+		log.Printf("Auto-sleep completed: %d succeeded, %d failed", success, failed)
+		a.emitAutoSleep(autoSleepEvent{Phase: "completed", Success: success, Failed: failed})
+	}
+}
+
 // shutdown is called when the app terminates.
 func (a *App) shutdown(ctx context.Context) {
 	a.shuttingDown.Store(true)
 	log.Println("App shutdown requested. Cleaning up...")
+	a.stopAutoSleep()
 	a.stationManager.BeginShutdown()
 	a.apiLifecycleMutex.Lock()
 	cancelAPI := a.apiCancel

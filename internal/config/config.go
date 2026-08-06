@@ -8,21 +8,25 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"lhcontrol/internal/autosleep"
 )
 
 type Config struct {
-	RenamedStations          map[string]string `json:"renamedStations"`
-	RenamedStationsByAddress map[string]string `json:"renamedStationsByAddress"`
-	BluetoothAdapter         string            `json:"bluetoothAdapter"`
+	RenamedStations          map[string]string  `json:"renamedStations"`
+	RenamedStationsByAddress map[string]string  `json:"renamedStationsByAddress"`
+	BluetoothAdapter         string             `json:"bluetoothAdapter"`
+	AutoSleep                autosleep.Settings `json:"autoSleep"`
 	persistenceBlockedErr    error
 	lastPersistenceErr       error
 	mutex                    sync.RWMutex
 }
 
 type persistedConfig struct {
-	RenamedStations          map[string]string `json:"renamedStations"`
-	RenamedStationsByAddress map[string]string `json:"renamedStationsByAddress,omitempty"`
-	BluetoothAdapter         string            `json:"bluetoothAdapter,omitempty"`
+	RenamedStations          map[string]string   `json:"renamedStations"`
+	RenamedStationsByAddress map[string]string   `json:"renamedStationsByAddress,omitempty"`
+	BluetoothAdapter         string              `json:"bluetoothAdapter,omitempty"`
+	AutoSleep                *autosleep.Settings `json:"autoSleep,omitempty"`
 }
 
 var (
@@ -36,6 +40,7 @@ func NewConfig() *Config {
 	return &Config{
 		RenamedStations:          make(map[string]string),
 		RenamedStationsByAddress: make(map[string]string),
+		AutoSleep:                autosleep.DefaultSettings(),
 	}
 }
 
@@ -72,6 +77,7 @@ func (c *Config) Load() error {
 			c.RenamedStations = make(map[string]string)
 			c.RenamedStationsByAddress = make(map[string]string)
 			c.BluetoothAdapter = ""
+			c.AutoSleep = autosleep.DefaultSettings()
 			c.persistenceBlockedErr = nil
 			c.lastPersistenceErr = nil
 			c.mutex.Unlock()
@@ -104,6 +110,7 @@ func (c *Config) Load() error {
 		c.RenamedStations = make(map[string]string)
 		c.RenamedStationsByAddress = make(map[string]string)
 		c.BluetoothAdapter = ""
+		c.AutoSleep = autosleep.DefaultSettings()
 		c.persistenceBlockedErr = nil
 		c.lastPersistenceErr = nil
 		c.mutex.Unlock()
@@ -119,10 +126,28 @@ func (c *Config) Load() error {
 	c.RenamedStations = loaded.RenamedStations
 	c.RenamedStationsByAddress = loaded.RenamedStationsByAddress
 	c.BluetoothAdapter = loaded.BluetoothAdapter
+	c.AutoSleep = sanitizeAutoSleep(loaded.AutoSleep)
 	c.persistenceBlockedErr = nil
 	c.lastPersistenceErr = nil
 	c.mutex.Unlock()
 	return nil
+}
+
+// sanitizeAutoSleep repairs a persisted value that fails validation (for
+// example after a future version stored something this build rejects) by
+// falling back to individual defaults, keeping every valid part intact.
+func sanitizeAutoSleep(settings *autosleep.Settings) autosleep.Settings {
+	if settings == nil {
+		return autosleep.DefaultSettings()
+	}
+	result := *settings
+	if _, err := autosleep.Target(result.Target).ProcessName(); err != nil {
+		result.Target = string(autosleep.DefaultTarget)
+	}
+	if result.DelaySeconds < autosleep.MinDelaySeconds || result.DelaySeconds > autosleep.MaxDelaySeconds {
+		result.DelaySeconds = autosleep.DefaultDelaySeconds
+	}
+	return result
 }
 
 // Save writes the configuration to disk
@@ -161,6 +186,10 @@ func (c *Config) saveLocked() error {
 		RenamedStations:          make(map[string]string, len(c.RenamedStations)),
 		RenamedStationsByAddress: make(map[string]string, len(c.RenamedStationsByAddress)),
 		BluetoothAdapter:         c.BluetoothAdapter,
+	}
+	if c.AutoSleep != (autosleep.Settings{}) {
+		autoSleep := c.AutoSleep
+		snapshot.AutoSleep = &autoSleep
 	}
 	for originalName, renamedName := range c.RenamedStations {
 		snapshot.RenamedStations[originalName] = renamedName
@@ -360,6 +389,31 @@ func (c *Config) SetBluetoothAdapter(deviceID string) error {
 	c.BluetoothAdapter = deviceID
 	if err := c.saveLocked(); err != nil {
 		c.BluetoothAdapter = previous
+		return err
+	}
+	return nil
+}
+
+// GetAutoSleep returns the persisted automatic-sleep settings. The returned
+// value is always valid; invalid persisted data is repaired at load time.
+func (c *Config) GetAutoSleep() autosleep.Settings {
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	return c.AutoSleep
+}
+
+// SetAutoSleep validates and persists the automatic-sleep settings, rolling
+// the value back if persistence fails.
+func (c *Config) SetAutoSleep(settings autosleep.Settings) error {
+	if err := settings.Validate(); err != nil {
+		return err
+	}
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	previous := c.AutoSleep
+	c.AutoSleep = settings
+	if err := c.saveLocked(); err != nil {
+		c.AutoSleep = previous
 		return err
 	}
 	return nil

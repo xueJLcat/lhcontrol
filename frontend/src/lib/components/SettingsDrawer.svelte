@@ -1,10 +1,14 @@
 <script lang="ts">
   import { cubicOut } from 'svelte/easing';
   import { fly } from 'svelte/transition';
-  import { Bluetooth, CircleAlert, LoaderCircle, RefreshCw, X } from 'lucide-svelte';
+  import { Bluetooth, CircleAlert, LoaderCircle, MoonStar, RefreshCw, X } from 'lucide-svelte';
+  import { autosleep } from '../../../wailsjs/go/models';
   import type { bluetooth } from '../../../wailsjs/go/models';
   import { focusTrap } from '../actions';
   import { dur } from '../motion';
+
+  const MIN_DELAY_MINUTES = 1;
+  const MAX_DELAY_MINUTES = 120;
 
   let {
     adapters,
@@ -12,20 +16,26 @@
     loadError,
     selectedDeviceId,
     busy,
+    autoSleep,
+    autoSleepBusy = false,
     inactive = false,
     onClose,
     onRefresh,
-    onSelect
+    onSelect,
+    onAutoSleepChange
   }: {
     adapters: bluetooth.AdapterInfo[];
     loading: boolean;
     loadError: string | null;
     selectedDeviceId: string;
     busy: boolean;
+    autoSleep: autosleep.Settings | null;
+    autoSleepBusy?: boolean;
     inactive?: boolean;
     onClose: () => void;
     onRefresh: () => void;
     onSelect: (deviceId: string) => void;
+    onAutoSleepChange: (settings: autosleep.Settings) => void;
   } = $props();
 
   // A persisted selection may point at a radio that is currently detached
@@ -34,6 +44,26 @@
   const selectedMissing = $derived(
     selectedDeviceId !== '' && !adapters.some((adapter) => adapter.deviceId === selectedDeviceId)
   );
+
+  // The delay input keeps a draft copy so typing never saves; only commit
+  // (blur/Enter) pushes a change, matching the rest of the drawer.
+  let delayDraft = $state('');
+  $effect(() => {
+    if (autoSleep) delayDraft = String(Math.round(autoSleep.delaySeconds / 60));
+  });
+
+  function commitDelay() {
+    if (!autoSleep) return;
+    const parsed = Number(delayDraft);
+    const minutes = Number.isFinite(parsed)
+      ? Math.min(MAX_DELAY_MINUTES, Math.max(MIN_DELAY_MINUTES, Math.round(parsed)))
+      : Math.round(autoSleep.delaySeconds / 60);
+    delayDraft = String(minutes);
+    const delaySeconds = minutes * 60;
+    if (delaySeconds !== autoSleep.delaySeconds) {
+      onAutoSleepChange(autosleep.Settings.createFrom({ ...autoSleep, delaySeconds }));
+    }
+  }
 </script>
 
 <div
@@ -128,6 +158,82 @@
         cannot restrict the scan to a single adapter; it is kept for systems
         and future versions that support radio selection.
       </p>
+    {/if}
+  </section>
+
+  <section>
+    <h4><MoonStar size={12} /> Auto sleep</h4>
+    {#if autoSleep}
+      <label class="switch-row">
+        <span class="adapter-text">
+          <span class="adapter-name">Sleep all stations after a session ends</span>
+          <span class="adapter-desc">Scans and puts every known station to sleep</span>
+        </span>
+        <input
+          type="checkbox"
+          class="switch"
+          aria-label="Enable auto sleep"
+          checked={autoSleep.enabled}
+          disabled={autoSleepBusy}
+          onchange={() => onAutoSleepChange(autosleep.Settings.createFrom({ ...autoSleep, enabled: !autoSleep.enabled }))}
+        />
+      </label>
+      {#if autoSleep.enabled}
+        <div class="adapter-list" role="radiogroup" aria-label="Auto sleep trigger">
+          <label class="adapter-option" class:selected={autoSleep.target === 'steamvr'}>
+            <input
+              type="radio"
+              name="auto-sleep-target"
+              value="steamvr"
+              checked={autoSleep.target === 'steamvr'}
+              disabled={autoSleepBusy}
+              onchange={() => onAutoSleepChange(autosleep.Settings.createFrom({ ...autoSleep, target: 'steamvr' }))}
+            />
+            <span class="adapter-text">
+              <span class="adapter-name">SteamVR</span>
+              <span class="adapter-desc">vrserver.exe — also fires while the Steam client stays open</span>
+            </span>
+          </label>
+          <label class="adapter-option" class:selected={autoSleep.target === 'steam'}>
+            <input
+              type="radio"
+              name="auto-sleep-target"
+              value="steam"
+              checked={autoSleep.target === 'steam'}
+              disabled={autoSleepBusy}
+              onchange={() => onAutoSleepChange(autosleep.Settings.createFrom({ ...autoSleep, target: 'steam' }))}
+            />
+            <span class="adapter-text">
+              <span class="adapter-name">Steam</span>
+              <span class="adapter-desc">steam.exe — fires only when the Steam client fully exits</span>
+            </span>
+          </label>
+        </div>
+        <div class="delay-row">
+          <label for="auto-sleep-delay">Wait before sleeping</label>
+          <span class="delay-input">
+            <input
+              id="auto-sleep-delay"
+              type="number"
+              min={MIN_DELAY_MINUTES}
+              max={MAX_DELAY_MINUTES}
+              step="1"
+              bind:value={delayDraft}
+              onchange={commitDelay}
+              disabled={autoSleepBusy}
+            />
+            minutes
+          </span>
+        </div>
+      {/if}
+      <p class="hint">
+        The timer starts when the watched process closes and restarts if it is
+        reopened in time. When it fires, a Bluetooth operation from you skips
+        this round instead of retrying. Settings are saved and restored on the
+        next start.
+      </p>
+    {:else}
+      <p class="hint loading"><LoaderCircle class="spin" size={14} /> Loading auto sleep settings...</p>
     {/if}
   </section>
 </div>
@@ -229,6 +335,69 @@
     font-size: var(--fs-micro);
     white-space: nowrap;
   }
+  .switch-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.6rem;
+    padding: 0.5rem 0.6rem;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    background: var(--bg-input);
+    cursor: pointer;
+  }
+  .switch-row:has(input:disabled) { cursor: wait; }
+  .switch {
+    appearance: none;
+    position: relative;
+    flex-shrink: 0;
+    width: 36px;
+    height: 20px;
+    border-radius: var(--radius-pill);
+    border: 1px solid var(--color-border-strong);
+    background: var(--bg-inset);
+    cursor: pointer;
+    transition: background-color var(--dur-1) var(--ease), border-color var(--dur-1) var(--ease);
+  }
+  .switch:checked {
+    background: var(--color-primary);
+    border-color: var(--color-primary);
+  }
+  .switch::after {
+    content: '';
+    position: absolute;
+    top: 1px; left: 1px;
+    width: 16px; height: 16px;
+    border-radius: 50%;
+    background: #fff;
+    box-shadow: var(--shadow-sm);
+    transition: transform var(--dur-1) var(--ease);
+  }
+  .switch:checked::after { transform: translateX(16px); }
+  .switch:disabled { opacity: 0.5; cursor: not-allowed; }
+  .delay-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.6rem;
+    margin-top: 0.55rem;
+    padding: 0.5rem 0.6rem;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    background: var(--bg-input);
+    font-size: var(--fs-sm);
+    font-weight: 700;
+    color: var(--text-primary);
+  }
+  .delay-input {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-size: var(--fs-micro);
+    font-weight: 600;
+    color: var(--text-muted);
+  }
+  .delay-input input { width: 4.2rem; text-align: right; }
   .hint {
     margin: 0.6rem 0 0;
     font-size: var(--fs-micro);

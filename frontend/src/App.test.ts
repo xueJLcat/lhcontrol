@@ -7,6 +7,7 @@ import { pushToast } from './lib/toast';
 const api = vi.hoisted(() => ({
   CheckAllStationStatuses: vi.fn(),
   GetAPIStatus: vi.fn(),
+  GetAutoSleepSettings: vi.fn(),
   GetBluetoothAdapter: vi.fn(),
   GetCurrentStationInfo: vi.fn(),
   GetScanStatus: vi.fn(),
@@ -17,6 +18,7 @@ const api = vi.hoisted(() => ({
   RenameStationByAddress: vi.fn(),
   ScanAndFetchStations: vi.fn(),
   SetAllStationsPowerDetailed: vi.fn(),
+  SetAutoSleepSettings: vi.fn(),
   SetBluetoothAdapter: vi.fn(),
   SetStationChannel: vi.fn(),
   SetStationPower: vi.fn(),
@@ -77,6 +79,8 @@ beforeEach(() => {
   api.ListBluetoothAdapters.mockResolvedValue([]);
   api.GetBluetoothAdapter.mockResolvedValue('');
   api.SetBluetoothAdapter.mockResolvedValue(undefined);
+  api.GetAutoSleepSettings.mockResolvedValue({ enabled: false, target: 'steamvr', delaySeconds: 300 });
+  api.SetAutoSleepSettings.mockResolvedValue(undefined);
 });
 
 afterEach(() => {
@@ -1987,5 +1991,70 @@ describe('App settings drawer', () => {
     await fireEvent.click(screen.getByRole('button', { name: 'Details for LHB-TEST' }));
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Settings' })).not.toBeInTheDocument());
     expect(screen.getByRole('dialog', { name: 'Station details' })).toBeInTheDocument();
+  });
+});
+
+describe('App auto sleep settings', () => {
+  async function openSettings() {
+    render(App);
+    await screen.findByText('LHB-TEST');
+    await fireEvent.click(screen.getByRole('button', { name: 'Open settings' }));
+    await screen.findByRole('dialog', { name: 'Settings' });
+  }
+
+  it('loads and shows the auto sleep section when the drawer opens', async () => {
+    await openSettings();
+    await waitFor(() => expect(api.GetAutoSleepSettings).toHaveBeenCalledOnce());
+    const toggle = await screen.findByRole('checkbox', { name: 'Enable auto sleep' });
+    expect(toggle).not.toBeChecked();
+  });
+
+  it('enables auto sleep and persists the change', async () => {
+    await openSettings();
+    const toggle = await screen.findByRole('checkbox', { name: 'Enable auto sleep' });
+    await fireEvent.click(toggle);
+    await waitFor(() => expect(api.SetAutoSleepSettings).toHaveBeenCalledTimes(1));
+    const saved = api.SetAutoSleepSettings.mock.calls[0][0];
+    expect(saved.enabled).toBe(true);
+    expect(saved.target).toBe('steamvr');
+    expect(saved.delaySeconds).toBe(300);
+  });
+
+  it('rolls auto sleep settings back when saving fails', async () => {
+    api.SetAutoSleepSettings.mockRejectedValue(new Error('config locked'));
+    await openSettings();
+    const toggle = await screen.findByRole('checkbox', { name: 'Enable auto sleep' });
+    await fireEvent.click(toggle);
+    await waitFor(() => expect(api.SetAutoSleepSettings).toHaveBeenCalledTimes(1));
+    expect(pushToast).toHaveBeenCalledWith('Auto-sleep settings could not be saved: Error: config locked');
+    const rolledBack = await screen.findByRole('checkbox', { name: 'Enable auto sleep' });
+    expect((rolledBack as HTMLInputElement).checked).toBe(false);
+  });
+
+  it('switches the trigger target once enabled', async () => {
+    api.GetAutoSleepSettings.mockResolvedValue({ enabled: true, target: 'steamvr', delaySeconds: 300 });
+    await openSettings();
+    const steamOption = await screen.findByText('steam.exe — fires only when the Steam client fully exits');
+    await fireEvent.click(steamOption);
+    await waitFor(() => expect(api.SetAutoSleepSettings).toHaveBeenCalledTimes(1));
+    const saved = api.SetAutoSleepSettings.mock.calls[0][0];
+    expect(saved.target).toBe('steam');
+  });
+
+  it('toasts auto-sleep progress events', async () => {
+    render(App);
+    await screen.findByText('LHB-TEST');
+
+    runtime.handlers.get('auto-sleep')?.({ phase: 'started' });
+    expect(pushToast).toHaveBeenCalledWith('Session ended — scanning and putting all stations to sleep.', 'info');
+
+    runtime.handlers.get('auto-sleep')?.({ phase: 'completed', success: 2, failed: 0 });
+    expect(pushToast).toHaveBeenCalledWith('Auto sleep finished: 2 station(s) put to sleep.', 'success');
+
+    runtime.handlers.get('auto-sleep')?.({ phase: 'skipped', error: 'another Bluetooth operation is in progress' });
+    expect(pushToast).toHaveBeenCalledWith('Auto sleep skipped: another Bluetooth operation is in progress.', 'info');
+
+    runtime.handlers.get('auto-sleep')?.({ phase: 'failed', error: 'boom' });
+    expect(pushToast).toHaveBeenCalledWith('Auto sleep failed: boom.');
   });
 });

@@ -1,3 +1,24 @@
+export namespace autosleep {
+	
+	export class Settings {
+	    enabled: boolean;
+	    target: string;
+	    delaySeconds: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new Settings(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.enabled = source["enabled"];
+	        this.target = source["target"];
+	        this.delaySeconds = source["delaySeconds"];
+	    }
+	}
+
+}
+
 export namespace bluetooth {
 	
 	export class AdapterInfo {

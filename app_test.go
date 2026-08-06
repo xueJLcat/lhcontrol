@@ -816,3 +816,42 @@ func TestBluetoothAdapterPreferenceSurvivesRestart(t *testing.T) {
 		t.Fatalf("GetBluetoothAdapter() after simulated restart = %q, want persisted value", got)
 	}
 }
+
+func TestAutoSleepSettingsBindings(t *testing.T) {
+	t.Setenv("AppData", t.TempDir())
+	app := NewApp()
+
+	defaults := app.GetAutoSleepSettings()
+	if defaults.Enabled {
+		t.Fatal("fresh auto-sleep settings must be disabled by default")
+	}
+
+	invalid := defaults
+	invalid.Target = "chrome"
+	if err := app.SetAutoSleepSettings(invalid); err == nil {
+		t.Fatal("SetAutoSleepSettings() accepted an invalid target")
+	}
+	invalid = defaults
+	invalid.DelaySeconds = 5
+	if err := app.SetAutoSleepSettings(invalid); err == nil {
+		t.Fatal("SetAutoSleepSettings() accepted a below-minimum delay")
+	}
+
+	enabled := defaults
+	enabled.Enabled = true
+	enabled.Target = "steam"
+	enabled.DelaySeconds = 120
+	if err := app.SetAutoSleepSettings(enabled); err != nil {
+		t.Fatalf("SetAutoSleepSettings() error = %v", err)
+	}
+	defer app.stopAutoSleep()
+
+	restarted := NewApp()
+	if err := restarted.config.Load(); err != nil {
+		t.Fatalf("config.Load() error = %v", err)
+	}
+	got := restarted.GetAutoSleepSettings()
+	if !got.Enabled || got.Target != "steam" || got.DelaySeconds != 120 {
+		t.Fatalf("auto-sleep settings after simulated restart = %+v", got)
+	}
+}

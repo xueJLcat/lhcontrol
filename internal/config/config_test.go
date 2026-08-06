@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"lhcontrol/internal/autosleep"
 )
 
 func TestWriteFileAtomicallyCreatesAndReplacesFile(t *testing.T) {
@@ -426,5 +428,77 @@ func TestSuccessfulInvalidConfigQuarantineResetsPreviousLoadState(t *testing.T) 
 	}
 	if err := cfg.SetRenamedStation("LHB-NEW", "New"); err != nil {
 		t.Fatalf("SetRenamedStation() remained blocked after successful quarantine: %v", err)
+	}
+}
+
+func TestAutoSleepSettingsPersistAcrossReloads(t *testing.T) {
+	configRoot := t.TempDir()
+	t.Setenv("AppData", configRoot)
+
+	cfg := NewConfig()
+	defaults := cfg.GetAutoSleep()
+	if defaults.Enabled || defaults.Target != string(autosleep.DefaultTarget) || defaults.DelaySeconds != autosleep.DefaultDelaySeconds {
+		t.Fatalf("fresh auto-sleep defaults = %+v", defaults)
+	}
+	settings := defaults
+	settings.Enabled = true
+	settings.Target = "steam"
+	settings.DelaySeconds = 90
+	if err := cfg.SetAutoSleep(settings); err != nil {
+		t.Fatalf("SetAutoSleep() error = %v", err)
+	}
+
+	reloaded := NewConfig()
+	if err := reloaded.Load(); err != nil {
+		t.Fatalf("reloaded Load() error = %v", err)
+	}
+	got := reloaded.GetAutoSleep()
+	if !got.Enabled || got.Target != "steam" || got.DelaySeconds != 90 {
+		t.Fatalf("reloaded auto-sleep = %+v, want enabled/steam/90", got)
+	}
+}
+
+func TestSetAutoSleepRejectsInvalidSettings(t *testing.T) {
+	t.Setenv("AppData", t.TempDir())
+
+	cfg := NewConfig()
+	bad := cfg.GetAutoSleep()
+	bad.Target = "chrome"
+	if err := cfg.SetAutoSleep(bad); err == nil {
+		t.Fatal("SetAutoSleep() accepted an unknown target")
+	}
+	bad = cfg.GetAutoSleep()
+	bad.DelaySeconds = 1
+	if err := cfg.SetAutoSleep(bad); err == nil {
+		t.Fatal("SetAutoSleep() accepted a below-minimum delay")
+	}
+}
+
+func TestLoadSanitizesInvalidPersistedAutoSleep(t *testing.T) {
+	configRoot := t.TempDir()
+	t.Setenv("AppData", configRoot)
+	configDirectory := filepath.Join(configRoot, "lhcontrol")
+	if err := os.MkdirAll(configDirectory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A future version persisted a target and delay this build rejects.
+	content := []byte(`{"autoSleep":{"enabled":true,"target":"chrome","delaySeconds":999999}}`)
+	if err := os.WriteFile(filepath.Join(configDirectory, "config.json"), content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := NewConfig()
+	if err := cfg.Load(); err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	got := cfg.GetAutoSleep()
+	if !got.Enabled {
+		t.Fatal("sanitization dropped the enabled flag")
+	}
+	if got.Target == "chrome" {
+		t.Fatalf("sanitization kept invalid target %q", got.Target)
+	}
+	if got.DelaySeconds == 999999 {
+		t.Fatalf("sanitization kept invalid delay %d", got.DelaySeconds)
 	}
 }

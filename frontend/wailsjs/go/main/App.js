@@ -10,6 +10,10 @@ export function GetAPIStatus() {
   return window['go']['main']['App']['GetAPIStatus']();
 }
 
+export function GetAutoSleepSettings() {
+  return window['go']['main']['App']['GetAutoSleepSettings']();
+}
+
 export function GetBluetoothAdapter() {
   return window['go']['main']['App']['GetBluetoothAdapter']();
 }
@@ -76,6 +80,10 @@ export function SetAllStationsPower(arg1) {
 
 export function SetAllStationsPowerDetailed(arg1) {
   return window['go']['main']['App']['SetAllStationsPowerDetailed'](arg1);
+}
+
+export function SetAutoSleepSettings(arg1) {
+  return window['go']['main']['App']['SetAutoSleepSettings'](arg1);
 }
 
 export function SetBluetoothAdapter(arg1) {
