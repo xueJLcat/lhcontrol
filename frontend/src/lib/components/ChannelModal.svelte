@@ -163,6 +163,9 @@
       color var(--dur-1) var(--ease), box-shadow var(--dur-1) var(--ease),
       transform 80ms var(--ease);
   }
+  /* Inset ring: the outward outline would slip under the adjacent opaque
+     cells in the tight grid. */
+  .ch-cell:focus-visible { outline-offset: -2px; }
   .ch-cell:hover:not(:disabled):not(.occupied) {
     background: var(--bg-surface-hover);
     border-color: color-mix(in srgb, var(--color-primary) 35%, var(--color-border-strong));

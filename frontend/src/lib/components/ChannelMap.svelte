@@ -54,6 +54,7 @@
       <span class="lg lg-on">On</span>
       <span class="lg lg-standby">Standby</span>
       <span class="lg lg-sleep">Sleep</span>
+      <span class="lg lg-booting">Booting</span>
     </div>
   </div>
   <div class="channel-map" role="group" aria-label="Channel occupancy">
@@ -85,7 +86,7 @@
     padding: 0.6rem 0.65rem 0.55rem;
     margin-bottom: 0.7rem;
   }
-  .cm-head { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; margin-bottom: 0.4rem; }
+  .cm-head { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 0.4rem; }
   .cm-head h3 {
     margin: 0;
     display: flex;
@@ -117,6 +118,7 @@
   .lg-on::before { background: var(--color-on); }
   .lg-standby::before { background: var(--color-standby); }
   .lg-sleep::before { background: var(--color-sleep); }
+  .lg-booting::before { background: var(--color-booting); }
   .channel-map {
     display: grid;
     grid-template-columns: repeat(16, 1fr);
@@ -139,6 +141,9 @@
     transition: background-color var(--dur-2) var(--ease), border-color var(--dur-2) var(--ease),
       color var(--dur-2) var(--ease), transform var(--dur-1) var(--ease-spring), box-shadow var(--dur-2) var(--ease);
   }
+  /* Inset ring: the outward outline would slip under the adjacent opaque
+     cells in the tight grid. */
+  .cm-cell:focus-visible { outline-offset: -2px; }
   .cm-cell:disabled { cursor: default; background: transparent; border-color: color-mix(in srgb, var(--color-border) 60%, transparent); }
   .cm-cell.occupied:hover:not(:disabled) { transform: translateY(-1px); box-shadow: var(--shadow-sm); }
   .cm-cell.occupied {

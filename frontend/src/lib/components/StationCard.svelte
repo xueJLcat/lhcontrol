@@ -242,6 +242,10 @@
 <style>
   .station-card {
     position: relative;
+    /* Fill the flip wrapper so cards in the same grid row share one height
+       even when a neighbour carries an extra feedback line. */
+    height: 100%;
+    box-sizing: border-box;
     background: var(--bg-surface-solid);
     /* Uniform 1px border: the 3px transparent left edge used to break the
        corner arcs; the gradient bar (::before below) carries the accent.
@@ -268,40 +272,37 @@
   .station-card.state-standby { --flash: var(--color-standby); --glow: var(--glow-standby); }
   .station-card.state-sleep { --flash: var(--color-sleep); --glow: var(--glow-sleep); }
   .station-card.state-booting { --flash: var(--color-booting); --glow: var(--glow-booting); }
-  /* Gradient accent bar: replaces the old flat 3px state border with a
-     glowing light strip that fades in when a state is known. */
+  /* Quiet edge hint: a thin solid strip at reduced opacity. The state color
+     is already carried by the status dot, badge and segment thumb, so this
+     stays a subtle accent instead of a fourth loud repetition. */
   .station-card::before {
     content: '';
     position: absolute;
     left: 0;
-    top: 10px;
-    bottom: 10px;
-    width: 3px;
+    top: 12px;
+    bottom: 12px;
+    width: 2px;
     border-radius: var(--radius-pill);
     opacity: 0;
     transition: opacity var(--dur-2) var(--ease);
   }
   .station-card.state-on::before {
-    opacity: 1;
-    background: linear-gradient(180deg, var(--color-on), color-mix(in srgb, var(--color-on) 40%, transparent));
-    box-shadow: 0 0 10px color-mix(in srgb, var(--color-on) 50%, transparent);
+    opacity: 0.65;
+    background: var(--color-on);
   }
   .station-card.state-standby::before {
-    opacity: 1;
-    background: linear-gradient(180deg, var(--color-standby), color-mix(in srgb, var(--color-standby) 40%, transparent));
-    box-shadow: 0 0 10px color-mix(in srgb, var(--color-standby) 50%, transparent);
+    opacity: 0.65;
+    background: var(--color-standby);
   }
   .station-card.state-sleep::before {
-    opacity: 1;
-    background: linear-gradient(180deg, var(--color-sleep), color-mix(in srgb, var(--color-sleep) 40%, transparent));
-    box-shadow: 0 0 10px color-mix(in srgb, var(--color-sleep) 50%, transparent);
+    opacity: 0.65;
+    background: var(--color-sleep);
   }
   .station-card.state-booting::before {
-    opacity: 1;
-    background: linear-gradient(180deg, var(--color-booting), color-mix(in srgb, var(--color-booting) 40%, transparent));
-    box-shadow: 0 0 10px color-mix(in srgb, var(--color-booting) 50%, transparent);
+    opacity: 0.65;
+    background: var(--color-booting);
   }
-  .station-card.offline::before { opacity: 0.35; box-shadow: none; }
+  .station-card.offline::before { opacity: 0.25; }
   .station-card.flash { animation: state-flash 1.1s var(--ease); }
   @keyframes state-flash {
     0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--flash, var(--color-primary)) 45%, transparent); }
@@ -384,7 +385,9 @@
   .power-feedback.warning { color: var(--fb-warning); }
   .power-feedback.error { color: var(--fb-error); }
 
-  .card-actions { display: flex; align-items: center; gap: 0.4rem; }
+  /* margin-top:auto pins the actions to the bottom when the grid stretches
+     this card to the row height, instead of leaving dead space under them. */
+  .card-actions { display: flex; align-items: center; gap: 0.4rem; margin-top: auto; }
   .power-segment { flex: 1; }
   .power-segment button { flex: 1; min-width: 0; }
   .details {
@@ -411,7 +414,9 @@
   }
 
   .rename-row { display: flex; align-items: center; gap: 0.35rem; }
-  .rename-row input { flex: 1; min-width: 0; }
+  /* Slightly tighter than the global input so the rename row stays close to
+     the normal card-top height and the grid row barely grows. */
+  .rename-row input { flex: 1; min-width: 0; padding: 0.3rem 0.5rem; }
   /* Self-contained focus ring instead of the global outline, which would
      stack a second ring around the hover shadow. */
   .rename-row input:focus {

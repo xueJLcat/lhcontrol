@@ -297,7 +297,9 @@ button:focus-visible, [tabindex]:focus-visible {
 }
 @keyframes seg-pop {
   0% { transform: scale(1); }
-  35% { transform: scale(1.07); }
+  /* Kept at 1.05: the segment's overflow:hidden would clip a larger scale
+     at the container's top/bottom edges. */
+  35% { transform: scale(1.05); }
   100% { transform: scale(1); }
 }
 .power-segment button, .bulk-power button {

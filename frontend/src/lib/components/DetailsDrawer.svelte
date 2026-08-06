@@ -149,11 +149,17 @@
     z-index: 11;
     right: 0; top: 0; bottom: 0;
     width: min(390px, 92vw);
-    /* Colorful signature edge pinned to the box so it does not scroll
-       away with the drawer content. */
+    /* Colorful signature edge, styled after the card accent strip: 2px wide,
+       inset 12px from top/bottom, at 65% softness (baked into the stops,
+       because a background layer has no opacity of its own). Kept as a
+       background layer so it stays pinned while the drawer content scrolls. */
     background:
-      linear-gradient(180deg, var(--color-primary), var(--color-on), var(--color-standby), var(--color-sleep))
-        0 0 / 3px 100% no-repeat,
+      linear-gradient(180deg,
+        color-mix(in srgb, var(--color-primary) 65%, transparent),
+        color-mix(in srgb, var(--color-on) 65%, transparent) 33%,
+        color-mix(in srgb, var(--color-standby) 65%, transparent) 66%,
+        color-mix(in srgb, var(--color-sleep) 65%, transparent))
+        0 12px / 2px calc(100% - 24px) no-repeat,
       var(--bg-surface-solid);
     border-left: 1px solid var(--color-border);
     /* Rounded left edge; the right side stays flush with the window. */
@@ -213,12 +219,14 @@
     display: flex;
     align-items: center;
     gap: 0.3rem;
-    flex-wrap: nowrap;
+    /* Wrap instead of squeezing: the three labels exceed the 390px drawer's
+       content width on some fonts/DPI, and shrinking nowrap buttons would
+       spill text past their boxes. */
+    flex-wrap: wrap;
     margin-top: 0.8rem;
   }
   .drawer-actions .btn {
-    flex: 0 1 auto;
-    min-width: 0;
+    flex: 0 0 auto;
     min-height: 30px;
     gap: 0.25rem;
     padding: 0.35rem 0.45rem;

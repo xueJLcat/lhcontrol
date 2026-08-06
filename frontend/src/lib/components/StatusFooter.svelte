@@ -1,6 +1,5 @@
 <script lang="ts">
-  import { cubicOut } from 'svelte/easing';
-  import { fly } from 'svelte/transition';
+  import { fade } from 'svelte/transition';
   import { Activity } from 'lucide-svelte';
 
   export let statusMessage: string;
@@ -14,7 +13,8 @@
   <Activity size={12} />
   <span class="status-text" role="status" aria-live="polite" title={statusMessage}>
     {#key statusMessage}
-      <span class="status-msg" in:fly={{ y: 7, duration: 170, easing: cubicOut }}>{statusMessage}</span>
+      <!-- fade only: the parent ellipsis container clips vertical motion. -->
+      <span class="status-msg" in:fade={{ duration: 160 }}>{statusMessage}</span>
     {/key}
   </span>
   {#if configWarnings.length > 0 || !configWritable}

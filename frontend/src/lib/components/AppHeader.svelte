@@ -66,9 +66,9 @@
     </div>
     {#if fleetTotal > 0}
       <div class="fleet-summary" aria-label="Fleet power summary">
-        {#if onCount > 0}<span class="fleet-chip chip-on" in:fade={{ duration: 160 }}><span class="fleet-dot dot-on"></span>{onCount} On</span>{/if}
-        {#if standbyCount > 0}<span class="fleet-chip chip-standby" in:fade={{ duration: 160 }}><span class="fleet-dot dot-standby"></span>{standbyCount} Standby</span>{/if}
-        {#if sleepCount > 0}<span class="fleet-chip chip-sleep" in:fade={{ duration: 160 }}><span class="fleet-dot dot-sleep"></span>{sleepCount} Sleep</span>{/if}
+        {#if onCount > 0}<span class="fleet-chip chip-on" transition:fade={{ duration: 160 }}><span class="fleet-dot dot-on"></span>{onCount} On</span>{/if}
+        {#if standbyCount > 0}<span class="fleet-chip chip-standby" transition:fade={{ duration: 160 }}><span class="fleet-dot dot-standby"></span>{standbyCount} Standby</span>{/if}
+        {#if sleepCount > 0}<span class="fleet-chip chip-sleep" transition:fade={{ duration: 160 }}><span class="fleet-dot dot-sleep"></span>{sleepCount} Sleep</span>{/if}
       </div>
     {/if}
   </div>
