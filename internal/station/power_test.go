@@ -21,6 +21,36 @@ func TestSetAllStationsPowerValidatesState(t *testing.T) {
 	}
 }
 
+func TestSinglePowerOperationHasHardTimeoutAndReleasesOperation(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	manager.stationOperationTimeout = 25 * time.Millisecond
+	address := "11:22:33:44:55:90"
+	manager.stations[address] = &internalbluetooth.BaseStation{
+		Name: "LHB-TIMEOUT", Address: mustAddress(t, address), Present: true,
+		Capabilities: internalbluetooth.Capabilities{PowerWrite: true}, CapabilitiesKnown: true,
+	}
+	manager.bluetoothOps.setPowerState = func(ctx context.Context, _ *internalbluetooth.BaseStation, _ internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
+		<-ctx.Done()
+		return internalbluetooth.PowerControlResult{}, ctx.Err()
+	}
+
+	start := time.Now()
+	if _, err := manager.SetStationPower(address, "on"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("SetStationPower() error = %v, want context deadline", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("SetStationPower() took %v, want a bounded return", elapsed)
+	}
+
+	manager.bluetoothOps.setPowerState = func(context.Context, *internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
+		return internalbluetooth.PowerControlResult{Confirmed: true}, nil
+	}
+	if _, err := manager.SetStationPower(address, "on"); err != nil {
+		t.Fatalf("operation lock was not released after timeout: %v", err)
+	}
+}
+
 func TestSetAllStationsPowerSkipsIneligibleStations(t *testing.T) {
 	manager := NewManager(config.NewConfig())
 	manager.stations["already-on"] = &internalbluetooth.BaseStation{

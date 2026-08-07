@@ -273,8 +273,18 @@ func (m *Manager) endRecoveryStationOperation(address string) {
 // while preventing a hidden recovery task from making a UI-permitted second
 // device action fail with Busy.
 func (m *Manager) beginForegroundStationOperation(address string) error {
+	return m.beginForegroundStationOperationContext(context.Background(), address)
+}
+
+func (m *Manager) beginForegroundStationOperationContext(ctx context.Context, address string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	m.scanTransitionMutex.Lock()
 	defer m.scanTransitionMutex.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if m.isScanning.Load() {
 		return ErrOperationInProgress
 	}
@@ -296,6 +306,8 @@ func (m *Manager) beginForegroundStationOperation(address string) error {
 			select {
 			case <-deviceBusy.backgroundDone:
 				continue
+			case <-ctx.Done():
+				return ctx.Err()
 			case <-m.shutdownCh:
 				return ErrShuttingDown
 			}
@@ -316,6 +328,8 @@ func (m *Manager) beginForegroundStationOperation(address string) error {
 		m.cancelRecoveryForForeground()
 		select {
 		case <-done:
+		case <-ctx.Done():
+			return ctx.Err()
 		case <-m.shutdownCh:
 			return ErrShuttingDown
 		}

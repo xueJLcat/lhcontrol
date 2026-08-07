@@ -472,6 +472,27 @@ func TestSecondForegroundOperationWaitsForHiddenRecoverySlot(t *testing.T) {
 	manager.endStationOperation("FIRST")
 }
 
+func TestForegroundRecoveryWaitHonorsOperationDeadline(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	if err := manager.beginRecoveryStationOperation("RECOVERY"); err != nil {
+		t.Fatalf("begin recovery: %v", err)
+	}
+	if err := manager.beginStationOperation("FIRST"); err != nil {
+		t.Fatalf("reserve foreground slot: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+	err := manager.beginForegroundStationOperationContext(ctx, "SECOND")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("foreground recovery wait error = %v, want context deadline", err)
+	}
+
+	manager.endRecoveryStationOperation("RECOVERY")
+	manager.endStationOperation("FIRST")
+}
+
 func TestForegroundRetriesWhenRecoveryEndsDuringSlotMiss(t *testing.T) {
 	manager := NewManager(config.NewConfig())
 	defer manager.Shutdown()

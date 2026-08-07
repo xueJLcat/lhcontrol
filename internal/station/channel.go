@@ -36,7 +36,9 @@ func (m *Manager) SetStationChannel(
 			Address: initialSnapshot.Address, PreviousChannel: channel, Channel: channel, Confirmed: true, Warnings: []string{},
 		}, nil
 	}
-	if err := m.beginForegroundStationOperation(canonicalAddress); err != nil {
+	operationContext, cancelOperation := m.newStationOperationContext(m.lifecycleContext)
+	defer cancelOperation()
+	if err := m.beginForegroundStationOperationContext(operationContext, canonicalAddress); err != nil {
 		return result, err
 	}
 	defer m.endStationOperation(canonicalAddress)
@@ -59,6 +61,9 @@ func (m *Manager) SetStationChannel(
 	if err := m.ensureReady(); err != nil {
 		return result, err
 	}
+	if err := operationContext.Err(); err != nil {
+		return result, err
+	}
 	if !m.channelOperationMutex.TryLock() {
 		return result, ErrOperationInProgress
 	}
@@ -74,7 +79,7 @@ func (m *Manager) SetStationChannel(
 	capabilities := targetSnapshot.Capabilities
 	if !capabilities.ChannelRead || !capabilities.ChannelWrite {
 		err = runSafely("channel capability refresh", func() error {
-			discoveryContext, cancelDiscovery := context.WithTimeout(m.lifecycleContext, m.initialReadTimeout)
+			discoveryContext, cancelDiscovery := context.WithTimeout(operationContext, m.initialReadTimeout)
 			defer cancelDiscovery()
 			var refreshErr error
 			capabilities, refreshErr = m.bluetoothOps.refreshCapabilities(discoveryContext, stationPtr)
@@ -141,7 +146,7 @@ func (m *Manager) SetStationChannel(
 	var writeResult bluetooth.ChannelWriteResult
 	err = runSafely("channel operation", func() error {
 		var channelErr error
-		writeResult, channelErr = m.bluetoothOps.setChannel(m.lifecycleContext, stationPtr, channel)
+		writeResult, channelErr = m.bluetoothOps.setChannel(operationContext, stationPtr, channel)
 		return channelErr
 	})
 	result.PreviousChannel = writeResult.PreviousChannel

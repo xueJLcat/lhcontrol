@@ -99,6 +99,7 @@
 
   function handleLanguageChanged() {
     clearToasts();
+    store.onLocaleChanged();
   }
 
   function openChannelEditor() {

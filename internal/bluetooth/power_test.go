@@ -9,6 +9,24 @@ import (
 	tinybluetooth "tinygo.org/x/bluetooth"
 )
 
+type sleepFinalBlockingCharacteristic struct {
+	*fakeCharacteristic
+	contextWrites int
+}
+
+func (f *sleepFinalBlockingCharacteristic) WriteContext(ctx context.Context, value []byte) (int, error) {
+	return f.WriteWithoutResponseContext(ctx, value)
+}
+
+func (f *sleepFinalBlockingCharacteristic) WriteWithoutResponseContext(ctx context.Context, value []byte) (int, error) {
+	f.contextWrites++
+	if f.contextWrites == 1 {
+		return len(value), nil
+	}
+	<-ctx.Done()
+	return 0, ctx.Err()
+}
+
 func TestIsGATTCommunicationFailure(t *testing.T) {
 	for _, target := range []error{
 		tinybluetooth.ErrGATTUnreachable,
@@ -351,6 +369,30 @@ func TestSetPowerStateContextRejectsCancelledContext(t *testing.T) {
 	}
 	if len(power.writes) != 0 {
 		t.Fatalf("writes after cancellation = %v, want none", power.writes)
+	}
+}
+
+func TestSleepFinalWritePreservesOperationDeadline(t *testing.T) {
+	power := &sleepFinalBlockingCharacteristic{fakeCharacteristic: &fakeCharacteristic{
+		properties: characteristicPropertyWriteWithoutResponse,
+	}}
+	station := connectedFakeStation(power, nil, nil, Capabilities{PowerWrite: true})
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	result, err := SetPowerStateContext(ctx, station, PowerStateSleep)
+	if result.Confirmed {
+		t.Fatalf("result = %+v, want unconfirmed final write", result)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("sleep final write error = %v, want context deadline", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("sleep final write exceeded the parent deadline: %v", elapsed)
+	}
+	if power.contextWrites != 2 {
+		t.Fatalf("context writes = %d, want prepare plus final sleep", power.contextWrites)
 	}
 }
 func TestSetPowerStateContextCancellationDuringConfirmationKeepsCommandSent(t *testing.T) {

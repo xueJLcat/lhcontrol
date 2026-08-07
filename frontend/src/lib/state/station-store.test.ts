@@ -34,6 +34,7 @@ vi.mock('../toast', async (importOriginal) => {
 import { StationStore, type StationStoreUi } from './station-store.svelte.ts';
 import { pushToast } from '../toast';
 import { createStation } from '../../test/fixtures';
+import { setLanguagePreference } from '../i18n.svelte';
 
 function createUi(): StationStoreUi {
   return {
@@ -52,6 +53,7 @@ function mountStore(ui = createUi()) {
 }
 
 beforeEach(() => {
+  setLanguagePreference('en');
   vi.clearAllMocks();
   runtime.handlers.clear();
   backend.IsScanning.mockResolvedValue(false);
@@ -65,6 +67,25 @@ beforeEach(() => {
   backend.StopScan.mockResolvedValue(undefined);
   backend.SetStationPower.mockResolvedValue({
     station: createStation(), commandSent: true, confirmed: true, confirmationError: ''
+  });
+});
+
+describe('StationStore locale changes', () => {
+  it('rebuilds transient messages and clears old-language feedback', async () => {
+    const { store } = mountStore();
+    await vi.waitFor(() => expect(store.stations).toHaveLength(1));
+    store.statusMessage = 'Old status';
+    store.channelError = 'Old channel error';
+    store.powerFeedback.set(store.stations[0].address, {
+      kind: 'success', text: 'Old feedback', target: 'on'
+    });
+
+    setLanguagePreference('zh-CN');
+    store.onLocaleChanged();
+
+    expect(store.statusMessage).toBe('可以开始扫描。');
+    expect(store.channelError).toBe('');
+    expect(store.powerFeedbackMap).toEqual({});
   });
 });
 
@@ -299,7 +320,7 @@ describe('StationStore auto sleep events', () => {
     expect(store?.stationLocked).toBe(true);
 
     runtime.handlers.get('auto-sleep')?.({
-      phase: 'completed', success: 2, failed: 0,
+      phase: 'completed', success: 2, unconfirmed: 0, failed: 0,
       updateId: 1,
       stations: [createStation({ powerState: 0, powerStateName: 'sleep', rawPowerState: 0x00 })]
     });
@@ -308,10 +329,16 @@ describe('StationStore auto sleep events', () => {
     expect(store?.autoSleepRunning).toBe(false);
 
     runtime.handlers.get('auto-sleep')?.({
-      phase: 'completed', success: 1, failed: 0, skipped: 1, updateId: 2,
+      phase: 'completed', success: 1, unconfirmed: 0, failed: 0, skipped: 1, updateId: 2,
       stations: [createStation({ powerState: 0, powerStateName: 'sleep', rawPowerState: 0x00 })]
     });
-    expect(pushToast).toHaveBeenCalledWith('Auto sleep finished: 1 succeeded, 1 skipped.', 'warning');
+    expect(pushToast).toHaveBeenCalledWith('Auto sleep finished: 1 confirmed, 0 unconfirmed, 0 failed, 1 skipped.', 'warning');
+
+    runtime.handlers.get('auto-sleep')?.({
+      phase: 'completed', success: 0, unconfirmed: 1, failed: 0, skipped: 0, updateId: 3,
+      stations: [createStation({ powerStateConfirmed: false })]
+    });
+    expect(pushToast).toHaveBeenCalledWith('Auto sleep finished: 0 confirmed, 1 unconfirmed, 0 failed, 0 skipped.', 'warning');
   });
 
   it('reports partial results when automatic sleep is cancelled', async () => {
@@ -320,14 +347,14 @@ describe('StationStore auto sleep events', () => {
 
     runtime.handlers.get('auto-sleep')?.({ phase: 'started' });
     runtime.handlers.get('auto-sleep')?.({
-      phase: 'cancelled', success: 1, failed: 0, skipped: 2, updateId: 1,
+      phase: 'cancelled', success: 1, unconfirmed: 1, failed: 0, skipped: 2, updateId: 1,
       stations: [createStation({ powerState: 0, powerStateName: 'sleep', rawPowerState: 0x00 })]
     });
 
     expect(store.autoSleepRunning).toBe(false);
-    expect(store.statusMessage).toBe('Auto sleep cancelled: 1 succeeded, 0 failed, 2 skipped.');
+    expect(store.statusMessage).toBe('Auto sleep cancelled: 1 confirmed, 1 unconfirmed, 0 failed, 2 skipped.');
     expect(pushToast).toHaveBeenCalledWith(
-      'Auto sleep cancelled: 1 succeeded, 0 failed, 2 skipped.',
+      'Auto sleep cancelled: 1 confirmed, 1 unconfirmed, 0 failed, 2 skipped.',
       'warning'
     );
     expect(store.stations[0].powerStateName).toBe('sleep');
@@ -342,6 +369,31 @@ describe('StationStore auto sleep events', () => {
     await (store as unknown as { periodicStatusCheck(): Promise<void> }).periodicStatusCheck();
 
     expect(backend.CheckAllStationStatuses).not.toHaveBeenCalled();
+  });
+});
+
+describe('StationStore external HTTP operation events', () => {
+  it('locks controls until every overlapping external operation finishes', async () => {
+    const { store } = mountStore();
+    await vi.waitFor(() => expect(runtime.handlers.has('external-operation')).toBe(true));
+    await vi.waitFor(() => expect(store.stations).toHaveLength(1));
+
+    runtime.handlers.get('external-operation')?.({ id: 11, phase: 'started', kind: 'power' });
+    runtime.handlers.get('external-operation')?.({ id: 12, phase: 'started', kind: 'identify' });
+
+    expect(store.externalOperationRunning).toBe(true);
+    expect(store.scanLocked).toBe(true);
+    expect(store.bulkLocked).toBe(true);
+    expect(store.stationLocked).toBe(true);
+
+    runtime.handlers.get('external-operation')?.({ id: 11, phase: 'finished', kind: 'power' });
+    expect(store.externalOperationRunning).toBe(true);
+
+    runtime.handlers.get('external-operation')?.({ id: 12, phase: 'finished', kind: 'identify' });
+    expect(store.externalOperationRunning).toBe(false);
+    expect(store.scanLocked).toBe(false);
+    expect(store.bulkLocked).toBe(false);
+    expect(store.stationLocked).toBe(false);
   });
 });
 

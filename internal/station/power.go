@@ -113,7 +113,9 @@ func (m *Manager) SetStationPower(address, state string) (PowerActionResult, err
 	if result, outcomeErr, handled := m.cachedPowerOutcome(stationPtr, target); handled {
 		return result, outcomeErr
 	}
-	if err := m.beginForegroundStationOperation(canonicalAddress); err != nil {
+	operationContext, cancelOperation := m.newStationOperationContext(m.lifecycleContext)
+	defer cancelOperation()
+	if err := m.beginForegroundStationOperationContext(operationContext, canonicalAddress); err != nil {
 		return PowerActionResult{}, err
 	}
 	defer m.endStationOperation(canonicalAddress)
@@ -124,12 +126,15 @@ func (m *Manager) SetStationPower(address, state string) (PowerActionResult, err
 	if err := m.ensureReady(); err != nil {
 		return PowerActionResult{}, err
 	}
+	if err := operationContext.Err(); err != nil {
+		return PowerActionResult{}, err
+	}
 	capabilities := snapshot.Capabilities
 	if !snapshot.CapabilitiesKnown ||
 		!capabilities.PowerWrite ||
 		(target == bluetooth.PowerStateStandby && !capabilities.Standby) {
 		err = runSafely("power capability refresh", func() error {
-			discoveryContext, cancelDiscovery := context.WithTimeout(m.lifecycleContext, m.initialReadTimeout)
+			discoveryContext, cancelDiscovery := context.WithTimeout(operationContext, m.initialReadTimeout)
 			defer cancelDiscovery()
 			var refreshErr error
 			if snapshot.CapabilitiesKnown {
@@ -156,7 +161,7 @@ func (m *Manager) SetStationPower(address, state string) (PowerActionResult, err
 	var controlResult bluetooth.PowerControlResult
 	err = runSafely("power operation", func() error {
 		var controlErr error
-		controlResult, controlErr = m.bluetoothOps.setPowerState(m.lifecycleContext, stationPtr, target)
+		controlResult, controlErr = m.bluetoothOps.setPowerState(operationContext, stationPtr, target)
 		return controlErr
 	})
 	if err != nil {
@@ -198,17 +203,22 @@ func (m *Manager) IdentifyStation(address string) error {
 		return err
 	}
 	canonicalAddress := stationPtr.Snapshot().Address
-	if err := m.beginForegroundStationOperation(canonicalAddress); err != nil {
+	operationContext, cancelOperation := m.newStationOperationContext(m.lifecycleContext)
+	defer cancelOperation()
+	if err := m.beginForegroundStationOperationContext(operationContext, canonicalAddress); err != nil {
 		return err
 	}
 	defer m.endStationOperation(canonicalAddress)
 	if err := m.ensureReady(); err != nil {
 		return err
 	}
+	if err := operationContext.Err(); err != nil {
+		return err
+	}
 	capabilities := stationPtr.Snapshot().Capabilities
 	if !capabilities.Identify {
 		err = runSafely("identify capability refresh", func() error {
-			discoveryContext, cancelDiscovery := context.WithTimeout(m.lifecycleContext, m.initialReadTimeout)
+			discoveryContext, cancelDiscovery := context.WithTimeout(operationContext, m.initialReadTimeout)
 			defer cancelDiscovery()
 			var refreshErr error
 			capabilities, refreshErr = m.bluetoothOps.refreshCapabilities(discoveryContext, stationPtr)
@@ -226,7 +236,7 @@ func (m *Manager) IdentifyStation(address string) error {
 		return fmt.Errorf("%w: identify is unavailable", ErrUnsupported)
 	}
 	err = runSafely("identify operation", func() error {
-		return m.bluetoothOps.identify(m.lifecycleContext, stationPtr)
+		return m.bluetoothOps.identify(operationContext, stationPtr)
 	})
 	if bluetooth.IsUnsupportedCapabilityError(err) {
 		return fmt.Errorf("%w: %v", ErrUnsupported, err)
@@ -247,15 +257,20 @@ func (m *Manager) RefreshStationCapabilities(address string) (StationInfo, error
 		return StationInfo{}, err
 	}
 	canonicalAddress := stationPtr.Snapshot().Address
-	if err := m.beginForegroundStationOperation(canonicalAddress); err != nil {
+	operationContext, cancelOperation := m.newStationOperationContext(m.lifecycleContext)
+	defer cancelOperation()
+	if err := m.beginForegroundStationOperationContext(operationContext, canonicalAddress); err != nil {
 		return StationInfo{}, err
 	}
 	defer m.endStationOperation(canonicalAddress)
 	if err := m.ensureReady(); err != nil {
 		return StationInfo{}, err
 	}
+	if err := operationContext.Err(); err != nil {
+		return StationInfo{}, err
+	}
 	if err := runSafely("capability refresh", func() error {
-		discoveryContext, cancelDiscovery := context.WithTimeout(m.lifecycleContext, m.initialReadTimeout)
+		discoveryContext, cancelDiscovery := context.WithTimeout(operationContext, m.initialReadTimeout)
 		defer cancelDiscovery()
 		_, refreshErr := m.bluetoothOps.refreshCapabilities(discoveryContext, stationPtr)
 		return refreshErr
@@ -267,7 +282,7 @@ func (m *Manager) RefreshStationCapabilities(address string) (StationInfo, error
 		return StationInfo{}, err
 	}
 	if err := runSafely("capability refresh state read", func() error {
-		readContext, cancelRead := context.WithTimeout(m.lifecycleContext, m.initialReadTimeout)
+		readContext, cancelRead := context.WithTimeout(operationContext, m.initialReadTimeout)
 		defer cancelRead()
 		return m.bluetoothOps.fetchInitialPowerState(readContext, stationPtr)
 	}); err != nil {
@@ -497,6 +512,8 @@ func (m *Manager) setAllStationsPowerDetailed(ctx context.Context, state string)
 				return
 			}
 			defer func() { <-semaphore }()
+			operationContext, cancelOperation := m.newStationOperationContext(ctx)
+			defer cancelOperation()
 			if m.shuttingDown.Load() || ctx.Err() != nil {
 				result.Results[resultIndex].Skipped = true
 				if m.shuttingDown.Load() {
@@ -530,7 +547,7 @@ func (m *Manager) setAllStationsPowerDetailed(ctx context.Context, state string)
 				}
 				capabilities := snapshot.Capabilities
 				var err error
-				discoveryContext, cancelDiscovery := context.WithTimeout(ctx, m.initialReadTimeout)
+				discoveryContext, cancelDiscovery := context.WithTimeout(operationContext, m.initialReadTimeout)
 				defer cancelDiscovery()
 				if snapshot.CapabilitiesKnown &&
 					(!capabilities.PowerWrite ||
@@ -553,7 +570,7 @@ func (m *Manager) setAllStationsPowerDetailed(ctx context.Context, state string)
 					return err
 				}
 				var controlResult bluetooth.PowerControlResult
-				controlResult, err = m.bluetoothOps.setPowerState(ctx, s, target)
+				controlResult, err = m.bluetoothOps.setPowerState(operationContext, s, target)
 				stationResult.CommandSent = err == nil
 				stationResult.Confirmed = controlResult.Confirmed
 				if err == nil {

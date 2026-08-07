@@ -26,6 +26,7 @@ const (
 	defaultStatusReadTimeout       = 20 * time.Second
 	defaultInitialReadPhaseTimeout = 45 * time.Second
 	defaultStatusRefreshTimeout    = 30 * time.Second
+	defaultStationOperationTimeout = 30 * time.Second
 	metadataFreshnessWindow        = 24 * time.Hour
 )
 
@@ -200,6 +201,7 @@ type Manager struct {
 	initialReadPhaseTimeout time.Duration
 	statusReadTimeout       time.Duration
 	statusRefreshTimeout    time.Duration
+	stationOperationTimeout time.Duration
 	shuttingDown            atomic.Bool
 	shutdownOnce            sync.Once
 	shutdownCh              chan struct{}

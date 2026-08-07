@@ -9,6 +9,8 @@ import (
 	"tinygo.org/x/bluetooth"
 )
 
+const finalSleepWriteTimeout = 30 * time.Second
+
 func writeCharacteristicValueInternal(ctx context.Context, characteristic characteristicIO, value byte) error {
 	if characteristic == nil {
 		return transportError("write characteristic", fmt.Errorf("characteristic is unavailable"))
@@ -271,7 +273,19 @@ func SetPowerStateContext(ctx context.Context, station *BaseStation, target Powe
 				// shutdown cancels ctx. Leaving a sleeping station prepared can wake it.
 				time.Sleep(50 * time.Millisecond)
 				sleepFinalAttempted = true
-				err = writePowerValueInternal(context.WithoutCancel(ctx), station, command)
+				// Complete the wake/sleep pair even when the caller is cancelled,
+				// but never let a stuck WinRT write hold shutdown forever. Preserve
+				// an existing operation deadline; direct background callers receive
+				// the same conservative 30-second hard bound.
+				finalContext := context.WithoutCancel(ctx)
+				var cancelFinal context.CancelFunc
+				if deadline, ok := ctx.Deadline(); ok {
+					finalContext, cancelFinal = context.WithDeadline(finalContext, deadline)
+				} else {
+					finalContext, cancelFinal = context.WithTimeout(finalContext, finalSleepWriteTimeout)
+				}
+				err = writePowerValueInternal(finalContext, station, command)
+				cancelFinal()
 			}
 		} else {
 			err = writePowerValueInternal(ctx, station, command)

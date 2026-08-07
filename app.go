@@ -19,27 +19,28 @@ import (
 )
 
 type App struct {
-	ctx               context.Context
-	config            *config.Config
-	stationManager    *station.Manager
-	api               *fiber.App
-	apiStatusMutex    sync.RWMutex
-	apiStatus         APIStatus
-	configLoadWarning string
-	configSaveWarning string
-	apiLifecycleMutex sync.Mutex
-	apiCancel         context.CancelFunc
-	apiWG             sync.WaitGroup
-	listen            func(string, string) (net.Listener, error)
-	serveListener     func(net.Listener) error
-	apiRetryDelay     time.Duration
-	apiGeneration     uint64
-	externalScanID    atomic.Uint64
-	externalUpdateID  atomic.Uint64
-	shuttingDown      atomic.Bool
-	autoSleepMutex    sync.Mutex
-	autoSleepCancel   context.CancelFunc
-	autoSleepWG       sync.WaitGroup
+	ctx                 context.Context
+	config              *config.Config
+	stationManager      *station.Manager
+	api                 *fiber.App
+	apiStatusMutex      sync.RWMutex
+	apiStatus           APIStatus
+	configLoadWarning   string
+	configSaveWarning   string
+	apiLifecycleMutex   sync.Mutex
+	apiCancel           context.CancelFunc
+	apiWG               sync.WaitGroup
+	listen              func(string, string) (net.Listener, error)
+	serveListener       func(net.Listener) error
+	apiRetryDelay       time.Duration
+	apiGeneration       uint64
+	externalScanID      atomic.Uint64
+	externalUpdateID    atomic.Uint64
+	externalOperationID atomic.Uint64
+	shuttingDown        atomic.Bool
+	autoSleepMutex      sync.Mutex
+	autoSleepCancel     context.CancelFunc
+	autoSleepWG         sync.WaitGroup
 }
 
 func NewApp() *App {
@@ -97,6 +98,9 @@ func (a *App) startup(ctx context.Context) {
 		nextUpdateID: func() uint64 {
 			return a.externalUpdateID.Add(1)
 		},
+		nextOperationID: func() uint64 {
+			return a.externalOperationID.Add(1)
+		},
 		started: func(event scanEvent) {
 			if a.ctx != nil && !a.shuttingDown.Load() {
 				runtime.EventsEmit(a.ctx, "external-scan-started", event)
@@ -121,6 +125,11 @@ func (a *App) startup(ctx context.Context) {
 		updated: func(event stationUpdateEvent) {
 			if a.ctx != nil && !a.shuttingDown.Load() {
 				runtime.EventsEmit(a.ctx, "external-stations-updated", event)
+			}
+		},
+		operation: func(event externalOperationEvent) {
+			if a.ctx != nil && !a.shuttingDown.Load() {
+				runtime.EventsEmit(a.ctx, "external-operation", event)
 			}
 		},
 	}, a.GetAPIStatus)

@@ -5,6 +5,7 @@ import { t } from '../i18n.svelte';
 export interface AutoSleepEvent {
   phase: 'started' | 'completed' | 'cancelled' | 'skipped' | 'failed';
   success?: number;
+  unconfirmed?: number;
   failed?: number;
   skipped?: number;
   error?: string;
@@ -61,18 +62,15 @@ export class AutoSleepEventCoordinator {
     this.dependencies.setRunning(false);
     this.dependencies.beginStatusOperation();
     const success = event.success ?? 0;
+    const unconfirmed = event.unconfirmed ?? 0;
     const failed = event.failed ?? 0;
     const skipped = event.skipped ?? 0;
-    const message = t('Auto sleep finished: {success} succeeded, {failed} failed, {skipped} skipped.', {
-      success, failed, skipped
+    const message = t('Auto sleep finished: {success} confirmed, {unconfirmed} unconfirmed, {failed} failed, {skipped} skipped.', {
+      success, unconfirmed, failed, skipped
     });
     this.setMessage(message);
-    if (failed > 0) {
-      pushToast(skipped
-        ? message
-        : t('Auto sleep finished: {success} succeeded, {failed} failed.', { success, failed }), 'warning');
-    } else if (skipped > 0) {
-      pushToast(t('Auto sleep finished: {success} succeeded, {skipped} skipped.', { success, skipped }), 'warning');
+    if (failed > 0 || unconfirmed > 0 || skipped > 0) {
+      pushToast(message, 'warning');
     } else {
       pushToast(t('Auto sleep finished: {success} station(s) put to sleep.', { success }), 'success');
     }
@@ -82,10 +80,11 @@ export class AutoSleepEventCoordinator {
     this.dependencies.setRunning(false);
     this.dependencies.beginStatusOperation();
     const success = event.success ?? 0;
+    const unconfirmed = event.unconfirmed ?? 0;
     const failed = event.failed ?? 0;
     const skipped = event.skipped ?? 0;
-    const details = success || failed || skipped
-      ? t('{success} succeeded, {failed} failed, {skipped} skipped', { success, failed, skipped })
+    const details = success || unconfirmed || failed || skipped
+      ? t('{success} confirmed, {unconfirmed} unconfirmed, {failed} failed, {skipped} skipped', { success, unconfirmed, failed, skipped })
       : t('no station commands completed');
     const message = t('Auto sleep cancelled: {details}.', { details });
     this.setMessage(message);

@@ -20,6 +20,8 @@ type autoSleepEvent struct {
 
 	Failed int `json:"failed"`
 
+	Unconfirmed int `json:"unconfirmed,omitempty"`
+
 	Skipped int `json:"skipped,omitempty"`
 
 	Error string `json:"error,omitempty"`
@@ -196,7 +198,7 @@ func (a *App) emitTerminalAutoSleep(event autoSleepEvent) {
 
 }
 
-func summarizeAutoSleepResults(results []station.BulkPowerStationResult) (success, failed, skipped int) {
+func summarizeAutoSleepResults(results []station.BulkPowerStationResult) (success, unconfirmed, failed, skipped int) {
 
 	for _, entry := range results {
 
@@ -204,9 +206,13 @@ func summarizeAutoSleepResults(results []station.BulkPowerStationResult) (succes
 
 			skipped++
 
-		} else if entry.Success {
+		} else if entry.Success && entry.Confirmed {
 
 			success++
+
+		} else if entry.Success && entry.CommandSent {
+
+			unconfirmed++
 
 		} else {
 
@@ -216,17 +222,17 @@ func summarizeAutoSleepResults(results []station.BulkPowerStationResult) (succes
 
 	}
 
-	return success, failed, skipped
+	return success, unconfirmed, failed, skipped
 
 }
 
 func cancelledAutoSleepEvent(results []station.BulkPowerStationResult, reason string) autoSleepEvent {
 
-	success, failed, skipped := summarizeAutoSleepResults(results)
+	success, unconfirmed, failed, skipped := summarizeAutoSleepResults(results)
 
 	return autoSleepEvent{
 
-		Phase: "cancelled", Success: success, Failed: failed, Skipped: skipped, Error: reason,
+		Phase: "cancelled", Success: success, Unconfirmed: unconfirmed, Failed: failed, Skipped: skipped, Error: reason,
 	}
 
 }
@@ -329,13 +335,13 @@ func (a *App) runAutoSleep(ctx context.Context) {
 
 	default:
 
-		success, failed, skipped := summarizeAutoSleepResults(result.Results)
+		success, unconfirmed, failed, skipped := summarizeAutoSleepResults(result.Results)
 
-		log.Printf("Auto-sleep completed: %d succeeded, %d failed, %d skipped", success, failed, skipped)
+		log.Printf("Auto-sleep completed: %d confirmed, %d unconfirmed, %d failed, %d skipped", success, unconfirmed, failed, skipped)
 
 		a.emitTerminalAutoSleep(autoSleepEvent{
 
-			Phase: "completed", Success: success, Failed: failed, Skipped: skipped,
+			Phase: "completed", Success: success, Unconfirmed: unconfirmed, Failed: failed, Skipped: skipped,
 		})
 
 	}

@@ -44,6 +44,33 @@ func TestVisibleStationsOnlyParticipateInChannelConflicts(t *testing.T) {
 	}
 }
 
+func TestChannelOperationHasHardTimeoutAndReleasesOperation(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	manager.stationOperationTimeout = 25 * time.Millisecond
+	address := "11:22:33:44:55:91"
+	now := time.Now()
+	manager.stations[address] = &internalbluetooth.BaseStation{
+		Name: "LHB-CHANNEL-TIMEOUT", Address: mustAddress(t, address), Present: true,
+		Channel: 3, LastSeenAt: now, LastChannelReadAt: now,
+		Capabilities: internalbluetooth.Capabilities{ChannelRead: true, ChannelWrite: true}, CapabilitiesKnown: true,
+	}
+	manager.bluetoothOps.setChannel = func(ctx context.Context, _ *internalbluetooth.BaseStation, _ int) (internalbluetooth.ChannelWriteResult, error) {
+		<-ctx.Done()
+		return internalbluetooth.ChannelWriteResult{}, ctx.Err()
+	}
+
+	if _, err := manager.SetStationChannel(address, 4, false); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("SetStationChannel() error = %v, want context deadline", err)
+	}
+	manager.bluetoothOps.setChannel = func(context.Context, *internalbluetooth.BaseStation, int) (internalbluetooth.ChannelWriteResult, error) {
+		return internalbluetooth.ChannelWriteResult{PreviousChannel: 3, Channel: 4, CommandSent: true}, nil
+	}
+	if _, err := manager.SetStationChannel(address, 4, false); err != nil {
+		t.Fatalf("operation lock was not released after timeout: %v", err)
+	}
+}
+
 func TestStationInfoIsSortedByChannelNameAndAddress(t *testing.T) {
 	manager := NewManager(config.NewConfig())
 	manager.stations["unknown"] = &internalbluetooth.BaseStation{Name: "Unknown", Address: mustAddress(t, "11:22:33:44:55:66")}

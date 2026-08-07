@@ -102,13 +102,15 @@ type apiStationManager interface {
 }
 
 type scanEventCallbacks struct {
-	nextID       func() uint64
-	nextUpdateID func() uint64
-	started      func(scanEvent)
-	completed    func(scanEvent)
-	failed       func(scanEvent)
-	cancelled    func(scanEvent)
-	updated      func(stationUpdateEvent)
+	nextID          func() uint64
+	nextUpdateID    func() uint64
+	nextOperationID func() uint64
+	started         func(scanEvent)
+	completed       func(scanEvent)
+	failed          func(scanEvent)
+	cancelled       func(scanEvent)
+	updated         func(stationUpdateEvent)
+	operation       func(externalOperationEvent)
 }
 
 // scanEvent ties every external lifecycle notification to one scan request so
@@ -123,6 +125,27 @@ type stationUpdateEvent struct {
 	ID       uint64                `json:"id"`
 	Source   string                `json:"source"`
 	Stations []station.StationInfo `json:"stations"`
+}
+
+type externalOperationEvent struct {
+	ID    uint64 `json:"id"`
+	Phase string `json:"phase"`
+	Kind  string `json:"kind"`
+}
+
+func beginExternalOperation(events scanEventCallbacks, kind string) func() {
+	id := uint64(0)
+	if events.nextOperationID != nil {
+		id = events.nextOperationID()
+	}
+	if events.operation != nil {
+		events.operation(externalOperationEvent{ID: id, Phase: "started", Kind: kind})
+	}
+	return func() {
+		if events.operation != nil {
+			events.operation(externalOperationEvent{ID: id, Phase: "finished", Kind: kind})
+		}
+	}
 }
 
 func emitStationUpdate(events scanEventCallbacks, source string, snapshot func() []station.StationInfo) {
@@ -148,6 +171,8 @@ func registerAPIRoutes(api *fiber.App, manager apiStationManager, events scanEve
 		return c.Next()
 	})
 	api.Post("/allon", func(c *fiber.Ctx) error {
+		finish := beginExternalOperation(events, "bulk-power")
+		defer finish()
 		result, err := manager.SetAllStationsPowerDetailed("on")
 		if err != nil {
 			return sendAPIError(c, err)
@@ -156,6 +181,8 @@ func registerAPIRoutes(api *fiber.App, manager apiStationManager, events scanEve
 		return c.JSON(result)
 	})
 	api.Post("/alloff", func(c *fiber.Ctx) error {
+		finish := beginExternalOperation(events, "bulk-power")
+		defer finish()
 		result, err := manager.SetAllStationsPowerDetailed("sleep")
 		if err != nil {
 			return sendAPIError(c, err)
@@ -220,6 +247,8 @@ func registerAPIRoutes(api *fiber.App, manager apiStationManager, events scanEve
 		if err := c.BodyParser(&request); err != nil {
 			return sendAPIError(c, fmt.Errorf("%w: invalid JSON body", station.ErrInvalidArgument))
 		}
+		finish := beginExternalOperation(events, "bulk-power")
+		defer finish()
 		result, err := manager.SetAllStationsPowerDetailed(request.State)
 		if err != nil {
 			return sendAPIError(c, err)
@@ -234,6 +263,8 @@ func registerAPIRoutes(api *fiber.App, manager apiStationManager, events scanEve
 		if err := c.BodyParser(&request); err != nil {
 			return sendAPIError(c, fmt.Errorf("%w: invalid JSON body", station.ErrInvalidArgument))
 		}
+		finish := beginExternalOperation(events, "power")
+		defer finish()
 		result, err := manager.SetStationPower(c.Params("address"), request.State)
 		if err == nil || result.CommandSent {
 			emitStationUpdate(events, "http-power", manager.GetStationInfo)
@@ -241,12 +272,16 @@ func registerAPIRoutes(api *fiber.App, manager apiStationManager, events scanEve
 		return sendPowerActionResponse(c, result, err)
 	})
 	api.Post("/stations/:address/identify", func(c *fiber.Ctx) error {
+		finish := beginExternalOperation(events, "identify")
+		defer finish()
 		if err := manager.IdentifyStation(c.Params("address")); err != nil {
 			return sendAPIError(c, err)
 		}
 		return c.SendStatus(fiber.StatusNoContent)
 	})
 	api.Post("/stations/:address/refresh", func(c *fiber.Ctx) error {
+		finish := beginExternalOperation(events, "refresh")
+		defer finish()
 		result, err := manager.RefreshStationCapabilities(c.Params("address"))
 		if err != nil {
 			return sendAPIError(c, err)
@@ -262,6 +297,8 @@ func registerAPIRoutes(api *fiber.App, manager apiStationManager, events scanEve
 		if err := c.BodyParser(&request); err != nil {
 			return sendAPIError(c, fmt.Errorf("%w: invalid JSON body", station.ErrInvalidArgument))
 		}
+		finish := beginExternalOperation(events, "channel")
+		defer finish()
 		result, err := manager.SetStationChannel(c.Params("address"), request.Channel, request.AllowUnknownConflictRisk)
 		if err == nil || result.CommandSent {
 			emitStationUpdate(events, "http-channel", manager.GetStationInfo)

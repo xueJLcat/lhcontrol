@@ -6,11 +6,13 @@ function locks(
   externalScanning = false,
   gattDevices: string[] = [],
   configDevices: string[] = [],
-  autoSleepRunning = false
+  autoSleepRunning = false,
+  externalOperationRunning = false
 ) {
   return deriveOperationLocks({
     global,
     externalScanning,
+    externalOperationRunning,
     autoSleepRunning,
     gattAddresses: new Set(gattDevices),
     configAddresses: new Set(configDevices)
@@ -49,6 +51,15 @@ describe('deriveOperationLocks', () => {
 
   it('locks every Bluetooth entry point while automatic sleep is running', () => {
     expect(locks('idle', false, [], [], true)).toEqual({
+      scanLocked: true,
+      bulkLocked: true,
+      stationLocked: true,
+      anyDeviceOperation: false
+    });
+  });
+
+  it('locks every Bluetooth entry point while an HTTP device operation is running', () => {
+    expect(locks('idle', false, [], [], false, true)).toEqual({
       scanLocked: true,
       bulkLocked: true,
       stationLocked: true,

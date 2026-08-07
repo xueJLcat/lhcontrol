@@ -303,23 +303,51 @@ func TestStationUpdateAllocatesIDBeforeTakingSnapshot(t *testing.T) {
 
 func TestAutoSleepSummaryDoesNotCountSkippedStationsAsFailed(t *testing.T) {
 
-	success, failed, skipped := summarizeAutoSleepResults([]station.BulkPowerStationResult{
+	success, unconfirmed, failed, skipped := summarizeAutoSleepResults([]station.BulkPowerStationResult{
 
 		{Success: true, Confirmed: true},
 
 		{Skipped: true, Reason: "station is booting"},
 
-		{Skipped: true, Success: true, Reason: "already at target state"},
+		{Skipped: true, Success: true, Confirmed: true, Reason: "already at target state"},
+
+		{Success: true, CommandSent: true, Confirmed: false},
 
 		{Error: "connection failed"},
 	})
 
-	if success != 2 || failed != 1 || skipped != 1 {
+	if success != 2 || unconfirmed != 1 || failed != 1 || skipped != 1 {
 
-		t.Fatalf("summary = success %d, failed %d, skipped %d", success, failed, skipped)
+		t.Fatalf("summary = success %d, unconfirmed %d, failed %d, skipped %d", success, unconfirmed, failed, skipped)
 
 	}
 
+}
+
+func TestExternalOperationEventsBracketHTTPDeviceWork(t *testing.T) {
+	manager := &fakeAPIStationManager{}
+	events := make([]externalOperationEvent, 0, 2)
+	api := fiber.New()
+	registerAPIRoutes(api, manager, scanEventCallbacks{
+		nextOperationID: func() uint64 { return 73 },
+		operation: func(event externalOperationEvent) {
+			events = append(events, event)
+		},
+	}, func() APIStatus { return APIStatus{} })
+
+	response, err := api.Test(httptest.NewRequest(http.MethodPost, "/allon", nil))
+	if err != nil {
+		t.Fatalf("allon request failed: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != fiber.StatusOK {
+		t.Fatalf("allon status = %d, want %d", response.StatusCode, fiber.StatusOK)
+	}
+	if len(events) != 2 || events[0].ID != 73 || events[1].ID != 73 ||
+		events[0].Phase != "started" || events[1].Phase != "finished" ||
+		events[0].Kind != "bulk-power" || events[1].Kind != "bulk-power" {
+		t.Fatalf("operation events = %+v", events)
+	}
 }
 
 func TestCancelledAutoSleepEventPreservesPartialResults(t *testing.T) {
@@ -328,12 +356,14 @@ func TestCancelledAutoSleepEventPreservesPartialResults(t *testing.T) {
 
 		{Success: true, Confirmed: true},
 
+		{Success: true, CommandSent: true, Confirmed: false},
+
 		{Skipped: true, Reason: "operation cancelled"},
 
 		{Error: "connection failed"},
 	}, "watched process restarted")
 
-	if event.Phase != "cancelled" || event.Success != 1 || event.Failed != 1 || event.Skipped != 1 {
+	if event.Phase != "cancelled" || event.Success != 1 || event.Unconfirmed != 1 || event.Failed != 1 || event.Skipped != 1 {
 
 		t.Fatalf("cancelled event = %+v", event)
 

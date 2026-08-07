@@ -3,6 +3,7 @@ export type GlobalOperation = 'idle' | 'scanning' | 'status-refresh' | 'bulk-pow
 export interface OperationState {
   global: GlobalOperation;
   externalScanning: boolean;
+  externalOperationRunning: boolean;
   autoSleepRunning: boolean;
   gattAddresses: ReadonlySet<string>;
   configAddresses: ReadonlySet<string>;
@@ -18,9 +19,9 @@ export interface OperationLocks {
 export function deriveOperationLocks(state: OperationState): OperationLocks {
   const anyDeviceOperation = state.gattAddresses.size > 0 || state.configAddresses.size > 0;
   const exclusiveGlobalOperation = state.global === 'scanning' ||
-    state.global === 'bulk-power' || state.autoSleepRunning;
+    state.global === 'bulk-power' || state.autoSleepRunning || state.externalOperationRunning;
   const globalActionBusy = state.global !== 'idle';
-  const bluetoothBusy = globalActionBusy || state.externalScanning || state.autoSleepRunning || anyDeviceOperation;
+  const bluetoothBusy = globalActionBusy || state.externalScanning || state.externalOperationRunning || state.autoSleepRunning || anyDeviceOperation;
   return {
     scanLocked: bluetoothBusy,
     bulkLocked: bluetoothBusy,

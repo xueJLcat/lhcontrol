@@ -50,6 +50,7 @@ export class StationStore {
   channelWarning = $state(false);
   scanError = $state<ScanErrorInfo | null>(null);
   externalScanning = $state(false);
+  externalOperationRunning = $state(false);
   autoSleepRunning = $state(false);
   stoppingScan = $state(false);
   scanElapsed = $state(0);
@@ -66,6 +67,8 @@ export class StationStore {
   private cancelExternalScanCancelledListener: (() => void) | null = null;
   private cancelAutoSleepListener: (() => void) | null = null;
   private cancelExternalStationUpdateListener: (() => void) | null = null;
+  private cancelExternalOperationListener: (() => void) | null = null;
+  private externalOperationIds = new Set<number>();
   stopRequestPending = false;
   stopRequestGeneration = 0;
   disposed = false;
@@ -180,9 +183,36 @@ export class StationStore {
   syncChannelMemory() {
     this.fleet.syncChannelMemory();
   }
+
+  onLocaleChanged() {
+    // Transient text is stored as rendered copy. Drop per-device feedback and
+    // rebuild the status line from the current operation so no old-language
+    // fragments survive an immediate locale switch.
+    this.powerFeedback.clearAll();
+    this.channelError = '';
+    this.channelWarning = false;
+    if (this.stoppingScan) {
+      this.statusMessage = t('Stopping scan...');
+    } else if (this.globalOperation === 'scanning') {
+      this.statusMessage = t('Scanning for base stations...');
+    } else if (this.externalScanning) {
+      this.statusMessage = t('External scan in progress...');
+    } else if (this.autoSleepRunning) {
+      this.statusMessage = t('Auto sleep: scanning and putting all stations to sleep...');
+    } else if (this.globalOperation === 'bulk-power' && this.bulkTarget) {
+      this.statusMessage = t('Setting all available stations to {target}…', {
+        target: t(this.bulkTarget === 'on' ? 'On' : this.bulkTarget === 'standby' ? 'Standby' : 'Sleep')
+      });
+    } else if (this.globalOperation === 'status-refresh') {
+      this.statusMessage = t('Reading station states...');
+    } else {
+      this.statusMessage = t('Ready to scan.');
+    }
+  }
   private operationLocks = $derived(deriveOperationLocks({
     global: this.globalOperation,
     externalScanning: this.externalScanning,
+    externalOperationRunning: this.externalOperationRunning,
     autoSleepRunning: this.autoSleepRunning,
     gattAddresses: this.gattOperations,
     configAddresses: this.configOperations
@@ -341,7 +371,6 @@ export class StationStore {
 
   mount() {
     const startupScanEpoch = this.gates.currentScanEpoch;
-    this.apiStatus.start(15000);
     this.cancelExternalScanStartedListener = EventsOn('external-scan-started', (value: unknown) => {
       this.externalScan.handleStarted(value as ExternalScanEvent);
     });
@@ -360,6 +389,18 @@ export class StationStore {
     this.cancelExternalStationUpdateListener = EventsOn('external-stations-updated', (value: unknown) => {
       this.externalStationUpdates.handle(value as ExternalStationUpdateEvent);
     });
+    this.cancelExternalOperationListener = EventsOn('external-operation', (value: unknown) => {
+      const event = value as { id?: number; phase?: 'started' | 'finished' };
+      if (this.disposed || !Number.isFinite(event?.id)) return;
+      const id = Number(event.id);
+      if (event.phase === 'started') this.externalOperationIds.add(id);
+      else if (event.phase === 'finished') this.externalOperationIds.delete(id);
+      else return;
+      this.externalOperationRunning = this.externalOperationIds.size > 0;
+    });
+    // Register operation listeners before the first asynchronous health poll
+    // so a newly started HTTP action cannot slip through the mount window.
+    this.apiStatus.start(15000);
     this.statusCheckInterval = setInterval(() => {
       void this.periodicStatusCheck();
     }, 15000);
@@ -393,6 +434,9 @@ export class StationStore {
     this.cancelExternalScanCancelledListener?.();
     this.cancelAutoSleepListener?.();
     this.cancelExternalStationUpdateListener?.();
+    this.cancelExternalOperationListener?.();
+    this.externalOperationIds.clear();
+    this.externalOperationRunning = false;
   }
 
   private periodicStatusCheck() {

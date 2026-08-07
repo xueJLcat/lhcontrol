@@ -26,6 +26,7 @@ func NewManager(cfg *config.Config) *Manager {
 		initialReadPhaseTimeout: defaultInitialReadPhaseTimeout,
 		statusReadTimeout:       defaultStatusReadTimeout,
 		statusRefreshTimeout:    defaultStatusRefreshTimeout,
+		stationOperationTimeout: defaultStationOperationTimeout,
 		scanStatus:              ScanStatus{State: "idle", Warnings: []string{}},
 		initializeBluetooth:     bluetooth.Initialize,
 		shutdownCh:              make(chan struct{}),
@@ -49,6 +50,20 @@ func NewManager(cfg *config.Config) *Manager {
 	}
 	manager.lifecycleCond = sync.NewCond(&manager.lifecycleMutex)
 	return manager
+}
+
+// newStationOperationContext gives one physical-device action a hard upper
+// bound. Tests that construct a Manager directly still receive the production
+// default when the injectable field is left at zero.
+func (m *Manager) newStationOperationContext(parent context.Context) (context.Context, context.CancelFunc) {
+	if parent == nil {
+		parent = m.lifecycleContext
+	}
+	timeout := m.stationOperationTimeout
+	if timeout <= 0 {
+		timeout = defaultStationOperationTimeout
+	}
+	return context.WithTimeout(parent, timeout)
 }
 func (m *Manager) noteStatusFailure(address string) {
 	m.noteStatusFailureKind(address, statusRetryConnection)
