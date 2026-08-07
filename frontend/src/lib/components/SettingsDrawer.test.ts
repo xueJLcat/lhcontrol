@@ -52,6 +52,13 @@ function defaultProps(overrides: Record<string, unknown> = {}) {
 }
 
 describe('SettingsDrawer', () => {
+  it('offers a system language preference separately from explicit languages', () => {
+    render(SettingsDrawer, { props: defaultProps() });
+    expect(screen.getByRole('radio', { name: 'Follow system' })).toBeChecked();
+    expect(screen.getByRole('radio', { name: 'English' })).not.toBeChecked();
+    expect(screen.getByRole('radio', { name: '简体中文' })).not.toBeChecked();
+  });
+
   it('lists every detected adapter as read-only diagnostics', () => {
     render(SettingsDrawer, { props: defaultProps() });
     expect(screen.getByText('Intel Wireless Bluetooth')).toBeInTheDocument();

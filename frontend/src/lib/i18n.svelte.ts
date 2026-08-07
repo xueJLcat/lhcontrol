@@ -1,6 +1,7 @@
 import { GetLanguage } from './backend';
 
 export type Locale = 'en' | 'zh-CN';
+export type LanguagePreference = 'system' | Locale;
 export type MessageValues = Record<string, string | number>;
 
 const zhCN = {
@@ -84,6 +85,7 @@ const zhCN = {
   'Close settings': '关闭设置',
   'Language': '语言',
   'Display language': '显示语言',
+  'Follow system': '跟随系统',
   'Changes apply immediately and are saved for the next start.': '更改会立即生效，并保存供下次启动使用。',
   'Bluetooth adapter': '蓝牙适配器',
   'Detecting Bluetooth adapters...': '正在检测蓝牙适配器…',
@@ -289,9 +291,14 @@ const zhCN = {
 export type TranslationKey = keyof typeof zhCN;
 
 let currentLocale = $state<Locale>('en');
+let currentLanguagePreference = $state<LanguagePreference>('system');
 
 export function locale(): Locale {
   return currentLocale;
+}
+
+export function languagePreference(): LanguagePreference {
+  return currentLanguagePreference;
 }
 
 export function isLocale(value: string): value is Locale {
@@ -299,7 +306,12 @@ export function isLocale(value: string): value is Locale {
 }
 
 export function localeFromLanguages(languages: readonly string[] = []): Locale {
-  return languages.some((language) => language.toLowerCase().startsWith('zh')) ? 'zh-CN' : 'en';
+  for (const language of languages) {
+    const normalized = language.toLowerCase();
+    if (normalized.startsWith('zh')) return 'zh-CN';
+    if (normalized.startsWith('en')) return 'en';
+  }
+  return 'en';
 }
 
 export function systemLocale(): Locale {
@@ -313,16 +325,22 @@ export function setLocale(next: Locale): void {
   if (typeof document !== 'undefined') document.documentElement.lang = next;
 }
 
+export function setLanguagePreference(next: LanguagePreference): Locale {
+  currentLanguagePreference = next;
+  const effective = next === 'system' ? systemLocale() : next;
+  setLocale(effective);
+  return effective;
+}
+
 export async function initializeLocale(): Promise<Locale> {
-  let next = systemLocale();
+  let preference: LanguagePreference = 'system';
   try {
     const persisted = await GetLanguage();
-    if (isLocale(persisted)) next = persisted;
+    if (isLocale(persisted)) preference = persisted;
   } catch {
     // A missing WebView binding or unreadable config must not block startup.
   }
-  setLocale(next);
-  return next;
+  return setLanguagePreference(preference);
 }
 
 function interpolate(template: string, values: MessageValues): string {

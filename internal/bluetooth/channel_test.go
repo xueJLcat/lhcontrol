@@ -1,0 +1,304 @@
+package bluetooth
+
+import (
+	"errors"
+	"fmt"
+	"testing"
+	"time"
+	tinybluetooth "tinygo.org/x/bluetooth"
+)
+
+func TestStatusReadReportsMissingDeclaredPowerCharacteristic(t *testing.T) {
+	station := connectedFakeStation(nil, nil, nil, Capabilities{PowerRead: true})
+	err := ReadPowerState(station)
+	var readErr *StatusReadError
+	if !errors.As(err, &readErr) || readErr.Power == nil {
+		t.Fatalf("ReadPowerState() error = %#v, want power StatusReadError", err)
+	}
+	if station.LastError == "" || !station.LastPowerReadAt.IsZero() {
+		t.Fatalf("missing characteristic state was not recorded: %+v", station.Snapshot())
+	}
+}
+func TestStatusReadClearsChannelWhenCapabilityIsUnavailable(t *testing.T) {
+	station := connectedFakeStation(&fakeCharacteristic{}, nil, nil, Capabilities{})
+	station.Channel = 7
+	station.LastChannelReadAt = time.Now()
+	if err := ReadPowerState(station); err != nil {
+		t.Fatalf("ReadPowerState() error = %v", err)
+	}
+	if station.Channel != ChannelUnknown || !station.LastChannelReadAt.IsZero() {
+		t.Fatalf("stale channel was retained: %+v", station.Snapshot())
+	}
+	if !station.LastReadAt.IsZero() {
+		t.Fatalf("status read without readable values updated LastReadAt: %v", station.LastReadAt)
+	}
+}
+func TestInitialReadClearsChannelWhenCapabilityIsUnavailable(t *testing.T) {
+	station := connectedFakeStation(&fakeCharacteristic{}, nil, nil, Capabilities{})
+	station.Channel = 7
+	station.LastChannelReadAt = time.Now()
+	if err := FetchInitialPowerState(station); err != nil {
+		t.Fatalf("FetchInitialPowerState() error = %v", err)
+	}
+	if station.Channel != ChannelUnknown || !station.LastChannelReadAt.IsZero() {
+		t.Fatalf("stale channel was retained: %+v", station.Snapshot())
+	}
+}
+func TestSetChannelConfirmsReadback(t *testing.T) {
+	mode := &fakeCharacteristic{value: []byte{0x03}}
+	power := &fakeCharacteristic{}
+	station := connectedFakeStation(power, mode, nil, Capabilities{ChannelRead: true, ChannelWrite: true})
+	result, err := SetChannel(station, 5)
+	if err != nil {
+		t.Fatalf("SetChannel() error = %v", err)
+	}
+	if result.PreviousChannel != 3 || result.Channel != 5 {
+		t.Fatalf("result = %+v", result)
+	}
+	if !result.CommandSent {
+		t.Fatalf("result = %+v, want command sent", result)
+	}
+}
+func TestSetChannelSkipsWriteWhenUnchanged(t *testing.T) {
+	mode := &fakeCharacteristic{value: []byte{0x03}}
+	power := &fakeCharacteristic{}
+	station := connectedFakeStation(power, mode, nil, Capabilities{ChannelRead: true, ChannelWrite: true})
+	result, err := SetChannel(station, 3)
+	if err != nil {
+		t.Fatalf("SetChannel() error = %v", err)
+	}
+	if result.PreviousChannel != 3 || result.Channel != 3 {
+		t.Fatalf("result = %+v", result)
+	}
+	if result.CommandSent {
+		t.Fatalf("result = %+v, unchanged channel must not report command sent", result)
+	}
+	if len(mode.writes) != 0 {
+		t.Fatalf("unchanged channel produced writes: %v", mode.writes)
+	}
+}
+func TestReadChannelRejectsOverlongValue(t *testing.T) {
+	station := &BaseStation{
+		Name:               "LHB-TEST",
+		modeCharacteristic: &fakeCharacteristic{value: []byte{0, 0, 0, 0, 5}},
+		Channel:            3,
+	}
+	if err := readChannelInternal(station); err == nil {
+		t.Fatal("readChannelInternal() unexpectedly accepted five bytes")
+	}
+	if station.Channel != 3 || !station.LastChannelReadAt.IsZero() {
+		t.Fatalf("failed read did not retain channel as stale: %+v", station.Snapshot())
+	}
+}
+func TestSetChannelRequiresInitialRead(t *testing.T) {
+	mode := &fakeCharacteristic{readErr: errors.New("read failed")}
+	power := &fakeCharacteristic{}
+	station := connectedFakeStation(power, mode, nil, Capabilities{ChannelRead: true, ChannelWrite: true})
+	_, err := SetChannel(station, 5)
+	if err == nil {
+		t.Fatal("SetChannel() unexpectedly succeeded")
+	}
+	if len(mode.writes) != 0 {
+		t.Fatalf("channel was written despite initial read failure: %v", mode.writes)
+	}
+	if station.Snapshot().Connected {
+		t.Fatal("initial channel transport failure retained the connection")
+	}
+}
+func TestSetChannelInitialReadUnsupportedRetainsConnection(t *testing.T) {
+	device := &trackingConnectedDevice{}
+	mode := &fakeCharacteristic{readErr: tinybluetooth.ErrAttReadNotPermitted}
+	station := connectedFakeStation(
+		&fakeCharacteristic{},
+		mode,
+		nil,
+		Capabilities{ChannelRead: true, ChannelWrite: true},
+	)
+	station.device = device
+	_, err := SetChannel(station, 5)
+	if !IsUnsupportedCapabilityError(err) {
+		t.Fatalf("SetChannel() error = %v, want unsupported channel read", err)
+	}
+	if station.Snapshot().Connected == false || device.disconnected {
+		t.Fatal("unsupported initial channel read discarded a healthy connection")
+	}
+	if len(mode.writes) != 0 {
+		t.Fatalf("channel was written despite unsupported initial read: %v", mode.writes)
+	}
+}
+func TestSetChannelWriteFailureRetainsPreviousChannel(t *testing.T) {
+	mode := &fakeCharacteristic{value: []byte{0x03}, writeErr: errors.New("connection lost")}
+	power := &fakeCharacteristic{}
+	station := connectedFakeStation(power, mode, nil, Capabilities{ChannelRead: true, ChannelWrite: true})
+	result, err := SetChannel(station, 5)
+	if err == nil {
+		t.Fatal("SetChannel() unexpectedly succeeded")
+	}
+	if result.PreviousChannel != 3 || result.Channel != 3 {
+		t.Fatalf("result = %+v", result)
+	}
+}
+func TestSetChannelWriteAndReadbackFailureInvalidatesConnection(t *testing.T) {
+	device := &trackingConnectedDevice{}
+	mode := &fakeCharacteristic{
+		value:             []byte{0x03},
+		writeErr:          errors.New("write transport failed"),
+		readErrAfterWrite: errors.New("readback transport failed"),
+	}
+	station := connectedFakeStation(&fakeCharacteristic{}, mode, nil, Capabilities{ChannelRead: true, ChannelWrite: true})
+	station.device = device
+	_, err := SetChannel(station, 5)
+	if err == nil {
+		t.Fatal("SetChannel() unexpectedly succeeded")
+	}
+	if !RequiresReconnect(err) {
+		t.Fatalf("SetChannel() error = %v, want reconnect classification", err)
+	}
+	if station.Snapshot().Connected || !device.disconnected {
+		t.Fatal("write plus readback failure retained the invalid connection")
+	}
+}
+func TestSetChannelAmbiguousWriteAndFailedReadbackReportsCommandSent(t *testing.T) {
+	mode := &fakeCharacteristic{
+		value:             []byte{0x03},
+		writeErr:          &classifiedWriteError{possiblySent: true},
+		readErrAfterWrite: errors.New("readback transport failed"),
+	}
+	station := connectedFakeStation(&fakeCharacteristic{}, mode, nil, Capabilities{ChannelRead: true, ChannelWrite: true})
+	result, err := SetChannel(station, 5)
+	if err == nil {
+		t.Fatal("SetChannel() unexpectedly succeeded")
+	}
+	if !result.CommandSent || result.PreviousChannel != 3 {
+		t.Fatalf("result = %+v, want ambiguous command sent after channel 3", result)
+	}
+}
+func TestSetChannelUnsupportedConfirmationReportsCommandSent(t *testing.T) {
+	device := &trackingConnectedDevice{}
+	mode := &fakeCharacteristic{
+		value:             []byte{0x03},
+		readErrAfterWrite: tinybluetooth.ErrAttReadNotPermitted,
+	}
+	station := connectedFakeStation(&fakeCharacteristic{}, mode, nil, Capabilities{ChannelRead: true, ChannelWrite: true})
+	station.device = device
+	result, err := SetChannel(station, 5)
+	if !IsUnsupportedCapabilityError(err) {
+		t.Fatalf("SetChannel() error = %v, want unsupported confirmation read", err)
+	}
+	if !result.CommandSent || result.PreviousChannel != 3 {
+		t.Fatalf("result = %+v, want sent command after channel 3", result)
+	}
+	if station.Snapshot().Connected == false || device.disconnected {
+		t.Fatal("unsupported confirmation read discarded a healthy connection")
+	}
+}
+func TestATTCapabilityErrorsDoNotRequireReconnect(t *testing.T) {
+	for _, protocolErr := range []tinybluetooth.AttributeProtocolError{
+		tinybluetooth.ErrAttReadNotPermitted,
+		tinybluetooth.ErrAttWriteNotPermitted,
+		tinybluetooth.ErrAttRequestNotSupported,
+	} {
+		err := transportError("operation", protocolErr)
+		if !IsCapabilityUnsupported(err) {
+			t.Fatalf("%v was not classified as unsupported", protocolErr)
+		}
+		if RequiresReconnect(err) {
+			t.Fatalf("%v incorrectly required reconnect", protocolErr)
+		}
+	}
+	for _, protocolErr := range []tinybluetooth.AttributeProtocolError{
+		tinybluetooth.ErrAttInvalidHandle,
+		tinybluetooth.ErrAttOutOfSync,
+		tinybluetooth.ErrAttUnlikelyError,
+	} {
+		if !RequiresReconnect(protocolErr) {
+			t.Fatalf("%v did not require reconnect", protocolErr)
+		}
+	}
+}
+func TestCleanupTransportFailureIsNotMaskedByUnsupportedCapability(t *testing.T) {
+	err := fmt.Errorf(
+		"capability discovery failed: %w",
+		errors.Join(
+			unsupportedCapability("power control", tinybluetooth.ErrAttRequestNotSupported),
+			transportError("cleanup connection", tinybluetooth.ErrGATTCommunication),
+		),
+	)
+	if !IsUnsupportedCapabilityError(err) {
+		t.Fatalf("joined error lost unsupported classification: %v", err)
+	}
+	if !RequiresReconnect(err) {
+		t.Fatalf("joined cleanup failure did not require reconnect: %v", err)
+	}
+}
+func TestUnsupportedCapabilityRejectionNeverRequiresReconnect(t *testing.T) {
+	// Standby rejections arrive as Value Not Allowed (0x13), which is outside
+	// the unsupported ATT whitelist. The capability wrapper must keep the
+	// healthy connection alive regardless of the wrapped rejection code.
+	err := &UnsupportedCapabilityError{
+		Capability: "standby",
+		Err:        transportError("write characteristic", tinybluetooth.ErrAttValueNotAllowed),
+	}
+	if !IsUnsupportedCapabilityError(err) {
+		t.Fatalf("standby rejection lost unsupported classification: %v", err)
+	}
+	if RequiresReconnect(err) {
+		t.Fatalf("standby value rejection incorrectly required reconnect: %v", err)
+	}
+}
+func TestSetChannelAcceptsConfirmedReadbackAfterWriteError(t *testing.T) {
+	mode := &fakeCharacteristic{
+		value:                []byte{0x03},
+		writeErr:             errors.New("late transport error"),
+		writeErrorAfterApply: true,
+	}
+	power := &fakeCharacteristic{}
+	station := connectedFakeStation(power, mode, nil, Capabilities{ChannelRead: true, ChannelWrite: true})
+	result, err := SetChannel(station, 5)
+	if err != nil {
+		t.Fatalf("SetChannel() error = %v", err)
+	}
+	if result.Channel != 5 || result.WriteWarning == "" {
+		t.Fatalf("result = %+v, want confirmed channel and warning", result)
+	}
+	if !result.CommandSent {
+		t.Fatalf("result = %+v, want command sent", result)
+	}
+}
+func TestSetChannelReportsMismatchedFinalReadback(t *testing.T) {
+	mode := &fakeCharacteristic{value: []byte{0x03}, ignoreWrite: true}
+	power := &fakeCharacteristic{}
+	station := connectedFakeStation(power, mode, nil, Capabilities{ChannelRead: true, ChannelWrite: true})
+	result, err := SetChannel(station, 5)
+	if err == nil {
+		t.Fatal("SetChannel() unexpectedly succeeded")
+	}
+	if result.PreviousChannel != 3 || result.Channel != 3 {
+		t.Fatalf("result = %+v, want previous and actual channel 3", result)
+	}
+	if !station.Snapshot().Connected {
+		t.Fatal("confirmed mismatched readback discarded a working connection")
+	}
+}
+func TestSetChannelAcceptsTargetOnFinalReadback(t *testing.T) {
+	mode := &fakeCharacteristic{
+		value:       []byte{0x05},
+		ignoreWrite: true,
+		readValues: [][]byte{
+			{0x03},
+			{0x03}, {0x03}, {0x03}, {0x03}, {0x03},
+			{0x05},
+		},
+	}
+	station := connectedFakeStation(&fakeCharacteristic{}, mode, nil, Capabilities{ChannelRead: true, ChannelWrite: true})
+	result, err := SetChannel(station, 5)
+	if err != nil {
+		t.Fatalf("SetChannel() error = %v", err)
+	}
+	if result.PreviousChannel != 3 || result.Channel != 5 || result.WriteWarning == "" {
+		t.Fatalf("result = %+v, want delayed confirmed channel", result)
+	}
+	if station.LastError != "" {
+		t.Fatalf("confirmed final readback retained error %q", station.LastError)
+	}
+}

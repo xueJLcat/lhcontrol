@@ -1,0 +1,462 @@
+package bluetooth
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"testing"
+	"time"
+	tinybluetooth "tinygo.org/x/bluetooth"
+)
+
+func TestReadMetadataValueFailureIsIsolated(t *testing.T) {
+	good := &fakeCharacteristic{value: []byte(" Valve Corp. \x00\r\n")}
+	value, err := readMetadataValue(good)
+	if err != nil || value != "Valve Corp." {
+		t.Fatalf("readMetadataValue() = %q, %v", value, err)
+	}
+	bad := &fakeCharacteristic{readErr: errors.New("field unavailable")}
+	if _, err := readMetadataValue(bad); err == nil {
+		t.Fatal("readMetadataValue() unexpectedly succeeded")
+	}
+}
+func TestDecodePowerStateWithHistory(t *testing.T) {
+	now := time.Now()
+	if got := decodePowerStateWithHistory(0x01, PowerStateOn, time.Time{}, now); got != PowerStateBooting {
+		t.Fatalf("fresh 0x01 after On = %v, want Booting", got)
+	}
+	if got := decodePowerStateWithHistory(0x01, PowerStateSleep, time.Time{}, now); got != PowerStateBooting {
+		t.Fatalf("fresh 0x01 after Sleep = %v, want Booting", got)
+	}
+	if got := decodePowerStateWithHistory(0x01, PowerStateBooting, now.Add(-bootingFallbackAfter), now); got != PowerStateOn {
+		t.Fatalf("persistent 0x01 = %v, want On fallback", got)
+	}
+	if got := decodePowerStateWithHistory(0x08, PowerStateOn, time.Time{}, now); got != PowerStateBooting {
+		t.Fatalf("fresh 0x08 after On = %v, want Booting", got)
+	}
+	if got := decodePowerStateWithHistory(0x08, PowerStateSleep, time.Time{}, now); got != PowerStateBooting {
+		t.Fatalf("fresh 0x08 after Sleep = %v, want Booting", got)
+	}
+	if got := decodePowerStateWithHistory(0x08, PowerStateBooting, now.Add(-bootingFallbackAfter), now); got != PowerStateOn {
+		t.Fatalf("persistent 0x08 = %v, want On fallback", got)
+	}
+}
+func TestReleaseStationForScanPreservesLastKnownState(t *testing.T) {
+	station := &BaseStation{
+		Name:            "LHB-TEST",
+		PowerState:      PowerStateOn,
+		RawPowerState:   0x09,
+		Channel:         4,
+		LastStateUpdate: time.Now(),
+		characteristic:  &fakeCharacteristic{},
+	}
+	lastUpdate := station.LastStateUpdate
+	ReleaseStationForScan(station)
+	if station.PowerState != PowerStateOn || station.RawPowerState != 0x09 || station.Channel != 4 {
+		t.Fatalf("last known state was not preserved: %+v", station.Snapshot())
+	}
+	if !station.LastStateUpdate.Equal(lastUpdate) {
+		t.Fatalf("last update changed from %v to %v", lastUpdate, station.LastStateUpdate)
+	}
+	if station.characteristic != nil {
+		t.Fatal("GATT characteristic was not released")
+	}
+}
+func TestScanCompletionErrorRejectsEarlyFailure(t *testing.T) {
+	adapterErr := errors.New("adapter stopped unexpectedly")
+	if err := scanCompletionError(adapterErr); !errors.Is(err, adapterErr) {
+		t.Fatalf("scanCompletionError() = %v, want wrapped adapter error", err)
+	}
+	if err := scanCompletionError(nil); err != nil {
+		t.Fatalf("nil scan error should be successful, got %v", err)
+	}
+}
+func TestScanCompletionErrorExplainsUnavailableRadio(t *testing.T) {
+	err := scanCompletionError(tinybluetooth.ErrRadioNotAvailable)
+	if !errors.Is(err, tinybluetooth.ErrRadioNotAvailable) {
+		t.Fatalf("scanCompletionError() = %v", err)
+	}
+	if !strings.Contains(err.Error(), "turn on Bluetooth") {
+		t.Fatalf("scanCompletionError() is not actionable: %v", err)
+	}
+}
+func TestFetchInitialPowerStateReportsPartialReadErrors(t *testing.T) {
+	powerErr := errors.New("power read failed")
+	channelErr := errors.New("channel read failed")
+	metadataErr := errors.New("metadata read failed")
+	station := connectedFakeStation(
+		&fakeCharacteristic{readErr: powerErr},
+		&fakeCharacteristic{readErr: channelErr},
+		nil,
+		Capabilities{PowerRead: true, ChannelRead: true},
+	)
+	station.PowerState = PowerStateOn
+	station.RawPowerState = 0x09
+	station.Channel = 4
+	station.LastPowerReadAt = time.Now()
+	station.LastChannelReadAt = time.Now()
+	station.setMetadataErrorInternal(metadataErr)
+	err := FetchInitialPowerState(station)
+	var initialErr *InitialReadError
+	if !errors.As(err, &initialErr) {
+		t.Fatalf("FetchInitialPowerState() error = %v, want InitialReadError", err)
+	}
+	if !errors.Is(err, powerErr) || !errors.Is(err, channelErr) || !errors.Is(err, metadataErr) {
+		t.Fatalf("InitialReadError does not preserve underlying errors: %v", err)
+	}
+	if station.PowerState != PowerStateOn || station.RawPowerState != 0x09 || station.Channel != 4 ||
+		!station.LastPowerReadAt.IsZero() || !station.LastChannelReadAt.IsZero() {
+		t.Fatalf("failed reads did not preserve stale values: %+v", station.Snapshot())
+	}
+}
+func TestFetchInitialPowerStateContextCancelsReadAndCleansUpConnection(t *testing.T) {
+	power := &blockingContextCharacteristic{
+		fakeCharacteristic: &fakeCharacteristic{},
+		started:            make(chan struct{}),
+	}
+	station := connectedFakeStation(power, nil, nil, Capabilities{PowerRead: true})
+	device := &trackingConnectedDevice{}
+	station.device = device
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		result <- FetchInitialPowerStateContext(ctx, station)
+	}()
+	select {
+	case <-power.started:
+	case <-time.After(time.Second):
+		t.Fatal("context-aware power read did not start")
+	}
+	cancel()
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("FetchInitialPowerStateContext() error = %v, want context.Canceled", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("cancelled initial read did not return within 3 seconds")
+	}
+	if device.disconnects != 1 || station.Snapshot().Connected {
+		t.Fatalf("cancelled read cleanup: disconnects=%d connected=%v", device.disconnects, station.Snapshot().Connected)
+	}
+}
+func TestReadPowerStateContextCancelsBlockingRead(t *testing.T) {
+	power := &blockingContextCharacteristic{
+		fakeCharacteristic: &fakeCharacteristic{},
+		started:            make(chan struct{}),
+	}
+	station := connectedFakeStation(power, nil, nil, Capabilities{PowerRead: true})
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		result <- ReadPowerStateContext(ctx, station)
+	}()
+	select {
+	case <-power.started:
+	case <-time.After(time.Second):
+		t.Fatal("context-aware status read did not start")
+	}
+	cancel()
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("ReadPowerStateContext() error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cancelled status read did not return")
+	}
+}
+func TestReadPowerStateContextPreservesCancellationWhenTransportReturnsTerminalError(t *testing.T) {
+	power := &blockingContextCharacteristic{
+		fakeCharacteristic: &fakeCharacteristic{},
+		started:            make(chan struct{}),
+		terminalErr:        errors.New("WinRT operation ended with canceled status"),
+	}
+	station := connectedFakeStation(power, nil, nil, Capabilities{PowerRead: true})
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		result <- ReadPowerStateContext(ctx, station)
+	}()
+	<-power.started
+	cancel()
+	err := <-result
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("ReadPowerStateContext() error = %v, want context.Canceled", err)
+	}
+	if !strings.Contains(err.Error(), power.terminalErr.Error()) {
+		t.Fatalf("ReadPowerStateContext() error = %v, want terminal transport detail", err)
+	}
+}
+func TestEnsureCapabilitiesUsesConnectedDiscovery(t *testing.T) {
+	station := connectedFakeStation(
+		&fakeCharacteristic{},
+		nil,
+		nil,
+		Capabilities{PowerWrite: true},
+	)
+	capabilities, err := EnsureCapabilities(station)
+	if err != nil {
+		t.Fatalf("EnsureCapabilities() error = %v", err)
+	}
+	if !capabilities.PowerWrite {
+		t.Fatalf("EnsureCapabilities() = %+v, want powerWrite", capabilities)
+	}
+}
+func TestEnsureCapabilitiesContextCleansUpCancelledDiscovery(t *testing.T) {
+	device := &blockingDiscoveryDevice{started: make(chan struct{})}
+	station := connectedFakeStation(&fakeCharacteristic{}, nil, nil, Capabilities{})
+	station.device = device
+	station.characteristic = nil
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		_, err := EnsureCapabilitiesContext(ctx, station)
+		result <- err
+	}()
+	<-device.started
+	cancel()
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("EnsureCapabilitiesContext() error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cancelled capability discovery did not return")
+	}
+	if device.disconnects != 1 || station.Snapshot().Connected {
+		t.Fatalf("cancelled discovery cleanup: disconnects=%d connected=%v", device.disconnects, station.Snapshot().Connected)
+	}
+}
+func TestStrictPowerConfirmationDoesNotAcceptTransitionalRawState(t *testing.T) {
+	if IsPowerStateConfirmed(PowerStateOn, 0x01) {
+		t.Fatal("transitional 0x01 must not strictly confirm On")
+	}
+	for _, raw := range []int{0x09, 0x0B} {
+		if !IsPowerStateConfirmed(PowerStateOn, raw) {
+			t.Fatalf("raw %#x should strictly confirm On", raw)
+		}
+	}
+	if !IsPowerStateConfirmed(PowerStateStandby, 0x02) {
+		t.Fatal("0x02 should strictly confirm Standby")
+	}
+	if !IsPowerStateConfirmed(PowerStateSleep, 0x00) {
+		t.Fatal("0x00 should strictly confirm Sleep")
+	}
+}
+func TestPowerStateVerifiedRequiresStableRawValue(t *testing.T) {
+	for _, test := range []struct {
+		decoded PowerState
+		raw     int
+		want    bool
+	}{
+		{PowerStateOn, 0x09, true},
+		{PowerStateOn, 0x0B, true},
+		{PowerStateOn, 0x01, false},
+		{PowerStateOn, 0x08, false},
+		{PowerStateOn, 0x00, false},
+		{PowerStateSleep, 0x00, true},
+		{PowerStateSleep, 0x01, false},
+		{PowerStateStandby, 0x02, true},
+		{PowerStateStandby, 0x01, false},
+		{PowerStateBooting, 0x01, false},
+		{PowerStateUnknown, 0x01, false},
+	} {
+		if got := IsPowerStateVerified(test.decoded, test.raw); got != test.want {
+			t.Errorf("IsPowerStateVerified(%v, %#x) = %v, want %v", test.decoded, test.raw, got, test.want)
+		}
+	}
+}
+func TestPowerConfirmationRejectsFreshBootRawWhenAlreadyOn(t *testing.T) {
+	power := &fakeCharacteristic{value: []byte{0x01}}
+	station := connectedFakeStation(power, nil, nil, Capabilities{PowerRead: true, PowerWrite: true})
+	station.PowerState = PowerStateOn
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	result, err := SetPowerStateContext(ctx, station, PowerStateOn)
+	var confirmationErr *PowerConfirmationError
+	if !errors.As(err, &confirmationErr) || result.Confirmed {
+		t.Fatalf("SetPowerState() result=%+v error=%v, want unconfirmed boot transition", result, err)
+	}
+	if station.PowerState != PowerStateBooting || station.RawPowerState != 0x01 {
+		t.Fatalf("station state = %v raw %#x, want Booting with raw 0x01", station.PowerState, station.RawPowerState)
+	}
+}
+func TestPowerConfirmationRejectsFresh0x08RawWhenAlreadyOn(t *testing.T) {
+	power := &fakeCharacteristic{value: []byte{0x08}, ignoreWrite: true}
+	station := connectedFakeStation(power, nil, nil, Capabilities{PowerRead: true, PowerWrite: true})
+	station.PowerState = PowerStateOn
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	result, err := SetPowerStateContext(ctx, station, PowerStateOn)
+	var confirmationErr *PowerConfirmationError
+	if !errors.As(err, &confirmationErr) || result.Confirmed {
+		t.Fatalf("SetPowerState() result=%+v error=%v, want unconfirmed boot transition", result, err)
+	}
+	if station.PowerState != PowerStateBooting || station.RawPowerState != 0x08 {
+		t.Fatalf("station state = %v raw %#x, want Booting with raw 0x08", station.PowerState, station.RawPowerState)
+	}
+}
+func TestPersistentBootRawFallbackIsStickyButUnconfirmed(t *testing.T) {
+	power := &fakeCharacteristic{value: []byte{0x01}}
+	station := connectedFakeStation(power, nil, nil, Capabilities{PowerRead: true})
+	station.PowerState = PowerStateBooting
+	station.bootingSince = time.Now().Add(-bootingFallbackAfter)
+	if err := ReadPowerState(station); err != nil {
+		t.Fatalf("first fallback read error = %v", err)
+	}
+	if station.PowerState != PowerStateOn || !station.bootRawTrustedOn {
+		t.Fatalf("first fallback state = %+v, trusted=%v", station.Snapshot(), station.bootRawTrustedOn)
+	}
+	if err := ReadPowerState(station); err != nil {
+		t.Fatalf("sticky fallback read error = %v", err)
+	}
+	if station.PowerState != PowerStateOn || !station.bootRawTrustedOn ||
+		IsPowerStateVerified(station.PowerState, station.RawPowerState) {
+		t.Fatalf("sticky fallback became unstable or confirmed: %+v trusted=%v", station.Snapshot(), station.bootRawTrustedOn)
+	}
+}
+func TestPowerConfirmationKeepsPollingDuringGenuineBoot(t *testing.T) {
+	power := &fakeCharacteristic{value: []byte{0x01}}
+	station := connectedFakeStation(power, nil, nil, Capabilities{PowerRead: true, PowerWrite: true})
+	station.PowerState = PowerStateSleep
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	station.mutex.Lock()
+	err := confirmPowerStateInternalContext(ctx, station, PowerStateOn)
+	station.mutex.Unlock()
+	if err == nil {
+		t.Fatal("confirmation unexpectedly accepted a booting station as On")
+	}
+	if station.PowerState != PowerStateBooting {
+		t.Fatalf("station state = %v, want Booting while raw 0x01 is transitional", station.PowerState)
+	}
+}
+func TestSnapshotStaysResponsiveDuringPowerConfirmationPolling(t *testing.T) {
+	power := &fakeCharacteristic{value: []byte{0x00}}
+	station := connectedFakeStation(power, nil, nil, Capabilities{PowerRead: true, PowerWrite: true})
+	station.PowerState = PowerStateSleep
+	ctx, cancel := context.WithTimeout(context.Background(), 700*time.Millisecond)
+	defer cancel()
+	setDone := make(chan error, 1)
+	go func() {
+		_, err := SetPowerStateContext(ctx, station, PowerStateOn)
+		setDone <- err
+	}()
+	// While the confirmation loop polls (200ms sleeps between attempts),
+	// snapshots must not queue behind the station lock. With the sleeps
+	// moved outside the lock, contention is limited to single short
+	// read/write steps.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		start := time.Now()
+		_ = station.Snapshot()
+		if elapsed := time.Since(start); elapsed > 150*time.Millisecond {
+			t.Fatalf("Snapshot() blocked for %v during confirmation polling", elapsed)
+		}
+		select {
+		case err := <-setDone:
+			if err == nil {
+				t.Fatal("SetPowerStateContext() unexpectedly confirmed a sleeping station as On")
+			}
+			return
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("SetPowerStateContext did not return")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+func TestMarkMissedRequiresTwoConsecutiveScans(t *testing.T) {
+	now := time.Now()
+	station := &BaseStation{Present: true}
+	station.MarkSeen(now)
+	station.MarkMissed()
+	firstMiss := station.Snapshot()
+	if !firstMiss.Present || firstMiss.MissedScans != 1 {
+		t.Fatalf("first missed scan should retain presence: %+v", firstMiss)
+	}
+	station.MarkMissed()
+	secondMiss := station.Snapshot()
+	if secondMiss.Present || secondMiss.MissedScans != 2 {
+		t.Fatalf("second missed scan should mark absent: %+v", secondMiss)
+	}
+	station.MarkSeen(now.Add(time.Second))
+	recovered := station.Snapshot()
+	if !recovered.Present || recovered.MissedScans != 0 {
+		t.Fatalf("seen station did not recover: %+v", recovered)
+	}
+}
+func TestUncertainPresenceDoesNotCountAsMiss(t *testing.T) {
+	now := time.Now()
+	station := &BaseStation{Present: true}
+	station.MarkSeen(now)
+	station.MarkPresenceUncertain()
+	uncertain := station.Snapshot()
+	if !uncertain.Present || uncertain.MissedScans != 0 || !uncertain.PresenceUncertain {
+		t.Fatalf("uncertain scan changed presence history: %+v", uncertain)
+	}
+	station.MarkMissed()
+	firstReliableMiss := station.Snapshot()
+	if !firstReliableMiss.Present || firstReliableMiss.MissedScans != 1 || firstReliableMiss.PresenceUncertain {
+		t.Fatalf("first reliable miss after uncertainty = %+v", firstReliableMiss)
+	}
+	station.MarkSeen(now.Add(time.Second))
+	recovered := station.Snapshot()
+	if !recovered.Present || recovered.MissedScans != 0 || recovered.PresenceUncertain {
+		t.Fatalf("seen station did not clear uncertainty: %+v", recovered)
+	}
+}
+func TestMergeMetadataPreservesPreviouslyReadFields(t *testing.T) {
+	previous := DeviceMetadata{Manufacturer: "Valve", Model: "Old model"}
+	discovered := DeviceMetadata{Model: "New model", FirmwareRevision: "1.2.3"}
+	merged := mergeMetadata(previous, discovered)
+	if merged.Manufacturer != "Valve" || merged.Model != "New model" || merged.FirmwareRevision != "1.2.3" {
+		t.Fatalf("mergeMetadata() = %+v", merged)
+	}
+}
+func TestReconcileMetadataReplacesCompleteSnapshot(t *testing.T) {
+	previous := DeviceMetadata{Manufacturer: "Valve", SerialNumber: "old serial"}
+	discovered := DeviceMetadata{Manufacturer: "Valve", FirmwareRevision: "2.0"}
+	now := time.Now()
+	got, readAt := reconcileMetadata(previous, discovered, true, 2, 2, false, now)
+	if got != discovered {
+		t.Fatalf("reconcileMetadata() = %+v, want authoritative snapshot %+v", got, discovered)
+	}
+	if !readAt.Equal(now) {
+		t.Fatalf("reconcileMetadata() read time = %v, want %v", readAt, now)
+	}
+}
+func TestReconcileMetadataRetainsPartialValuesWithoutFreshTimestamp(t *testing.T) {
+	previous := DeviceMetadata{Manufacturer: "Valve", SerialNumber: "cached serial"}
+	discovered := DeviceMetadata{Manufacturer: "Valve", FirmwareRevision: "2.0"}
+	got, readAt := reconcileMetadata(previous, discovered, true, 3, 2, true, time.Now())
+	if got.SerialNumber != "cached serial" || got.FirmwareRevision != "2.0" {
+		t.Fatalf("reconcileMetadata() partial snapshot = %+v", got)
+	}
+	if !readAt.IsZero() {
+		t.Fatalf("partial metadata was marked fresh at %v", readAt)
+	}
+}
+func TestReconcileMetadataInvalidatesFreshnessWithoutUsableService(t *testing.T) {
+	previous := DeviceMetadata{Manufacturer: "Valve"}
+	for _, test := range []struct {
+		name         string
+		serviceFound bool
+		recognized   int
+	}{
+		{name: "service absent", serviceFound: false, recognized: 0},
+		{name: "no recognized characteristics", serviceFound: true, recognized: 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, readAt := reconcileMetadata(previous, DeviceMetadata{}, test.serviceFound, test.recognized, 0, false, time.Now())
+			if got.Manufacturer != "Valve" {
+				t.Fatalf("reconcileMetadata() discarded cached metadata: %+v", got)
+			}
+			if !readAt.IsZero() {
+				t.Fatalf("unusable metadata service was marked fresh at %v", readAt)
+			}
+		})
+	}
+}

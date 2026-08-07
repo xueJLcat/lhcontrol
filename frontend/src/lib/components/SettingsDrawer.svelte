@@ -6,7 +6,7 @@
   import type { bluetooth } from '../../../wailsjs/go/models';
   import { focusTrap } from '../actions';
   import { dur } from '../motion';
-  import { t, type Locale } from '../i18n.svelte';
+  import { t, type LanguagePreference } from '../i18n.svelte';
 
   const MIN_DELAY_MINUTES = 1;
   const MAX_DELAY_MINUTES = 120;
@@ -18,7 +18,7 @@
     autoSleep,
     autoSleepError = null,
     autoSleepBusy = false,
-    language = 'en',
+    languagePreference = 'system',
     languageBusy = false,
     inactive = false,
     onClose,
@@ -33,14 +33,14 @@
     autoSleep: autosleep.Settings | null;
     autoSleepError?: string | null;
     autoSleepBusy?: boolean;
-    language?: Locale;
+    languagePreference?: LanguagePreference;
     languageBusy?: boolean;
     inactive?: boolean;
     onClose: () => void;
     onRefresh: () => void;
     onAutoSleepChange: (settings: autosleep.Settings) => void;
     onAutoSleepRetry?: () => void;
-    onLanguageChange?: (language: Locale) => void;
+    onLanguageChange?: (language: LanguagePreference) => void;
   } = $props();
 
   // The delay input keeps a draft copy so typing never saves; only commit
@@ -87,12 +87,16 @@
   <section>
     <h4><Languages size={12} /> {t('Language')}</h4>
     <div class="adapter-list" role="radiogroup" aria-label={t('Display language')}>
-      <label class="adapter-option" class:selected={language === 'en'}>
-        <input type="radio" name="display-language" value="en" checked={language === 'en'} disabled={languageBusy} onchange={() => onLanguageChange('en')} />
+      <label class="adapter-option" class:selected={languagePreference === 'system'}>
+        <input type="radio" name="display-language" value="system" checked={languagePreference === 'system'} disabled={languageBusy} onchange={() => onLanguageChange('system')} />
+        <span class="adapter-name">{t('Follow system')}</span>
+      </label>
+      <label class="adapter-option" class:selected={languagePreference === 'en'}>
+        <input type="radio" name="display-language" value="en" checked={languagePreference === 'en'} disabled={languageBusy} onchange={() => onLanguageChange('en')} />
         <span class="adapter-name">English</span>
       </label>
-      <label class="adapter-option" class:selected={language === 'zh-CN'}>
-        <input type="radio" name="display-language" value="zh-CN" checked={language === 'zh-CN'} disabled={languageBusy} onchange={() => onLanguageChange('zh-CN')} />
+      <label class="adapter-option" class:selected={languagePreference === 'zh-CN'}>
+        <input type="radio" name="display-language" value="zh-CN" checked={languagePreference === 'zh-CN'} disabled={languageBusy} onchange={() => onLanguageChange('zh-CN')} />
         <span class="adapter-name">简体中文</span>
       </label>
     </div>

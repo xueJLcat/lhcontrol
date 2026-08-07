@@ -34,8 +34,9 @@ Modified based on [lhcontrol](https://github.com/FlameInTheDark/lhcontrol). Spec
   * 序列号
   * 制造商
   * BLE 功能支持情况
-* 一键开启或关闭当前应用会话中已经发现的全部基站。
+* 一键将当前应用会话中已经发现的全部基站设为 On、Standby 或 Sleep。
 * 支持为基站设置本地名称，方便区分和管理。
+* 界面支持 English 和简体中文；未保存语言偏好时会跟随系统语言，也可在设置中即时切换并保存选择。
 * 在单次应用运行期间持续保存已经发现的基站，即使后续扫描未再次发现，也不会立即从列表中移除。
 * 支持在设置中查看 Windows 检测到的蓝牙适配器，用于诊断无线电可用性；Windows 系统负责选择实际执行 BLE 扫描和连接的无线电。
 * 支持自动休眠：监控 SteamVR（`vrserver.exe`）或 Steam（`steam.exe`），在对应会话结束并经过 1-120 分钟延迟后，重新扫描并将全部已知基站设为 Sleep。
@@ -145,6 +146,7 @@ lhcontrol-amd64-installer.exe
 6. 使用 **All** 控件可以控制当前应用会话中发现过的全部基站，包括最近一次扫描没有再次发现的历史设备。
 7. 打开右上角的 **Settings**：
 
+   * 在 **Language** 中切换 English 或简体中文。更改会立即生效，并在下次启动时继续使用；首次启动或尚未保存选择时，应用会根据 Windows 系统语言自动选择界面语言。
    * 查看 Windows 检测到的蓝牙适配器。该列表仅用于诊断，Windows 会自行路由 BLE 扫描与连接。
    * 启用 **Auto sleep**，选择监控 SteamVR 或 Steam，并设置 1-120 分钟延迟。
 
@@ -152,7 +154,7 @@ lhcontrol-amd64-installer.exe
 
 ## 设置与本地数据
 
-基站别名和自动休眠设置会保存到：
+基站别名、自动休眠设置和显式选择的界面语言会保存到：
 
 ```text
 %APPDATA%\lhcontrol\config.json
@@ -738,8 +740,9 @@ A simple application to control Valve Lighthouse (SteamVR) base station v2.0 pow
   * Serial number
   * Manufacturer
   * BLE capabilities
-* Power On or Off all base stations discovered during the current application session.
+* Set all base stations discovered during the current application session to On, Standby, or Sleep.
 * Rename base stations locally for easier identification.
+* Use the interface in English or Simplified Chinese. With no saved preference, the application follows the system language; the selection can be changed immediately in Settings and is persisted.
 * Keep a persistent list of discovered stations during a single application session, including stations not rediscovered during the latest scan.
 * List Bluetooth adapters for radio-availability diagnostics. Windows chooses the radio used for BLE discovery and connections.
 * Automatically put stations to sleep after SteamVR (`vrserver.exe`) or Steam (`steam.exe`) exits, with a configurable delay from 1 to 120 minutes.
@@ -846,6 +849,7 @@ lhcontrol-amd64-installer.exe
 6. Use the **All** controls to change all stations discovered during the current application session, including stations missed by the latest scan.
 7. Open **Settings** in the upper-right corner to:
 
+   * Switch between English and Simplified Chinese under **Language**. The change applies immediately and is restored on the next launch. On first launch, or when no preference has been saved, the application follows the Windows system language.
    * Inspect the Bluetooth adapters detected by Windows. The list is diagnostic only; Windows routes BLE discovery and connections.
    * Enable **Auto sleep**, choose SteamVR or Steam as the watched process, and set a delay from 1 to 120 minutes.
 
@@ -853,7 +857,7 @@ Auto sleep only arms after the watched process has been observed running. If the
 
 ## Settings and Local Data
 
-Station aliases and auto-sleep settings are stored in:
+Station aliases, auto-sleep settings, and an explicitly selected interface language are stored in:
 
 ```text
 %APPDATA%\lhcontrol\config.json

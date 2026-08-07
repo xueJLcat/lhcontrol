@@ -99,7 +99,6 @@
 
   function handleLanguageChanged() {
     clearToasts();
-    store.resetLocalizedMessages();
   }
 
   function openChannelEditor() {
@@ -139,7 +138,7 @@
 
 <svelte:window onkeydown={handleGlobalKeydown} />
 
-<div class="app-container" inert={selectedStation !== null || settingsOpen}>
+<div class="app-container" inert={selectedStation !== null || settingsOpen || bulkConfirmTarget !== null}>
   <AppHeader
     scanning={store.scanRunning}
     isBulkLoading={store.isBulkLoading}

@@ -1,0 +1,397 @@
+package station
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	internalbluetooth "lhcontrol/internal/bluetooth"
+	"lhcontrol/internal/config"
+
+	tinybluetooth "tinygo.org/x/bluetooth"
+)
+
+func TestSetAllStationsPowerValidatesState(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	if err := manager.SetAllStationsPower("invalid"); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("SetAllStationsPower() error = %v, want ErrInvalidArgument", err)
+	}
+}
+
+func TestSetAllStationsPowerSkipsIneligibleStations(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	manager.stations["already-on"] = &internalbluetooth.BaseStation{
+		Name: "LHB-ON", Present: true, PowerState: internalbluetooth.PowerStateOn, RawPowerState: 0x0B,
+		Capabilities: internalbluetooth.Capabilities{PowerWrite: true}, CapabilitiesKnown: true, LastPowerReadAt: time.Now(),
+	}
+	manager.stations["booting"] = &internalbluetooth.BaseStation{
+		Name: "LHB-BOOTING", Present: true, PowerState: internalbluetooth.PowerStateBooting,
+		Capabilities: internalbluetooth.Capabilities{PowerWrite: true}, CapabilitiesKnown: true, LastPowerReadAt: time.Now(),
+	}
+	manager.stations["not-visible"] = &internalbluetooth.BaseStation{
+		Name: "LHB-OFFLINE", Present: false, PowerState: internalbluetooth.PowerStateOn, RawPowerState: 0x0B,
+		Capabilities: internalbluetooth.Capabilities{PowerWrite: true, Standby: false}, CapabilitiesKnown: true,
+		LastPowerReadAt: time.Now(),
+	}
+
+	if err := manager.SetAllStationsPower("on"); err != nil {
+		t.Fatalf("SetAllStationsPower() should skip all ineligible stations, got %v", err)
+	}
+
+	manager.stations["no-standby"] = &internalbluetooth.BaseStation{
+		Name: "LHB-NO-STANDBY", Present: true, PowerState: internalbluetooth.PowerStateSleep,
+		Capabilities: internalbluetooth.Capabilities{PowerWrite: true, Standby: false}, CapabilitiesKnown: true,
+	}
+	manager.bluetoothOps.refreshCapabilities = func(context.Context, *internalbluetooth.BaseStation) (internalbluetooth.Capabilities, error) {
+		return internalbluetooth.Capabilities{PowerWrite: true, Standby: false}, nil
+	}
+	if err := manager.SetAllStationsPower("standby"); err != nil {
+		t.Fatalf("SetAllStationsPower() should skip stations without standby capability, got %v", err)
+	}
+	result, err := manager.SetAllStationsPowerDetailed("standby")
+	if err != nil {
+		t.Fatalf("SetAllStationsPowerDetailed() error = %v", err)
+	}
+	if len(result.Results) != 4 {
+		t.Fatalf("detailed result count = %d, want all four known stations", len(result.Results))
+	}
+	for _, stationResult := range result.Results {
+		if !stationResult.Skipped || stationResult.Reason == "" {
+			t.Fatalf("expected structured skipped result: %+v", stationResult)
+		}
+		if stationResult.Station.Name == "" {
+			t.Fatalf("skipped result is missing station data: %+v", stationResult)
+		}
+	}
+}
+
+func TestInferredBootRawStateIsUnconfirmedAndActionableByBulkPower(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	address := "11:22:33:44:55:84"
+	manager.stations[address] = &internalbluetooth.BaseStation{
+		Name: "LHB-STEADY-BOOT", Address: mustAddress(t, address), Present: true,
+		PowerState: internalbluetooth.PowerStateOn, RawPowerState: 0x01,
+		Capabilities: internalbluetooth.Capabilities{PowerWrite: true}, CapabilitiesKnown: true,
+		LastPowerReadAt: time.Now(),
+	}
+
+	infos := manager.GetStationInfo()
+	if len(infos) != 1 || !infos[0].PowerFresh || infos[0].PowerStateConfirmed {
+		t.Fatalf("station info = %+v, want fresh inferred On state reported as unconfirmed", infos)
+	}
+
+	var powerCalls atomic.Int32
+	manager.bluetoothOps.setPowerState = func(context.Context, *internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
+		powerCalls.Add(1)
+		return internalbluetooth.PowerControlResult{State: internalbluetooth.PowerStateOn, Confirmed: true}, nil
+	}
+	result, err := manager.SetAllStationsPowerDetailed("on")
+	if err != nil {
+		t.Fatalf("SetAllStationsPowerDetailed() error = %v", err)
+	}
+	if powerCalls.Load() != 1 {
+		t.Fatalf("bulk power writes = %d, want the inferred station handled", powerCalls.Load())
+	}
+	if len(result.Results) != 1 || result.Results[0].Skipped || !result.Results[0].CommandSent ||
+		!result.Results[0].Success || !result.Results[0].Confirmed {
+		t.Fatalf("bulk result = %+v, want a confirmed power command", result.Results)
+	}
+}
+
+func TestSingleStandbyRefreshesCachedUnsupportedCapability(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	address := "11:22:33:44:55:81"
+	manager.stations[address] = &internalbluetooth.BaseStation{
+		Name: "LHB-STANDBY", Address: mustAddress(t, address), Present: true,
+		Capabilities: internalbluetooth.Capabilities{PowerWrite: true, Standby: false}, CapabilitiesKnown: true,
+	}
+	var refreshes atomic.Int32
+	manager.bluetoothOps.refreshCapabilities = func(context.Context, *internalbluetooth.BaseStation) (internalbluetooth.Capabilities, error) {
+		refreshes.Add(1)
+		return internalbluetooth.Capabilities{PowerWrite: true, Standby: true}, nil
+	}
+	manager.bluetoothOps.setPowerState = func(context.Context, *internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
+		return internalbluetooth.PowerControlResult{State: internalbluetooth.PowerStateStandby, Confirmed: true}, nil
+	}
+
+	if _, err := manager.SetStationPower(address, "standby"); err != nil {
+		t.Fatalf("SetStationPower() error = %v", err)
+	}
+	if refreshes.Load() != 1 {
+		t.Fatalf("capability refreshes = %d, want 1", refreshes.Load())
+	}
+}
+
+func TestBulkStandbyRefreshesCachedUnsupportedCapability(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	address := "11:22:33:44:55:82"
+	manager.stations[address] = &internalbluetooth.BaseStation{
+		Name: "LHB-BULK-STANDBY", Address: mustAddress(t, address), Present: true,
+		Capabilities: internalbluetooth.Capabilities{PowerWrite: true, Standby: false}, CapabilitiesKnown: true,
+	}
+	var refreshes atomic.Int32
+	manager.bluetoothOps.refreshCapabilities = func(context.Context, *internalbluetooth.BaseStation) (internalbluetooth.Capabilities, error) {
+		refreshes.Add(1)
+		return internalbluetooth.Capabilities{PowerWrite: true, Standby: true}, nil
+	}
+	manager.bluetoothOps.setPowerState = func(context.Context, *internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
+		return internalbluetooth.PowerControlResult{State: internalbluetooth.PowerStateStandby, Confirmed: true}, nil
+	}
+
+	result, err := manager.SetAllStationsPowerDetailed("standby")
+	if err != nil {
+		t.Fatalf("SetAllStationsPowerDetailed() error = %v", err)
+	}
+	if refreshes.Load() != 1 || len(result.Results) != 1 || result.Results[0].Skipped || !result.Results[0].Success {
+		t.Fatalf("bulk result = %+v, refreshes = %d", result, refreshes.Load())
+	}
+}
+
+func TestRefreshCapabilitiesReturnsStationAfterChannelOnlyReadFailure(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	address := "11:22:33:44:55:83"
+	manager.stations[address] = &internalbluetooth.BaseStation{
+		Name: "LHB-CHANNEL-PARTIAL", Address: mustAddress(t, address), Present: true,
+	}
+	manager.bluetoothOps.refreshCapabilities = func(context.Context, *internalbluetooth.BaseStation) (internalbluetooth.Capabilities, error) {
+		return internalbluetooth.Capabilities{PowerRead: true, ChannelRead: true}, nil
+	}
+	manager.bluetoothOps.fetchInitialPowerState = func(context.Context, *internalbluetooth.BaseStation) error {
+		return &internalbluetooth.InitialReadError{Channel: errors.New("channel unavailable")}
+	}
+
+	info, err := manager.RefreshStationCapabilities(address)
+	if err != nil {
+		t.Fatalf("RefreshStationCapabilities() error = %v", err)
+	}
+	if info.Address != address || info.Name != "LHB-CHANNEL-PARTIAL" {
+		t.Fatalf("RefreshStationCapabilities() returned zero or wrong station: %+v", info)
+	}
+}
+
+func TestRefreshCapabilitiesReturnsStationAfterPowerReadFailure(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	address := "11:22:33:44:55:84"
+	manager.stations[address] = &internalbluetooth.BaseStation{
+		Name: "LHB-POWER-PARTIAL", Address: mustAddress(t, address), Present: true,
+	}
+	manager.bluetoothOps.refreshCapabilities = func(context.Context, *internalbluetooth.BaseStation) (internalbluetooth.Capabilities, error) {
+		return internalbluetooth.Capabilities{PowerRead: true, PowerWrite: true}, nil
+	}
+	manager.bluetoothOps.fetchInitialPowerState = func(_ context.Context, station *internalbluetooth.BaseStation) error {
+		station.LastError = "power unavailable"
+		return &internalbluetooth.InitialReadError{Power: errors.New("power unavailable")}
+	}
+
+	info, err := manager.RefreshStationCapabilities(address)
+	if err != nil {
+		t.Fatalf("RefreshStationCapabilities() error = %v", err)
+	}
+	if info.Address != address || info.LastError != "power unavailable" || info.PowerFresh {
+		t.Fatalf("RefreshStationCapabilities() partial result = %+v", info)
+	}
+	manager.statusRetryMutex.Lock()
+	retry, tracked := manager.statusRetries[address]
+	manager.statusRetryMutex.Unlock()
+	if !tracked || effectiveStatusRetryKinds(retry)&statusRetryConnection == 0 {
+		t.Fatalf("power read recovery was not scheduled: %+v", retry)
+	}
+}
+
+func TestSinglePowerConfirmationUnsupportedReadPreservesCommandSent(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	address := "11:22:33:44:55:76"
+	manager.stations[address] = &internalbluetooth.BaseStation{
+		Name: "LHB-CONFIRM-UNSUPPORTED", Address: mustAddress(t, address), Present: true,
+		Capabilities:      internalbluetooth.Capabilities{PowerRead: true, PowerWrite: true},
+		CapabilitiesKnown: true,
+	}
+	manager.bluetoothOps.ensureCapabilities = func(context.Context, *internalbluetooth.BaseStation) (internalbluetooth.Capabilities, error) {
+		return internalbluetooth.Capabilities{PowerRead: true, PowerWrite: true}, nil
+	}
+	confirmationErr := &internalbluetooth.PowerConfirmationError{
+		Target: internalbluetooth.PowerStateOn,
+		Err: &internalbluetooth.UnsupportedCapabilityError{
+			Capability: "power read",
+			Err:        tinybluetooth.ErrAttReadNotPermitted,
+		},
+	}
+	manager.bluetoothOps.setPowerState = func(context.Context, *internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
+		return internalbluetooth.PowerControlResult{State: internalbluetooth.PowerStateUnknown}, confirmationErr
+	}
+
+	result, err := manager.SetStationPower(address, "on")
+	if !errors.Is(err, tinybluetooth.ErrAttReadNotPermitted) {
+		t.Fatalf("SetStationPower() error = %v, want confirmation read error", err)
+	}
+	if errors.Is(err, ErrUnsupported) {
+		t.Fatalf("confirmation error was incorrectly converted to ErrUnsupported: %v", err)
+	}
+	if !result.CommandSent || result.Confirmed || result.ConfirmationError == "" {
+		t.Fatalf("power result = %+v, want sent but unconfirmed", result)
+	}
+}
+
+func TestSinglePowerAlreadyAtConfirmedTargetIsNoOp(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	if err := manager.beginStationOperation("busy-1"); err != nil {
+		t.Fatalf("beginStationOperation(busy-1) error = %v", err)
+	}
+	defer manager.endStationOperation("busy-1")
+	if err := manager.beginStationOperation("busy-2"); err != nil {
+		t.Fatalf("beginStationOperation(busy-2) error = %v", err)
+	}
+	defer manager.endStationOperation("busy-2")
+	manager.initializeErr = errors.New("adapter unavailable")
+	manager.nextInitializeAt = time.Now().Add(time.Hour)
+	manager.initializeBluetooth = func() error {
+		t.Fatal("Bluetooth initialization was attempted for a confirmed no-op")
+		return nil
+	}
+	address := "11:22:33:44:55:78"
+	manager.stations[address] = &internalbluetooth.BaseStation{
+		Name:              "LHB-ALREADY-ON",
+		Address:           mustAddress(t, address),
+		Present:           true,
+		PowerState:        internalbluetooth.PowerStateOn,
+		RawPowerState:     0x0B,
+		LastPowerReadAt:   time.Now(),
+		CapabilitiesKnown: false,
+	}
+	manager.bluetoothOps.ensureCapabilities = func(context.Context, *internalbluetooth.BaseStation) (internalbluetooth.Capabilities, error) {
+		t.Fatal("capability discovery was attempted for a confirmed no-op")
+		return internalbluetooth.Capabilities{}, nil
+	}
+	manager.bluetoothOps.refreshCapabilities = func(context.Context, *internalbluetooth.BaseStation) (internalbluetooth.Capabilities, error) {
+		t.Fatal("capability refresh was attempted for a confirmed no-op")
+		return internalbluetooth.Capabilities{}, nil
+	}
+	manager.bluetoothOps.setPowerState = func(context.Context, *internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
+		t.Fatal("power write was attempted for a confirmed no-op")
+		return internalbluetooth.PowerControlResult{}, nil
+	}
+
+	result, err := manager.SetStationPower(address, "on")
+	if err != nil {
+		t.Fatalf("SetStationPower() error = %v", err)
+	}
+	if result.CommandSent || !result.Confirmed || result.Station.Address != address {
+		t.Fatalf("no-op power result = %+v", result)
+	}
+	if !result.Skipped || result.Reason != "already at target state" {
+		t.Fatalf("no-op power result = %+v, want skipped with reason", result)
+	}
+}
+
+func TestSinglePowerRejectsFreshBootingStation(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	manager.initializeErr = errors.New("adapter unavailable")
+	manager.nextInitializeAt = time.Now().Add(time.Hour)
+	manager.initializeBluetooth = func() error {
+		t.Fatal("Bluetooth initialization was attempted while station was booting")
+		return nil
+	}
+	address := "11:22:33:44:55:79"
+	manager.stations[address] = &internalbluetooth.BaseStation{
+		Name:              "LHB-BOOTING",
+		Address:           mustAddress(t, address),
+		Present:           true,
+		PowerState:        internalbluetooth.PowerStateBooting,
+		RawPowerState:     0x01,
+		LastPowerReadAt:   time.Now(),
+		CapabilitiesKnown: false,
+	}
+	manager.bluetoothOps.ensureCapabilities = func(context.Context, *internalbluetooth.BaseStation) (internalbluetooth.Capabilities, error) {
+		t.Fatal("capability discovery was attempted while station was booting")
+		return internalbluetooth.Capabilities{}, nil
+	}
+	manager.bluetoothOps.refreshCapabilities = func(context.Context, *internalbluetooth.BaseStation) (internalbluetooth.Capabilities, error) {
+		t.Fatal("capability refresh was attempted while station was booting")
+		return internalbluetooth.Capabilities{}, nil
+	}
+	manager.bluetoothOps.setPowerState = func(context.Context, *internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
+		t.Fatal("power write was attempted while station was booting")
+		return internalbluetooth.PowerControlResult{}, nil
+	}
+
+	_, err := manager.SetStationPower(address, "on")
+	if !errors.Is(err, ErrStationTransitioning) || !strings.Contains(err.Error(), "station is booting") {
+		t.Fatalf("SetStationPower() error = %v, want booting ErrStationTransitioning", err)
+	}
+}
+
+func TestSuccessfulPowerOperationPreservesPendingChannelRecovery(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	address := "11:22:33:44:55:70"
+	station := &internalbluetooth.BaseStation{
+		Name: "LHB-CHANNEL-RETRY", Address: mustAddress(t, address), Present: true,
+		Capabilities: internalbluetooth.Capabilities{PowerWrite: true}, CapabilitiesKnown: true,
+	}
+	manager.stations[address] = station
+	manager.statusRetryMutex.Lock()
+	manager.statusRetries[address] = statusRetry{
+		kinds:  statusRetryConnection | statusRetryChannel,
+		nextAt: time.Now().Add(time.Hour),
+	}
+	manager.statusRetryMutex.Unlock()
+	manager.bluetoothOps.ensureCapabilities = func(context.Context, *internalbluetooth.BaseStation) (internalbluetooth.Capabilities, error) {
+		return internalbluetooth.Capabilities{PowerWrite: true}, nil
+	}
+	manager.bluetoothOps.setPowerState = func(context.Context, *internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
+		return internalbluetooth.PowerControlResult{Confirmed: true}, nil
+	}
+
+	if _, err := manager.SetStationPower(address, "on"); err != nil {
+		t.Fatalf("SetStationPower() error = %v", err)
+	}
+	manager.statusRetryMutex.Lock()
+	retry, tracked := manager.statusRetries[address]
+	manager.statusRetryMutex.Unlock()
+	if !tracked || effectiveStatusRetryKinds(retry) != statusRetryChannel {
+		t.Fatalf("retry after power success = %+v, tracked=%v; want channel-only", retry, tracked)
+	}
+}
+
+func TestShutdownCancelsCapabilityDiscoveryBeforePowerWrite(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	address := "11:22:33:44:88:01"
+	manager.stations[address] = &internalbluetooth.BaseStation{
+		Name: "LHB-CAPABILITY-CANCEL", Address: mustAddress(t, address), Present: true,
+	}
+	discoveryStarted := make(chan struct{})
+	manager.bluetoothOps.ensureCapabilities = func(ctx context.Context, _ *internalbluetooth.BaseStation) (internalbluetooth.Capabilities, error) {
+		close(discoveryStarted)
+		<-ctx.Done()
+		return internalbluetooth.Capabilities{}, ctx.Err()
+	}
+	var writes atomic.Int32
+	manager.bluetoothOps.setPowerState = func(context.Context, *internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
+		writes.Add(1)
+		return internalbluetooth.PowerControlResult{}, nil
+	}
+	result := make(chan error, 1)
+	go func() {
+		_, err := manager.SetStationPower(address, "on")
+		result <- err
+	}()
+	<-discoveryStarted
+	manager.BeginShutdown()
+	select {
+	case err := <-result:
+		if !errors.Is(err, ErrShuttingDown) {
+			t.Fatalf("SetStationPower() error = %v, want ErrShuttingDown", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("capability discovery did not observe shutdown cancellation")
+	}
+	if writes.Load() != 0 {
+		t.Fatalf("power writes = %d, want zero after cancelled discovery", writes.Load())
+	}
+	manager.Shutdown()
+}

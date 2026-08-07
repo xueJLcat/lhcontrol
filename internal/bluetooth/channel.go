@@ -1,0 +1,216 @@
+package bluetooth
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+)
+
+func IdentifyContext(ctx context.Context, station *BaseStation) error {
+	if station == nil {
+		return fmt.Errorf("station is nil")
+	}
+	ctx = normalizeContext(ctx)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	station.mutex.Lock()
+	defer station.mutex.Unlock()
+	var lastErr error
+	for attempt := 0; attempt < 2; attempt++ {
+		if contextErr := ctx.Err(); contextErr != nil {
+			return contextErr
+		}
+		if err := connectAndDiscoverInternalContext(ctx, station); err != nil {
+			lastErr = err
+		} else if !station.Capabilities.Identify || station.identifyCharacteristic == nil {
+			return unsupportedCapability("identify", nil)
+		} else if err := writeCharacteristicValueInternal(ctx, station.identifyCharacteristic, 0x01); err != nil {
+			if IsCapabilityUnsupported(err) {
+				station.Capabilities.Identify = false
+				station.setOperationErrorInternal(err)
+				return unsupportedCapability("identify", err)
+			}
+			lastErr = err
+			if IsPossiblySent(err) {
+				station.setOperationErrorInternal(err)
+				return fmt.Errorf("identify command for %s may have been sent and will not be retried: %w", station.Name, err)
+			}
+		} else {
+			station.setOperationErrorInternal(nil)
+			return nil
+		}
+		if attempt == 0 {
+			_ = disconnectInternal(station)
+			station.mutex.Unlock()
+			err := sleepContext(ctx, 250*time.Millisecond)
+			station.mutex.Lock()
+			if err != nil {
+				return err
+			}
+		}
+	}
+	_ = disconnectInternal(station)
+	station.setOperationErrorInternal(lastErr)
+	return fmt.Errorf("failed to identify %s after retry: %w", station.Name, lastErr)
+}
+
+type ChannelWriteResult struct {
+	PreviousChannel int
+	Channel         int
+	WriteWarning    string
+	CommandSent     bool
+}
+
+func SetChannel(station *BaseStation, channel int) (ChannelWriteResult, error) {
+	return SetChannelContext(context.Background(), station, channel)
+}
+
+// SetChannelContext is the cancellable form of SetChannel. Cancellation before
+// the write aborts the operation with CommandSent false; cancellation during
+// readback keeps CommandSent true and surfaces a confirmation failure.
+func SetChannelContext(ctx context.Context, station *BaseStation, channel int) (ChannelWriteResult, error) {
+	result := ChannelWriteResult{PreviousChannel: ChannelUnknown, Channel: ChannelUnknown}
+	if station == nil {
+		return result, fmt.Errorf("station is nil")
+	}
+	if channel < 1 || channel > 16 {
+		return result, fmt.Errorf("channel %d is outside the supported range 1-16", channel)
+	}
+	ctx = normalizeContext(ctx)
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
+	station.mutex.Lock()
+	defer station.mutex.Unlock()
+	if err := connectAndDiscoverInternalContext(ctx, station); err != nil {
+		return result, err
+	}
+	if !station.Capabilities.ChannelWrite || !station.Capabilities.ChannelRead || station.modeCharacteristic == nil {
+		return result, unsupportedCapability("safe channel control", nil)
+	}
+	if err := readChannelInternalContext(ctx, station); err != nil {
+		station.setChannelErrorInternal(err)
+		station.setOperationErrorInternal(nil)
+		if RequiresReconnect(err) {
+			_ = disconnectInternal(station)
+		}
+		return result, fmt.Errorf("failed to read the existing channel for %s: %w", station.Name, err)
+	}
+	result.PreviousChannel = station.Channel
+	if station.Channel == channel {
+		result.Channel = station.Channel
+		station.LastReadAt = time.Now()
+		station.setChannelErrorInternal(nil)
+		station.setOperationErrorInternal(nil)
+		return result, nil
+	}
+	if writeErr := writeCharacteristicValueInternal(ctx, station.modeCharacteristic, byte(channel)); writeErr != nil {
+		if IsCapabilityUnsupported(writeErr) {
+			station.Capabilities.ChannelWrite = false
+			station.setOperationErrorInternal(writeErr)
+			return result, unsupportedCapability("channel write", writeErr)
+		}
+		// Once the transport reports an ambiguous write, a failed readback
+		// cannot turn it back into a definitely-unsent command.
+		result.CommandSent = IsPossiblySent(writeErr)
+		if readErr := readChannelInternalContext(ctx, station); readErr == nil {
+			result.Channel = station.Channel
+			if station.Channel == channel {
+				result.CommandSent = true
+				result.WriteWarning = fmt.Sprintf("the write call reported an error, but channel %d was confirmed by readback: %v", channel, writeErr)
+				station.LastReadAt = time.Now()
+				station.setChannelErrorInternal(nil)
+				station.setOperationErrorInternal(nil)
+				return result, nil
+			}
+			writeErr = fmt.Errorf(
+				"write reported %v, but readback reported channel %d instead of %d",
+				writeErr,
+				station.Channel,
+				channel,
+			)
+		} else {
+			writeErr = errors.Join(writeErr, fmt.Errorf("final channel read failed: %w", readErr))
+			_ = disconnectInternal(station)
+		}
+		station.setOperationErrorInternal(writeErr)
+		return result, fmt.Errorf("failed to write channel %d for %s: %w", channel, station.Name, writeErr)
+	}
+	result.CommandSent = true
+	var confirmationErr error
+	consecutiveReadErrors := 0
+	for attempt := 0; attempt < 5; attempt++ {
+		// Readback waits run outside the station lock so snapshots are not
+		// queued behind the confirmation window; the lock is held again
+		// before station state is read or written.
+		station.mutex.Unlock()
+		sleepErr := sleepContext(ctx, 250*time.Millisecond)
+		station.mutex.Lock()
+		if sleepErr != nil {
+			confirmationErr = sleepErr
+			break
+		}
+		if err := readChannelInternalContext(ctx, station); err != nil {
+			confirmationErr = err
+			if IsUnsupportedCapabilityError(err) {
+				break
+			}
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				break
+			}
+			consecutiveReadErrors++
+			if consecutiveReadErrors >= 2 && attempt < 4 {
+				_ = disconnectInternal(station)
+				station.mutex.Unlock()
+				sleepErr := sleepContext(ctx, 250*time.Millisecond)
+				station.mutex.Lock()
+				if sleepErr != nil {
+					confirmationErr = errors.Join(confirmationErr, sleepErr)
+					break
+				}
+				if reconnectErr := connectAndDiscoverInternalContext(ctx, station); reconnectErr != nil {
+					confirmationErr = errors.Join(confirmationErr, fmt.Errorf("channel confirmation reconnect failed: %w", reconnectErr))
+					break
+				}
+				consecutiveReadErrors = 0
+			}
+			continue
+		}
+		consecutiveReadErrors = 0
+		result.Channel = station.Channel
+		if station.Channel == channel {
+			station.LastReadAt = time.Now()
+			station.setChannelErrorInternal(nil)
+			station.setOperationErrorInternal(nil)
+			return result, nil
+		}
+		confirmationErr = fmt.Errorf("reported channel %d, expected %d", station.Channel, channel)
+	}
+	if err := readChannelInternalContext(ctx, station); err == nil {
+		result.Channel = station.Channel
+		if station.Channel == channel {
+			result.WriteWarning = fmt.Sprintf("channel %d was confirmed by the final readback", channel)
+			station.LastReadAt = time.Now()
+			station.setChannelErrorInternal(nil)
+			station.setOperationErrorInternal(nil)
+			return result, nil
+		}
+		confirmationErr = fmt.Errorf("reported channel %d, expected %d", station.Channel, channel)
+	} else {
+		confirmationErr = errors.Join(confirmationErr, err)
+		if RequiresReconnect(err) {
+			_ = disconnectInternal(station)
+		}
+	}
+	if confirmationErr == nil {
+		confirmationErr = fmt.Errorf("no channel confirmation was received")
+	}
+	station.setChannelErrorInternal(confirmationErr)
+	station.setOperationErrorInternal(nil)
+	return result, fmt.Errorf("channel %d was written but could not be confirmed for %s: %w", channel, station.Name, confirmationErr)
+}
+
+// disconnectInternal performs disconnection without locking (must be called within locked context).
+// Also removes station from the global tracking list.

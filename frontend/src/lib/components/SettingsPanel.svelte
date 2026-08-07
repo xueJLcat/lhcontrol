@@ -8,7 +8,9 @@
   } from '../backend';
   import { autosleep as autosleepModels, bluetooth as bluetoothModels } from '../../../wailsjs/go/models';
   import { pushToast } from '../toast';
-  import { locale, setLocale, t, withDetail, type Locale } from '../i18n.svelte';
+  import {
+    languagePreference, setLanguagePreference, t, withDetail, type LanguagePreference
+  } from '../i18n.svelte';
   import SettingsDrawer from './SettingsDrawer.svelte';
 
   let { inactive = false, onClose, onLanguageChanged = () => {} }: { inactive?: boolean; onClose: () => void; onLanguageChanged?: () => void } = $props();
@@ -67,16 +69,16 @@
     }
   }
 
-  async function changeLanguage(next: Locale) {
-    if (languageBusy || next === locale()) return;
-    const previous = locale();
-    setLocale(next);
+  async function changeLanguage(next: LanguagePreference) {
+    if (languageBusy || next === languagePreference()) return;
+    const previous = languagePreference();
+    setLanguagePreference(next);
     onLanguageChanged();
     languageBusy = true;
     try {
-      await SetLanguage(next);
+      await SetLanguage(next === 'system' ? '' : next);
     } catch (error) {
-      setLocale(previous);
+      setLanguagePreference(previous);
       onLanguageChanged();
       pushToast(`${t('Language setting could not be saved')}: ${String(error)}`);
     } finally {
@@ -92,7 +94,7 @@
   autoSleep={autoSleepSettings}
   autoSleepError={autoSleepError}
   {autoSleepBusy}
-  language={locale()}
+  languagePreference={languagePreference()}
   {languageBusy}
   {inactive}
   {onClose}

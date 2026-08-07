@@ -469,6 +469,24 @@ func TestLanguagePersistsAcrossReloads(t *testing.T) {
 	}
 }
 
+func TestLanguageCanReturnToSystemDefault(t *testing.T) {
+	t.Setenv("AppData", t.TempDir())
+	cfg := NewConfig()
+	if err := cfg.SetLanguage(LanguageSimplifiedChinese); err != nil {
+		t.Fatalf("SetLanguage(zh-CN) error = %v", err)
+	}
+	if err := cfg.SetLanguage(""); err != nil {
+		t.Fatalf("SetLanguage(system) error = %v", err)
+	}
+	reloaded := NewConfig()
+	if err := reloaded.Load(); err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if got := reloaded.GetLanguage(); got != "" {
+		t.Fatalf("reloaded language = %q, want system default", got)
+	}
+}
+
 func TestSetLanguageRejectsInvalidValue(t *testing.T) {
 	t.Setenv("AppData", t.TempDir())
 	cfg := NewConfig()

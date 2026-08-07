@@ -17,7 +17,7 @@ vi.mock('../toast', async (importOriginal) => {
 
 import SettingsPanel from './SettingsPanel.svelte';
 import { pushToast } from '../toast';
-import { setLocale } from '../i18n.svelte';
+import { languagePreference, setLanguagePreference } from '../i18n.svelte';
 
 afterEach(cleanup);
 
@@ -43,7 +43,7 @@ beforeEach(() => {
   backend.GetAutoSleepSettings.mockResolvedValue({ enabled: false, target: 'steamvr', delaySeconds: 300 });
   backend.SetAutoSleepSettings.mockResolvedValue(undefined);
   backend.SetLanguage.mockResolvedValue(undefined);
-  setLocale('en');
+  setLanguagePreference('system');
 });
 
 describe('SettingsPanel', () => {
@@ -95,6 +95,23 @@ describe('SettingsPanel', () => {
     await waitFor(() => expect(backend.SetLanguage).toHaveBeenCalledWith('zh-CN'));
   });
 
+  it('can explicitly persist the language that currently matches the system', async () => {
+    render(SettingsPanel, { props: { onClose: vi.fn() } });
+    await screen.findByRole('dialog', { name: 'Settings' });
+    await fireEvent.click(screen.getByRole('radio', { name: 'English' }));
+    await waitFor(() => expect(backend.SetLanguage).toHaveBeenCalledWith('en'));
+    expect(languagePreference()).toBe('en');
+  });
+
+  it('can return to following the system language', async () => {
+    setLanguagePreference('zh-CN');
+    render(SettingsPanel, { props: { onClose: vi.fn() } });
+    await screen.findByRole('dialog', { name: '设置' });
+    await fireEvent.click(screen.getByRole('radio', { name: '跟随系统' }));
+    await waitFor(() => expect(backend.SetLanguage).toHaveBeenCalledWith(''));
+    expect(languagePreference()).toBe('system');
+  });
+
   it('restores the previous language when saving fails', async () => {
     backend.SetLanguage.mockRejectedValue(new Error('config locked'));
     render(SettingsPanel, { props: { onClose: vi.fn() } });
@@ -102,6 +119,7 @@ describe('SettingsPanel', () => {
     await fireEvent.click(screen.getByRole('radio', { name: '简体中文' }));
     await waitFor(() => expect(backend.SetLanguage).toHaveBeenCalledOnce());
     expect(await screen.findByRole('dialog', { name: 'Settings' })).toBeInTheDocument();
+    expect(languagePreference()).toBe('system');
     expect(pushToast).toHaveBeenCalledWith('Language setting could not be saved: Error: config locked');
   });
 });

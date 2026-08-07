@@ -420,7 +420,7 @@ func (c *Config) GetLanguage() string {
 // SetLanguage validates and persists the UI language, rolling the in-memory
 // value back when the atomic configuration write fails.
 func (c *Config) SetLanguage(language string) error {
-	if language != LanguageEnglish && language != LanguageSimplifiedChinese {
+	if language != "" && language != LanguageEnglish && language != LanguageSimplifiedChinese {
 		return fmt.Errorf("unsupported language %q", language)
 	}
 	c.mutex.Lock()
