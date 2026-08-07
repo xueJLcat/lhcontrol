@@ -107,6 +107,22 @@ func (a *App) SetBulkPowerTimeoutSeconds(timeoutSeconds int) error {
 
 }
 
+func (a *App) GetStatusPollIntervalSeconds() int {
+
+	return a.config.GetStatusPollIntervalSeconds()
+
+}
+
+func (a *App) SetStatusPollIntervalSeconds(intervalSeconds int) error {
+
+	err := a.config.SetStatusPollIntervalSeconds(intervalSeconds)
+
+	a.setConfigPersistenceStatus()
+
+	return err
+
+}
+
 // applyAutoSleep (re)starts the auto-sleep watcher goroutine to match the
 
 // given settings. Calling it repeatedly is safe: the previous watcher is

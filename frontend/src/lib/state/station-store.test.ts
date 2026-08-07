@@ -6,6 +6,7 @@ const backend = vi.hoisted(() => ({
   GetAPIStatus: vi.fn(),
   GetCurrentStationInfo: vi.fn(),
   GetScanStatus: vi.fn(),
+  GetStatusPollIntervalSeconds: vi.fn(),
   IdentifyStation: vi.fn(),
   IsScanning: vi.fn(),
   RefreshStationCapabilities: vi.fn(),
@@ -64,6 +65,7 @@ beforeEach(() => {
   backend.ScanAndFetchStations.mockResolvedValue([createStation()]);
   backend.GetScanStatus.mockResolvedValue({ state: 'completed', found: 1, warnings: [] });
   backend.GetCurrentStationInfo.mockResolvedValue([createStation()]);
+  backend.GetStatusPollIntervalSeconds.mockResolvedValue(15);
   backend.CheckAllStationStatuses.mockResolvedValue([createStation()]);
   backend.StopScan.mockResolvedValue(undefined);
   backend.SetStationPower.mockResolvedValue({
@@ -93,9 +95,24 @@ describe('StationStore locale changes', () => {
 afterEach(() => {
   store?.dispose();
   store = null;
+  vi.useRealTimers();
 });
 
 describe('StationStore startup', () => {
+  it('uses the persisted automatic polling interval', async () => {
+    vi.useFakeTimers();
+    backend.GetStatusPollIntervalSeconds.mockResolvedValue(30);
+    mountStore();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(backend.GetStatusPollIntervalSeconds).toHaveBeenCalledOnce();
+    backend.CheckAllStationStatuses.mockClear();
+
+    await vi.advanceTimersByTimeAsync(29_999);
+    expect(backend.CheckAllStationStatuses).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(backend.CheckAllStationStatuses).toHaveBeenCalledOnce();
+  });
+
   it('runs the initial scan on mount when the backend is idle', async () => {
     const { store } = mountStore();
     await vi.waitFor(() => expect(backend.ScanAndFetchStations).toHaveBeenCalledOnce());

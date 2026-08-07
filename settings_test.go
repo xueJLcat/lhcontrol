@@ -157,3 +157,25 @@ func TestLanguageBindingsPersistAndValidate(t *testing.T) {
 	}
 
 }
+
+func TestStatusPollIntervalBindingsPersistAndValidate(t *testing.T) {
+	t.Setenv("AppData", t.TempDir())
+	app := NewApp()
+	if got := app.GetStatusPollIntervalSeconds(); got != 15 {
+		t.Fatalf("fresh status poll interval = %d, want 15", got)
+	}
+	if err := app.SetStatusPollIntervalSeconds(4); err == nil {
+		t.Fatal("SetStatusPollIntervalSeconds() accepted a below-minimum interval")
+	}
+	if err := app.SetStatusPollIntervalSeconds(45); err != nil {
+		t.Fatalf("SetStatusPollIntervalSeconds() error = %v", err)
+	}
+
+	restarted := NewApp()
+	if err := restarted.config.Load(); err != nil {
+		t.Fatalf("config.Load() error = %v", err)
+	}
+	if got := restarted.GetStatusPollIntervalSeconds(); got != 45 {
+		t.Fatalf("status poll interval after simulated restart = %d, want 45", got)
+	}
+}

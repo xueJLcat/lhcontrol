@@ -562,6 +562,60 @@ func TestLoadSanitizesInvalidBulkPowerTimeout(t *testing.T) {
 	}
 }
 
+func TestStatusPollIntervalPersistsAndValidates(t *testing.T) {
+	useTemporaryConfigDirectory(t)
+	cfg := NewConfig()
+	if got := cfg.GetStatusPollIntervalSeconds(); got != DefaultStatusPollIntervalSeconds {
+		t.Fatalf("default status poll interval = %d, want %d", got, DefaultStatusPollIntervalSeconds)
+	}
+	if err := cfg.SetStatusPollIntervalSeconds(MinStatusPollIntervalSeconds - 1); err == nil {
+		t.Fatal("SetStatusPollIntervalSeconds accepted a below-minimum value")
+	}
+	if err := cfg.SetStatusPollIntervalSeconds(45); err != nil {
+		t.Fatalf("SetStatusPollIntervalSeconds() error = %v", err)
+	}
+
+	reloaded := NewConfig()
+	if err := reloaded.Load(); err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if got := reloaded.GetStatusPollIntervalSeconds(); got != 45 {
+		t.Fatalf("reloaded status poll interval = %d, want 45", got)
+	}
+}
+
+func TestLoadSanitizesInvalidStatusPollInterval(t *testing.T) {
+	configDirectory := useTemporaryConfigDirectory(t)
+	if err := os.WriteFile(
+		filepath.Join(configDirectory, "config.json"),
+		[]byte(`{"statusPollIntervalSeconds":1}`),
+		0o644,
+	); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	cfg := NewConfig()
+	if err := cfg.Load(); err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if got := cfg.GetStatusPollIntervalSeconds(); got != DefaultStatusPollIntervalSeconds {
+		t.Fatalf("sanitized status poll interval = %d, want %d", got, DefaultStatusPollIntervalSeconds)
+	}
+}
+
+func TestSetStatusPollIntervalRollsBackWhenPersistenceFails(t *testing.T) {
+	t.Setenv("AppData", t.TempDir())
+	originalWriter := configFileWriter
+	configFileWriter = func(string, []byte, os.FileMode) error { return errors.New("disk full") }
+	t.Cleanup(func() { configFileWriter = originalWriter })
+	cfg := NewConfig()
+	if err := cfg.SetStatusPollIntervalSeconds(45); err == nil {
+		t.Fatal("SetStatusPollIntervalSeconds() unexpectedly succeeded")
+	}
+	if got := cfg.GetStatusPollIntervalSeconds(); got != DefaultStatusPollIntervalSeconds {
+		t.Fatalf("failed save retained status poll interval %d", got)
+	}
+}
+
 func TestLoadSanitizesUnknownLanguage(t *testing.T) {
 	configRoot := t.TempDir()
 	t.Setenv("AppData", configRoot)

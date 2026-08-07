@@ -38,6 +38,10 @@ export function GetLanguage(): Promise<string> {
   return call(() => bindings.GetLanguage());
 }
 
+export function GetStatusPollIntervalSeconds(): Promise<number> {
+  return call(() => bindings.GetStatusPollIntervalSeconds());
+}
+
 export function GetCurrentStationInfo(): Promise<station.StationInfo[]> {
   return call(() => bindings.GetCurrentStationInfo());
 }
@@ -84,6 +88,10 @@ export function SetBulkPowerTimeoutSeconds(timeoutSeconds: number): Promise<void
 
 export function SetLanguage(language: string): Promise<void> {
   return call(() => bindings.SetLanguage(language));
+}
+
+export function SetStatusPollIntervalSeconds(intervalSeconds: number): Promise<void> {
+  return call(() => bindings.SetStatusPollIntervalSeconds(intervalSeconds));
 }
 
 export function SetStationChannel(address: string, channel: number, allowUnknownConflictRisk: boolean): Promise<station.ChannelChangeResult> {

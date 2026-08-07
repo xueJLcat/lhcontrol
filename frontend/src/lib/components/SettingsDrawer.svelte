@@ -12,6 +12,8 @@
   const MAX_DELAY_MINUTES = 120;
   const MIN_BULK_TIMEOUT_SECONDS = 30;
   const MAX_BULK_TIMEOUT_SECONDS = 600;
+  const MIN_STATUS_POLL_INTERVAL_SECONDS = 5;
+  const MAX_STATUS_POLL_INTERVAL_SECONDS = 300;
 
   let {
     adapters,
@@ -23,6 +25,9 @@
     bulkPowerTimeoutSeconds,
     bulkPowerTimeoutError = null,
     bulkPowerTimeoutBusy = false,
+    statusPollIntervalSeconds,
+    statusPollIntervalError = null,
+    statusPollIntervalBusy = false,
     languagePreference = 'system',
     languageBusy = false,
     inactive = false,
@@ -32,6 +37,8 @@
     onAutoSleepRetry,
     onBulkPowerTimeoutChange,
     onBulkPowerTimeoutRetry,
+    onStatusPollIntervalChange,
+    onStatusPollIntervalRetry,
     onLanguageChange = () => {}
   }: {
     adapters: bluetooth.AdapterInfo[];
@@ -43,6 +50,9 @@
     bulkPowerTimeoutSeconds: number | null;
     bulkPowerTimeoutError?: string | null;
     bulkPowerTimeoutBusy?: boolean;
+    statusPollIntervalSeconds: number | null;
+    statusPollIntervalError?: string | null;
+    statusPollIntervalBusy?: boolean;
     languagePreference?: LanguagePreference;
     languageBusy?: boolean;
     inactive?: boolean;
@@ -52,6 +62,8 @@
     onAutoSleepRetry?: () => void;
     onBulkPowerTimeoutChange: (timeoutSeconds: number) => void;
     onBulkPowerTimeoutRetry?: () => void;
+    onStatusPollIntervalChange: (intervalSeconds: number) => void;
+    onStatusPollIntervalRetry?: () => void;
     onLanguageChange?: (language: LanguagePreference) => void;
   } = $props();
 
@@ -65,6 +77,11 @@
   let bulkTimeoutDraft = $state('');
   $effect(() => {
     if (bulkPowerTimeoutSeconds !== null) bulkTimeoutDraft = String(bulkPowerTimeoutSeconds);
+  });
+
+  let statusPollIntervalDraft = $state('');
+  $effect(() => {
+    if (statusPollIntervalSeconds !== null) statusPollIntervalDraft = String(statusPollIntervalSeconds);
   });
 
   function commitDelay() {
@@ -88,6 +105,16 @@
       : bulkPowerTimeoutSeconds;
     bulkTimeoutDraft = String(seconds);
     if (seconds !== bulkPowerTimeoutSeconds) onBulkPowerTimeoutChange(seconds);
+  }
+
+  function commitStatusPollInterval() {
+    if (statusPollIntervalSeconds === null) return;
+    const parsed = Number(statusPollIntervalDraft);
+    const seconds = Number.isFinite(parsed)
+      ? Math.min(MAX_STATUS_POLL_INTERVAL_SECONDS, Math.max(MIN_STATUS_POLL_INTERVAL_SECONDS, Math.round(parsed)))
+      : statusPollIntervalSeconds;
+    statusPollIntervalDraft = String(seconds);
+    if (seconds !== statusPollIntervalSeconds) onStatusPollIntervalChange(seconds);
   }
 </script>
 
@@ -128,6 +155,36 @@
       </label>
     </div>
     <p class="hint">{t('Changes apply immediately and are saved for the next start.')}</p>
+  </section>
+
+  <section>
+    <h4><RefreshCw size={12} /> {t('Automatic refresh')}</h4>
+    {#if statusPollIntervalSeconds !== null}
+      <div class="delay-row">
+        <label for="status-poll-interval">{t('Status polling interval')}</label>
+        <span class="delay-input">
+          <input
+            id="status-poll-interval"
+            type="number"
+            min={MIN_STATUS_POLL_INTERVAL_SECONDS}
+            max={MAX_STATUS_POLL_INTERVAL_SECONDS}
+            step="1"
+            bind:value={statusPollIntervalDraft}
+            onchange={commitStatusPollInterval}
+            disabled={statusPollIntervalBusy}
+          />
+          {t('seconds')}
+        </span>
+      </div>
+      <p class="hint">{t('Controls how often station states and application health are refreshed automatically. Allowed range: 5–300 seconds.')}</p>
+    {:else if statusPollIntervalError}
+      <div class="alert danger">{statusPollIntervalError}</div>
+      <div class="drawer-actions">
+        <button class="btn" onclick={() => onStatusPollIntervalRetry?.()}><RefreshCw size={15} /> {t('Retry')}</button>
+      </div>
+    {:else}
+      <p class="hint loading"><LoaderCircle class="spin" size={14} /> {t('Loading automatic refresh settings...')}</p>
+    {/if}
   </section>
 
   <section>

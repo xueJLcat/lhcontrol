@@ -10,6 +10,7 @@ const api = vi.hoisted(() => ({
   GetAPIStatus: vi.fn(),
   GetAutoSleepSettings: vi.fn(),
   GetBulkPowerTimeoutSeconds: vi.fn(),
+  GetStatusPollIntervalSeconds: vi.fn(),
   GetCurrentStationInfo: vi.fn(),
   GetScanStatus: vi.fn(),
   IdentifyStation: vi.fn(),
@@ -21,6 +22,7 @@ const api = vi.hoisted(() => ({
   SetAllStationsPowerDetailed: vi.fn(),
   SetAutoSleepSettings: vi.fn(),
   SetBulkPowerTimeoutSeconds: vi.fn(),
+  SetStatusPollIntervalSeconds: vi.fn(),
   SetStationChannel: vi.fn(),
   SetStationPower: vi.fn(),
   StopScan: vi.fn()
@@ -80,8 +82,10 @@ beforeEach(() => {
   api.ListBluetoothAdapters.mockResolvedValue([]);
   api.GetAutoSleepSettings.mockResolvedValue({ enabled: false, target: 'steamvr', delaySeconds: 300 });
   api.GetBulkPowerTimeoutSeconds.mockResolvedValue(120);
+  api.GetStatusPollIntervalSeconds.mockResolvedValue(15);
   api.SetAutoSleepSettings.mockResolvedValue(undefined);
   api.SetBulkPowerTimeoutSeconds.mockResolvedValue(undefined);
+  api.SetStatusPollIntervalSeconds.mockResolvedValue(undefined);
 });
 
 afterEach(() => {

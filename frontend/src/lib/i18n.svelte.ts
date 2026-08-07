@@ -5,6 +5,12 @@ export type LanguagePreference = 'system' | Locale;
 export type MessageValues = Record<string, string | number>;
 
 const zhCN = {
+  'Automatic refresh': '自动刷新',
+  'Status polling interval': '状态轮询间隔',
+  'Controls how often station states and application health are refreshed automatically. Allowed range: 5–300 seconds.': '控制自动刷新基站状态和应用运行状况的频率。允许范围：5–300 秒。',
+  'Loading automatic refresh settings...': '正在加载自动刷新设置…',
+  'Status polling interval could not be loaded': '无法加载状态轮询间隔',
+  'Status polling interval could not be saved': '无法保存状态轮询间隔',
   'Operation safety': '操作安全',
   'Bulk power timeout': '批量电源操作超时',
   'seconds': '秒',

@@ -107,4 +107,19 @@ describe('ApiStatusPoller', () => {
     await vi.advanceTimersByTimeAsync(60_000);
     expect(backend.GetAPIStatus).toHaveBeenCalledTimes(1);
   });
+
+  it('replaces the existing timer when the interval changes', async () => {
+    vi.useFakeTimers();
+    backend.GetAPIStatus.mockResolvedValue(status());
+    const poller = new ApiStatusPoller(makeHost());
+    poller.start(10_000);
+    poller.start(20_000);
+    expect(backend.GetAPIStatus).toHaveBeenCalledTimes(2);
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(backend.GetAPIStatus).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(backend.GetAPIStatus).toHaveBeenCalledTimes(3);
+    poller.dispose();
+  });
 });

@@ -5,9 +5,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const backend = vi.hoisted(() => ({
   GetAutoSleepSettings: vi.fn(),
   GetBulkPowerTimeoutSeconds: vi.fn(),
+  GetStatusPollIntervalSeconds: vi.fn(),
   ListBluetoothAdapters: vi.fn(),
   SetAutoSleepSettings: vi.fn(),
   SetBulkPowerTimeoutSeconds: vi.fn(),
+  SetStatusPollIntervalSeconds: vi.fn(),
   SetLanguage: vi.fn()
 }));
 
@@ -44,8 +46,10 @@ beforeEach(() => {
   ]);
   backend.GetAutoSleepSettings.mockResolvedValue({ enabled: false, target: 'steamvr', delaySeconds: 300 });
   backend.GetBulkPowerTimeoutSeconds.mockResolvedValue(120);
+  backend.GetStatusPollIntervalSeconds.mockResolvedValue(15);
   backend.SetAutoSleepSettings.mockResolvedValue(undefined);
   backend.SetBulkPowerTimeoutSeconds.mockResolvedValue(undefined);
+  backend.SetStatusPollIntervalSeconds.mockResolvedValue(undefined);
   backend.SetLanguage.mockResolvedValue(undefined);
   setLanguagePreference('system');
 });
@@ -57,10 +61,12 @@ describe('SettingsPanel', () => {
     expect(backend.ListBluetoothAdapters).toHaveBeenCalledOnce();
     expect(backend.GetAutoSleepSettings).toHaveBeenCalledOnce();
     expect(backend.GetBulkPowerTimeoutSeconds).toHaveBeenCalledOnce();
+    expect(backend.GetStatusPollIntervalSeconds).toHaveBeenCalledOnce();
     expect(await screen.findByText('Intel Wireless Bluetooth')).toBeInTheDocument();
     expect(screen.getByText('BT-1')).toBeInTheDocument();
     expect(screen.getByRole('checkbox', { name: 'Enable auto sleep' })).not.toBeChecked();
     expect(screen.getByLabelText('Bulk power timeout')).toHaveValue(120);
+    expect(screen.getByLabelText('Status polling interval')).toHaveValue(15);
   });
 
   it('persists the bulk power timeout', async () => {
@@ -80,6 +86,29 @@ describe('SettingsPanel', () => {
     await waitFor(() => expect(backend.SetBulkPowerTimeoutSeconds).toHaveBeenCalledWith(180));
     await waitFor(() => expect(input).toHaveValue(120));
     expect(pushToast).toHaveBeenCalledWith('Bulk power timeout could not be saved: Error: config locked');
+  });
+
+  it('persists the status polling interval and applies it immediately', async () => {
+    const onStatusPollIntervalChanged = vi.fn();
+    render(SettingsPanel, { props: { onClose: vi.fn(), onStatusPollIntervalChanged } });
+    const input = await screen.findByLabelText('Status polling interval');
+    await fireEvent.input(input, { target: { value: '45' } });
+    await fireEvent.change(input);
+    await waitFor(() => expect(backend.SetStatusPollIntervalSeconds).toHaveBeenCalledWith(45));
+    expect(onStatusPollIntervalChanged).toHaveBeenCalledWith(45);
+  });
+
+  it('rolls the status polling interval back when saving fails', async () => {
+    backend.SetStatusPollIntervalSeconds.mockRejectedValue(new Error('config locked'));
+    const onStatusPollIntervalChanged = vi.fn();
+    render(SettingsPanel, { props: { onClose: vi.fn(), onStatusPollIntervalChanged } });
+    const input = await screen.findByLabelText('Status polling interval');
+    await fireEvent.input(input, { target: { value: '45' } });
+    await fireEvent.change(input);
+    await waitFor(() => expect(backend.SetStatusPollIntervalSeconds).toHaveBeenCalledWith(45));
+    await waitFor(() => expect(input).toHaveValue(15));
+    expect(onStatusPollIntervalChanged).not.toHaveBeenCalled();
+    expect(pushToast).toHaveBeenCalledWith('Status polling interval could not be saved: Error: config locked');
   });
 
   it('persists auto sleep changes', async () => {

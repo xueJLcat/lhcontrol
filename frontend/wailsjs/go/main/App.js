@@ -34,6 +34,10 @@ export function GetScanStatus() {
   return window['go']['main']['App']['GetScanStatus']();
 }
 
+export function GetStatusPollIntervalSeconds() {
+  return window['go']['main']['App']['GetStatusPollIntervalSeconds']();
+}
+
 export function IdentifyStation(arg1) {
   return window['go']['main']['App']['IdentifyStation'](arg1);
 }
@@ -108,6 +112,10 @@ export function SetStationChannel(arg1, arg2, arg3) {
 
 export function SetStationPower(arg1, arg2) {
   return window['go']['main']['App']['SetStationPower'](arg1, arg2);
+}
+
+export function SetStatusPollIntervalSeconds(arg1) {
+  return window['go']['main']['App']['SetStatusPollIntervalSeconds'](arg1);
 }
 
 export function StopScan() {

@@ -44,6 +44,8 @@ function defaultProps(overrides: Record<string, unknown> = {}) {
     autoSleepBusy: false,
     bulkPowerTimeoutSeconds: 120,
     bulkPowerTimeoutBusy: false,
+    statusPollIntervalSeconds: 15,
+    statusPollIntervalBusy: false,
     inactive: false,
     onClose: vi.fn(),
     onRefresh: vi.fn(),
@@ -51,6 +53,8 @@ function defaultProps(overrides: Record<string, unknown> = {}) {
     onAutoSleepRetry: vi.fn(),
     onBulkPowerTimeoutChange: vi.fn(),
     onBulkPowerTimeoutRetry: vi.fn(),
+    onStatusPollIntervalChange: vi.fn(),
+    onStatusPollIntervalRetry: vi.fn(),
     ...overrides
   };
 }
@@ -108,6 +112,17 @@ describe('SettingsDrawer', () => {
     await fireEvent.change(input);
     expect(props.onBulkPowerTimeoutChange).toHaveBeenCalledWith(600);
     expect(input.value).toBe('600');
+  });
+
+  it('clamps and commits the status polling interval in seconds', async () => {
+    const props = defaultProps();
+    render(SettingsDrawer, { props });
+    const input = screen.getByLabelText('Status polling interval') as HTMLInputElement;
+    expect(input.value).toBe('15');
+    await fireEvent.input(input, { target: { value: '2' } });
+    await fireEvent.change(input);
+    expect(props.onStatusPollIntervalChange).toHaveBeenCalledWith(5);
+    expect(input.value).toBe('5');
   });
 });
 

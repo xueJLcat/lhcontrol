@@ -2,6 +2,7 @@ import { EventsOn } from '../../../wailsjs/runtime/runtime';
 import {
   GetCurrentStationInfo,
   GetScanStatus,
+  GetStatusPollIntervalSeconds,
   IsScanning
 } from '../backend';
 import type { PowerFeedback, PowerTarget, StationInfo } from '../types';
@@ -23,6 +24,10 @@ import {
 import { FleetState } from './fleet-state.svelte';
 import { StationActionController } from './station-actions';
 import { StationScanController } from './station-scan-controller';
+
+const DEFAULT_STATUS_POLL_INTERVAL_SECONDS = 15;
+const MIN_STATUS_POLL_INTERVAL_SECONDS = 5;
+const MAX_STATUS_POLL_INTERVAL_SECONDS = 300;
 
 // Overlay controls owned by App. The store calls back into them whenever an
 // operation must close or open a layer instead of reaching into UI state.
@@ -62,6 +67,7 @@ export class StationStore {
   configWritable = $state(true);
 
   private statusCheckInterval: ReturnType<typeof setInterval> | null = null;
+  private statusPollIntervalSeconds = DEFAULT_STATUS_POLL_INTERVAL_SECONDS;
   private cancelExternalScanListener: (() => void) | null = null;
   private cancelExternalScanFailureListener: (() => void) | null = null;
   private cancelExternalScanStartedListener: (() => void) | null = null;
@@ -368,6 +374,23 @@ export class StationStore {
     this.powerFeedback.reconcile(this.stations);
   }
 
+  setStatusPollIntervalSeconds(intervalSeconds: number) {
+    if (this.disposed || !Number.isFinite(intervalSeconds)) return;
+    const next = Math.min(
+      MAX_STATUS_POLL_INTERVAL_SECONDS,
+      Math.max(MIN_STATUS_POLL_INTERVAL_SECONDS, Math.round(intervalSeconds))
+    );
+    if (this.statusCheckInterval && next === this.statusPollIntervalSeconds) return;
+    this.statusPollIntervalSeconds = next;
+
+    if (this.statusCheckInterval) clearInterval(this.statusCheckInterval);
+    const intervalMs = next * 1000;
+    this.apiStatus.start(intervalMs);
+    this.statusCheckInterval = setInterval(() => {
+      void this.periodicStatusCheck();
+    }, intervalMs);
+  }
+
   withStationChanges(current: StationInfo, changes: Partial<StationInfo>): StationInfo {
     return this.fleet.patch(current, changes);
   }
@@ -403,10 +426,12 @@ export class StationStore {
     });
     // Register operation listeners before the first asynchronous health poll
     // so a newly started HTTP action cannot slip through the mount window.
-    this.apiStatus.start(15000);
-    this.statusCheckInterval = setInterval(() => {
-      void this.periodicStatusCheck();
-    }, 15000);
+    this.setStatusPollIntervalSeconds(DEFAULT_STATUS_POLL_INTERVAL_SECONDS);
+    void GetStatusPollIntervalSeconds()
+      .then((intervalSeconds) => this.setStatusPollIntervalSeconds(intervalSeconds))
+      .catch(() => {
+        // Keep the default interval when the persisted preference cannot be read.
+      });
     void (async () => {
       const startupScanning = await IsScanning().catch(() => false);
       // Do not allow the first polling tick to acquire the backend operation

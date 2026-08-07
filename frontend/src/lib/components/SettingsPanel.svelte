@@ -3,10 +3,12 @@
   import {
     GetAutoSleepSettings,
     GetBulkPowerTimeoutSeconds,
+    GetStatusPollIntervalSeconds,
     ListBluetoothAdapters,
     SetAutoSleepSettings,
     SetBulkPowerTimeoutSeconds,
-    SetLanguage
+    SetLanguage,
+    SetStatusPollIntervalSeconds
   } from '../backend';
   import { autosleep as autosleepModels, bluetooth as bluetoothModels } from '../../../wailsjs/go/models';
   import { pushToast } from '../toast';
@@ -15,7 +17,17 @@
   } from '../i18n.svelte';
   import SettingsDrawer from './SettingsDrawer.svelte';
 
-  let { inactive = false, onClose, onLanguageChanged = () => {} }: { inactive?: boolean; onClose: () => void; onLanguageChanged?: () => void } = $props();
+  let {
+    inactive = false,
+    onClose,
+    onLanguageChanged = () => {},
+    onStatusPollIntervalChanged = () => {}
+  }: {
+    inactive?: boolean;
+    onClose: () => void;
+    onLanguageChanged?: () => void;
+    onStatusPollIntervalChanged?: (intervalSeconds: number) => void;
+  } = $props();
 
   let adapters = $state<bluetoothModels.AdapterInfo[]>([]);
   let loading = $state(false);
@@ -26,6 +38,9 @@
   let bulkPowerTimeoutSeconds = $state<number | null>(null);
   let bulkPowerTimeoutError = $state<string | null>(null);
   let bulkPowerTimeoutBusy = $state(false);
+  let statusPollIntervalSeconds = $state<number | null>(null);
+  let statusPollIntervalError = $state<string | null>(null);
+  let statusPollIntervalBusy = $state(false);
   let languageBusy = $state(false);
 
   // The panel only mounts while the settings drawer is open, so loading here
@@ -34,6 +49,7 @@
     void loadAdapterSettings();
     void loadAutoSleepSettings();
     void loadBulkPowerTimeout();
+    void loadStatusPollInterval();
   });
 
   async function loadAdapterSettings() {
@@ -101,6 +117,33 @@
     }
   }
 
+  async function loadStatusPollInterval() {
+    statusPollIntervalError = null;
+    try {
+      statusPollIntervalSeconds = await GetStatusPollIntervalSeconds();
+    } catch (error) {
+      statusPollIntervalSeconds = null;
+      statusPollIntervalError = String(error);
+      pushToast(withDetail('Status polling interval could not be loaded', error));
+    }
+  }
+
+  async function changeStatusPollInterval(next: number) {
+    if (statusPollIntervalBusy || statusPollIntervalSeconds === null) return;
+    const previous = statusPollIntervalSeconds;
+    statusPollIntervalSeconds = next;
+    statusPollIntervalBusy = true;
+    try {
+      await SetStatusPollIntervalSeconds(next);
+      onStatusPollIntervalChanged(next);
+    } catch (error) {
+      statusPollIntervalSeconds = previous;
+      pushToast(withDetail('Status polling interval could not be saved', error));
+    } finally {
+      statusPollIntervalBusy = false;
+    }
+  }
+
   async function changeLanguage(next: LanguagePreference) {
     if (languageBusy || next === languagePreference()) return;
     const previous = languagePreference();
@@ -129,6 +172,9 @@
   {bulkPowerTimeoutSeconds}
   {bulkPowerTimeoutError}
   {bulkPowerTimeoutBusy}
+  {statusPollIntervalSeconds}
+  {statusPollIntervalError}
+  {statusPollIntervalBusy}
   languagePreference={languagePreference()}
   {languageBusy}
   {inactive}
@@ -138,5 +184,7 @@
   onAutoSleepRetry={loadAutoSleepSettings}
   onBulkPowerTimeoutChange={changeBulkPowerTimeout}
   onBulkPowerTimeoutRetry={loadBulkPowerTimeout}
+  onStatusPollIntervalChange={changeStatusPollInterval}
+  onStatusPollIntervalRetry={loadStatusPollInterval}
   onLanguageChange={changeLanguage}
 />

@@ -20,6 +20,7 @@ export class ApiStatusPoller {
   constructor(private readonly host: ApiStatusPollerHost) {}
 
   start(intervalMs = 15000) {
+    if (this.interval) clearInterval(this.interval);
     this.refresh();
     this.interval = setInterval(() => this.refresh(), intervalMs);
   }

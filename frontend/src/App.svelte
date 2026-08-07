@@ -233,6 +233,7 @@
     inactive={channelEditorOpen || Boolean(bulkConfirmTarget)}
     onClose={closeSettings}
     onLanguageChanged={handleLanguageChanged}
+    onStatusPollIntervalChanged={(intervalSeconds) => store.setStatusPollIntervalSeconds(intervalSeconds)}
   />
 {/if}
 

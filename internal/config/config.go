@@ -13,30 +13,35 @@ import (
 )
 
 const (
-	LanguageEnglish                = "en"
-	LanguageSimplifiedChinese      = "zh-CN"
-	MinBulkPowerTimeoutSeconds     = 30
-	MaxBulkPowerTimeoutSeconds     = 600
-	DefaultBulkPowerTimeoutSeconds = 120
+	LanguageEnglish                  = "en"
+	LanguageSimplifiedChinese        = "zh-CN"
+	MinBulkPowerTimeoutSeconds       = 30
+	MaxBulkPowerTimeoutSeconds       = 600
+	DefaultBulkPowerTimeoutSeconds   = 120
+	MinStatusPollIntervalSeconds     = 5
+	MaxStatusPollIntervalSeconds     = 300
+	DefaultStatusPollIntervalSeconds = 15
 )
 
 type Config struct {
-	RenamedStations          map[string]string  `json:"renamedStations"`
-	RenamedStationsByAddress map[string]string  `json:"renamedStationsByAddress"`
-	AutoSleep                autosleep.Settings `json:"autoSleep"`
-	Language                 string             `json:"language,omitempty"`
-	BulkPowerTimeoutSeconds  int                `json:"bulkPowerTimeoutSeconds"`
-	persistenceBlockedErr    error
-	lastPersistenceErr       error
-	mutex                    sync.RWMutex
+	RenamedStations           map[string]string  `json:"renamedStations"`
+	RenamedStationsByAddress  map[string]string  `json:"renamedStationsByAddress"`
+	AutoSleep                 autosleep.Settings `json:"autoSleep"`
+	Language                  string             `json:"language,omitempty"`
+	BulkPowerTimeoutSeconds   int                `json:"bulkPowerTimeoutSeconds"`
+	StatusPollIntervalSeconds int                `json:"statusPollIntervalSeconds"`
+	persistenceBlockedErr     error
+	lastPersistenceErr        error
+	mutex                     sync.RWMutex
 }
 
 type persistedConfig struct {
-	RenamedStations          map[string]string   `json:"renamedStations"`
-	RenamedStationsByAddress map[string]string   `json:"renamedStationsByAddress,omitempty"`
-	AutoSleep                *autosleep.Settings `json:"autoSleep,omitempty"`
-	Language                 string              `json:"language,omitempty"`
-	BulkPowerTimeoutSeconds  *int                `json:"bulkPowerTimeoutSeconds,omitempty"`
+	RenamedStations           map[string]string   `json:"renamedStations"`
+	RenamedStationsByAddress  map[string]string   `json:"renamedStationsByAddress,omitempty"`
+	AutoSleep                 *autosleep.Settings `json:"autoSleep,omitempty"`
+	Language                  string              `json:"language,omitempty"`
+	BulkPowerTimeoutSeconds   *int                `json:"bulkPowerTimeoutSeconds,omitempty"`
+	StatusPollIntervalSeconds *int                `json:"statusPollIntervalSeconds,omitempty"`
 }
 
 var (
@@ -48,10 +53,11 @@ var (
 // NewConfig creates a new Config with defaults
 func NewConfig() *Config {
 	return &Config{
-		RenamedStations:          make(map[string]string),
-		RenamedStationsByAddress: make(map[string]string),
-		AutoSleep:                autosleep.DefaultSettings(),
-		BulkPowerTimeoutSeconds:  DefaultBulkPowerTimeoutSeconds,
+		RenamedStations:           make(map[string]string),
+		RenamedStationsByAddress:  make(map[string]string),
+		AutoSleep:                 autosleep.DefaultSettings(),
+		BulkPowerTimeoutSeconds:   DefaultBulkPowerTimeoutSeconds,
+		StatusPollIntervalSeconds: DefaultStatusPollIntervalSeconds,
 	}
 }
 
@@ -90,6 +96,7 @@ func (c *Config) Load() error {
 			c.AutoSleep = autosleep.DefaultSettings()
 			c.Language = ""
 			c.BulkPowerTimeoutSeconds = DefaultBulkPowerTimeoutSeconds
+			c.StatusPollIntervalSeconds = DefaultStatusPollIntervalSeconds
 			c.persistenceBlockedErr = nil
 			c.lastPersistenceErr = nil
 			c.mutex.Unlock()
@@ -124,6 +131,7 @@ func (c *Config) Load() error {
 		c.AutoSleep = autosleep.DefaultSettings()
 		c.Language = ""
 		c.BulkPowerTimeoutSeconds = DefaultBulkPowerTimeoutSeconds
+		c.StatusPollIntervalSeconds = DefaultStatusPollIntervalSeconds
 		c.persistenceBlockedErr = nil
 		c.lastPersistenceErr = nil
 		c.mutex.Unlock()
@@ -141,6 +149,7 @@ func (c *Config) Load() error {
 	c.AutoSleep = sanitizeAutoSleep(loaded.AutoSleep)
 	c.Language = sanitizeLanguage(loaded.Language)
 	c.BulkPowerTimeoutSeconds = sanitizeBulkPowerTimeout(loaded.BulkPowerTimeoutSeconds)
+	c.StatusPollIntervalSeconds = sanitizeStatusPollInterval(loaded.StatusPollIntervalSeconds)
 	c.persistenceBlockedErr = nil
 	c.lastPersistenceErr = nil
 	c.mutex.Unlock()
@@ -152,6 +161,13 @@ func sanitizeBulkPowerTimeout(timeoutSeconds *int) int {
 		return DefaultBulkPowerTimeoutSeconds
 	}
 	return *timeoutSeconds
+}
+
+func sanitizeStatusPollInterval(intervalSeconds *int) int {
+	if intervalSeconds == nil || *intervalSeconds < MinStatusPollIntervalSeconds || *intervalSeconds > MaxStatusPollIntervalSeconds {
+		return DefaultStatusPollIntervalSeconds
+	}
+	return *intervalSeconds
 }
 
 func sanitizeLanguage(language string) string {
@@ -217,6 +233,8 @@ func (c *Config) saveLocked() error {
 	}
 	bulkPowerTimeoutSeconds := c.BulkPowerTimeoutSeconds
 	snapshot.BulkPowerTimeoutSeconds = &bulkPowerTimeoutSeconds
+	statusPollIntervalSeconds := c.StatusPollIntervalSeconds
+	snapshot.StatusPollIntervalSeconds = &statusPollIntervalSeconds
 	if c.AutoSleep != (autosleep.Settings{}) {
 		autoSleep := c.AutoSleep
 		snapshot.AutoSleep = &autoSleep
@@ -480,6 +498,35 @@ func (c *Config) SetBulkPowerTimeoutSeconds(timeoutSeconds int) error {
 	c.BulkPowerTimeoutSeconds = timeoutSeconds
 	if err := c.saveLocked(); err != nil {
 		c.BulkPowerTimeoutSeconds = previous
+		return err
+	}
+	return nil
+}
+
+func (c *Config) GetStatusPollIntervalSeconds() int {
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	if c.StatusPollIntervalSeconds < MinStatusPollIntervalSeconds || c.StatusPollIntervalSeconds > MaxStatusPollIntervalSeconds {
+		return DefaultStatusPollIntervalSeconds
+	}
+	return c.StatusPollIntervalSeconds
+}
+
+func (c *Config) SetStatusPollIntervalSeconds(intervalSeconds int) error {
+	if intervalSeconds < MinStatusPollIntervalSeconds || intervalSeconds > MaxStatusPollIntervalSeconds {
+		return fmt.Errorf(
+			"status poll interval must be between %d and %d seconds, got %d",
+			MinStatusPollIntervalSeconds,
+			MaxStatusPollIntervalSeconds,
+			intervalSeconds,
+		)
+	}
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	previous := c.StatusPollIntervalSeconds
+	c.StatusPollIntervalSeconds = intervalSeconds
+	if err := c.saveLocked(); err != nil {
+		c.StatusPollIntervalSeconds = previous
 		return err
 	}
 	return nil
