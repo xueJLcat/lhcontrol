@@ -1,7 +1,7 @@
 <script lang="ts">
   import { cubicOut } from 'svelte/easing';
   import { fly } from 'svelte/transition';
-  import { Bluetooth, Languages, LoaderCircle, MoonStar, RefreshCw, Timer, X } from 'lucide-svelte';
+  import { Bluetooth, Languages, LoaderCircle, MoonStar, Radar, RefreshCw, Timer, X } from 'lucide-svelte';
   import { autosleep } from '../../../wailsjs/go/models';
   import type { bluetooth } from '../../../wailsjs/go/models';
   import { focusTrap } from '../actions';
@@ -10,6 +10,8 @@
 
   const MIN_DELAY_MINUTES = 1;
   const MAX_DELAY_MINUTES = 120;
+  const MIN_SCAN_DURATION_SECONDS = 2;
+  const MAX_SCAN_DURATION_SECONDS = 30;
   const MIN_BULK_TIMEOUT_SECONDS = 30;
   const MAX_BULK_TIMEOUT_SECONDS = 600;
   const MIN_STATUS_POLL_INTERVAL_SECONDS = 5;
@@ -22,6 +24,15 @@
     autoSleep,
     autoSleepError = null,
     autoSleepBusy = false,
+    scanOnStartup,
+    scanOnStartupError = null,
+    scanOnStartupBusy = false,
+    scanDurationSeconds,
+    scanDurationError = null,
+    scanDurationBusy = false,
+    statusPollingEnabled,
+    statusPollingEnabledError = null,
+    statusPollingEnabledBusy = false,
     bulkPowerTimeoutSeconds,
     bulkPowerTimeoutError = null,
     bulkPowerTimeoutBusy = false,
@@ -35,6 +46,12 @@
     onRefresh,
     onAutoSleepChange,
     onAutoSleepRetry,
+    onScanOnStartupChange,
+    onScanOnStartupRetry,
+    onScanDurationChange,
+    onScanDurationRetry,
+    onStatusPollingEnabledChange,
+    onStatusPollingEnabledRetry,
     onBulkPowerTimeoutChange,
     onBulkPowerTimeoutRetry,
     onStatusPollIntervalChange,
@@ -47,6 +64,15 @@
     autoSleep: autosleep.Settings | null;
     autoSleepError?: string | null;
     autoSleepBusy?: boolean;
+    scanOnStartup: boolean | null;
+    scanOnStartupError?: string | null;
+    scanOnStartupBusy?: boolean;
+    scanDurationSeconds: number | null;
+    scanDurationError?: string | null;
+    scanDurationBusy?: boolean;
+    statusPollingEnabled: boolean | null;
+    statusPollingEnabledError?: string | null;
+    statusPollingEnabledBusy?: boolean;
     bulkPowerTimeoutSeconds: number | null;
     bulkPowerTimeoutError?: string | null;
     bulkPowerTimeoutBusy?: boolean;
@@ -60,6 +86,12 @@
     onRefresh: () => void;
     onAutoSleepChange: (settings: autosleep.Settings) => void;
     onAutoSleepRetry?: () => void;
+    onScanOnStartupChange: (enabled: boolean) => void;
+    onScanOnStartupRetry?: () => void;
+    onScanDurationChange: (durationSeconds: number) => void;
+    onScanDurationRetry?: () => void;
+    onStatusPollingEnabledChange: (enabled: boolean) => void;
+    onStatusPollingEnabledRetry?: () => void;
     onBulkPowerTimeoutChange: (timeoutSeconds: number) => void;
     onBulkPowerTimeoutRetry?: () => void;
     onStatusPollIntervalChange: (intervalSeconds: number) => void;
@@ -82,6 +114,11 @@
   let statusPollIntervalDraft = $state('');
   $effect(() => {
     if (statusPollIntervalSeconds !== null) statusPollIntervalDraft = String(statusPollIntervalSeconds);
+  });
+
+  let scanDurationDraft = $state('');
+  $effect(() => {
+    if (scanDurationSeconds !== null) scanDurationDraft = String(scanDurationSeconds);
   });
 
   function commitDelay() {
@@ -115,6 +152,16 @@
       : statusPollIntervalSeconds;
     statusPollIntervalDraft = String(seconds);
     if (seconds !== statusPollIntervalSeconds) onStatusPollIntervalChange(seconds);
+  }
+
+  function commitScanDuration() {
+    if (scanDurationSeconds === null) return;
+    const parsed = Number(scanDurationDraft);
+    const seconds = Number.isFinite(parsed)
+      ? Math.min(MAX_SCAN_DURATION_SECONDS, Math.max(MIN_SCAN_DURATION_SECONDS, Math.round(parsed)))
+      : scanDurationSeconds;
+    scanDurationDraft = String(seconds);
+    if (seconds !== scanDurationSeconds) onScanDurationChange(seconds);
   }
 </script>
 
@@ -158,96 +205,61 @@
   </section>
 
   <section>
-    <h4><RefreshCw size={12} /> {t('Automatic refresh')}</h4>
+    <h4><Radar size={12} /> {t('Scanning and refresh')}</h4>
+    {#if scanOnStartup !== null}
+      <label class="switch-row">
+        <span class="adapter-text">
+          <span class="adapter-name">{t('Scan when the application starts')}</span>
+          <span class="adapter-desc">{t('Discover nearby stations automatically after startup.')}</span>
+        </span>
+        <input type="checkbox" class="switch" aria-label={t('Scan when the application starts')} checked={scanOnStartup} disabled={scanOnStartupBusy} onchange={() => onScanOnStartupChange(!scanOnStartup)} />
+      </label>
+    {:else if scanOnStartupError}
+      <div class="alert danger">{scanOnStartupError}</div>
+      <div class="drawer-actions"><button class="btn" onclick={() => onScanOnStartupRetry?.()}><RefreshCw size={15} /> {t('Retry')}</button></div>
+    {/if}
+
+    {#if scanDurationSeconds !== null}
+      <div class="delay-row">
+        <label for="scan-duration">{t('Bluetooth scan duration')}</label>
+        <span class="delay-input">
+          <input id="scan-duration" type="number" min={MIN_SCAN_DURATION_SECONDS} max={MAX_SCAN_DURATION_SECONDS} step="1" bind:value={scanDurationDraft} onchange={commitScanDuration} disabled={scanDurationBusy} />
+          {t('seconds')}
+        </span>
+      </div>
+      <p class="hint">{t('Longer scans can find slow advertisers but take more time. Allowed range: 2–30 seconds.')}</p>
+    {:else if scanDurationError}
+      <div class="alert danger">{scanDurationError}</div>
+      <div class="drawer-actions"><button class="btn" onclick={() => onScanDurationRetry?.()}><RefreshCw size={15} /> {t('Retry')}</button></div>
+    {/if}
+
+    {#if statusPollingEnabled !== null}
+      <label class="switch-row">
+        <span class="adapter-text">
+          <span class="adapter-name">{t('Refresh station status automatically')}</span>
+          <span class="adapter-desc">{t('API health continues to be monitored when station refresh is disabled.')}</span>
+        </span>
+        <input type="checkbox" class="switch" aria-label={t('Refresh station status automatically')} checked={statusPollingEnabled} disabled={statusPollingEnabledBusy} onchange={() => onStatusPollingEnabledChange(!statusPollingEnabled)} />
+      </label>
+    {:else if statusPollingEnabledError}
+      <div class="alert danger">{statusPollingEnabledError}</div>
+      <div class="drawer-actions"><button class="btn" onclick={() => onStatusPollingEnabledRetry?.()}><RefreshCw size={15} /> {t('Retry')}</button></div>
+    {/if}
+
     {#if statusPollIntervalSeconds !== null}
       <div class="delay-row">
         <label for="status-poll-interval">{t('Status polling interval')}</label>
         <span class="delay-input">
-          <input
-            id="status-poll-interval"
-            type="number"
-            min={MIN_STATUS_POLL_INTERVAL_SECONDS}
-            max={MAX_STATUS_POLL_INTERVAL_SECONDS}
-            step="1"
-            bind:value={statusPollIntervalDraft}
-            onchange={commitStatusPollInterval}
-            disabled={statusPollIntervalBusy}
-          />
+          <input id="status-poll-interval" type="number" min={MIN_STATUS_POLL_INTERVAL_SECONDS} max={MAX_STATUS_POLL_INTERVAL_SECONDS} step="1" bind:value={statusPollIntervalDraft} onchange={commitStatusPollInterval} disabled={statusPollIntervalBusy || statusPollingEnabled === false} />
           {t('seconds')}
         </span>
       </div>
-      <p class="hint">{t('Controls how often station states and application health are refreshed automatically. Allowed range: 5–300 seconds.')}</p>
+      <p class="hint">{t('Displayed state remains valid long enough for the selected interval. Allowed range: 5–300 seconds.')}</p>
     {:else if statusPollIntervalError}
       <div class="alert danger">{statusPollIntervalError}</div>
-      <div class="drawer-actions">
-        <button class="btn" onclick={() => onStatusPollIntervalRetry?.()}><RefreshCw size={15} /> {t('Retry')}</button>
-      </div>
-    {:else}
-      <p class="hint loading"><LoaderCircle class="spin" size={14} /> {t('Loading automatic refresh settings...')}</p>
-    {/if}
-  </section>
-
-  <section>
-    <h4><Bluetooth size={12} /> {t('Bluetooth adapter')}</h4>
-    {#if loading}
-      <p class="hint loading"><LoaderCircle class="spin" size={14} /> {t('Detecting Bluetooth adapters...')}</p>
-    {:else if loadError}
-      <div class="alert danger">{loadError}</div>
-      <div class="drawer-actions">
-        <button class="btn" onclick={onRefresh}><RefreshCw size={15} /> {t('Retry')}</button>
-      </div>
-    {:else}
-      <div class="adapter-list" aria-label={t('Detected Bluetooth adapters')}>
-        {#each adapters as adapter (adapter.deviceId)}
-          <div class="adapter-option">
-            <span class="adapter-text">
-              <span class="adapter-name">{adapter.name}</span>
-              <span class="adapter-id">{adapter.deviceId}</span>
-            </span>
-          </div>
-        {:else}
-          <p class="hint">{t('No Bluetooth adapters were detected on this system.')}</p>
-        {/each}
-      </div>
-      <div class="drawer-actions">
-        <button class="btn" onclick={onRefresh} disabled={loading}>
-          {#if loading}<LoaderCircle class="spin" size={15} />{:else}<RefreshCw size={15} />{/if}
-          {t('Refresh adapters')}
-        </button>
-      </div>
-      <p class="hint">
-        {t('Windows controls which radio handles BLE discovery and connections. The application cannot route a Lighthouse operation through one specific adapter.')}
-      </p>
-    {/if}
-  </section>
-
-  <section>
-    <h4><Timer size={12} /> {t('Operation safety')}</h4>
-    {#if bulkPowerTimeoutSeconds !== null}
-      <div class="delay-row">
-        <label for="bulk-power-timeout">{t('Bulk power timeout')}</label>
-        <span class="delay-input">
-          <input
-            id="bulk-power-timeout"
-            type="number"
-            min={MIN_BULK_TIMEOUT_SECONDS}
-            max={MAX_BULK_TIMEOUT_SECONDS}
-            step="1"
-            bind:value={bulkTimeoutDraft}
-            onchange={commitBulkTimeout}
-            disabled={bulkPowerTimeoutBusy}
-          />
-          {t('seconds')}
-        </span>
-      </div>
-      <p class="hint">{t('A bulk power action is stopped when this total time limit is reached. Allowed range: 30–600 seconds.')}</p>
-    {:else if bulkPowerTimeoutError}
-      <div class="alert danger">{bulkPowerTimeoutError}</div>
-      <div class="drawer-actions">
-        <button class="btn" onclick={() => onBulkPowerTimeoutRetry?.()}><RefreshCw size={15} /> {t('Retry')}</button>
-      </div>
-    {:else}
-      <p class="hint loading"><LoaderCircle class="spin" size={14} /> {t('Loading operation safety settings...')}</p>
+      <div class="drawer-actions"><button class="btn" onclick={() => onStatusPollIntervalRetry?.()}><RefreshCw size={15} /> {t('Retry')}</button></div>
+    {:else if !scanOnStartupError && !scanDurationError && !statusPollingEnabledError}
+      <p class="hint loading"><LoaderCircle class="spin" size={14} /> {t('Loading scan and refresh settings...')}</p>
     {/if}
   </section>
 
@@ -326,6 +338,47 @@
       </div>
     {:else}
       <p class="hint loading"><LoaderCircle class="spin" size={14} /> {t('Loading auto sleep settings...')}</p>
+    {/if}
+  </section>
+
+  <section>
+    <h4><Timer size={12} /> {t('Operation safety')}</h4>
+    {#if bulkPowerTimeoutSeconds !== null}
+      <div class="delay-row">
+        <label for="bulk-power-timeout">{t('Bulk power timeout')}</label>
+        <span class="delay-input">
+          <input id="bulk-power-timeout" type="number" min={MIN_BULK_TIMEOUT_SECONDS} max={MAX_BULK_TIMEOUT_SECONDS} step="1" bind:value={bulkTimeoutDraft} onchange={commitBulkTimeout} disabled={bulkPowerTimeoutBusy} />
+          {t('seconds')}
+        </span>
+      </div>
+      <p class="hint">{t('A bulk power action is stopped when this total time limit is reached. Allowed range: 30–600 seconds.')}</p>
+    {:else if bulkPowerTimeoutError}
+      <div class="alert danger">{bulkPowerTimeoutError}</div>
+      <div class="drawer-actions"><button class="btn" onclick={() => onBulkPowerTimeoutRetry?.()}><RefreshCw size={15} /> {t('Retry')}</button></div>
+    {:else}
+      <p class="hint loading"><LoaderCircle class="spin" size={14} /> {t('Loading operation safety settings...')}</p>
+    {/if}
+  </section>
+
+  <section>
+    <h4><Bluetooth size={12} /> {t('Bluetooth diagnostics')}</h4>
+    {#if loading}
+      <p class="hint loading"><LoaderCircle class="spin" size={14} /> {t('Detecting Bluetooth adapters...')}</p>
+    {:else if loadError}
+      <div class="alert danger">{loadError}</div>
+      <div class="drawer-actions"><button class="btn" onclick={onRefresh}><RefreshCw size={15} /> {t('Retry')}</button></div>
+    {:else}
+      <div class="adapter-list" aria-label={t('Detected Bluetooth adapters')}>
+        {#each adapters as adapter (adapter.deviceId)}
+          <div class="adapter-option"><span class="adapter-text"><span class="adapter-name">{adapter.name}</span><span class="adapter-id">{adapter.deviceId}</span></span></div>
+        {:else}
+          <p class="hint">{t('No Bluetooth adapters were detected on this system.')}</p>
+        {/each}
+      </div>
+      <div class="drawer-actions">
+        <button class="btn" onclick={onRefresh} disabled={loading}>{#if loading}<LoaderCircle class="spin" size={15} />{:else}<RefreshCw size={15} />{/if} {t('Refresh adapters')}</button>
+      </div>
+      <p class="hint">{t('Windows controls which radio handles BLE discovery and connections. The application cannot route a Lighthouse operation through one specific adapter.')}</p>
     {/if}
   </section>
 </div>
@@ -432,6 +485,7 @@
     cursor: pointer;
   }
   .switch-row:has(input:disabled) { cursor: wait; }
+  .hint + .switch-row, .drawer-actions + .switch-row { margin-top: 0.55rem; }
   .switch {
     appearance: none;
     position: relative;

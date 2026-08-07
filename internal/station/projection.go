@@ -23,13 +23,14 @@ func (m *Manager) GetStationInfo() []StationInfo {
 	m.stationsMutex.RUnlock()
 	channelCounts := make(map[int]int)
 	now := time.Now()
+	displayFreshnessWindow := m.config.StatusDisplayFreshnessWindow()
 	for _, snapshot := range snapshots {
 		if snapshot.Present &&
 			snapshot.MissedScans == 0 &&
 			!snapshot.PresenceUncertain &&
 			isRecent(snapshot.LastSeenAt, now, channelScanFreshnessWindow) &&
 			snapshot.Channel != bluetooth.ChannelUnknown &&
-			isFresh(snapshot.LastChannelReadAt, now) {
+			isRecent(snapshot.LastChannelReadAt, now, displayFreshnessWindow) {
 			channelCounts[snapshot.Channel]++
 		}
 	}
@@ -43,8 +44,8 @@ func (m *Manager) GetStationInfo() []StationInfo {
 		if snapshot.Connected {
 			connectionState = "connected"
 		}
-		powerFresh := snapshot.RawPowerState != bluetooth.RawPowerStateUnknown && isFresh(snapshot.LastPowerReadAt, now)
-		channelFresh := snapshot.Channel != bluetooth.ChannelUnknown && isFresh(snapshot.LastChannelReadAt, now)
+		powerFresh := snapshot.RawPowerState != bluetooth.RawPowerStateUnknown && isRecent(snapshot.LastPowerReadAt, now, displayFreshnessWindow)
+		channelFresh := snapshot.Channel != bluetooth.ChannelUnknown && isRecent(snapshot.LastChannelReadAt, now, displayFreshnessWindow)
 		seenInLatestScan := snapshot.MissedScans == 0 &&
 			!snapshot.PresenceUncertain &&
 			!snapshot.LastSeenAt.IsZero()
@@ -106,8 +107,8 @@ func stationValuesLess(leftChannel int, leftName, leftAddress string, rightChann
 	}
 	return strings.ToLower(leftAddress) < strings.ToLower(rightAddress)
 }
-func isFresh(value, now time.Time) bool {
-	return isRecent(value, now, statusFreshnessWindow)
+func isOperationallyFresh(value, now time.Time) bool {
+	return isRecent(value, now, operationSafetyFreshnessWindow)
 }
 func isRecent(value, now time.Time, window time.Duration) bool {
 	age := now.Sub(value)

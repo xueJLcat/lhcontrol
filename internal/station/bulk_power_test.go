@@ -120,6 +120,40 @@ func TestBulkPowerDoesNotTrustStaleTargetCacheAfterLiveRead(t *testing.T) {
 	}
 }
 
+func TestBulkPowerReadsExpiredStateBeforeWriting(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	address := "11:22:33:44:55:6A"
+	station := &internalbluetooth.BaseStation{
+		Name:              "LHB-EXPIRED",
+		Address:           mustAddress(t, address),
+		Present:           true,
+		PowerState:        internalbluetooth.PowerStateSleep,
+		RawPowerState:     0x00,
+		LastPowerReadAt:   time.Now().Add(-operationSafetyFreshnessWindow - time.Second),
+		Capabilities:      internalbluetooth.Capabilities{PowerWrite: true},
+		CapabilitiesKnown: true,
+	}
+	manager.stations[address] = station
+	manager.bluetoothOps.fetchInitialPowerState = func(context.Context, *internalbluetooth.BaseStation) error {
+		station.PowerState = internalbluetooth.PowerStateOn
+		station.RawPowerState = 0x0B
+		station.LastPowerReadAt = time.Now()
+		return nil
+	}
+	manager.bluetoothOps.setPowerState = func(context.Context, *internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
+		t.Fatal("bulk power write was attempted after an expired snapshot refreshed to the target")
+		return internalbluetooth.PowerControlResult{}, nil
+	}
+
+	result, err := manager.SetAllStationsPowerDetailed("on")
+	if err != nil {
+		t.Fatalf("SetAllStationsPowerDetailed() error = %v", err)
+	}
+	if len(result.Results) != 1 || !result.Results[0].Skipped || !result.Results[0].Confirmed || result.Results[0].CommandSent {
+		t.Fatalf("bulk result = %+v, want confirmed no-op", result)
+	}
+}
+
 func TestBulkPowerDoesNotStartQueuedWorkAfterShutdown(t *testing.T) {
 	manager := NewManager(config.NewConfig())
 	started := make(chan struct{}, 2)

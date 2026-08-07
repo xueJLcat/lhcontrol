@@ -20,7 +20,7 @@ var ErrScanRequired = errors.New("a recent successful scan is required")
 var ErrShuttingDown = errors.New("application is shutting down")
 
 const (
-	statusFreshnessWindow          = 45 * time.Second
+	operationSafetyFreshnessWindow = 45 * time.Second
 	channelScanFreshnessWindow     = 2 * time.Minute
 	defaultInitialReadTimeout      = 30 * time.Second
 	defaultStatusReadTimeout       = 20 * time.Second

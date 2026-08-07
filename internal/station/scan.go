@@ -208,7 +208,7 @@ func fallbackStationName(address string) string {
 	return "LHB-" + strings.ToUpper(compact)
 }
 func (m *Manager) scanAndFetchStations(ctx context.Context) ([]StationInfo, int, error) {
-	scanDuration := 5 * time.Second
+	scanDuration := m.config.ScanDuration()
 	if err := scanContextError(ctx); err != nil {
 		return m.GetStationInfo(), 0, err
 	}

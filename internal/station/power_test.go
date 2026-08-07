@@ -351,6 +351,40 @@ func TestSinglePowerDoesNotTrustStaleTargetCacheAfterLiveRead(t *testing.T) {
 	}
 }
 
+func TestSinglePowerReadsExpiredStateBeforeWriting(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	address := "11:22:33:44:55:7B"
+	station := &internalbluetooth.BaseStation{
+		Name:              "LHB-EXPIRED",
+		Address:           mustAddress(t, address),
+		Present:           true,
+		PowerState:        internalbluetooth.PowerStateSleep,
+		RawPowerState:     0x00,
+		LastPowerReadAt:   time.Now().Add(-operationSafetyFreshnessWindow - time.Second),
+		Capabilities:      internalbluetooth.Capabilities{PowerWrite: true},
+		CapabilitiesKnown: true,
+	}
+	manager.stations[address] = station
+	manager.bluetoothOps.fetchInitialPowerState = func(context.Context, *internalbluetooth.BaseStation) error {
+		station.PowerState = internalbluetooth.PowerStateOn
+		station.RawPowerState = 0x0B
+		station.LastPowerReadAt = time.Now()
+		return nil
+	}
+	manager.bluetoothOps.setPowerState = func(context.Context, *internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
+		t.Fatal("power write was attempted after an expired snapshot refreshed to the target")
+		return internalbluetooth.PowerControlResult{}, nil
+	}
+
+	result, err := manager.SetStationPower(address, "on")
+	if err != nil {
+		t.Fatalf("SetStationPower() error = %v", err)
+	}
+	if !result.Skipped || !result.Confirmed || result.CommandSent || result.Reason != "already at target state" {
+		t.Fatalf("power result = %+v, want confirmed no-op", result)
+	}
+}
+
 func TestSinglePowerRejectsFreshBootingStation(t *testing.T) {
 	manager := NewManager(config.NewConfig())
 	manager.initializeErr = errors.New("adapter unavailable")

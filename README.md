@@ -147,14 +147,15 @@ lhcontrol-amd64-installer.exe
 7. 打开右上角的 **Settings**：
 
    * 在 **Language** 中切换 English 或简体中文。更改会立即生效，并在下次启动时继续使用；首次启动或尚未保存选择时，应用会根据 Windows 系统语言自动选择界面语言。
-   * 查看 Windows 检测到的蓝牙适配器。该列表仅用于诊断，Windows 会自行路由 BLE 扫描与连接。
+   * 在 **Scanning and refresh** 中决定是否启动时自动扫描、设置 2-30 秒扫描时长、启用或关闭自动基站状态刷新，并设置 5-300 秒轮询间隔。较长轮询间隔会自动延长界面状态有效期，但电源写入仍使用独立的 45 秒安全有效期，过期时会先强制读取状态。
    * 启用 **Auto sleep**，选择监控 SteamVR 或 Steam，并设置 1-120 分钟延迟。
+   * 在 **Operation safety** 中设置批量电源操作总超时，并在 **Bluetooth diagnostics** 中查看 Windows 检测到的蓝牙适配器。
 
-自动休眠只会在监控进程至少运行过一次、随后退出并持续超过设定延迟时触发；如果进程在延迟期间或自动休眠执行期间重新启动，本轮操作会取消，尚未发送的命令不会继续，界面会报告取消前已经完成、失败及跳过的基站数量。触发后应用先扫描基站，再将全部已知基站设为 Sleep。如果此时已有其他蓝牙操作，本轮自动休眠会跳过，不会自动重试。
+自动休眠只会在监控进程至少运行过一次、随后退出并持续超过设定延迟时触发；如果进程在延迟期间或自动休眠执行期间重新启动，本轮操作会取消，尚未发送的命令不会继续，界面会报告取消前已经完成、失败及跳过的基站数量。批量超时时同样会保留部分执行结果，并分别报告已确认、未确认、失败和因超时跳过的数量。触发后应用先扫描基站，再将全部已知基站设为 Sleep。如果此时已有其他蓝牙操作，本轮自动休眠会跳过，不会自动重试。
 
 ## 设置与本地数据
 
-基站别名、自动休眠设置和显式选择的界面语言会保存到：
+基站别名、扫描与刷新设置、批量操作超时、自动休眠设置和显式选择的界面语言会保存到：
 
 ```text
 %APPDATA%\lhcontrol\config.json
@@ -850,14 +851,15 @@ lhcontrol-amd64-installer.exe
 7. Open **Settings** in the upper-right corner to:
 
    * Switch between English and Simplified Chinese under **Language**. The change applies immediately and is restored on the next launch. On first launch, or when no preference has been saved, the application follows the Windows system language.
-   * Inspect the Bluetooth adapters detected by Windows. The list is diagnostic only; Windows routes BLE discovery and connections.
+   * Under **Scanning and refresh**, choose whether to scan on startup, set a 2-30 second scan duration, enable or disable automatic station refresh, and select a 5-300 second polling interval. Longer intervals extend display freshness automatically, while power writes keep an independent 45-second safety window and force a read when that window expires.
    * Enable **Auto sleep**, choose SteamVR or Steam as the watched process, and set a delay from 1 to 120 minutes.
+   * Set the bulk-operation timeout under **Operation safety**, and inspect Windows radios under **Bluetooth diagnostics**.
 
-Auto sleep only arms after the watched process has been observed running. If the process remains closed for the configured delay, the application scans and then puts every known station into Sleep. Relaunching the process during the delay or while automatic sleep is running cancels the action, stops commands not yet sent, and reports how many stations completed, failed, or were skipped before cancellation. If another Bluetooth operation is active when the timer fires, that auto-sleep cycle is skipped without an automatic retry.
+Auto sleep only arms after the watched process has been observed running. If the process remains closed for the configured delay, the application scans and then puts every known station into Sleep. Relaunching the process during the delay or while automatic sleep is running cancels the action, stops commands not yet sent, and reports how many stations completed, failed, or were skipped before cancellation. A bulk timeout also preserves partial results and separately reports confirmed, unconfirmed, failed, and timeout-skipped stations. If another Bluetooth operation is active when the timer fires, that auto-sleep cycle is skipped without an automatic retry.
 
 ## Settings and Local Data
 
-Station aliases, auto-sleep settings, and an explicitly selected interface language are stored in:
+Station aliases, scan and refresh preferences, the bulk-operation timeout, auto-sleep settings, and an explicitly selected interface language are stored in:
 
 ```text
 %APPDATA%\lhcontrol\config.json

@@ -30,12 +30,24 @@ export function GetLanguage() {
   return window['go']['main']['App']['GetLanguage']();
 }
 
+export function GetScanDurationSeconds() {
+  return window['go']['main']['App']['GetScanDurationSeconds']();
+}
+
+export function GetScanOnStartup() {
+  return window['go']['main']['App']['GetScanOnStartup']();
+}
+
 export function GetScanStatus() {
   return window['go']['main']['App']['GetScanStatus']();
 }
 
 export function GetStatusPollIntervalSeconds() {
   return window['go']['main']['App']['GetStatusPollIntervalSeconds']();
+}
+
+export function GetStatusPollingEnabled() {
+  return window['go']['main']['App']['GetStatusPollingEnabled']();
 }
 
 export function IdentifyStation(arg1) {
@@ -106,6 +118,14 @@ export function SetLanguage(arg1) {
   return window['go']['main']['App']['SetLanguage'](arg1);
 }
 
+export function SetScanDurationSeconds(arg1) {
+  return window['go']['main']['App']['SetScanDurationSeconds'](arg1);
+}
+
+export function SetScanOnStartup(arg1) {
+  return window['go']['main']['App']['SetScanOnStartup'](arg1);
+}
+
 export function SetStationChannel(arg1, arg2, arg3) {
   return window['go']['main']['App']['SetStationChannel'](arg1, arg2, arg3);
 }
@@ -116,6 +136,10 @@ export function SetStationPower(arg1, arg2) {
 
 export function SetStatusPollIntervalSeconds(arg1) {
   return window['go']['main']['App']['SetStatusPollIntervalSeconds'](arg1);
+}
+
+export function SetStatusPollingEnabled(arg1) {
+  return window['go']['main']['App']['SetStatusPollingEnabled'](arg1);
 }
 
 export function StopScan() {

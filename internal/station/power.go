@@ -84,7 +84,7 @@ func classifyCachedPower(
 	target bluetooth.PowerState,
 	now time.Time,
 ) cachedPowerDisposition {
-	if !isFresh(snapshot.LastPowerReadAt, now) {
+	if !isOperationallyFresh(snapshot.LastPowerReadAt, now) {
 		return cachedPowerActionable
 	}
 	if snapshot.PowerState == bluetooth.PowerStateBooting {
@@ -134,7 +134,12 @@ func (m *Manager) SetStationPower(address, state string) (PowerActionResult, err
 	if err := operationContext.Err(); err != nil {
 		return PowerActionResult{}, err
 	}
-	if classifyCachedPower(snapshot, target, time.Now()) == cachedPowerAtTarget {
+	// A display can legitimately remain fresh longer than the fixed write
+	// safety window. Always attempt a current read before acting on an expired
+	// power snapshot; a successful target-state read turns the request into a
+	// confirmed no-op instead of sending a duplicate command.
+	disposition := classifyCachedPower(snapshot, target, time.Now())
+	if disposition == cachedPowerAtTarget || !isOperationallyFresh(snapshot.LastPowerReadAt, time.Now()) {
 		var readErr error
 		readErr = runSafely("power cache verification", func() error {
 			readContext, cancelRead := context.WithTimeout(operationContext, m.initialReadTimeout)
@@ -578,18 +583,25 @@ func (m *Manager) setAllStationsPowerDetailed(ctx context.Context, state string)
 				snapshot := s.Snapshot()
 				stationResult.Address = snapshot.Address
 				stationResult.Name = snapshot.Name
-				switch classifyCachedPower(snapshot, target, time.Now()) {
-				case cachedPowerBooting:
+				disposition := classifyCachedPower(snapshot, target, time.Now())
+				if disposition == cachedPowerBooting {
 					cachedSkip = true
 					stationResult.Skipped = true
 					stationResult.Reason = "station is booting"
 					return nil
-				case cachedPowerAtTarget:
+				}
+				if disposition == cachedPowerAtTarget || !isOperationallyFresh(snapshot.LastPowerReadAt, time.Now()) {
 					readContext, cancelRead := context.WithTimeout(operationContext, m.initialReadTimeout)
 					readErr := m.bluetoothOps.fetchInitialPowerState(readContext, s)
 					cancelRead()
 					if readErr == nil || powerReadSucceeded(readErr) {
-						if classifyCachedPower(s.Snapshot(), target, time.Now()) == cachedPowerAtTarget {
+						switch classifyCachedPower(s.Snapshot(), target, time.Now()) {
+						case cachedPowerBooting:
+							cachedSkip = true
+							stationResult.Skipped = true
+							stationResult.Reason = "station is booting"
+							return nil
+						case cachedPowerAtTarget:
 							cachedSkip = true
 							stationResult.Skipped = true
 							stationResult.Success = true

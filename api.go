@@ -81,12 +81,19 @@ func sendChannelActionResponse(c *fiber.Ctx, result station.ChannelChangeResult,
 
 // App struct
 
+type OperationStatus struct {
+	ID   uint64 `json:"id"`
+	Kind string `json:"kind"`
+}
+
 type APIStatus struct {
-	Running        bool     `json:"running"`
-	Address        string   `json:"address"`
-	Error          string   `json:"error"`
-	Warnings       []string `json:"warnings"`
-	ConfigWritable bool     `json:"configWritable"`
+	Running           bool              `json:"running"`
+	Address           string            `json:"address"`
+	Error             string            `json:"error"`
+	Warnings          []string          `json:"warnings"`
+	ConfigWritable    bool              `json:"configWritable"`
+	ActiveOperations  []OperationStatus `json:"activeOperations"`
+	OperationRevision uint64            `json:"operationRevision"`
 }
 
 type apiStationManager interface {
@@ -128,9 +135,10 @@ type stationUpdateEvent struct {
 }
 
 type externalOperationEvent struct {
-	ID    uint64 `json:"id"`
-	Phase string `json:"phase"`
-	Kind  string `json:"kind"`
+	ID       uint64 `json:"id"`
+	Phase    string `json:"phase"`
+	Kind     string `json:"kind"`
+	Revision uint64 `json:"revision"`
 }
 
 func beginExternalOperation(events scanEventCallbacks, kind string) func() {

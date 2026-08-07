@@ -10,7 +10,10 @@ const api = vi.hoisted(() => ({
   GetAPIStatus: vi.fn(),
   GetAutoSleepSettings: vi.fn(),
   GetBulkPowerTimeoutSeconds: vi.fn(),
+  GetScanDurationSeconds: vi.fn(),
+  GetScanOnStartup: vi.fn(),
   GetStatusPollIntervalSeconds: vi.fn(),
+  GetStatusPollingEnabled: vi.fn(),
   GetCurrentStationInfo: vi.fn(),
   GetScanStatus: vi.fn(),
   IdentifyStation: vi.fn(),
@@ -22,7 +25,10 @@ const api = vi.hoisted(() => ({
   SetAllStationsPowerDetailed: vi.fn(),
   SetAutoSleepSettings: vi.fn(),
   SetBulkPowerTimeoutSeconds: vi.fn(),
+  SetScanDurationSeconds: vi.fn(),
+  SetScanOnStartup: vi.fn(),
   SetStatusPollIntervalSeconds: vi.fn(),
+  SetStatusPollingEnabled: vi.fn(),
   SetStationChannel: vi.fn(),
   SetStationPower: vi.fn(),
   StopScan: vi.fn()
@@ -74,6 +80,8 @@ beforeEach(() => {
     configWritable: true
   });
   api.IsScanning.mockResolvedValue(false);
+  api.GetScanOnStartup.mockResolvedValue(true);
+  api.GetStatusPollingEnabled.mockResolvedValue(true);
   api.ScanAndFetchStations.mockResolvedValue([createStation()]);
   api.GetScanStatus.mockResolvedValue({ state: 'completed', found: 1, warnings: [] });
   api.GetCurrentStationInfo.mockResolvedValue([createStation()]);
@@ -82,10 +90,14 @@ beforeEach(() => {
   api.ListBluetoothAdapters.mockResolvedValue([]);
   api.GetAutoSleepSettings.mockResolvedValue({ enabled: false, target: 'steamvr', delaySeconds: 300 });
   api.GetBulkPowerTimeoutSeconds.mockResolvedValue(120);
+  api.GetScanDurationSeconds.mockResolvedValue(5);
   api.GetStatusPollIntervalSeconds.mockResolvedValue(15);
   api.SetAutoSleepSettings.mockResolvedValue(undefined);
   api.SetBulkPowerTimeoutSeconds.mockResolvedValue(undefined);
+  api.SetScanDurationSeconds.mockResolvedValue(undefined);
+  api.SetScanOnStartup.mockResolvedValue(undefined);
   api.SetStatusPollIntervalSeconds.mockResolvedValue(undefined);
+  api.SetStatusPollingEnabled.mockResolvedValue(undefined);
 });
 
 afterEach(() => {

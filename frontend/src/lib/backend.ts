@@ -38,8 +38,20 @@ export function GetLanguage(): Promise<string> {
   return call(() => bindings.GetLanguage());
 }
 
+export function GetScanDurationSeconds(): Promise<number> {
+  return call(() => bindings.GetScanDurationSeconds());
+}
+
+export function GetScanOnStartup(): Promise<boolean> {
+  return call(() => bindings.GetScanOnStartup());
+}
+
 export function GetStatusPollIntervalSeconds(): Promise<number> {
   return call(() => bindings.GetStatusPollIntervalSeconds());
+}
+
+export function GetStatusPollingEnabled(): Promise<boolean> {
+  return call(() => bindings.GetStatusPollingEnabled());
 }
 
 export function GetCurrentStationInfo(): Promise<station.StationInfo[]> {
@@ -90,8 +102,20 @@ export function SetLanguage(language: string): Promise<void> {
   return call(() => bindings.SetLanguage(language));
 }
 
+export function SetScanDurationSeconds(durationSeconds: number): Promise<void> {
+  return call(() => bindings.SetScanDurationSeconds(durationSeconds));
+}
+
+export function SetScanOnStartup(enabled: boolean): Promise<void> {
+  return call(() => bindings.SetScanOnStartup(enabled));
+}
+
 export function SetStatusPollIntervalSeconds(intervalSeconds: number): Promise<void> {
   return call(() => bindings.SetStatusPollIntervalSeconds(intervalSeconds));
+}
+
+export function SetStatusPollingEnabled(enabled: boolean): Promise<void> {
+  return call(() => bindings.SetStatusPollingEnabled(enabled));
 }
 
 export function SetStationChannel(address: string, channel: number, allowUnknownConflictRisk: boolean): Promise<station.ChannelChangeResult> {

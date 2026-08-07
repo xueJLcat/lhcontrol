@@ -19,9 +19,15 @@ export function GetCurrentStationInfo():Promise<Array<station.StationInfo>>;
 
 export function GetLanguage():Promise<string>;
 
+export function GetScanDurationSeconds():Promise<number>;
+
+export function GetScanOnStartup():Promise<boolean>;
+
 export function GetScanStatus():Promise<station.ScanStatus>;
 
 export function GetStatusPollIntervalSeconds():Promise<number>;
+
+export function GetStatusPollingEnabled():Promise<boolean>;
 
 export function IdentifyStation(arg1:string):Promise<void>;
 
@@ -57,10 +63,16 @@ export function SetBulkPowerTimeoutSeconds(arg1:number):Promise<void>;
 
 export function SetLanguage(arg1:string):Promise<void>;
 
+export function SetScanDurationSeconds(arg1:number):Promise<void>;
+
+export function SetScanOnStartup(arg1:boolean):Promise<void>;
+
 export function SetStationChannel(arg1:string,arg2:number,arg3:boolean):Promise<station.ChannelChangeResult>;
 
 export function SetStationPower(arg1:string,arg2:string):Promise<station.PowerActionResult>;
 
 export function SetStatusPollIntervalSeconds(arg1:number):Promise<void>;
+
+export function SetStatusPollingEnabled(arg1:boolean):Promise<void>;
 
 export function StopScan():Promise<void>;

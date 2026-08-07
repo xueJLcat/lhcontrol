@@ -1,8 +1,10 @@
 import { EventsOn } from '../../../wailsjs/runtime/runtime';
 import {
   GetCurrentStationInfo,
+  GetScanOnStartup,
   GetScanStatus,
   GetStatusPollIntervalSeconds,
+  GetStatusPollingEnabled,
   IsScanning
 } from '../backend';
 import type { PowerFeedback, PowerTarget, StationInfo } from '../types';
@@ -68,6 +70,7 @@ export class StationStore {
 
   private statusCheckInterval: ReturnType<typeof setInterval> | null = null;
   private statusPollIntervalSeconds = DEFAULT_STATUS_POLL_INTERVAL_SECONDS;
+  private statusPollingEnabled = true;
   private cancelExternalScanListener: (() => void) | null = null;
   private cancelExternalScanFailureListener: (() => void) | null = null;
   private cancelExternalScanStartedListener: (() => void) | null = null;
@@ -76,6 +79,7 @@ export class StationStore {
   private cancelExternalStationUpdateListener: (() => void) | null = null;
   private cancelExternalOperationListener: (() => void) | null = null;
   private externalOperationIds = new Set<number>();
+  private externalOperationRevision = 0;
   stopRequestPending = false;
   stopRequestGeneration = 0;
   disposed = false;
@@ -133,6 +137,9 @@ export class StationStore {
       this.apiAddress = status.address;
       this.configWarnings = status.warnings ?? [];
       this.configWritable = status.configWritable ?? true;
+      if (Array.isArray(status.activeOperations)) {
+        this.reconcileExternalOperations(status.activeOperations, status.operationRevision ?? 0);
+      }
     },
     commitFailure: (error) => {
       this.apiRunning = false;
@@ -374,21 +381,47 @@ export class StationStore {
     this.powerFeedback.reconcile(this.stations);
   }
 
+  private reconcileExternalOperations(operations: Array<{ id: number; kind?: string }>, revision: number) {
+    if (revision <= 0 && this.externalOperationRevision > 0) return;
+    if (revision > 0 && revision < this.externalOperationRevision) return;
+    if (revision > 0) this.externalOperationRevision = revision;
+    this.externalOperationIds = new Set(
+      operations.map((operation) => Number(operation.id)).filter((id) => Number.isFinite(id))
+    );
+    this.externalOperationRunning = this.externalOperationIds.size > 0;
+  }
+
   setStatusPollIntervalSeconds(intervalSeconds: number) {
     if (this.disposed || !Number.isFinite(intervalSeconds)) return;
     const next = Math.min(
       MAX_STATUS_POLL_INTERVAL_SECONDS,
       Math.max(MIN_STATUS_POLL_INTERVAL_SECONDS, Math.round(intervalSeconds))
     );
-    if (this.statusCheckInterval && next === this.statusPollIntervalSeconds) return;
+    if (next === this.statusPollIntervalSeconds && this.statusCheckInterval) return;
     this.statusPollIntervalSeconds = next;
 
     if (this.statusCheckInterval) clearInterval(this.statusCheckInterval);
+    this.statusCheckInterval = null;
     const intervalMs = next * 1000;
     this.apiStatus.start(intervalMs);
-    this.statusCheckInterval = setInterval(() => {
-      void this.periodicStatusCheck();
-    }, intervalMs);
+    if (this.statusPollingEnabled) {
+      this.statusCheckInterval = setInterval(() => {
+        void this.periodicStatusCheck();
+      }, intervalMs);
+    }
+  }
+
+  setStatusPollingEnabled(enabled: boolean) {
+    if (this.disposed || this.statusPollingEnabled === enabled) return;
+    this.statusPollingEnabled = enabled;
+    if (this.statusCheckInterval) clearInterval(this.statusCheckInterval);
+    this.statusCheckInterval = null;
+    if (enabled) {
+      const intervalMs = this.statusPollIntervalSeconds * 1000;
+      this.statusCheckInterval = setInterval(() => {
+        void this.periodicStatusCheck();
+      }, intervalMs);
+    }
   }
 
   withStationChanges(current: StationInfo, changes: Partial<StationInfo>): StationInfo {
@@ -416,9 +449,12 @@ export class StationStore {
       this.externalStationUpdates.handle(value as ExternalStationUpdateEvent);
     });
     this.cancelExternalOperationListener = EventsOn('external-operation', (value: unknown) => {
-      const event = value as { id?: number; phase?: 'started' | 'finished' };
+      const event = value as { id?: number; phase?: 'started' | 'finished'; revision?: number };
       if (this.disposed || !Number.isFinite(event?.id)) return;
       const id = Number(event.id);
+      const revision = Number(event.revision ?? 0);
+      if (revision > 0 && revision <= this.externalOperationRevision) return;
+      if (revision > 0) this.externalOperationRevision = revision;
       if (event.phase === 'started') this.externalOperationIds.add(id);
       else if (event.phase === 'finished') this.externalOperationIds.delete(id);
       else return;
@@ -432,8 +468,16 @@ export class StationStore {
       .catch(() => {
         // Keep the default interval when the persisted preference cannot be read.
       });
+    void GetStatusPollingEnabled()
+      .then((enabled) => this.setStatusPollingEnabled(enabled))
+      .catch(() => {
+        // Keep automatic station refresh enabled when the preference is unreadable.
+      });
     void (async () => {
-      const startupScanning = await IsScanning().catch(() => false);
+      const [startupScanning, scanOnStartup] = await Promise.all([
+        IsScanning().catch(() => false),
+        GetScanOnStartup().catch(() => true)
+      ]);
       // Do not allow the first polling tick to acquire the backend operation
       // lock before the initial external-scan check can start the local scan.
       this.startupPending = false;
@@ -442,7 +486,7 @@ export class StationStore {
       if (this.disposed || startupScanEpoch !== this.gates.currentScanEpoch) return;
       if (startupScanning) {
         await this.externalScan.adoptUnknown();
-      } else {
+      } else if (scanOnStartup) {
         await this.startScan();
       }
     })();

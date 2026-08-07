@@ -179,3 +179,28 @@ func TestStatusPollIntervalBindingsPersistAndValidate(t *testing.T) {
 		t.Fatalf("status poll interval after simulated restart = %d, want 45", got)
 	}
 }
+
+func TestScanAndStatusPollingBindingsPersist(t *testing.T) {
+	t.Setenv("AppData", t.TempDir())
+	app := NewApp()
+	if !app.GetScanOnStartup() || !app.GetStatusPollingEnabled() || app.GetScanDurationSeconds() != 5 {
+		t.Fatalf("fresh scan settings = startup %v, polling %v, duration %d", app.GetScanOnStartup(), app.GetStatusPollingEnabled(), app.GetScanDurationSeconds())
+	}
+	if err := app.SetScanOnStartup(false); err != nil {
+		t.Fatalf("SetScanOnStartup() error = %v", err)
+	}
+	if err := app.SetStatusPollingEnabled(false); err != nil {
+		t.Fatalf("SetStatusPollingEnabled() error = %v", err)
+	}
+	if err := app.SetScanDurationSeconds(12); err != nil {
+		t.Fatalf("SetScanDurationSeconds() error = %v", err)
+	}
+
+	restarted := NewApp()
+	if err := restarted.config.Load(); err != nil {
+		t.Fatalf("config.Load() error = %v", err)
+	}
+	if restarted.GetScanOnStartup() || restarted.GetStatusPollingEnabled() || restarted.GetScanDurationSeconds() != 12 {
+		t.Fatalf("restarted scan settings = startup %v, polling %v, duration %d", restarted.GetScanOnStartup(), restarted.GetStatusPollingEnabled(), restarted.GetScanDurationSeconds())
+	}
+}

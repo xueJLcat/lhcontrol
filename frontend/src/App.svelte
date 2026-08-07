@@ -234,6 +234,7 @@
     onClose={closeSettings}
     onLanguageChanged={handleLanguageChanged}
     onStatusPollIntervalChanged={(intervalSeconds) => store.setStatusPollIntervalSeconds(intervalSeconds)}
+    onStatusPollingEnabledChanged={(enabled) => store.setStatusPollingEnabled(enabled)}
   />
 {/if}
 

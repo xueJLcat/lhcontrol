@@ -2,10 +2,12 @@ package config
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"lhcontrol/internal/autosleep"
 )
@@ -613,6 +615,54 @@ func TestSetStatusPollIntervalRollsBackWhenPersistenceFails(t *testing.T) {
 	}
 	if got := cfg.GetStatusPollIntervalSeconds(); got != DefaultStatusPollIntervalSeconds {
 		t.Fatalf("failed save retained status poll interval %d", got)
+	}
+}
+
+func TestScanAndPollingPreferencesPersist(t *testing.T) {
+	useTemporaryConfigDirectory(t)
+	cfg := NewConfig()
+	if !cfg.GetScanOnStartup() || !cfg.GetStatusPollingEnabled() {
+		t.Fatal("new configurations should enable startup scan and status polling")
+	}
+	if err := cfg.SetScanOnStartup(false); err != nil {
+		t.Fatalf("SetScanOnStartup() error = %v", err)
+	}
+	if err := cfg.SetStatusPollingEnabled(false); err != nil {
+		t.Fatalf("SetStatusPollingEnabled() error = %v", err)
+	}
+	if err := cfg.SetScanDurationSeconds(12); err != nil {
+		t.Fatalf("SetScanDurationSeconds() error = %v", err)
+	}
+	if err := cfg.SetScanDurationSeconds(MinScanDurationSeconds - 1); err == nil {
+		t.Fatal("SetScanDurationSeconds() accepted a below-minimum value")
+	}
+
+	reloaded := NewConfig()
+	if err := reloaded.Load(); err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if reloaded.GetScanOnStartup() || reloaded.GetStatusPollingEnabled() || reloaded.GetScanDurationSeconds() != 12 {
+		t.Fatalf("reloaded preferences = startup %v, polling %v, scan %d", reloaded.GetScanOnStartup(), reloaded.GetStatusPollingEnabled(), reloaded.GetScanDurationSeconds())
+	}
+}
+
+func TestStatusDisplayFreshnessWindowTracksLongPollingIntervals(t *testing.T) {
+	tests := []struct {
+		intervalSeconds int
+		want            time.Duration
+	}{
+		{intervalSeconds: 60, want: 125 * time.Second},
+		{intervalSeconds: 120, want: 245 * time.Second},
+		{intervalSeconds: 300, want: 605 * time.Second},
+	}
+	for _, test := range tests {
+		t.Run(fmt.Sprintf("%d_seconds", test.intervalSeconds), func(t *testing.T) {
+			cfg := NewConfig()
+			cfg.StatusPollIntervalSeconds = test.intervalSeconds
+			if got := cfg.StatusDisplayFreshnessWindow(); got != test.want {
+				t.Fatalf("StatusDisplayFreshnessWindow() = %v, want %v", got, test.want)
+			}
+		})
 	}
 }
 

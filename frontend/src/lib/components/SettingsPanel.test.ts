@@ -5,11 +5,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const backend = vi.hoisted(() => ({
   GetAutoSleepSettings: vi.fn(),
   GetBulkPowerTimeoutSeconds: vi.fn(),
+  GetScanDurationSeconds: vi.fn(),
+  GetScanOnStartup: vi.fn(),
   GetStatusPollIntervalSeconds: vi.fn(),
+  GetStatusPollingEnabled: vi.fn(),
   ListBluetoothAdapters: vi.fn(),
   SetAutoSleepSettings: vi.fn(),
   SetBulkPowerTimeoutSeconds: vi.fn(),
+  SetScanDurationSeconds: vi.fn(),
+  SetScanOnStartup: vi.fn(),
   SetStatusPollIntervalSeconds: vi.fn(),
+  SetStatusPollingEnabled: vi.fn(),
   SetLanguage: vi.fn()
 }));
 
@@ -46,10 +52,16 @@ beforeEach(() => {
   ]);
   backend.GetAutoSleepSettings.mockResolvedValue({ enabled: false, target: 'steamvr', delaySeconds: 300 });
   backend.GetBulkPowerTimeoutSeconds.mockResolvedValue(120);
+  backend.GetScanDurationSeconds.mockResolvedValue(5);
+  backend.GetScanOnStartup.mockResolvedValue(true);
   backend.GetStatusPollIntervalSeconds.mockResolvedValue(15);
+  backend.GetStatusPollingEnabled.mockResolvedValue(true);
   backend.SetAutoSleepSettings.mockResolvedValue(undefined);
   backend.SetBulkPowerTimeoutSeconds.mockResolvedValue(undefined);
+  backend.SetScanDurationSeconds.mockResolvedValue(undefined);
+  backend.SetScanOnStartup.mockResolvedValue(undefined);
   backend.SetStatusPollIntervalSeconds.mockResolvedValue(undefined);
+  backend.SetStatusPollingEnabled.mockResolvedValue(undefined);
   backend.SetLanguage.mockResolvedValue(undefined);
   setLanguagePreference('system');
 });
@@ -61,12 +73,18 @@ describe('SettingsPanel', () => {
     expect(backend.ListBluetoothAdapters).toHaveBeenCalledOnce();
     expect(backend.GetAutoSleepSettings).toHaveBeenCalledOnce();
     expect(backend.GetBulkPowerTimeoutSeconds).toHaveBeenCalledOnce();
+    expect(backend.GetScanDurationSeconds).toHaveBeenCalledOnce();
+    expect(backend.GetScanOnStartup).toHaveBeenCalledOnce();
     expect(backend.GetStatusPollIntervalSeconds).toHaveBeenCalledOnce();
+    expect(backend.GetStatusPollingEnabled).toHaveBeenCalledOnce();
     expect(await screen.findByText('Intel Wireless Bluetooth')).toBeInTheDocument();
     expect(screen.getByText('BT-1')).toBeInTheDocument();
     expect(screen.getByRole('checkbox', { name: 'Enable auto sleep' })).not.toBeChecked();
     expect(screen.getByLabelText('Bulk power timeout')).toHaveValue(120);
     expect(screen.getByLabelText('Status polling interval')).toHaveValue(15);
+    expect(screen.getByRole('checkbox', { name: 'Scan when the application starts' })).toBeChecked();
+    expect(screen.getByRole('checkbox', { name: 'Refresh station status automatically' })).toBeChecked();
+    expect(screen.getByLabelText('Bluetooth scan duration')).toHaveValue(5);
   });
 
   it('persists the bulk power timeout', async () => {
@@ -75,6 +93,23 @@ describe('SettingsPanel', () => {
     await fireEvent.input(input, { target: { value: '180' } });
     await fireEvent.change(input);
     await waitFor(() => expect(backend.SetBulkPowerTimeoutSeconds).toHaveBeenCalledWith(180));
+  });
+
+  it('persists scan and automatic station refresh preferences', async () => {
+    const onStatusPollingEnabledChanged = vi.fn();
+    render(SettingsPanel, { props: { onClose: vi.fn(), onStatusPollingEnabledChanged } });
+
+    await fireEvent.click(await screen.findByRole('checkbox', { name: 'Scan when the application starts' }));
+    await waitFor(() => expect(backend.SetScanOnStartup).toHaveBeenCalledWith(false));
+
+    const duration = screen.getByLabelText('Bluetooth scan duration');
+    await fireEvent.input(duration, { target: { value: '12' } });
+    await fireEvent.change(duration);
+    await waitFor(() => expect(backend.SetScanDurationSeconds).toHaveBeenCalledWith(12));
+
+    await fireEvent.click(screen.getByRole('checkbox', { name: 'Refresh station status automatically' }));
+    await waitFor(() => expect(backend.SetStatusPollingEnabled).toHaveBeenCalledWith(false));
+    expect(onStatusPollingEnabledChanged).toHaveBeenCalledWith(false);
   });
 
   it('rolls the bulk power timeout back when saving fails', async () => {

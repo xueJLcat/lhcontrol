@@ -408,7 +408,7 @@ func TestStaleChannelDoesNotCreateHardConflict(t *testing.T) {
 	}
 	manager.stations["stale"] = &internalbluetooth.BaseStation{
 		Name: "LHB-STALE", Channel: 4, Present: true, LastSeenAt: now,
-		LastChannelReadAt: now.Add(-statusFreshnessWindow - time.Second),
+		LastChannelReadAt: now.Add(-operationSafetyFreshnessWindow - time.Second),
 	}
 
 	for _, info := range manager.GetStationInfo() {

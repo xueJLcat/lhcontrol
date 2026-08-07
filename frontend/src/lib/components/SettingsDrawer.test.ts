@@ -42,6 +42,12 @@ function defaultProps(overrides: Record<string, unknown> = {}) {
     loadError: null,
     autoSleep: autoSleep(),
     autoSleepBusy: false,
+    scanOnStartup: true,
+    scanOnStartupBusy: false,
+    scanDurationSeconds: 5,
+    scanDurationBusy: false,
+    statusPollingEnabled: true,
+    statusPollingEnabledBusy: false,
     bulkPowerTimeoutSeconds: 120,
     bulkPowerTimeoutBusy: false,
     statusPollIntervalSeconds: 15,
@@ -51,6 +57,12 @@ function defaultProps(overrides: Record<string, unknown> = {}) {
     onRefresh: vi.fn(),
     onAutoSleepChange: vi.fn(),
     onAutoSleepRetry: vi.fn(),
+    onScanOnStartupChange: vi.fn(),
+    onScanOnStartupRetry: vi.fn(),
+    onScanDurationChange: vi.fn(),
+    onScanDurationRetry: vi.fn(),
+    onStatusPollingEnabledChange: vi.fn(),
+    onStatusPollingEnabledRetry: vi.fn(),
     onBulkPowerTimeoutChange: vi.fn(),
     onBulkPowerTimeoutRetry: vi.fn(),
     onStatusPollIntervalChange: vi.fn(),
@@ -60,6 +72,17 @@ function defaultProps(overrides: Record<string, unknown> = {}) {
 }
 
 describe('SettingsDrawer', () => {
+  it('orders user preferences before automation, safety, and diagnostics', () => {
+    render(SettingsDrawer, { props: defaultProps() });
+    expect(screen.getAllByRole('heading', { level: 4 }).map((heading) => heading.textContent?.trim())).toEqual([
+      'Language',
+      'Scanning and refresh',
+      'Auto sleep',
+      'Operation safety',
+      'Bluetooth diagnostics'
+    ]);
+  });
+
   it('offers a system language preference separately from explicit languages', () => {
     render(SettingsDrawer, { props: defaultProps() });
     expect(screen.getByRole('radio', { name: 'Follow system' })).toBeChecked();
@@ -75,6 +98,21 @@ describe('SettingsDrawer', () => {
     expect(screen.getByText('USB\\VID-2')).toBeInTheDocument();
     expect(screen.queryByRole('radio', { name: /Bluetooth/ })).not.toBeInTheDocument();
     expect(screen.getByText(/Windows controls which radio/)).toBeInTheDocument();
+  });
+
+  it('commits startup, scan-duration, and automatic-refresh preferences', async () => {
+    const props = defaultProps();
+    render(SettingsDrawer, { props });
+
+    await fireEvent.click(screen.getByRole('checkbox', { name: 'Scan when the application starts' }));
+    await fireEvent.click(screen.getByRole('checkbox', { name: 'Refresh station status automatically' }));
+    const duration = screen.getByLabelText('Bluetooth scan duration') as HTMLInputElement;
+    await fireEvent.input(duration, { target: { value: '45' } });
+    await fireEvent.change(duration);
+
+    expect(props.onScanOnStartupChange).toHaveBeenCalledWith(false);
+    expect(props.onStatusPollingEnabledChange).toHaveBeenCalledWith(false);
+    expect(props.onScanDurationChange).toHaveBeenCalledWith(30);
   });
 
   it('shows the loading state without an adapter list', () => {

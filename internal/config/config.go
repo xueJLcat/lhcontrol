@@ -15,12 +15,17 @@ import (
 const (
 	LanguageEnglish                  = "en"
 	LanguageSimplifiedChinese        = "zh-CN"
+	MinScanDurationSeconds           = 2
+	MaxScanDurationSeconds           = 30
+	DefaultScanDurationSeconds       = 5
 	MinBulkPowerTimeoutSeconds       = 30
 	MaxBulkPowerTimeoutSeconds       = 600
 	DefaultBulkPowerTimeoutSeconds   = 120
 	MinStatusPollIntervalSeconds     = 5
 	MaxStatusPollIntervalSeconds     = 300
 	DefaultStatusPollIntervalSeconds = 15
+	MinimumDisplayFreshnessSeconds   = 45
+	StatusPollJitterSeconds          = 5
 )
 
 type Config struct {
@@ -28,6 +33,9 @@ type Config struct {
 	RenamedStationsByAddress  map[string]string  `json:"renamedStationsByAddress"`
 	AutoSleep                 autosleep.Settings `json:"autoSleep"`
 	Language                  string             `json:"language,omitempty"`
+	ScanOnStartup             bool               `json:"scanOnStartup"`
+	ScanDurationSeconds       int                `json:"scanDurationSeconds"`
+	StatusPollingEnabled      bool               `json:"statusPollingEnabled"`
 	BulkPowerTimeoutSeconds   int                `json:"bulkPowerTimeoutSeconds"`
 	StatusPollIntervalSeconds int                `json:"statusPollIntervalSeconds"`
 	persistenceBlockedErr     error
@@ -40,6 +48,9 @@ type persistedConfig struct {
 	RenamedStationsByAddress  map[string]string   `json:"renamedStationsByAddress,omitempty"`
 	AutoSleep                 *autosleep.Settings `json:"autoSleep,omitempty"`
 	Language                  string              `json:"language,omitempty"`
+	ScanOnStartup             *bool               `json:"scanOnStartup,omitempty"`
+	ScanDurationSeconds       *int                `json:"scanDurationSeconds,omitempty"`
+	StatusPollingEnabled      *bool               `json:"statusPollingEnabled,omitempty"`
 	BulkPowerTimeoutSeconds   *int                `json:"bulkPowerTimeoutSeconds,omitempty"`
 	StatusPollIntervalSeconds *int                `json:"statusPollIntervalSeconds,omitempty"`
 }
@@ -56,6 +67,9 @@ func NewConfig() *Config {
 		RenamedStations:           make(map[string]string),
 		RenamedStationsByAddress:  make(map[string]string),
 		AutoSleep:                 autosleep.DefaultSettings(),
+		ScanOnStartup:             true,
+		ScanDurationSeconds:       DefaultScanDurationSeconds,
+		StatusPollingEnabled:      true,
 		BulkPowerTimeoutSeconds:   DefaultBulkPowerTimeoutSeconds,
 		StatusPollIntervalSeconds: DefaultStatusPollIntervalSeconds,
 	}
@@ -95,6 +109,9 @@ func (c *Config) Load() error {
 			c.RenamedStationsByAddress = make(map[string]string)
 			c.AutoSleep = autosleep.DefaultSettings()
 			c.Language = ""
+			c.ScanOnStartup = true
+			c.ScanDurationSeconds = DefaultScanDurationSeconds
+			c.StatusPollingEnabled = true
 			c.BulkPowerTimeoutSeconds = DefaultBulkPowerTimeoutSeconds
 			c.StatusPollIntervalSeconds = DefaultStatusPollIntervalSeconds
 			c.persistenceBlockedErr = nil
@@ -130,6 +147,9 @@ func (c *Config) Load() error {
 		c.RenamedStationsByAddress = make(map[string]string)
 		c.AutoSleep = autosleep.DefaultSettings()
 		c.Language = ""
+		c.ScanOnStartup = true
+		c.ScanDurationSeconds = DefaultScanDurationSeconds
+		c.StatusPollingEnabled = true
 		c.BulkPowerTimeoutSeconds = DefaultBulkPowerTimeoutSeconds
 		c.StatusPollIntervalSeconds = DefaultStatusPollIntervalSeconds
 		c.persistenceBlockedErr = nil
@@ -148,12 +168,29 @@ func (c *Config) Load() error {
 	c.RenamedStationsByAddress = loaded.RenamedStationsByAddress
 	c.AutoSleep = sanitizeAutoSleep(loaded.AutoSleep)
 	c.Language = sanitizeLanguage(loaded.Language)
+	c.ScanOnStartup = boolOrDefault(loaded.ScanOnStartup, true)
+	c.ScanDurationSeconds = sanitizeScanDuration(loaded.ScanDurationSeconds)
+	c.StatusPollingEnabled = boolOrDefault(loaded.StatusPollingEnabled, true)
 	c.BulkPowerTimeoutSeconds = sanitizeBulkPowerTimeout(loaded.BulkPowerTimeoutSeconds)
 	c.StatusPollIntervalSeconds = sanitizeStatusPollInterval(loaded.StatusPollIntervalSeconds)
 	c.persistenceBlockedErr = nil
 	c.lastPersistenceErr = nil
 	c.mutex.Unlock()
 	return nil
+}
+
+func boolOrDefault(value *bool, fallback bool) bool {
+	if value == nil {
+		return fallback
+	}
+	return *value
+}
+
+func sanitizeScanDuration(durationSeconds *int) int {
+	if durationSeconds == nil || *durationSeconds < MinScanDurationSeconds || *durationSeconds > MaxScanDurationSeconds {
+		return DefaultScanDurationSeconds
+	}
+	return *durationSeconds
 }
 
 func sanitizeBulkPowerTimeout(timeoutSeconds *int) int {
@@ -231,6 +268,12 @@ func (c *Config) saveLocked() error {
 		RenamedStationsByAddress: make(map[string]string, len(c.RenamedStationsByAddress)),
 		Language:                 c.Language,
 	}
+	scanOnStartup := c.ScanOnStartup
+	snapshot.ScanOnStartup = &scanOnStartup
+	scanDurationSeconds := c.ScanDurationSeconds
+	snapshot.ScanDurationSeconds = &scanDurationSeconds
+	statusPollingEnabled := c.StatusPollingEnabled
+	snapshot.StatusPollingEnabled = &statusPollingEnabled
 	bulkPowerTimeoutSeconds := c.BulkPowerTimeoutSeconds
 	snapshot.BulkPowerTimeoutSeconds = &bulkPowerTimeoutSeconds
 	statusPollIntervalSeconds := c.StatusPollIntervalSeconds
@@ -470,6 +513,75 @@ func (c *Config) SetLanguage(language string) error {
 	return nil
 }
 
+func (c *Config) GetScanOnStartup() bool {
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	return c.ScanOnStartup
+}
+
+func (c *Config) SetScanOnStartup(enabled bool) error {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	previous := c.ScanOnStartup
+	c.ScanOnStartup = enabled
+	if err := c.saveLocked(); err != nil {
+		c.ScanOnStartup = previous
+		return err
+	}
+	return nil
+}
+
+func (c *Config) GetScanDurationSeconds() int {
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	if c.ScanDurationSeconds < MinScanDurationSeconds || c.ScanDurationSeconds > MaxScanDurationSeconds {
+		return DefaultScanDurationSeconds
+	}
+	return c.ScanDurationSeconds
+}
+
+func (c *Config) ScanDuration() time.Duration {
+	return time.Duration(c.GetScanDurationSeconds()) * time.Second
+}
+
+func (c *Config) SetScanDurationSeconds(durationSeconds int) error {
+	if durationSeconds < MinScanDurationSeconds || durationSeconds > MaxScanDurationSeconds {
+		return fmt.Errorf(
+			"scan duration must be between %d and %d seconds, got %d",
+			MinScanDurationSeconds,
+			MaxScanDurationSeconds,
+			durationSeconds,
+		)
+	}
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	previous := c.ScanDurationSeconds
+	c.ScanDurationSeconds = durationSeconds
+	if err := c.saveLocked(); err != nil {
+		c.ScanDurationSeconds = previous
+		return err
+	}
+	return nil
+}
+
+func (c *Config) GetStatusPollingEnabled() bool {
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	return c.StatusPollingEnabled
+}
+
+func (c *Config) SetStatusPollingEnabled(enabled bool) error {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	previous := c.StatusPollingEnabled
+	c.StatusPollingEnabled = enabled
+	if err := c.saveLocked(); err != nil {
+		c.StatusPollingEnabled = previous
+		return err
+	}
+	return nil
+}
+
 func (c *Config) GetBulkPowerTimeoutSeconds() int {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
@@ -530,4 +642,15 @@ func (c *Config) SetStatusPollIntervalSeconds(intervalSeconds int) error {
 		return err
 	}
 	return nil
+}
+
+// StatusDisplayFreshnessWindow keeps displayed state valid across slow poll
+// schedules without weakening the fixed freshness rule used before writes.
+func (c *Config) StatusDisplayFreshnessWindow() time.Duration {
+	intervalSeconds := c.GetStatusPollIntervalSeconds()
+	seconds := 2*intervalSeconds + StatusPollJitterSeconds
+	if seconds < MinimumDisplayFreshnessSeconds {
+		seconds = MinimumDisplayFreshnessSeconds
+	}
+	return time.Duration(seconds) * time.Second
 }

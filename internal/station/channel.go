@@ -31,7 +31,7 @@ func (m *Manager) SetStationChannel(
 		}
 	}()
 	initialSnapshot := stationPtr.Snapshot()
-	if initialSnapshot.Channel == channel && isFresh(initialSnapshot.LastChannelReadAt, time.Now()) {
+	if initialSnapshot.Channel == channel && isOperationallyFresh(initialSnapshot.LastChannelReadAt, time.Now()) {
 		return ChannelChangeResult{
 			Address: initialSnapshot.Address, PreviousChannel: channel, Channel: channel, Confirmed: true, Warnings: []string{},
 		}, nil
@@ -45,14 +45,14 @@ func (m *Manager) SetStationChannel(
 	targetSnapshot := stationPtr.Snapshot()
 	result.Address = targetSnapshot.Address
 	if targetSnapshot.Channel == channel &&
-		isFresh(targetSnapshot.LastChannelReadAt, time.Now()) {
+		isOperationallyFresh(targetSnapshot.LastChannelReadAt, time.Now()) {
 		result.PreviousChannel = channel
 		result.Channel = channel
 		result.Confirmed = true
 		return result, nil
 	}
 	if targetSnapshot.PowerState == bluetooth.PowerStateBooting &&
-		isFresh(targetSnapshot.LastPowerReadAt, time.Now()) {
+		isOperationallyFresh(targetSnapshot.LastPowerReadAt, time.Now()) {
 		return result, fmt.Errorf(
 			"station is booting; retry channel change after transition: %w",
 			ErrStationTransitioning,
@@ -104,7 +104,7 @@ func (m *Manager) SetStationChannel(
 	if !isRecent(targetSnapshot.LastSeenAt, time.Now(), channelScanFreshnessWindow) {
 		return result, fmt.Errorf("%w before changing a channel", ErrScanRequired)
 	}
-	if targetSnapshot.Channel == channel && isFresh(targetSnapshot.LastChannelReadAt, time.Now()) {
+	if targetSnapshot.Channel == channel && isOperationallyFresh(targetSnapshot.LastChannelReadAt, time.Now()) {
 		result.PreviousChannel = channel
 		result.Channel = channel
 		result.Confirmed = true
@@ -123,7 +123,7 @@ func (m *Manager) SetStationChannel(
 		}
 		if snapshot.MissedScans > 0 || snapshot.PresenceUncertain ||
 			!isRecent(snapshot.LastSeenAt, conflictCheckTime, channelScanFreshnessWindow) ||
-			!isFresh(snapshot.LastChannelReadAt, conflictCheckTime) {
+			!isOperationallyFresh(snapshot.LastChannelReadAt, conflictCheckTime) {
 			hasUnknown = true
 			continue
 		}

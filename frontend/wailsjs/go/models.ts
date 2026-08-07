@@ -88,12 +88,28 @@ export namespace bluetooth {
 
 export namespace main {
 	
+	export class OperationStatus {
+	    id: number;
+	    kind: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new OperationStatus(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.kind = source["kind"];
+	    }
+	}
 	export class APIStatus {
 	    running: boolean;
 	    address: string;
 	    error: string;
 	    warnings: string[];
 	    configWritable: boolean;
+	    activeOperations: OperationStatus[];
+	    operationRevision: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new APIStatus(source);
@@ -106,7 +122,27 @@ export namespace main {
 	        this.error = source["error"];
 	        this.warnings = source["warnings"];
 	        this.configWritable = source["configWritable"];
+	        this.activeOperations = this.convertValues(source["activeOperations"], OperationStatus);
+	        this.operationRevision = source["operationRevision"];
 	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
 	}
 
 }

@@ -9,6 +9,9 @@ const api = vi.hoisted(() => ({
   CancelBulkPower: vi.fn(),
   GetAPIStatus: vi.fn(),
   GetAutoSleepSettings: vi.fn(),
+  GetScanOnStartup: vi.fn(),
+  GetStatusPollIntervalSeconds: vi.fn(),
+  GetStatusPollingEnabled: vi.fn(),
   GetCurrentStationInfo: vi.fn(),
   GetScanStatus: vi.fn(),
   IdentifyStation: vi.fn(),
@@ -70,6 +73,9 @@ beforeEach(() => {
     configWritable: true
   });
   api.IsScanning.mockResolvedValue(false);
+  api.GetScanOnStartup.mockResolvedValue(true);
+  api.GetStatusPollIntervalSeconds.mockResolvedValue(15);
+  api.GetStatusPollingEnabled.mockResolvedValue(true);
   api.ScanAndFetchStations.mockResolvedValue([createStation()]);
   api.GetScanStatus.mockResolvedValue({ state: 'completed', found: 1, warnings: [] });
   api.GetCurrentStationInfo.mockResolvedValue([createStation()]);

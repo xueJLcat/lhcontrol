@@ -24,6 +24,10 @@ type autoSleepEvent struct {
 
 	Skipped int `json:"skipped,omitempty"`
 
+	TimedOut bool `json:"timedOut,omitempty"`
+
+	TimedOutSkipped int `json:"timedOutSkipped,omitempty"`
+
 	Error string `json:"error,omitempty"`
 
 	UpdateID uint64 `json:"updateId,omitempty"`
@@ -94,6 +98,54 @@ func (a *App) SetLanguage(language string) error {
 func (a *App) GetBulkPowerTimeoutSeconds() int {
 
 	return a.config.GetBulkPowerTimeoutSeconds()
+
+}
+
+func (a *App) GetScanOnStartup() bool {
+
+	return a.config.GetScanOnStartup()
+
+}
+
+func (a *App) SetScanOnStartup(enabled bool) error {
+
+	err := a.config.SetScanOnStartup(enabled)
+
+	a.setConfigPersistenceStatus()
+
+	return err
+
+}
+
+func (a *App) GetScanDurationSeconds() int {
+
+	return a.config.GetScanDurationSeconds()
+
+}
+
+func (a *App) SetScanDurationSeconds(durationSeconds int) error {
+
+	err := a.config.SetScanDurationSeconds(durationSeconds)
+
+	a.setConfigPersistenceStatus()
+
+	return err
+
+}
+
+func (a *App) GetStatusPollingEnabled() bool {
+
+	return a.config.GetStatusPollingEnabled()
+
+}
+
+func (a *App) SetStatusPollingEnabled(enabled bool) error {
+
+	err := a.config.SetStatusPollingEnabled(enabled)
+
+	a.setConfigPersistenceStatus()
+
+	return err
 
 }
 
@@ -273,6 +325,31 @@ func cancelledAutoSleepEvent(results []station.BulkPowerStationResult, reason st
 
 }
 
+func timedOutAutoSleepEvent(results []station.BulkPowerStationResult, reason string) autoSleepEvent {
+
+	success, unconfirmed, failed, skipped := summarizeAutoSleepResults(results)
+
+	timedOutSkipped := 0
+
+	for _, entry := range results {
+
+		if entry.Skipped && !entry.Success && entry.Reason == "bulk operation timed out" {
+
+			timedOutSkipped++
+
+		}
+
+	}
+
+	return autoSleepEvent{
+
+		Phase: "timed-out", Success: success, Unconfirmed: unconfirmed, Failed: failed,
+
+		Skipped: skipped - timedOutSkipped, TimedOut: true, TimedOutSkipped: timedOutSkipped, Error: reason,
+	}
+
+}
+
 // runAutoSleep is the watcher trigger: rescan for base stations, then put
 
 // every known station to sleep. When the user is running a Bluetooth
@@ -368,6 +445,14 @@ func (a *App) runAutoSleep(ctx context.Context) {
 			a.emitTerminalAutoSleep(cancelledAutoSleepEvent(result.Results, "watched process restarted or automatic sleep was reconfigured"))
 
 		}
+
+		return
+
+	case errors.Is(err, context.DeadlineExceeded), result.TimedOut:
+
+		log.Printf("Auto-sleep timed out with partial results: %v", err)
+
+		a.emitTerminalAutoSleep(timedOutAutoSleepEvent(result.Results, "bulk power timeout reached"))
 
 		return
 

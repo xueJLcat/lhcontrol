@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -19,31 +20,34 @@ import (
 )
 
 type App struct {
-	ctx                  context.Context
-	config               *config.Config
-	stationManager       *station.Manager
-	api                  *fiber.App
-	apiStatusMutex       sync.RWMutex
-	apiStatus            APIStatus
-	configLoadWarning    string
-	configSaveWarning    string
-	apiLifecycleMutex    sync.Mutex
-	apiCancel            context.CancelFunc
-	apiWG                sync.WaitGroup
-	listen               func(string, string) (net.Listener, error)
-	serveListener        func(net.Listener) error
-	apiRetryDelay        time.Duration
-	apiGeneration        uint64
-	externalScanID       atomic.Uint64
-	externalUpdateID     atomic.Uint64
-	externalOperationID  atomic.Uint64
-	shuttingDown         atomic.Bool
-	autoSleepMutex       sync.Mutex
-	autoSleepCancel      context.CancelFunc
-	autoSleepWG          sync.WaitGroup
-	scanForAutoSleep     func(context.Context) ([]station.StationInfo, error)
-	setPowerForAutoSleep func(context.Context, string) (station.BulkPowerResult, error)
-	autoSleepEventSink   func(autoSleepEvent)
+	ctx                       context.Context
+	config                    *config.Config
+	stationManager            *station.Manager
+	api                       *fiber.App
+	apiStatusMutex            sync.RWMutex
+	apiStatus                 APIStatus
+	configLoadWarning         string
+	configSaveWarning         string
+	apiLifecycleMutex         sync.Mutex
+	apiCancel                 context.CancelFunc
+	apiWG                     sync.WaitGroup
+	listen                    func(string, string) (net.Listener, error)
+	serveListener             func(net.Listener) error
+	apiRetryDelay             time.Duration
+	apiGeneration             uint64
+	externalScanID            atomic.Uint64
+	externalUpdateID          atomic.Uint64
+	externalOperationID       atomic.Uint64
+	externalOperationMutex    sync.RWMutex
+	activeExternalOperations  map[uint64]string
+	externalOperationRevision uint64
+	shuttingDown              atomic.Bool
+	autoSleepMutex            sync.Mutex
+	autoSleepCancel           context.CancelFunc
+	autoSleepWG               sync.WaitGroup
+	scanForAutoSleep          func(context.Context) ([]station.StationInfo, error)
+	setPowerForAutoSleep      func(context.Context, string) (station.BulkPowerResult, error)
+	autoSleepEventSink        func(autoSleepEvent)
 }
 
 func NewApp() *App {
@@ -57,9 +61,10 @@ func NewApp() *App {
 		ErrorHandler: apiErrorHandler,
 	})
 	app := &App{
-		config:         cfg,
-		stationManager: mgr,
-		api:            api,
+		config:                   cfg,
+		stationManager:           mgr,
+		api:                      api,
+		activeExternalOperations: make(map[uint64]string),
 		apiStatus: APIStatus{
 			Address:        "127.0.0.1:7575",
 			Warnings:       []string{},
@@ -133,6 +138,7 @@ func (a *App) startup(ctx context.Context) {
 			}
 		},
 		operation: func(event externalOperationEvent) {
+			event = a.recordExternalOperation(event)
 			if a.ctx != nil && !a.shuttingDown.Load() {
 				runtime.EventsEmit(a.ctx, "external-operation", event)
 			}
@@ -213,10 +219,38 @@ func (a *App) refreshConfigStatusLocked() {
 
 func (a *App) GetAPIStatus() APIStatus {
 	a.apiStatusMutex.RLock()
-	defer a.apiStatusMutex.RUnlock()
 	status := a.apiStatus
 	status.Warnings = append([]string{}, a.apiStatus.Warnings...)
+	a.apiStatusMutex.RUnlock()
+	status.ActiveOperations, status.OperationRevision = a.externalOperationSnapshot()
 	return status
+}
+
+func (a *App) recordExternalOperation(event externalOperationEvent) externalOperationEvent {
+	a.externalOperationMutex.Lock()
+	defer a.externalOperationMutex.Unlock()
+	if a.activeExternalOperations == nil {
+		a.activeExternalOperations = make(map[uint64]string)
+	}
+	a.externalOperationRevision++
+	event.Revision = a.externalOperationRevision
+	if event.Phase == "started" {
+		a.activeExternalOperations[event.ID] = event.Kind
+	} else if event.Phase == "finished" {
+		delete(a.activeExternalOperations, event.ID)
+	}
+	return event
+}
+
+func (a *App) externalOperationSnapshot() ([]OperationStatus, uint64) {
+	a.externalOperationMutex.RLock()
+	defer a.externalOperationMutex.RUnlock()
+	operations := make([]OperationStatus, 0, len(a.activeExternalOperations))
+	for id, kind := range a.activeExternalOperations {
+		operations = append(operations, OperationStatus{ID: id, Kind: kind})
+	}
+	sort.Slice(operations, func(i, j int) bool { return operations[i].ID < operations[j].ID })
+	return operations, a.externalOperationRevision
 }
 
 func (a *App) PowerOnStation(address string) error {

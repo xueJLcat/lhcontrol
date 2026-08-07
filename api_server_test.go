@@ -108,6 +108,34 @@ func TestConfigLoadWarningIsExposedAndDefensivelyCopied(t *testing.T) {
 
 }
 
+func TestGetAPIStatusIncludesRecoverableExternalOperations(t *testing.T) {
+
+	app := NewApp()
+
+	started := app.recordExternalOperation(externalOperationEvent{ID: 42, Phase: "started", Kind: "bulk-power"})
+
+	status := app.GetAPIStatus()
+
+	if started.Revision == 0 || status.OperationRevision != started.Revision || len(status.ActiveOperations) != 1 ||
+
+		status.ActiveOperations[0].ID != 42 || status.ActiveOperations[0].Kind != "bulk-power" {
+
+		t.Fatalf("API status operation snapshot = %+v", status)
+
+	}
+
+	finished := app.recordExternalOperation(externalOperationEvent{ID: 42, Phase: "finished", Kind: "bulk-power"})
+
+	status = app.GetAPIStatus()
+
+	if finished.Revision <= started.Revision || status.OperationRevision != finished.Revision || len(status.ActiveOperations) != 0 {
+
+		t.Fatalf("API status after finish = %+v, event = %+v", status, finished)
+
+	}
+
+}
+
 func TestConfigPersistenceFailureUpdatesStatusAndEmptyWarningsStayArrays(t *testing.T) {
 
 	app := NewApp()

@@ -3,12 +3,18 @@
   import {
     GetAutoSleepSettings,
     GetBulkPowerTimeoutSeconds,
+    GetScanDurationSeconds,
+    GetScanOnStartup,
     GetStatusPollIntervalSeconds,
+    GetStatusPollingEnabled,
     ListBluetoothAdapters,
     SetAutoSleepSettings,
     SetBulkPowerTimeoutSeconds,
     SetLanguage,
-    SetStatusPollIntervalSeconds
+    SetScanDurationSeconds,
+    SetScanOnStartup,
+    SetStatusPollIntervalSeconds,
+    SetStatusPollingEnabled
   } from '../backend';
   import { autosleep as autosleepModels, bluetooth as bluetoothModels } from '../../../wailsjs/go/models';
   import { pushToast } from '../toast';
@@ -21,12 +27,14 @@
     inactive = false,
     onClose,
     onLanguageChanged = () => {},
-    onStatusPollIntervalChanged = () => {}
+    onStatusPollIntervalChanged = () => {},
+    onStatusPollingEnabledChanged = () => {}
   }: {
     inactive?: boolean;
     onClose: () => void;
     onLanguageChanged?: () => void;
     onStatusPollIntervalChanged?: (intervalSeconds: number) => void;
+    onStatusPollingEnabledChanged?: (enabled: boolean) => void;
   } = $props();
 
   let adapters = $state<bluetoothModels.AdapterInfo[]>([]);
@@ -35,6 +43,15 @@
   let autoSleepSettings = $state<autosleepModels.Settings | null>(null);
   let autoSleepError = $state<string | null>(null);
   let autoSleepBusy = $state(false);
+  let scanOnStartup = $state<boolean | null>(null);
+  let scanOnStartupError = $state<string | null>(null);
+  let scanOnStartupBusy = $state(false);
+  let scanDurationSeconds = $state<number | null>(null);
+  let scanDurationError = $state<string | null>(null);
+  let scanDurationBusy = $state(false);
+  let statusPollingEnabled = $state<boolean | null>(null);
+  let statusPollingEnabledError = $state<string | null>(null);
+  let statusPollingEnabledBusy = $state(false);
   let bulkPowerTimeoutSeconds = $state<number | null>(null);
   let bulkPowerTimeoutError = $state<string | null>(null);
   let bulkPowerTimeoutBusy = $state(false);
@@ -48,6 +65,9 @@
   onMount(() => {
     void loadAdapterSettings();
     void loadAutoSleepSettings();
+    void loadScanOnStartup();
+    void loadScanDuration();
+    void loadStatusPollingEnabled();
     void loadBulkPowerTimeout();
     void loadStatusPollInterval();
   });
@@ -99,6 +119,85 @@
       bulkPowerTimeoutSeconds = null;
       bulkPowerTimeoutError = String(error);
       pushToast(withDetail('Bulk power timeout could not be loaded', error));
+    }
+  }
+
+  async function loadScanOnStartup() {
+    scanOnStartupError = null;
+    try {
+      scanOnStartup = await GetScanOnStartup();
+    } catch (error) {
+      scanOnStartup = null;
+      scanOnStartupError = String(error);
+      pushToast(withDetail('Startup scan setting could not be loaded', error));
+    }
+  }
+
+  async function changeScanOnStartup(next: boolean) {
+    if (scanOnStartupBusy || scanOnStartup === null) return;
+    const previous = scanOnStartup;
+    scanOnStartup = next;
+    scanOnStartupBusy = true;
+    try {
+      await SetScanOnStartup(next);
+    } catch (error) {
+      scanOnStartup = previous;
+      pushToast(withDetail('Startup scan setting could not be saved', error));
+    } finally {
+      scanOnStartupBusy = false;
+    }
+  }
+
+  async function loadScanDuration() {
+    scanDurationError = null;
+    try {
+      scanDurationSeconds = await GetScanDurationSeconds();
+    } catch (error) {
+      scanDurationSeconds = null;
+      scanDurationError = String(error);
+      pushToast(withDetail('Scan duration could not be loaded', error));
+    }
+  }
+
+  async function changeScanDuration(next: number) {
+    if (scanDurationBusy || scanDurationSeconds === null) return;
+    const previous = scanDurationSeconds;
+    scanDurationSeconds = next;
+    scanDurationBusy = true;
+    try {
+      await SetScanDurationSeconds(next);
+    } catch (error) {
+      scanDurationSeconds = previous;
+      pushToast(withDetail('Scan duration could not be saved', error));
+    } finally {
+      scanDurationBusy = false;
+    }
+  }
+
+  async function loadStatusPollingEnabled() {
+    statusPollingEnabledError = null;
+    try {
+      statusPollingEnabled = await GetStatusPollingEnabled();
+    } catch (error) {
+      statusPollingEnabled = null;
+      statusPollingEnabledError = String(error);
+      pushToast(withDetail('Automatic station refresh setting could not be loaded', error));
+    }
+  }
+
+  async function changeStatusPollingEnabled(next: boolean) {
+    if (statusPollingEnabledBusy || statusPollingEnabled === null) return;
+    const previous = statusPollingEnabled;
+    statusPollingEnabled = next;
+    statusPollingEnabledBusy = true;
+    try {
+      await SetStatusPollingEnabled(next);
+      onStatusPollingEnabledChanged(next);
+    } catch (error) {
+      statusPollingEnabled = previous;
+      pushToast(withDetail('Automatic station refresh setting could not be saved', error));
+    } finally {
+      statusPollingEnabledBusy = false;
     }
   }
 
@@ -169,6 +268,15 @@
   autoSleep={autoSleepSettings}
   autoSleepError={autoSleepError}
   {autoSleepBusy}
+  {scanOnStartup}
+  {scanOnStartupError}
+  {scanOnStartupBusy}
+  {scanDurationSeconds}
+  {scanDurationError}
+  {scanDurationBusy}
+  {statusPollingEnabled}
+  {statusPollingEnabledError}
+  {statusPollingEnabledBusy}
   {bulkPowerTimeoutSeconds}
   {bulkPowerTimeoutError}
   {bulkPowerTimeoutBusy}
@@ -182,6 +290,12 @@
   onRefresh={loadAdapterSettings}
   onAutoSleepChange={changeAutoSleep}
   onAutoSleepRetry={loadAutoSleepSettings}
+  onScanOnStartupChange={changeScanOnStartup}
+  onScanOnStartupRetry={loadScanOnStartup}
+  onScanDurationChange={changeScanDuration}
+  onScanDurationRetry={loadScanDuration}
+  onStatusPollingEnabledChange={changeStatusPollingEnabled}
+  onStatusPollingEnabledRetry={loadStatusPollingEnabled}
   onBulkPowerTimeoutChange={changeBulkPowerTimeout}
   onBulkPowerTimeoutRetry={loadBulkPowerTimeout}
   onStatusPollIntervalChange={changeStatusPollInterval}

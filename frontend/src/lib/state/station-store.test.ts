@@ -5,8 +5,10 @@ const backend = vi.hoisted(() => ({
   CancelBulkPower: vi.fn(),
   GetAPIStatus: vi.fn(),
   GetCurrentStationInfo: vi.fn(),
+  GetScanOnStartup: vi.fn(),
   GetScanStatus: vi.fn(),
   GetStatusPollIntervalSeconds: vi.fn(),
+  GetStatusPollingEnabled: vi.fn(),
   IdentifyStation: vi.fn(),
   IsScanning: vi.fn(),
   RefreshStationCapabilities: vi.fn(),
@@ -59,6 +61,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   runtime.handlers.clear();
   backend.IsScanning.mockResolvedValue(false);
+  backend.GetScanOnStartup.mockResolvedValue(true);
   backend.GetAPIStatus.mockResolvedValue({
     running: true, address: '127.0.0.1:7575', error: '', warnings: [], configWritable: true
   });
@@ -66,6 +69,7 @@ beforeEach(() => {
   backend.GetScanStatus.mockResolvedValue({ state: 'completed', found: 1, warnings: [] });
   backend.GetCurrentStationInfo.mockResolvedValue([createStation()]);
   backend.GetStatusPollIntervalSeconds.mockResolvedValue(15);
+  backend.GetStatusPollingEnabled.mockResolvedValue(true);
   backend.CheckAllStationStatuses.mockResolvedValue([createStation()]);
   backend.StopScan.mockResolvedValue(undefined);
   backend.SetStationPower.mockResolvedValue({
@@ -120,6 +124,28 @@ describe('StationStore startup', () => {
     expect(store.stations[0].name).toBe('LHB-TEST');
     expect(store.statusMessage).toBe('Found 1; 1 known station.');
     expect(store.scanError).toBeNull();
+  });
+
+  it('respects a disabled startup scan preference', async () => {
+    backend.GetScanOnStartup.mockResolvedValue(false);
+    mountStore();
+    await vi.waitFor(() => expect(backend.GetScanOnStartup).toHaveBeenCalledOnce());
+    await Promise.resolve();
+    expect(backend.ScanAndFetchStations).not.toHaveBeenCalled();
+  });
+
+  it('keeps API health polling but disables automatic station refresh', async () => {
+    vi.useFakeTimers();
+    backend.GetStatusPollingEnabled.mockResolvedValue(false);
+    mountStore();
+    await vi.advanceTimersByTimeAsync(0);
+    backend.CheckAllStationStatuses.mockClear();
+    backend.GetAPIStatus.mockClear();
+
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    expect(backend.CheckAllStationStatuses).not.toHaveBeenCalled();
+    expect(backend.GetAPIStatus).toHaveBeenCalled();
   });
 
   it('adopts a running backend scan instead of starting a local scan', async () => {
@@ -391,6 +417,46 @@ describe('StationStore auto sleep events', () => {
 });
 
 describe('StationStore external HTTP operation events', () => {
+  it('recovers an operation that started before event listeners mounted', async () => {
+    backend.GetAPIStatus.mockResolvedValue({
+      running: true,
+      address: '127.0.0.1:7575',
+      error: '',
+      warnings: [],
+      configWritable: true,
+      activeOperations: [{ id: 73, kind: 'bulk-power' }],
+      operationRevision: 4
+    });
+    const { store } = mountStore();
+
+    await vi.waitFor(() => expect(store.externalOperationRunning).toBe(true));
+    expect(store.scanLocked).toBe(true);
+    expect(store.bulkLocked).toBe(true);
+    expect(store.stationLocked).toBe(true);
+  });
+
+  it('does not let an older operation snapshot clear a newer event', async () => {
+    let resolveStatus!: (value: Record<string, unknown>) => void;
+    backend.GetAPIStatus.mockReturnValue(new Promise((resolve) => { resolveStatus = resolve; }));
+    const { store } = mountStore();
+    await vi.waitFor(() => expect(runtime.handlers.has('external-operation')).toBe(true));
+
+    runtime.handlers.get('external-operation')?.({ id: 91, phase: 'started', kind: 'power', revision: 2 });
+    resolveStatus({
+      running: true,
+      address: '127.0.0.1:7575',
+      error: '',
+      warnings: [],
+      configWritable: true,
+      activeOperations: [],
+      operationRevision: 0
+    });
+
+    await Promise.resolve();
+    expect(store.externalOperationRunning).toBe(true);
+  });
+
+
   it('locks controls until every overlapping external operation finishes', async () => {
     const { store } = mountStore();
     await vi.waitFor(() => expect(runtime.handlers.has('external-operation')).toBe(true));

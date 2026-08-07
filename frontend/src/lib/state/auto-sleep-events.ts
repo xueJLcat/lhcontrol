@@ -3,11 +3,13 @@ import { pushToast } from '../toast';
 import { t } from '../i18n.svelte';
 
 export interface AutoSleepEvent {
-  phase: 'started' | 'completed' | 'cancelled' | 'skipped' | 'failed';
+  phase: 'started' | 'completed' | 'cancelled' | 'timed-out' | 'skipped' | 'failed';
   success?: number;
   unconfirmed?: number;
   failed?: number;
   skipped?: number;
+  timedOut?: boolean;
+  timedOutSkipped?: number;
   error?: string;
   updateId?: number;
   stations?: StationInfo[];
@@ -42,6 +44,9 @@ export class AutoSleepEventCoordinator {
         break;
       case 'cancelled':
         this.handleCancelled(event);
+        break;
+      case 'timed-out':
+        this.handleTimedOut(event);
         break;
       case 'skipped':
         this.dependencies.setRunning(false);
@@ -89,6 +94,20 @@ export class AutoSleepEventCoordinator {
     const message = t('Auto sleep cancelled: {details}.', { details });
     this.setMessage(message);
     pushToast(message, success || failed ? 'warning' : 'info');
+  }
+
+  private handleTimedOut(event: AutoSleepEvent) {
+    this.dependencies.setRunning(false);
+    this.dependencies.beginStatusOperation();
+    const success = event.success ?? 0;
+    const unconfirmed = event.unconfirmed ?? 0;
+    const failed = event.failed ?? 0;
+    const timedOutSkipped = event.timedOutSkipped ?? 0;
+    const message = t('Auto sleep timed out: {success} confirmed, {unconfirmed} unconfirmed, {failed} failed, {timedOutSkipped} skipped due to timeout.', {
+      success, unconfirmed, failed, timedOutSkipped
+    });
+    this.setMessage(message);
+    pushToast(message, 'warning');
   }
 
   private setMessage(message: string) {
