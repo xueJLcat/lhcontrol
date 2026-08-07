@@ -19,28 +19,31 @@ import (
 )
 
 type App struct {
-	ctx                 context.Context
-	config              *config.Config
-	stationManager      *station.Manager
-	api                 *fiber.App
-	apiStatusMutex      sync.RWMutex
-	apiStatus           APIStatus
-	configLoadWarning   string
-	configSaveWarning   string
-	apiLifecycleMutex   sync.Mutex
-	apiCancel           context.CancelFunc
-	apiWG               sync.WaitGroup
-	listen              func(string, string) (net.Listener, error)
-	serveListener       func(net.Listener) error
-	apiRetryDelay       time.Duration
-	apiGeneration       uint64
-	externalScanID      atomic.Uint64
-	externalUpdateID    atomic.Uint64
-	externalOperationID atomic.Uint64
-	shuttingDown        atomic.Bool
-	autoSleepMutex      sync.Mutex
-	autoSleepCancel     context.CancelFunc
-	autoSleepWG         sync.WaitGroup
+	ctx                  context.Context
+	config               *config.Config
+	stationManager       *station.Manager
+	api                  *fiber.App
+	apiStatusMutex       sync.RWMutex
+	apiStatus            APIStatus
+	configLoadWarning    string
+	configSaveWarning    string
+	apiLifecycleMutex    sync.Mutex
+	apiCancel            context.CancelFunc
+	apiWG                sync.WaitGroup
+	listen               func(string, string) (net.Listener, error)
+	serveListener        func(net.Listener) error
+	apiRetryDelay        time.Duration
+	apiGeneration        uint64
+	externalScanID       atomic.Uint64
+	externalUpdateID     atomic.Uint64
+	externalOperationID  atomic.Uint64
+	shuttingDown         atomic.Bool
+	autoSleepMutex       sync.Mutex
+	autoSleepCancel      context.CancelFunc
+	autoSleepWG          sync.WaitGroup
+	scanForAutoSleep     func(context.Context) ([]station.StationInfo, error)
+	setPowerForAutoSleep func(context.Context, string) (station.BulkPowerResult, error)
+	autoSleepEventSink   func(autoSleepEvent)
 }
 
 func NewApp() *App {
@@ -66,6 +69,8 @@ func NewApp() *App {
 		apiRetryDelay: 2 * time.Second,
 	}
 	app.serveListener = api.Listener
+	app.scanForAutoSleep = mgr.ScanAndFetchStationsContext
+	app.setPowerForAutoSleep = mgr.SetAllStationsPowerDetailedContext
 	return app
 }
 
@@ -291,6 +296,11 @@ func (a *App) SetAllStationsPower(state string) error {
 func (a *App) SetAllStationsPowerDetailed(state string) (station.BulkPowerResult, error) {
 	log.Printf("Requesting detailed power state %s for all known stations", state)
 	return a.stationManager.SetAllStationsPowerDetailed(state)
+}
+
+func (a *App) CancelBulkPower() error {
+	log.Printf("Requesting cancellation of the active bulk power operation")
+	return a.stationManager.CancelBulkPower()
 }
 
 // RenameStation is the legacy name-based rename kept for compatibility: it

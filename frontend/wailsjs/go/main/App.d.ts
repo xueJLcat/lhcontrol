@@ -5,11 +5,15 @@ import {main} from '../models';
 import {autosleep} from '../models';
 import {bluetooth} from '../models';
 
+export function CancelBulkPower():Promise<void>;
+
 export function CheckAllStationStatuses():Promise<Array<station.StationInfo>>;
 
 export function GetAPIStatus():Promise<main.APIStatus>;
 
 export function GetAutoSleepSettings():Promise<autosleep.Settings>;
+
+export function GetBulkPowerTimeoutSeconds():Promise<number>;
 
 export function GetCurrentStationInfo():Promise<Array<station.StationInfo>>;
 
@@ -46,6 +50,8 @@ export function SetAllStationsPower(arg1:string):Promise<void>;
 export function SetAllStationsPowerDetailed(arg1:string):Promise<station.BulkPowerResult>;
 
 export function SetAutoSleepSettings(arg1:autosleep.Settings):Promise<void>;
+
+export function SetBulkPowerTimeoutSeconds(arg1:number):Promise<void>;
 
 export function SetLanguage(arg1:string):Promise<void>;
 

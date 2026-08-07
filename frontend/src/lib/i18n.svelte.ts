@@ -5,6 +5,17 @@ export type LanguagePreference = 'system' | Locale;
 export type MessageValues = Record<string, string | number>;
 
 const zhCN = {
+  'Operation safety': '操作安全',
+  'Bulk power timeout': '批量电源操作超时',
+  'seconds': '秒',
+  'A bulk power action is stopped when this total time limit is reached. Allowed range: 30–600 seconds.': '批量电源操作达到此总时限后会自动停止。允许范围：30–600 秒。',
+  'Loading operation safety settings...': '正在加载操作安全设置…',
+  'Bulk power timeout could not be loaded': '无法加载批量电源操作超时设置',
+  'Bulk power timeout could not be saved': '无法保存批量电源操作超时设置',
+  'Cancel bulk power': '停止批量电源操作',
+  'Stopping bulk power...': '正在停止批量电源操作…',
+  'Bulk {target} cancelled': '批量{target}操作已停止',
+  'Bulk {target} timed out': '批量{target}操作已超时',
   'SteamVR base stations': 'SteamVR 基站',
   'Fleet power summary': '全部基站电源状态摘要',
   'On': '开启',

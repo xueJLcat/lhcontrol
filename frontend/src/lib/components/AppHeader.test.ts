@@ -7,6 +7,7 @@ afterEach(cleanup);
 
 function renderHeader(overrides: Record<string, unknown> = {}) {
   const onBulkPower = vi.fn();
+  const onCancelBulk = vi.fn();
   const onOpenSettings = vi.fn();
   render(AppHeader, {
     props: {
@@ -24,11 +25,12 @@ function renderHeader(overrides: Record<string, unknown> = {}) {
       onScan: vi.fn(),
       onStop: vi.fn(),
       onBulkPower,
+      onCancelBulk,
       onOpenSettings,
       ...overrides
     }
   });
-  return { onBulkPower, onOpenSettings };
+  return { onBulkPower, onCancelBulk, onOpenSettings };
 }
 
 describe('AppHeader bulk controls', () => {
@@ -56,6 +58,12 @@ describe('AppHeader bulk controls', () => {
     const { onBulkPower } = renderHeader();
     await fireEvent.click(screen.getByRole('button', { name: 'Standby' }));
     expect(onBulkPower).toHaveBeenCalledWith('standby');
+  });
+
+  it('offers a stop action while bulk power is running', async () => {
+    const { onCancelBulk } = renderHeader({ isBulkLoading: true, bulkLocked: true });
+    await fireEvent.click(screen.getByRole('button', { name: 'Cancel bulk power' }));
+    expect(onCancelBulk).toHaveBeenCalledOnce();
   });
 
   it('opens the settings drawer from the gear button', async () => {

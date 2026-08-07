@@ -4,8 +4,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const backend = vi.hoisted(() => ({
   GetAutoSleepSettings: vi.fn(),
+  GetBulkPowerTimeoutSeconds: vi.fn(),
   ListBluetoothAdapters: vi.fn(),
   SetAutoSleepSettings: vi.fn(),
+  SetBulkPowerTimeoutSeconds: vi.fn(),
   SetLanguage: vi.fn()
 }));
 
@@ -41,7 +43,9 @@ beforeEach(() => {
     { deviceId: 'BT-2', name: 'CSR Dongle' }
   ]);
   backend.GetAutoSleepSettings.mockResolvedValue({ enabled: false, target: 'steamvr', delaySeconds: 300 });
+  backend.GetBulkPowerTimeoutSeconds.mockResolvedValue(120);
   backend.SetAutoSleepSettings.mockResolvedValue(undefined);
+  backend.SetBulkPowerTimeoutSeconds.mockResolvedValue(undefined);
   backend.SetLanguage.mockResolvedValue(undefined);
   setLanguagePreference('system');
 });
@@ -52,9 +56,30 @@ describe('SettingsPanel', () => {
     expect(await screen.findByRole('dialog', { name: 'Settings' })).toBeInTheDocument();
     expect(backend.ListBluetoothAdapters).toHaveBeenCalledOnce();
     expect(backend.GetAutoSleepSettings).toHaveBeenCalledOnce();
+    expect(backend.GetBulkPowerTimeoutSeconds).toHaveBeenCalledOnce();
     expect(await screen.findByText('Intel Wireless Bluetooth')).toBeInTheDocument();
     expect(screen.getByText('BT-1')).toBeInTheDocument();
     expect(screen.getByRole('checkbox', { name: 'Enable auto sleep' })).not.toBeChecked();
+    expect(screen.getByLabelText('Bulk power timeout')).toHaveValue(120);
+  });
+
+  it('persists the bulk power timeout', async () => {
+    render(SettingsPanel, { props: { onClose: vi.fn() } });
+    const input = await screen.findByLabelText('Bulk power timeout');
+    await fireEvent.input(input, { target: { value: '180' } });
+    await fireEvent.change(input);
+    await waitFor(() => expect(backend.SetBulkPowerTimeoutSeconds).toHaveBeenCalledWith(180));
+  });
+
+  it('rolls the bulk power timeout back when saving fails', async () => {
+    backend.SetBulkPowerTimeoutSeconds.mockRejectedValue(new Error('config locked'));
+    render(SettingsPanel, { props: { onClose: vi.fn() } });
+    const input = await screen.findByLabelText('Bulk power timeout');
+    await fireEvent.input(input, { target: { value: '180' } });
+    await fireEvent.change(input);
+    await waitFor(() => expect(backend.SetBulkPowerTimeoutSeconds).toHaveBeenCalledWith(180));
+    await waitFor(() => expect(input).toHaveValue(120));
+    expect(pushToast).toHaveBeenCalledWith('Bulk power timeout could not be saved: Error: config locked');
   });
 
   it('persists auto sleep changes', async () => {

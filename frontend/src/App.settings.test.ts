@@ -6,8 +6,10 @@ import { pushToast } from './lib/toast';
 
 const api = vi.hoisted(() => ({
   CheckAllStationStatuses: vi.fn(),
+  CancelBulkPower: vi.fn(),
   GetAPIStatus: vi.fn(),
   GetAutoSleepSettings: vi.fn(),
+  GetBulkPowerTimeoutSeconds: vi.fn(),
   GetCurrentStationInfo: vi.fn(),
   GetScanStatus: vi.fn(),
   IdentifyStation: vi.fn(),
@@ -18,6 +20,7 @@ const api = vi.hoisted(() => ({
   ScanAndFetchStations: vi.fn(),
   SetAllStationsPowerDetailed: vi.fn(),
   SetAutoSleepSettings: vi.fn(),
+  SetBulkPowerTimeoutSeconds: vi.fn(),
   SetStationChannel: vi.fn(),
   SetStationPower: vi.fn(),
   StopScan: vi.fn()
@@ -76,7 +79,9 @@ beforeEach(() => {
   api.StopScan.mockResolvedValue(undefined);
   api.ListBluetoothAdapters.mockResolvedValue([]);
   api.GetAutoSleepSettings.mockResolvedValue({ enabled: false, target: 'steamvr', delaySeconds: 300 });
+  api.GetBulkPowerTimeoutSeconds.mockResolvedValue(120);
   api.SetAutoSleepSettings.mockResolvedValue(undefined);
+  api.SetBulkPowerTimeoutSeconds.mockResolvedValue(undefined);
 });
 
 afterEach(() => {

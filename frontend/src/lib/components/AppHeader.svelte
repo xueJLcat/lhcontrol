@@ -10,6 +10,7 @@
   let {
     scanning,
     isBulkLoading,
+    cancellingBulk = false,
     scanLocked,
     bulkLocked,
     bulkTarget,
@@ -29,10 +30,12 @@
     onStop,
     stopping = false,
     onBulkPower,
+    onCancelBulk = () => {},
     onOpenSettings
   }: {
     scanning: boolean;
     isBulkLoading: boolean;
+    cancellingBulk?: boolean;
     scanLocked: boolean;
     bulkLocked: boolean;
     bulkTarget: PowerTarget | null;
@@ -52,6 +55,7 @@
     onStop: () => void;
     stopping?: boolean;
     onBulkPower: (state: PowerTarget) => void;
+    onCancelBulk?: () => void;
     onOpenSettings: () => void;
   } = $props();
 
@@ -116,7 +120,20 @@
       {:else}<RefreshCw size={15} /> {t('Scan')}{/if}
     </button>
     <div class="bulk-power" role="group" aria-label={t('Set all known stations')}>
-      <span class="bulk-label">{#if isBulkLoading}<LoaderCircle class="spin" size={12} />{:else}<Zap size={12} />{/if} {t('All')}</span>
+      {#if isBulkLoading}
+        <button
+          type="button"
+          class="bulk-label bulk-cancel"
+          onclick={onCancelBulk}
+          disabled={cancellingBulk}
+          title={t(cancellingBulk ? 'Stopping bulk power...' : 'Cancel bulk power')}
+          aria-label={t('Cancel bulk power')}
+        >
+          {#if cancellingBulk}<LoaderCircle class="spin" size={12} /> {t('Stopping...')}{:else}<Square size={12} /> {t('Stop')}{/if}
+        </button>
+      {:else}
+        <span class="bulk-label"><Zap size={12} /> {t('All')}</span>
+      {/if}
       <div class="bulk-seg" class:pop={bulkPopIndex >= 0}>
         <div
           class="seg-thumb"
@@ -208,6 +225,14 @@
   .bulk-power { flex: 1; min-width: 0; }
   .bulk-seg { flex: 1; display: flex; min-width: 0; }
   .bulk-power button { flex: 1; min-width: 0; }
+  .bulk-power .bulk-cancel {
+    flex: 0 0 auto;
+    min-width: 72px;
+    color: var(--color-danger);
+    text-transform: none;
+    letter-spacing: 0;
+  }
+  .bulk-power .bulk-cancel:hover:not(:disabled) { color: var(--color-danger); }
   /* Square icon-only button closing the actions row; keeps the row height. */
   .settings-btn {
     flex: 0 0 auto;

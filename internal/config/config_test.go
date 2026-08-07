@@ -10,6 +10,17 @@ import (
 	"lhcontrol/internal/autosleep"
 )
 
+func useTemporaryConfigDirectory(t *testing.T) string {
+	t.Helper()
+	configRoot := t.TempDir()
+	t.Setenv("AppData", configRoot)
+	configDirectory := filepath.Join(configRoot, "lhcontrol")
+	if err := os.MkdirAll(configDirectory, 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	return configDirectory
+}
+
 func TestWriteFileAtomicallyCreatesAndReplacesFile(t *testing.T) {
 	directory := t.TempDir()
 	path := filepath.Join(directory, "config.json")
@@ -509,6 +520,45 @@ func TestSetLanguageRollsBackWhenPersistenceFails(t *testing.T) {
 	}
 	if got := cfg.GetLanguage(); got != "" {
 		t.Fatalf("failed save retained language %q", got)
+	}
+}
+
+func TestBulkPowerTimeoutPersistsAndValidates(t *testing.T) {
+	useTemporaryConfigDirectory(t)
+	cfg := NewConfig()
+	if got := cfg.GetBulkPowerTimeoutSeconds(); got != DefaultBulkPowerTimeoutSeconds {
+		t.Fatalf("default bulk timeout = %d, want %d", got, DefaultBulkPowerTimeoutSeconds)
+	}
+	if err := cfg.SetBulkPowerTimeoutSeconds(MinBulkPowerTimeoutSeconds - 1); err == nil {
+		t.Fatal("SetBulkPowerTimeoutSeconds accepted a below-minimum value")
+	}
+	if err := cfg.SetBulkPowerTimeoutSeconds(180); err != nil {
+		t.Fatalf("SetBulkPowerTimeoutSeconds() error = %v", err)
+	}
+	reloaded := NewConfig()
+	if err := reloaded.Load(); err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if got := reloaded.GetBulkPowerTimeoutSeconds(); got != 180 {
+		t.Fatalf("reloaded bulk timeout = %d, want 180", got)
+	}
+}
+
+func TestLoadSanitizesInvalidBulkPowerTimeout(t *testing.T) {
+	configDirectory := useTemporaryConfigDirectory(t)
+	if err := os.WriteFile(
+		filepath.Join(configDirectory, "config.json"),
+		[]byte(`{"bulkPowerTimeoutSeconds":5}`),
+		0o644,
+	); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	cfg := NewConfig()
+	if err := cfg.Load(); err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if got := cfg.GetBulkPowerTimeoutSeconds(); got != DefaultBulkPowerTimeoutSeconds {
+		t.Fatalf("sanitized bulk timeout = %d, want %d", got, DefaultBulkPowerTimeoutSeconds)
 	}
 }
 

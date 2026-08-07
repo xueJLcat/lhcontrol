@@ -32,6 +32,7 @@ if (import.meta.env.DEV && isRuntimeMissing()) {
     Promise.reject(new Error(`${name} is unavailable in the browser development preview`));
   const app: GoNamespace = {
     CheckAllStationStatuses: () => Promise.resolve([]),
+    CancelBulkPower: () => Promise.resolve(undefined),
     GetAPIStatus: () => Promise.resolve({
       running: false,
       address: '',
@@ -40,6 +41,7 @@ if (import.meta.env.DEV && isRuntimeMissing()) {
       configWritable: true
     }),
     GetAutoSleepSettings: () => Promise.resolve({ enabled: false, target: 'steamvr', delaySeconds: 300 }),
+	GetBulkPowerTimeoutSeconds: () => Promise.resolve(120),
 	GetLanguage: () => Promise.resolve(''),
     GetCurrentStationInfo: () => Promise.resolve([]),
     GetScanStatus: () => Promise.resolve({ state: 'completed', found: 0, error: '', warnings: [] }),
@@ -51,6 +53,7 @@ if (import.meta.env.DEV && isRuntimeMissing()) {
     ScanAndFetchStations: () => new Promise((resolve) => setTimeout(() => resolve([]), 400)),
     SetAllStationsPowerDetailed: () => Promise.reject(new Error('SetAllStationsPowerDetailed is unavailable in the browser development preview')),
     SetAutoSleepSettings: unavailable('SetAutoSleepSettings'),
+	SetBulkPowerTimeoutSeconds: unavailable('SetBulkPowerTimeoutSeconds'),
 	SetLanguage: unavailable('SetLanguage'),
     SetStationChannel: unavailable('SetStationChannel'),
     SetStationPower: unavailable('SetStationPower'),

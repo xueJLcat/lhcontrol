@@ -91,6 +91,22 @@ func (a *App) SetLanguage(language string) error {
 
 }
 
+func (a *App) GetBulkPowerTimeoutSeconds() int {
+
+	return a.config.GetBulkPowerTimeoutSeconds()
+
+}
+
+func (a *App) SetBulkPowerTimeoutSeconds(timeoutSeconds int) error {
+
+	err := a.config.SetBulkPowerTimeoutSeconds(timeoutSeconds)
+
+	a.setConfigPersistenceStatus()
+
+	return err
+
+}
+
 // applyAutoSleep (re)starts the auto-sleep watcher goroutine to match the
 
 // given settings. Calling it repeatedly is safe: the previous watcher is
@@ -171,6 +187,10 @@ func (a *App) stopAutoSleep() {
 }
 
 func (a *App) emitAutoSleep(event autoSleepEvent) {
+	if a.autoSleepEventSink != nil {
+		a.autoSleepEventSink(event)
+		return
+	}
 
 	if a.ctx == nil || a.shuttingDown.Load() {
 
@@ -255,7 +275,11 @@ func (a *App) runAutoSleep(ctx context.Context) {
 
 	log.Println("Auto-sleep: scanning for base stations")
 
-	_, scanErr := a.stationManager.ScanAndFetchStationsContext(ctx)
+	scan := a.scanForAutoSleep
+	if scan == nil {
+		scan = a.stationManager.ScanAndFetchStationsContext
+	}
+	_, scanErr := scan(ctx)
 
 	switch {
 
@@ -291,7 +315,15 @@ func (a *App) runAutoSleep(ctx context.Context) {
 
 	}
 
-	if a.shuttingDown.Load() || ctx.Err() != nil {
+	if a.shuttingDown.Load() {
+
+		return
+
+	}
+
+	if ctx.Err() != nil {
+
+		a.emitTerminalAutoSleep(cancelledAutoSleepEvent(nil, "cancelled after scanning and before power commands were sent"))
 
 		return
 
@@ -299,7 +331,11 @@ func (a *App) runAutoSleep(ctx context.Context) {
 
 	log.Println("Auto-sleep: putting all known stations to sleep")
 
-	result, err := a.stationManager.SetAllStationsPowerDetailedContext(ctx, "sleep")
+	setPower := a.setPowerForAutoSleep
+	if setPower == nil {
+		setPower = a.stationManager.SetAllStationsPowerDetailedContext
+	}
+	result, err := setPower(ctx, "sleep")
 
 	switch {
 

@@ -97,6 +97,14 @@ func classifyCachedPower(
 	return cachedPowerActionable
 }
 
+func powerReadSucceeded(err error) bool {
+	if err == nil {
+		return true
+	}
+	var initialErr *bluetooth.InitialReadError
+	return errors.As(err, &initialErr) && initialErr.Power == nil
+}
+
 func (m *Manager) SetStationPower(address, state string) (PowerActionResult, error) {
 	target, err := bluetooth.ParsePowerTarget(state)
 	if err != nil {
@@ -110,8 +118,8 @@ func (m *Manager) SetStationPower(address, state string) (PowerActionResult, err
 		return PowerActionResult{}, ErrShuttingDown
 	}
 	canonicalAddress := stationPtr.Snapshot().Address
-	if result, outcomeErr, handled := m.cachedPowerOutcome(stationPtr, target); handled {
-		return result, outcomeErr
+	if classifyCachedPower(stationPtr.Snapshot(), target, time.Now()) == cachedPowerBooting {
+		return PowerActionResult{}, fmt.Errorf("station is booting; retry after transition: %w", ErrStationTransitioning)
 	}
 	operationContext, cancelOperation := m.newStationOperationContext(m.lifecycleContext)
 	defer cancelOperation()
@@ -119,15 +127,29 @@ func (m *Manager) SetStationPower(address, state string) (PowerActionResult, err
 		return PowerActionResult{}, err
 	}
 	defer m.endStationOperation(canonicalAddress)
-	if result, outcomeErr, handled := m.cachedPowerOutcome(stationPtr, target); handled {
-		return result, outcomeErr
-	}
 	snapshot := stationPtr.Snapshot()
 	if err := m.ensureReady(); err != nil {
 		return PowerActionResult{}, err
 	}
 	if err := operationContext.Err(); err != nil {
 		return PowerActionResult{}, err
+	}
+	if classifyCachedPower(snapshot, target, time.Now()) == cachedPowerAtTarget {
+		var readErr error
+		readErr = runSafely("power cache verification", func() error {
+			readContext, cancelRead := context.WithTimeout(operationContext, m.initialReadTimeout)
+			defer cancelRead()
+			return m.bluetoothOps.fetchInitialPowerState(readContext, stationPtr)
+		})
+		if err := operationContext.Err(); err != nil {
+			return PowerActionResult{}, err
+		}
+		if powerReadSucceeded(readErr) {
+			if result, outcomeErr, handled := m.cachedPowerOutcome(stationPtr, target); handled {
+				return result, outcomeErr
+			}
+		}
+		snapshot = stationPtr.Snapshot()
 	}
 	capabilities := snapshot.Capabilities
 	if !snapshot.CapabilitiesKnown ||
@@ -342,7 +364,12 @@ func (m *Manager) setAllStationsPower(state string) error {
 // Per-device failures are data, not a top-level error, so Wails callers retain
 // successful results when only part of a batch fails.
 func (m *Manager) SetAllStationsPowerDetailed(state string) (BulkPowerResult, error) {
-	return m.SetAllStationsPowerDetailedContext(context.Background(), state)
+	result, err := m.SetAllStationsPowerDetailedContext(context.Background(), state)
+	if (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) &&
+		(result.Cancelled || result.TimedOut) {
+		return result, nil
+	}
+	return result, err
 }
 
 // SetAllStationsPowerDetailedContext applies a bulk power target while
@@ -351,47 +378,71 @@ func (m *Manager) SetAllStationsPowerDetailedContext(ctx context.Context, state 
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	operationContext, cancelOperation := context.WithCancel(ctx)
+	operationContext, cancelOperation := context.WithTimeout(ctx, m.config.BulkPowerTimeout())
 	stopLifecycleCancellation := context.AfterFunc(m.lifecycleContext, cancelOperation)
+	lifecycle := &bulkPowerLifecycle{cancel: cancelOperation, done: make(chan struct{})}
+	m.bulkLifecycleMutex.Lock()
+	if m.bulkLifecycle != nil {
+		m.bulkLifecycleMutex.Unlock()
+		stopLifecycleCancellation()
+		cancelOperation()
+		return BulkPowerResult{}, ErrOperationInProgress
+	}
+	m.bulkLifecycle = lifecycle
+	m.bulkLifecycleMutex.Unlock()
 	defer func() {
 		stopLifecycleCancellation()
 		cancelOperation()
-	}()
-	return m.setAllStationsPowerDetailed(operationContext, state)
-}
-
-func (m *Manager) cachedBulkPowerResult(target bluetooth.PowerState) (BulkPowerResult, bool) {
-	result := BulkPowerResult{Target: target.String(), Results: []BulkPowerStationResult{}}
-	for _, info := range m.GetStationInfo() {
-		item := BulkPowerStationResult{Address: info.Address, Name: info.Name, Station: info}
-		switch classifyCachedPowerInfo(info, target) {
-		case cachedPowerBooting:
-			item.Skipped = true
-			item.Reason = "station is booting"
-		case cachedPowerAtTarget:
-			item.Skipped = true
-			item.Success = true
-			item.Confirmed = true
-			item.Reason = "already at target state"
-		default:
-			return BulkPowerResult{}, false
+		m.bulkLifecycleMutex.Lock()
+		if m.bulkLifecycle == lifecycle {
+			m.bulkLifecycle = nil
+			close(lifecycle.done)
 		}
-		result.Results = append(result.Results, item)
+		m.bulkLifecycleMutex.Unlock()
+	}()
+	result, err := m.setAllStationsPowerDetailed(operationContext, state)
+	if contextErr := operationContext.Err(); contextErr != nil {
+		result.Cancelled = true
+		result.TimedOut = errors.Is(contextErr, context.DeadlineExceeded)
+		reason := "operation cancelled"
+		if result.TimedOut {
+			reason = "bulk operation timed out"
+		} else if m.shuttingDown.Load() {
+			reason = "application is shutting down"
+		}
+		// Cancellation can occur before worker goroutines start (for example
+		// while the adapter is being initialized). Complete every untouched
+		// entry so callers never receive ambiguous zero-value station results.
+		for index := range result.Results {
+			item := &result.Results[index]
+			if !item.Success && !item.Skipped && !item.CommandSent && item.Error == "" {
+				item.Skipped = true
+				item.Reason = reason
+			}
+		}
+		if err == nil {
+			err = contextErr
+		}
 	}
-	return result, true
+	return result, err
 }
 
-func classifyCachedPowerInfo(info StationInfo, target bluetooth.PowerState) cachedPowerDisposition {
-	if !info.PowerFresh {
-		return cachedPowerActionable
+func (m *Manager) CancelBulkPower() error {
+	m.bulkLifecycleMutex.Lock()
+	lifecycle := m.bulkLifecycle
+	if lifecycle != nil {
+		lifecycle.cancel()
 	}
-	if bluetooth.PowerState(info.PowerState) == bluetooth.PowerStateBooting {
-		return cachedPowerBooting
+	m.bulkLifecycleMutex.Unlock()
+	if lifecycle == nil {
+		return nil
 	}
-	if info.PowerStateConfirmed && bluetooth.PowerState(info.PowerState) == target {
-		return cachedPowerAtTarget
+	select {
+	case <-lifecycle.done:
+		return nil
+	case <-m.shutdownCh:
+		return ErrShuttingDown
 	}
-	return cachedPowerActionable
 }
 
 func (m *Manager) setAllStationsPowerDetailed(ctx context.Context, state string) (BulkPowerResult, error) {
@@ -405,9 +456,6 @@ func (m *Manager) setAllStationsPowerDetailed(ctx context.Context, state string)
 	}
 	if err := ctx.Err(); err != nil {
 		return result, err
-	}
-	if cached, complete := m.cachedBulkPowerResult(target); complete {
-		return cached, nil
 	}
 	if err := m.beginBulkGlobalOperationContext(ctx); err != nil {
 		return result, err
@@ -456,11 +504,6 @@ func (m *Manager) setAllStationsPowerDetailed(ctx context.Context, state string)
 		case cachedPowerBooting:
 			stationResult.Skipped = true
 			stationResult.Reason = "station is booting"
-		case cachedPowerAtTarget:
-			stationResult.Skipped = true
-			stationResult.Success = true
-			stationResult.Confirmed = true
-			stationResult.Reason = "already at target state"
 		}
 		result.Results = append(result.Results, stationResult)
 		resultIndex := len(result.Results) - 1
@@ -502,6 +545,8 @@ func (m *Manager) setAllStationsPowerDetailed(ctx context.Context, state string)
 				result.Results[resultIndex].Skipped = true
 				if m.shuttingDown.Load() {
 					result.Results[resultIndex].Reason = "application is shutting down"
+				} else if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+					result.Results[resultIndex].Reason = "bulk operation timed out"
 				} else {
 					result.Results[resultIndex].Reason = "operation cancelled"
 				}
@@ -518,6 +563,8 @@ func (m *Manager) setAllStationsPowerDetailed(ctx context.Context, state string)
 				result.Results[resultIndex].Skipped = true
 				if m.shuttingDown.Load() {
 					result.Results[resultIndex].Reason = "application is shutting down"
+				} else if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+					result.Results[resultIndex].Reason = "bulk operation timed out"
 				} else {
 					result.Results[resultIndex].Reason = "operation cancelled"
 				}
@@ -538,13 +585,21 @@ func (m *Manager) setAllStationsPowerDetailed(ctx context.Context, state string)
 					stationResult.Reason = "station is booting"
 					return nil
 				case cachedPowerAtTarget:
-					cachedSkip = true
-					stationResult.Skipped = true
-					stationResult.Success = true
-					stationResult.Confirmed = true
-					stationResult.Reason = "already at target state"
-					return nil
+					readContext, cancelRead := context.WithTimeout(operationContext, m.initialReadTimeout)
+					readErr := m.bluetoothOps.fetchInitialPowerState(readContext, s)
+					cancelRead()
+					if readErr == nil || powerReadSucceeded(readErr) {
+						if classifyCachedPower(s.Snapshot(), target, time.Now()) == cachedPowerAtTarget {
+							cachedSkip = true
+							stationResult.Skipped = true
+							stationResult.Success = true
+							stationResult.Confirmed = true
+							stationResult.Reason = "already at target state"
+							return nil
+						}
+					}
 				}
+				snapshot = s.Snapshot()
 				capabilities := snapshot.Capabilities
 				var err error
 				discoveryContext, cancelDiscovery := context.WithTimeout(operationContext, m.initialReadTimeout)
@@ -588,10 +643,12 @@ func (m *Manager) setAllStationsPowerDetailed(ctx context.Context, state string)
 					stationResult.Success = true
 					stationResult.Confirmed = false
 					stationResult.Error = workerErr.Error()
-				} else if errors.Is(workerErr, context.Canceled) {
+				} else if errors.Is(workerErr, context.Canceled) || errors.Is(workerErr, context.DeadlineExceeded) {
 					stationResult.Skipped = true
 					if m.shuttingDown.Load() {
 						stationResult.Reason = "application is shutting down"
+					} else if errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(workerErr, context.DeadlineExceeded) {
+						stationResult.Reason = "bulk operation timed out"
 					} else {
 						stationResult.Reason = "operation cancelled"
 					}

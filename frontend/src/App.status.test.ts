@@ -6,6 +6,7 @@ import { pushToast } from './lib/toast';
 
 const api = vi.hoisted(() => ({
   CheckAllStationStatuses: vi.fn(),
+  CancelBulkPower: vi.fn(),
   GetAPIStatus: vi.fn(),
   GetAutoSleepSettings: vi.fn(),
   GetCurrentStationInfo: vi.fn(),

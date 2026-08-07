@@ -6,6 +6,7 @@ import { pushToast } from './lib/toast';
 
 const api = vi.hoisted(() => ({
   CheckAllStationStatuses: vi.fn(),
+  CancelBulkPower: vi.fn(),
   GetAPIStatus: vi.fn(),
   GetAutoSleepSettings: vi.fn(),
   GetCurrentStationInfo: vi.fn(),
@@ -185,6 +186,36 @@ describe('App asynchronous operations', () => {
 
     resolveBulk({ target: 'on', results: [] });
     await waitFor(() => expect(screen.getByRole('button', { name: 'Rename LHB-TEST' })).not.toBeDisabled());
+  });
+
+  it('cancels an active bulk operation and reports its partial result', async () => {
+    let resolveBulk!: (value: unknown) => void;
+    api.SetAllStationsPowerDetailed.mockReturnValue(new Promise((resolve) => {
+      resolveBulk = resolve;
+    }));
+    api.CancelBulkPower.mockResolvedValue(undefined);
+    const station = createStation();
+    render(App);
+    await screen.findByText('LHB-TEST');
+
+    await fireEvent.click(await screen.findByTitle('Turn all known stations on'));
+    const cancel = await screen.findByRole('button', { name: 'Cancel bulk power' });
+    await fireEvent.click(cancel);
+    await waitFor(() => expect(api.CancelBulkPower).toHaveBeenCalledOnce());
+
+    resolveBulk({
+      target: 'on',
+      cancelled: true,
+      timedOut: false,
+      results: [{
+        address: station.address, name: station.name, skipped: true,
+        reason: 'operation cancelled', commandSent: false, success: false,
+        confirmed: false, error: '', station
+      }]
+    });
+    await waitFor(() => expect(pushToast).toHaveBeenCalledWith(
+      expect.stringContaining('Bulk On cancelled'), 'warning'
+    ));
   });
 
   it('disables a third GATT operation until one of two active operations finishes', async () => {

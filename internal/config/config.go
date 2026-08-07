@@ -13,8 +13,11 @@ import (
 )
 
 const (
-	LanguageEnglish           = "en"
-	LanguageSimplifiedChinese = "zh-CN"
+	LanguageEnglish                = "en"
+	LanguageSimplifiedChinese      = "zh-CN"
+	MinBulkPowerTimeoutSeconds     = 30
+	MaxBulkPowerTimeoutSeconds     = 600
+	DefaultBulkPowerTimeoutSeconds = 120
 )
 
 type Config struct {
@@ -22,6 +25,7 @@ type Config struct {
 	RenamedStationsByAddress map[string]string  `json:"renamedStationsByAddress"`
 	AutoSleep                autosleep.Settings `json:"autoSleep"`
 	Language                 string             `json:"language,omitempty"`
+	BulkPowerTimeoutSeconds  int                `json:"bulkPowerTimeoutSeconds"`
 	persistenceBlockedErr    error
 	lastPersistenceErr       error
 	mutex                    sync.RWMutex
@@ -32,6 +36,7 @@ type persistedConfig struct {
 	RenamedStationsByAddress map[string]string   `json:"renamedStationsByAddress,omitempty"`
 	AutoSleep                *autosleep.Settings `json:"autoSleep,omitempty"`
 	Language                 string              `json:"language,omitempty"`
+	BulkPowerTimeoutSeconds  *int                `json:"bulkPowerTimeoutSeconds,omitempty"`
 }
 
 var (
@@ -46,6 +51,7 @@ func NewConfig() *Config {
 		RenamedStations:          make(map[string]string),
 		RenamedStationsByAddress: make(map[string]string),
 		AutoSleep:                autosleep.DefaultSettings(),
+		BulkPowerTimeoutSeconds:  DefaultBulkPowerTimeoutSeconds,
 	}
 }
 
@@ -83,6 +89,7 @@ func (c *Config) Load() error {
 			c.RenamedStationsByAddress = make(map[string]string)
 			c.AutoSleep = autosleep.DefaultSettings()
 			c.Language = ""
+			c.BulkPowerTimeoutSeconds = DefaultBulkPowerTimeoutSeconds
 			c.persistenceBlockedErr = nil
 			c.lastPersistenceErr = nil
 			c.mutex.Unlock()
@@ -116,6 +123,7 @@ func (c *Config) Load() error {
 		c.RenamedStationsByAddress = make(map[string]string)
 		c.AutoSleep = autosleep.DefaultSettings()
 		c.Language = ""
+		c.BulkPowerTimeoutSeconds = DefaultBulkPowerTimeoutSeconds
 		c.persistenceBlockedErr = nil
 		c.lastPersistenceErr = nil
 		c.mutex.Unlock()
@@ -132,10 +140,18 @@ func (c *Config) Load() error {
 	c.RenamedStationsByAddress = loaded.RenamedStationsByAddress
 	c.AutoSleep = sanitizeAutoSleep(loaded.AutoSleep)
 	c.Language = sanitizeLanguage(loaded.Language)
+	c.BulkPowerTimeoutSeconds = sanitizeBulkPowerTimeout(loaded.BulkPowerTimeoutSeconds)
 	c.persistenceBlockedErr = nil
 	c.lastPersistenceErr = nil
 	c.mutex.Unlock()
 	return nil
+}
+
+func sanitizeBulkPowerTimeout(timeoutSeconds *int) int {
+	if timeoutSeconds == nil || *timeoutSeconds < MinBulkPowerTimeoutSeconds || *timeoutSeconds > MaxBulkPowerTimeoutSeconds {
+		return DefaultBulkPowerTimeoutSeconds
+	}
+	return *timeoutSeconds
 }
 
 func sanitizeLanguage(language string) string {
@@ -199,6 +215,8 @@ func (c *Config) saveLocked() error {
 		RenamedStationsByAddress: make(map[string]string, len(c.RenamedStationsByAddress)),
 		Language:                 c.Language,
 	}
+	bulkPowerTimeoutSeconds := c.BulkPowerTimeoutSeconds
+	snapshot.BulkPowerTimeoutSeconds = &bulkPowerTimeoutSeconds
 	if c.AutoSleep != (autosleep.Settings{}) {
 		autoSleep := c.AutoSleep
 		snapshot.AutoSleep = &autoSleep
@@ -429,6 +447,39 @@ func (c *Config) SetLanguage(language string) error {
 	c.Language = language
 	if err := c.saveLocked(); err != nil {
 		c.Language = previous
+		return err
+	}
+	return nil
+}
+
+func (c *Config) GetBulkPowerTimeoutSeconds() int {
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	if c.BulkPowerTimeoutSeconds < MinBulkPowerTimeoutSeconds || c.BulkPowerTimeoutSeconds > MaxBulkPowerTimeoutSeconds {
+		return DefaultBulkPowerTimeoutSeconds
+	}
+	return c.BulkPowerTimeoutSeconds
+}
+
+func (c *Config) BulkPowerTimeout() time.Duration {
+	return time.Duration(c.GetBulkPowerTimeoutSeconds()) * time.Second
+}
+
+func (c *Config) SetBulkPowerTimeoutSeconds(timeoutSeconds int) error {
+	if timeoutSeconds < MinBulkPowerTimeoutSeconds || timeoutSeconds > MaxBulkPowerTimeoutSeconds {
+		return fmt.Errorf(
+			"bulk power timeout must be between %d and %d seconds, got %d",
+			MinBulkPowerTimeoutSeconds,
+			MaxBulkPowerTimeoutSeconds,
+			timeoutSeconds,
+		)
+	}
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	previous := c.BulkPowerTimeoutSeconds
+	c.BulkPowerTimeoutSeconds = timeoutSeconds
+	if err := c.saveLocked(); err != nil {
+		c.BulkPowerTimeoutSeconds = previous
 		return err
 	}
 	return nil

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { cubicOut } from 'svelte/easing';
   import { fly } from 'svelte/transition';
-  import { Bluetooth, Languages, LoaderCircle, MoonStar, RefreshCw, X } from 'lucide-svelte';
+  import { Bluetooth, Languages, LoaderCircle, MoonStar, RefreshCw, Timer, X } from 'lucide-svelte';
   import { autosleep } from '../../../wailsjs/go/models';
   import type { bluetooth } from '../../../wailsjs/go/models';
   import { focusTrap } from '../actions';
@@ -10,6 +10,8 @@
 
   const MIN_DELAY_MINUTES = 1;
   const MAX_DELAY_MINUTES = 120;
+  const MIN_BULK_TIMEOUT_SECONDS = 30;
+  const MAX_BULK_TIMEOUT_SECONDS = 600;
 
   let {
     adapters,
@@ -18,6 +20,9 @@
     autoSleep,
     autoSleepError = null,
     autoSleepBusy = false,
+    bulkPowerTimeoutSeconds,
+    bulkPowerTimeoutError = null,
+    bulkPowerTimeoutBusy = false,
     languagePreference = 'system',
     languageBusy = false,
     inactive = false,
@@ -25,6 +30,8 @@
     onRefresh,
     onAutoSleepChange,
     onAutoSleepRetry,
+    onBulkPowerTimeoutChange,
+    onBulkPowerTimeoutRetry,
     onLanguageChange = () => {}
   }: {
     adapters: bluetooth.AdapterInfo[];
@@ -33,6 +40,9 @@
     autoSleep: autosleep.Settings | null;
     autoSleepError?: string | null;
     autoSleepBusy?: boolean;
+    bulkPowerTimeoutSeconds: number | null;
+    bulkPowerTimeoutError?: string | null;
+    bulkPowerTimeoutBusy?: boolean;
     languagePreference?: LanguagePreference;
     languageBusy?: boolean;
     inactive?: boolean;
@@ -40,6 +50,8 @@
     onRefresh: () => void;
     onAutoSleepChange: (settings: autosleep.Settings) => void;
     onAutoSleepRetry?: () => void;
+    onBulkPowerTimeoutChange: (timeoutSeconds: number) => void;
+    onBulkPowerTimeoutRetry?: () => void;
     onLanguageChange?: (language: LanguagePreference) => void;
   } = $props();
 
@@ -48,6 +60,11 @@
   let delayDraft = $state('');
   $effect(() => {
     if (autoSleep) delayDraft = String(Math.round(autoSleep.delaySeconds / 60));
+  });
+
+  let bulkTimeoutDraft = $state('');
+  $effect(() => {
+    if (bulkPowerTimeoutSeconds !== null) bulkTimeoutDraft = String(bulkPowerTimeoutSeconds);
   });
 
   function commitDelay() {
@@ -61,6 +78,16 @@
     if (delaySeconds !== autoSleep.delaySeconds) {
       onAutoSleepChange(autosleep.Settings.createFrom({ ...autoSleep, delaySeconds }));
     }
+  }
+
+  function commitBulkTimeout() {
+    if (bulkPowerTimeoutSeconds === null) return;
+    const parsed = Number(bulkTimeoutDraft);
+    const seconds = Number.isFinite(parsed)
+      ? Math.min(MAX_BULK_TIMEOUT_SECONDS, Math.max(MIN_BULK_TIMEOUT_SECONDS, Math.round(parsed)))
+      : bulkPowerTimeoutSeconds;
+    bulkTimeoutDraft = String(seconds);
+    if (seconds !== bulkPowerTimeoutSeconds) onBulkPowerTimeoutChange(seconds);
   }
 </script>
 
@@ -134,6 +161,36 @@
       <p class="hint">
         {t('Windows controls which radio handles BLE discovery and connections. The application cannot route a Lighthouse operation through one specific adapter.')}
       </p>
+    {/if}
+  </section>
+
+  <section>
+    <h4><Timer size={12} /> {t('Operation safety')}</h4>
+    {#if bulkPowerTimeoutSeconds !== null}
+      <div class="delay-row">
+        <label for="bulk-power-timeout">{t('Bulk power timeout')}</label>
+        <span class="delay-input">
+          <input
+            id="bulk-power-timeout"
+            type="number"
+            min={MIN_BULK_TIMEOUT_SECONDS}
+            max={MAX_BULK_TIMEOUT_SECONDS}
+            step="1"
+            bind:value={bulkTimeoutDraft}
+            onchange={commitBulkTimeout}
+            disabled={bulkPowerTimeoutBusy}
+          />
+          {t('seconds')}
+        </span>
+      </div>
+      <p class="hint">{t('A bulk power action is stopped when this total time limit is reached. Allowed range: 30–600 seconds.')}</p>
+    {:else if bulkPowerTimeoutError}
+      <div class="alert danger">{bulkPowerTimeoutError}</div>
+      <div class="drawer-actions">
+        <button class="btn" onclick={() => onBulkPowerTimeoutRetry?.()}><RefreshCw size={15} /> {t('Retry')}</button>
+      </div>
+    {:else}
+      <p class="hint loading"><LoaderCircle class="spin" size={14} /> {t('Loading operation safety settings...')}</p>
     {/if}
   </section>
 

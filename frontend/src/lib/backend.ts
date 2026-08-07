@@ -18,12 +18,20 @@ export function CheckAllStationStatuses(): Promise<station.StationInfo[]> {
   return call(() => bindings.CheckAllStationStatuses());
 }
 
+export function CancelBulkPower(): Promise<void> {
+  return call(() => bindings.CancelBulkPower());
+}
+
 export function GetAPIStatus(): Promise<main.APIStatus> {
   return call(() => bindings.GetAPIStatus());
 }
 
 export function GetAutoSleepSettings(): Promise<autosleep.Settings> {
   return call(() => bindings.GetAutoSleepSettings());
+}
+
+export function GetBulkPowerTimeoutSeconds(): Promise<number> {
+  return call(() => bindings.GetBulkPowerTimeoutSeconds());
 }
 
 export function GetLanguage(): Promise<string> {
@@ -68,6 +76,10 @@ export function SetAllStationsPowerDetailed(target: PowerTarget): Promise<statio
 
 export function SetAutoSleepSettings(settings: autosleep.Settings): Promise<void> {
   return call(() => bindings.SetAutoSleepSettings(settings));
+}
+
+export function SetBulkPowerTimeoutSeconds(timeoutSeconds: number): Promise<void> {
+  return call(() => bindings.SetBulkPowerTimeoutSeconds(timeoutSeconds));
 }
 
 export function SetLanguage(language: string): Promise<void> {

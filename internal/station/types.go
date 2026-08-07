@@ -81,8 +81,10 @@ type BulkPowerStationResult struct {
 	Station     StationInfo `json:"station"`
 }
 type BulkPowerResult struct {
-	Target  string                   `json:"target"`
-	Results []BulkPowerStationResult `json:"results"`
+	Target    string                   `json:"target"`
+	Results   []BulkPowerStationResult `json:"results"`
+	Cancelled bool                     `json:"cancelled"`
+	TimedOut  bool                     `json:"timedOut"`
 }
 type ChannelChangeResult struct {
 	Address           string      `json:"address"`
@@ -127,6 +129,11 @@ type scanLifecycle struct {
 	done        chan struct{}
 	startedDone chan struct{}
 }
+
+type bulkPowerLifecycle struct {
+	cancel context.CancelFunc
+	done   chan struct{}
+}
 type deviceOperationKind uint8
 
 const (
@@ -166,6 +173,8 @@ type Manager struct {
 	statusOperationDone     chan struct{}
 	cancelStatusOperation   context.CancelFunc
 	channelOperationMutex   sync.Mutex
+	bulkLifecycleMutex      sync.Mutex
+	bulkLifecycle           *bulkPowerLifecycle
 	deviceOperationMutex    sync.Mutex
 	activeDeviceOperations  map[string]activeDeviceOperation
 	deviceOperationSlots    chan struct{}

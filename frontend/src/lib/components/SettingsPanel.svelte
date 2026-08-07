@@ -2,8 +2,10 @@
   import { onMount } from 'svelte';
   import {
     GetAutoSleepSettings,
+    GetBulkPowerTimeoutSeconds,
     ListBluetoothAdapters,
     SetAutoSleepSettings,
+    SetBulkPowerTimeoutSeconds,
     SetLanguage
   } from '../backend';
   import { autosleep as autosleepModels, bluetooth as bluetoothModels } from '../../../wailsjs/go/models';
@@ -21,6 +23,9 @@
   let autoSleepSettings = $state<autosleepModels.Settings | null>(null);
   let autoSleepError = $state<string | null>(null);
   let autoSleepBusy = $state(false);
+  let bulkPowerTimeoutSeconds = $state<number | null>(null);
+  let bulkPowerTimeoutError = $state<string | null>(null);
+  let bulkPowerTimeoutBusy = $state(false);
   let languageBusy = $state(false);
 
   // The panel only mounts while the settings drawer is open, so loading here
@@ -28,6 +33,7 @@
   onMount(() => {
     void loadAdapterSettings();
     void loadAutoSleepSettings();
+    void loadBulkPowerTimeout();
   });
 
   async function loadAdapterSettings() {
@@ -69,6 +75,32 @@
     }
   }
 
+  async function loadBulkPowerTimeout() {
+    bulkPowerTimeoutError = null;
+    try {
+      bulkPowerTimeoutSeconds = await GetBulkPowerTimeoutSeconds();
+    } catch (error) {
+      bulkPowerTimeoutSeconds = null;
+      bulkPowerTimeoutError = String(error);
+      pushToast(withDetail('Bulk power timeout could not be loaded', error));
+    }
+  }
+
+  async function changeBulkPowerTimeout(next: number) {
+    if (bulkPowerTimeoutBusy || bulkPowerTimeoutSeconds === null) return;
+    const previous = bulkPowerTimeoutSeconds;
+    bulkPowerTimeoutSeconds = next;
+    bulkPowerTimeoutBusy = true;
+    try {
+      await SetBulkPowerTimeoutSeconds(next);
+    } catch (error) {
+      bulkPowerTimeoutSeconds = previous;
+      pushToast(withDetail('Bulk power timeout could not be saved', error));
+    } finally {
+      bulkPowerTimeoutBusy = false;
+    }
+  }
+
   async function changeLanguage(next: LanguagePreference) {
     if (languageBusy || next === languagePreference()) return;
     const previous = languagePreference();
@@ -94,6 +126,9 @@
   autoSleep={autoSleepSettings}
   autoSleepError={autoSleepError}
   {autoSleepBusy}
+  {bulkPowerTimeoutSeconds}
+  {bulkPowerTimeoutError}
+  {bulkPowerTimeoutBusy}
   languagePreference={languagePreference()}
   {languageBusy}
   {inactive}
@@ -101,5 +136,7 @@
   onRefresh={loadAdapterSettings}
   onAutoSleepChange={changeAutoSleep}
   onAutoSleepRetry={loadAutoSleepSettings}
+  onBulkPowerTimeoutChange={changeBulkPowerTimeout}
+  onBulkPowerTimeoutRetry={loadBulkPowerTimeout}
   onLanguageChange={changeLanguage}
 />

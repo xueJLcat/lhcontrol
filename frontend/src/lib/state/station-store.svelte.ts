@@ -45,6 +45,7 @@ export class StationStore {
   powerFeedbackMap = $state<Record<string, PowerFeedback | undefined>>({});
   globalOperation = $state<GlobalOperation>('idle');
   bulkTarget = $state<PowerTarget | null>(null);
+  cancellingBulk = $state(false);
   editingAddress = $state<string | null>(null);
   channelError = $state('');
   channelWarning = $state(false);
@@ -193,6 +194,8 @@ export class StationStore {
     this.channelWarning = false;
     if (this.stoppingScan) {
       this.statusMessage = t('Stopping scan...');
+    } else if (this.cancellingBulk) {
+      this.statusMessage = t('Stopping bulk power...');
     } else if (this.globalOperation === 'scanning') {
       this.statusMessage = t('Scanning for base stations...');
     } else if (this.externalScanning) {
@@ -461,6 +464,10 @@ export class StationStore {
 
   runBulkPower(state: PowerTarget) {
     return this.actions.runBulkPower(state);
+  }
+
+  cancelBulkPower() {
+    return this.actions.cancelBulkPower();
   }
 
   startRename(station: StationInfo) {

@@ -246,6 +246,8 @@ export namespace station {
 	export class BulkPowerResult {
 	    target: string;
 	    results: BulkPowerStationResult[];
+	    cancelled: boolean;
+	    timedOut: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new BulkPowerResult(source);
@@ -255,6 +257,8 @@ export namespace station {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.target = source["target"];
 	        this.results = this.convertValues(source["results"], BulkPowerStationResult);
+	        this.cancelled = source["cancelled"];
+	        this.timedOut = source["timedOut"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {

@@ -42,11 +42,15 @@ function defaultProps(overrides: Record<string, unknown> = {}) {
     loadError: null,
     autoSleep: autoSleep(),
     autoSleepBusy: false,
+    bulkPowerTimeoutSeconds: 120,
+    bulkPowerTimeoutBusy: false,
     inactive: false,
     onClose: vi.fn(),
     onRefresh: vi.fn(),
     onAutoSleepChange: vi.fn(),
     onAutoSleepRetry: vi.fn(),
+    onBulkPowerTimeoutChange: vi.fn(),
+    onBulkPowerTimeoutRetry: vi.fn(),
     ...overrides
   };
 }
@@ -93,6 +97,17 @@ describe('SettingsDrawer', () => {
     expect(hiddenDrawer).toHaveProperty('inert', true);
     expect(hiddenDrawer).toHaveAttribute('aria-hidden', 'true');
     expect(hiddenDrawer).not.toHaveAttribute('aria-modal');
+  });
+
+  it('clamps and commits the bulk operation timeout in seconds', async () => {
+    const props = defaultProps();
+    render(SettingsDrawer, { props });
+    const input = screen.getByLabelText('Bulk power timeout') as HTMLInputElement;
+    expect(input.value).toBe('120');
+    await fireEvent.input(input, { target: { value: '999' } });
+    await fireEvent.change(input);
+    expect(props.onBulkPowerTimeoutChange).toHaveBeenCalledWith(600);
+    expect(input.value).toBe('600');
   });
 });
 

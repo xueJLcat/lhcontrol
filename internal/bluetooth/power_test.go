@@ -372,12 +372,15 @@ func TestSetPowerStateContextRejectsCancelledContext(t *testing.T) {
 	}
 }
 
-func TestSleepFinalWritePreservesOperationDeadline(t *testing.T) {
+func TestSleepFinalWriteUsesIndependentCleanupDeadline(t *testing.T) {
+	previousTimeout := finalSleepWriteTimeout
+	finalSleepWriteTimeout = 100 * time.Millisecond
+	defer func() { finalSleepWriteTimeout = previousTimeout }()
 	power := &sleepFinalBlockingCharacteristic{fakeCharacteristic: &fakeCharacteristic{
 		properties: characteristicPropertyWriteWithoutResponse,
 	}}
 	station := connectedFakeStation(power, nil, nil, Capabilities{PowerWrite: true})
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
 	defer cancel()
 
 	start := time.Now()
@@ -388,8 +391,8 @@ func TestSleepFinalWritePreservesOperationDeadline(t *testing.T) {
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("sleep final write error = %v, want context deadline", err)
 	}
-	if elapsed := time.Since(start); elapsed > time.Second {
-		t.Fatalf("sleep final write exceeded the parent deadline: %v", elapsed)
+	if elapsed := time.Since(start); elapsed < 100*time.Millisecond || elapsed > time.Second {
+		t.Fatalf("sleep final cleanup duration = %v, want an independent bounded attempt", elapsed)
 	}
 	if power.contextWrites != 2 {
 		t.Fatalf("context writes = %d, want prepare plus final sleep", power.contextWrites)

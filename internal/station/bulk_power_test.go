@@ -27,6 +27,9 @@ func TestBulkPowerIncludesAbsentKnownStations(t *testing.T) {
 		Capabilities:      internalbluetooth.Capabilities{PowerWrite: true},
 		CapabilitiesKnown: true,
 	}
+	manager.bluetoothOps.fetchInitialPowerState = func(context.Context, *internalbluetooth.BaseStation) error {
+		return nil
+	}
 
 	result, err := manager.SetAllStationsPowerDetailed("on")
 	if err != nil {
@@ -38,18 +41,8 @@ func TestBulkPowerIncludesAbsentKnownStations(t *testing.T) {
 	}
 }
 
-func TestBulkPowerPureSkipsDoNotRequireBluetoothReadiness(t *testing.T) {
+func TestBulkPowerSkipsOnlyAfterFreshVerification(t *testing.T) {
 	manager := NewManager(config.NewConfig())
-	if err := manager.beginStationOperation("busy"); err != nil {
-		t.Fatalf("beginStationOperation() error = %v", err)
-	}
-	defer manager.endStationOperation("busy")
-	manager.initializeErr = errors.New("adapter unavailable")
-	manager.nextInitializeAt = time.Now().Add(time.Hour)
-	manager.initializeBluetooth = func() error {
-		t.Fatal("Bluetooth initialization was attempted for a pure-skip batch")
-		return nil
-	}
 	manager.stations["11:22:33:44:55:61"] = &internalbluetooth.BaseStation{
 		Name:            "LHB-ALREADY",
 		Address:         mustAddress(t, "11:22:33:44:55:61"),
@@ -67,8 +60,13 @@ func TestBulkPowerPureSkipsDoNotRequireBluetoothReadiness(t *testing.T) {
 		LastPowerReadAt: time.Now(),
 	}
 	manager.bluetoothOps.setPowerState = func(context.Context, *internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
-		t.Fatal("power write was attempted for a pure-skip batch")
+		t.Fatal("power write was attempted after a fresh target-state verification")
 		return internalbluetooth.PowerControlResult{}, nil
+	}
+	var reads atomic.Int32
+	manager.bluetoothOps.fetchInitialPowerState = func(context.Context, *internalbluetooth.BaseStation) error {
+		reads.Add(1)
+		return nil
 	}
 
 	result, err := manager.SetAllStationsPowerDetailed("on")
@@ -79,7 +77,46 @@ func TestBulkPowerPureSkipsDoNotRequireBluetoothReadiness(t *testing.T) {
 		!result.Results[0].Skipped || !result.Results[0].Success || !result.Results[0].Confirmed ||
 		!result.Results[1].Skipped || result.Results[1].Success ||
 		result.Results[1].Reason != "station is booting" {
-		t.Fatalf("pure-skip batch result = %+v", result.Results)
+		t.Fatalf("verified-skip batch result = %+v", result.Results)
+	}
+	if reads.Load() != 1 {
+		t.Fatalf("fresh verification reads = %d, want 1", reads.Load())
+	}
+}
+
+func TestBulkPowerDoesNotTrustStaleTargetCacheAfterLiveRead(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	address := "11:22:33:44:55:65"
+	station := &internalbluetooth.BaseStation{
+		Name:              "LHB-EXTERNAL-CHANGE",
+		Address:           mustAddress(t, address),
+		Present:           true,
+		PowerState:        internalbluetooth.PowerStateOn,
+		RawPowerState:     0x0B,
+		LastPowerReadAt:   time.Now(),
+		Capabilities:      internalbluetooth.Capabilities{PowerWrite: true},
+		CapabilitiesKnown: true,
+	}
+	manager.stations[address] = station
+	manager.bluetoothOps.fetchInitialPowerState = func(context.Context, *internalbluetooth.BaseStation) error {
+		station.PowerState = internalbluetooth.PowerStateSleep
+		station.RawPowerState = 0x00
+		station.LastPowerReadAt = time.Now()
+		return nil
+	}
+	var writes atomic.Int32
+	manager.bluetoothOps.setPowerState = func(context.Context, *internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
+		writes.Add(1)
+		return internalbluetooth.PowerControlResult{State: internalbluetooth.PowerStateOn, Confirmed: true}, nil
+	}
+
+	result, err := manager.SetAllStationsPowerDetailed("on")
+	if err != nil {
+		t.Fatalf("SetAllStationsPowerDetailed() error = %v", err)
+	}
+	if writes.Load() != 1 || len(result.Results) != 1 || result.Results[0].Skipped ||
+		!result.Results[0].CommandSent || !result.Results[0].Confirmed {
+		t.Fatalf("bulk result = %+v, writes = %d; want a confirmed command after live state changed", result, writes.Load())
 	}
 }
 
@@ -492,6 +529,9 @@ func TestBulkPowerRechecksQueuedStationStateBeforeWrite(t *testing.T) {
 				}
 				return internalbluetooth.PowerControlResult{Confirmed: true}, nil
 			}
+			manager.bluetoothOps.fetchInitialPowerState = func(context.Context, *internalbluetooth.BaseStation) error {
+				return nil
+			}
 
 			type outcome struct {
 				result BulkPowerResult
@@ -654,5 +694,69 @@ func TestBulkPowerContextCancellationPreservesPossiblySentResult(t *testing.T) {
 	if len(result.result.Results) != 1 || !result.result.Results[0].CommandSent ||
 		!result.result.Results[0].Success || result.result.Results[0].Confirmed {
 		t.Fatalf("possibly-sent cancellation result = %+v", result.result.Results)
+	}
+}
+
+func TestCancelBulkPowerStopsActiveOperation(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	address := "11:22:33:44:AA:04"
+	manager.stations[address] = &internalbluetooth.BaseStation{
+		Name: "LHB-CANCEL", Address: mustAddress(t, address), Present: true,
+		Capabilities: internalbluetooth.Capabilities{PowerWrite: true}, CapabilitiesKnown: true,
+	}
+	started := make(chan struct{})
+	manager.bluetoothOps.setPowerState = func(ctx context.Context, _ *internalbluetooth.BaseStation, _ internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
+		close(started)
+		<-ctx.Done()
+		return internalbluetooth.PowerControlResult{}, ctx.Err()
+	}
+
+	type outcome struct {
+		result BulkPowerResult
+		err    error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		result, err := manager.SetAllStationsPowerDetailed("on")
+		done <- outcome{result: result, err: err}
+	}()
+	<-started
+	if err := manager.CancelBulkPower(); err != nil {
+		t.Fatalf("CancelBulkPower() error = %v", err)
+	}
+
+	actual := <-done
+	if actual.err != nil || !actual.result.Cancelled || actual.result.TimedOut {
+		t.Fatalf("cancelled bulk result = %+v, error = %v", actual.result, actual.err)
+	}
+	if len(actual.result.Results) != 1 || !actual.result.Results[0].Skipped ||
+		actual.result.Results[0].Reason != "operation cancelled" {
+		t.Fatalf("cancelled station result = %+v", actual.result.Results)
+	}
+}
+
+func TestBulkPowerReportsCallerDeadline(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	address := "11:22:33:44:AA:05"
+	manager.stations[address] = &internalbluetooth.BaseStation{
+		Name: "LHB-TIMEOUT", Address: mustAddress(t, address), Present: true,
+		Capabilities: internalbluetooth.Capabilities{PowerWrite: true}, CapabilitiesKnown: true,
+	}
+	manager.bluetoothOps.setPowerState = func(ctx context.Context, _ *internalbluetooth.BaseStation, _ internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
+		<-ctx.Done()
+		return internalbluetooth.PowerControlResult{}, ctx.Err()
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+
+	result, err := manager.SetAllStationsPowerDetailedContext(ctx, "on")
+	if !errors.Is(err, context.DeadlineExceeded) || !result.Cancelled || !result.TimedOut {
+		t.Fatalf("timed-out bulk result = %+v, error = %v", result, err)
+	}
+	if len(result.Results) != 1 || !result.Results[0].Skipped ||
+		result.Results[0].Reason != "bulk operation timed out" {
+		t.Fatalf("timed-out station result = %+v", result.Results)
 	}
 }

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const backend = vi.hoisted(() => ({
   CheckAllStationStatuses: vi.fn(),
+  CancelBulkPower: vi.fn(),
   GetAPIStatus: vi.fn(),
   GetCurrentStationInfo: vi.fn(),
   GetScanStatus: vi.fn(),

@@ -1,4 +1,5 @@
 import {
+  CancelBulkPower,
   GetCurrentStationInfo,
   IdentifyStation,
   RefreshStationCapabilities,
@@ -30,6 +31,7 @@ export interface StationActionHost {
   powerTargetByAddress: Record<string, PowerTarget | undefined>;
   globalOperation: GlobalOperation;
   bulkTarget: PowerTarget | null;
+  cancellingBulk: boolean;
   editingAddress: string | null;
   channelError: string;
   channelWarning: boolean;
@@ -185,6 +187,7 @@ export class StationActionController {
 
   async runBulkPower(state: PowerTarget) {
     this.host.globalOperation = 'bulk-power';
+    this.host.cancellingBulk = false;
     const statusOperation = this.host.gates.beginStatusOperation();
     this.host.bulkTarget = state;
     const targetLabel = powerTargetLabel(state);
@@ -214,11 +217,20 @@ export class StationActionController {
       }
       const summary = summarizeBulkResult(result.results);
       if (!this.host.gates.canCommitStatus(statusOperation)) return;
-      this.host.statusMessage = formatBulkResult(targetLabel, summary);
-      const toastKind = summary.failed.length ? 'error'
-        : summary.unconfirmed || summary.skipped ? 'warning'
-          : 'success';
-      pushToast(`Bulk ${targetLabel}: ${formatBulkResult(targetLabel, summary)}`, toastKind);
+      const summaryText = formatBulkResult(targetLabel, summary);
+      this.host.statusMessage = result.timedOut
+        ? `${t('Bulk {target} timed out', { target: targetLabel })}: ${summaryText}`
+        : result.cancelled
+          ? `${t('Bulk {target} cancelled', { target: targetLabel })}: ${summaryText}`
+          : summaryText;
+      const toastKind = result.timedOut || result.cancelled ? 'warning'
+        : summary.failed.length ? 'error'
+          : summary.unconfirmed || summary.skipped ? 'warning'
+            : 'success';
+      const toastMessage = result.timedOut || result.cancelled
+        ? this.host.statusMessage
+        : `Bulk ${targetLabel}: ${summaryText}`;
+      pushToast(toastMessage, toastKind);
     } catch (error) {
       if (!this.host.gates.canCommitOperation(operationEpoch)) return;
       await this.fetchLatestList();
@@ -231,7 +243,24 @@ export class StationActionController {
       if (!this.host.disposed) {
         if (this.host.globalOperation === 'bulk-power') this.host.globalOperation = 'idle';
         this.host.bulkTarget = null;
+        this.host.cancellingBulk = false;
       }
+    }
+  }
+
+  async cancelBulkPower() {
+    if (this.host.globalOperation !== 'bulk-power' || this.host.cancellingBulk) return;
+    this.host.cancellingBulk = true;
+    this.host.statusMessage = t('Stopping bulk power...');
+    try {
+      await CancelBulkPower();
+    } catch (error) {
+      if (!this.host.disposed) {
+        this.host.statusMessage = `${t('Cancel bulk power')}: ${String(error)}`;
+        pushToast(this.host.statusMessage);
+      }
+    } finally {
+      if (!this.host.disposed) this.host.cancellingBulk = false;
     }
   }
 

@@ -53,6 +53,9 @@ func TestSinglePowerOperationHasHardTimeoutAndReleasesOperation(t *testing.T) {
 
 func TestSetAllStationsPowerSkipsIneligibleStations(t *testing.T) {
 	manager := NewManager(config.NewConfig())
+	manager.bluetoothOps.fetchInitialPowerState = func(context.Context, *internalbluetooth.BaseStation) error {
+		return nil
+	}
 	manager.stations["already-on"] = &internalbluetooth.BaseStation{
 		Name: "LHB-ON", Present: true, PowerState: internalbluetooth.PowerStateOn, RawPowerState: 0x0B,
 		Capabilities: internalbluetooth.Capabilities{PowerWrite: true}, CapabilitiesKnown: true, LastPowerReadAt: time.Now(),
@@ -270,20 +273,6 @@ func TestSinglePowerConfirmationUnsupportedReadPreservesCommandSent(t *testing.T
 
 func TestSinglePowerAlreadyAtConfirmedTargetIsNoOp(t *testing.T) {
 	manager := NewManager(config.NewConfig())
-	if err := manager.beginStationOperation("busy-1"); err != nil {
-		t.Fatalf("beginStationOperation(busy-1) error = %v", err)
-	}
-	defer manager.endStationOperation("busy-1")
-	if err := manager.beginStationOperation("busy-2"); err != nil {
-		t.Fatalf("beginStationOperation(busy-2) error = %v", err)
-	}
-	defer manager.endStationOperation("busy-2")
-	manager.initializeErr = errors.New("adapter unavailable")
-	manager.nextInitializeAt = time.Now().Add(time.Hour)
-	manager.initializeBluetooth = func() error {
-		t.Fatal("Bluetooth initialization was attempted for a confirmed no-op")
-		return nil
-	}
 	address := "11:22:33:44:55:78"
 	manager.stations[address] = &internalbluetooth.BaseStation{
 		Name:              "LHB-ALREADY-ON",
@@ -306,6 +295,11 @@ func TestSinglePowerAlreadyAtConfirmedTargetIsNoOp(t *testing.T) {
 		t.Fatal("power write was attempted for a confirmed no-op")
 		return internalbluetooth.PowerControlResult{}, nil
 	}
+	var reads atomic.Int32
+	manager.bluetoothOps.fetchInitialPowerState = func(context.Context, *internalbluetooth.BaseStation) error {
+		reads.Add(1)
+		return nil
+	}
 
 	result, err := manager.SetStationPower(address, "on")
 	if err != nil {
@@ -316,6 +310,44 @@ func TestSinglePowerAlreadyAtConfirmedTargetIsNoOp(t *testing.T) {
 	}
 	if !result.Skipped || result.Reason != "already at target state" {
 		t.Fatalf("no-op power result = %+v, want skipped with reason", result)
+	}
+	if reads.Load() != 1 {
+		t.Fatalf("fresh verification reads = %d, want 1", reads.Load())
+	}
+}
+
+func TestSinglePowerDoesNotTrustStaleTargetCacheAfterLiveRead(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	address := "11:22:33:44:55:7A"
+	station := &internalbluetooth.BaseStation{
+		Name:              "LHB-EXTERNAL-CHANGE",
+		Address:           mustAddress(t, address),
+		Present:           true,
+		PowerState:        internalbluetooth.PowerStateOn,
+		RawPowerState:     0x0B,
+		LastPowerReadAt:   time.Now(),
+		Capabilities:      internalbluetooth.Capabilities{PowerWrite: true},
+		CapabilitiesKnown: true,
+	}
+	manager.stations[address] = station
+	manager.bluetoothOps.fetchInitialPowerState = func(context.Context, *internalbluetooth.BaseStation) error {
+		station.PowerState = internalbluetooth.PowerStateSleep
+		station.RawPowerState = 0x00
+		station.LastPowerReadAt = time.Now()
+		return nil
+	}
+	var writes atomic.Int32
+	manager.bluetoothOps.setPowerState = func(context.Context, *internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
+		writes.Add(1)
+		return internalbluetooth.PowerControlResult{State: internalbluetooth.PowerStateOn, Confirmed: true}, nil
+	}
+
+	result, err := manager.SetStationPower(address, "on")
+	if err != nil {
+		t.Fatalf("SetStationPower() error = %v", err)
+	}
+	if writes.Load() != 1 || result.Skipped || !result.CommandSent || !result.Confirmed {
+		t.Fatalf("power result = %+v, writes = %d; want a confirmed command after live state changed", result, writes.Load())
 	}
 }
 

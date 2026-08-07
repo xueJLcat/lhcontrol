@@ -143,6 +143,7 @@
   <AppHeader
     scanning={store.scanRunning}
     isBulkLoading={store.isBulkLoading}
+    cancellingBulk={store.cancellingBulk}
     scanLocked={store.scanLocked}
     bulkLocked={store.bulkLocked}
     bulkTarget={store.bulkTarget}
@@ -162,6 +163,7 @@
     onStop={() => void store.stopScan()}
     stopping={store.stoppingScan}
     onBulkPower={(state) => store.requestBulkPower(state)}
+    onCancelBulk={() => void store.cancelBulkPower()}
     onOpenSettings={openSettings}
   />
 
