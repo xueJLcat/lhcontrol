@@ -31,6 +31,7 @@ type App struct {
 	apiLifecycleMutex         sync.Mutex
 	apiCancel                 context.CancelFunc
 	apiWG                     sync.WaitGroup
+	apiLifecycleGate          sync.Mutex
 	listen                    func(string, string) (net.Listener, error)
 	serveListener             func(net.Listener) error
 	apiRetryDelay             time.Duration
@@ -89,16 +90,22 @@ func (a *App) startup(ctx context.Context) {
 	log.Println("Application startup initiated.")
 	log.Println("-----------------------------------------")
 
-	if err := a.stationManager.Initialize(); err != nil {
-		log.Printf("Error initializing Bluetooth: %v", err)
-	}
-
+	// Load configuration before initializing Bluetooth so the very first
+	// adapter-initialization retry cooldown honors the persisted
+	// bluetoothInitRetrySeconds instead of the built-in default.
 	configLoadErr := a.config.Load()
 	a.setConfigLoadStatus(configLoadErr)
 	if configLoadErr != nil {
 		log.Printf("Error loading config: %v", configLoadErr)
 	}
 
+	a.applyBluetoothTiming()
+
+	if err := a.stationManager.Initialize(); err != nil {
+		log.Printf("Error initializing Bluetooth: %v", err)
+	}
+
+	a.setAPIAddress(a.config.GetAPIListenAddress())
 	a.applyAutoSleep(a.config.GetAutoSleep())
 
 	registerAPIRoutes(a.api, a.stationManager, scanEventCallbacks{
@@ -184,6 +191,14 @@ func (a *App) setAPIStatus(running bool, err error) {
 	a.apiStatusMutex.Unlock()
 }
 
+// setAPIAddress updates the advertised listen address. The server loop reads
+// it on every bind attempt, so a hot restart picks the new address up.
+func (a *App) setAPIAddress(address string) {
+	a.apiStatusMutex.Lock()
+	a.apiStatus.Address = address
+	a.apiStatusMutex.Unlock()
+}
+
 func (a *App) setConfigLoadStatus(err error) {
 	a.apiStatusMutex.Lock()
 	defer a.apiStatusMutex.Unlock()
@@ -217,6 +232,11 @@ func (a *App) refreshConfigStatusLocked() {
 	}
 }
 
+// GetAPIStatus assembles the server state and the external-operation snapshot
+// from two independent locks. The two halves can reflect slightly different
+// moments under concurrent requests; each half is internally consistent, and
+// consumers gate merges with OperationRevision rather than assuming a single
+// atomic instant.
 func (a *App) GetAPIStatus() APIStatus {
 	a.apiStatusMutex.RLock()
 	status := a.apiStatus

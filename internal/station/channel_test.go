@@ -330,12 +330,16 @@ func TestSetStationChannelMapsPreWriteUnsupportedCapability(t *testing.T) {
 }
 
 func TestStationChannelRequiresRecentScan(t *testing.T) {
-	manager := NewManager(config.NewConfig())
+	// Drive the freshness window through the config (a non-default value) so a
+	// wiring regression that hardcodes the old constant would fail this test.
+	cfg := config.NewConfig()
+	cfg.ChannelScanFreshnessSeconds = 60
+	manager := NewManager(cfg)
 	manager.stations["target"] = &internalbluetooth.BaseStation{
 		Name:       "LHB-TARGET",
 		Channel:    3,
 		Present:    true,
-		LastSeenAt: time.Now().Add(-channelScanFreshnessWindow - time.Second),
+		LastSeenAt: time.Now().Add(-60*time.Second - time.Second),
 		Capabilities: internalbluetooth.Capabilities{
 			ChannelRead: true, ChannelWrite: true,
 		},

@@ -51,6 +51,10 @@ func (w *Watcher) Run(ctx context.Context) {
 	defer ticker.Stop()
 	var triggerCancel context.CancelFunc
 	var triggerDone <-chan struct{}
+	// pendingTrigger records that the monitor fired (and consumed) a trigger
+	// while the previous action was still stopping, so the sleep runs as soon
+	// as the previous action finishes instead of being silently dropped.
+	pendingTrigger := false
 	stopTrigger := func() {
 		if triggerCancel == nil {
 			return
@@ -59,6 +63,17 @@ func (w *Watcher) Run(ctx context.Context) {
 		<-triggerDone
 		triggerCancel = nil
 		triggerDone = nil
+	}
+	fireTrigger := func() {
+		log.Printf("Auto-sleep: %s stayed closed for %s; triggering", processName, w.Settings.Delay())
+		triggerContext, cancelTrigger := context.WithCancel(ctx)
+		done := make(chan struct{})
+		triggerCancel = cancelTrigger
+		triggerDone = done
+		go func() {
+			defer close(done)
+			w.Trigger(triggerContext)
+		}()
 	}
 	for {
 		select {
@@ -81,25 +96,23 @@ func (w *Watcher) Run(ctx context.Context) {
 			// Keep monitoring while the Bluetooth action runs. A new session
 			// invalidates the old session's pending sleep immediately, including
 			// work that is already scanning or waiting for a GATT slot.
-			if running && triggerCancel != nil {
-				triggerCancel()
+			if running {
+				if triggerCancel != nil {
+					triggerCancel()
+				}
+				pendingTrigger = false
 			}
-			if monitor.Poll(running, now) != ActionTrigger {
-				continue
+			if monitor.Poll(running, now) == ActionTrigger {
+				pendingTrigger = true
 			}
-			if triggerDone != nil {
-				log.Printf("Auto-sleep trigger ignored because the previous action is still stopping")
-				continue
+			// Fire when a trigger is owed and no action is currently running.
+			// If the previous action is still stopping, this stays pending and
+			// fires on a later tick once it completes; the running re-check on
+			// every tick guarantees a relaunched session is never slept.
+			if pendingTrigger && triggerDone == nil && !running {
+				pendingTrigger = false
+				fireTrigger()
 			}
-			log.Printf("Auto-sleep: %s stayed closed for %s; triggering", processName, w.Settings.Delay())
-			triggerContext, cancelTrigger := context.WithCancel(ctx)
-			done := make(chan struct{})
-			triggerCancel = cancelTrigger
-			triggerDone = done
-			go func() {
-				defer close(done)
-				w.Trigger(triggerContext)
-			}()
 		}
 	}
 }

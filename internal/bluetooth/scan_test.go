@@ -404,3 +404,19 @@ func TestScanDurationStartsAfterWatcherReportsStarted(t *testing.T) {
 		t.Fatalf("StopScan calls = %d, want 1", got)
 	}
 }
+func TestScanSessionStopAfterFinishedDoesNotRecordReason(t *testing.T) {
+	// A stop request that arrives after the scan ended on its own must not
+	// record a stop reason: doing so would misclassify a natural finish as a
+	// duration/cancel stop and, via the duration latch, report an early stop
+	// as if the full duration had run.
+	session := newScanSession()
+	session.markStarted()
+	session.markFinished()
+	session.requestStopAsync(scanStopDuration)
+	if session.durationStopIssuedFlag() {
+		t.Fatal("stop request after finish latched the duration reason")
+	}
+	if got := session.stopReason(); got != scanStopNone {
+		t.Fatalf("stop reason after finish = %v, want none", got)
+	}
+}

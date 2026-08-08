@@ -93,7 +93,7 @@ export class AutoSleepEventCoordinator {
       : t('no station commands completed');
     const message = t('Auto sleep cancelled: {details}.', { details });
     this.setMessage(message);
-    pushToast(message, success || failed ? 'warning' : 'info');
+    pushToast(message, success || failed || unconfirmed ? 'warning' : 'info');
   }
 
   private handleTimedOut(event: AutoSleepEvent) {
@@ -103,9 +103,13 @@ export class AutoSleepEventCoordinator {
     const unconfirmed = event.unconfirmed ?? 0;
     const failed = event.failed ?? 0;
     const timedOutSkipped = event.timedOutSkipped ?? 0;
-    const message = t('Auto sleep timed out: {success} confirmed, {unconfirmed} unconfirmed, {failed} failed, {timedOutSkipped} skipped due to timeout.', {
+    const skipped = event.skipped ?? 0;
+    let message = t('Auto sleep timed out: {success} confirmed, {unconfirmed} unconfirmed, {failed} failed, {timedOutSkipped} skipped due to timeout.', {
       success, unconfirmed, failed, timedOutSkipped
     });
+    if (skipped > 0) {
+      message += ` ${t('{skipped} more skipped.', { skipped })}`;
+    }
     this.setMessage(message);
     pushToast(message, 'warning');
   }

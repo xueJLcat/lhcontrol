@@ -7,13 +7,40 @@ import { pushToast } from './lib/toast';
 const api = vi.hoisted(() => ({
   CheckAllStationStatuses: vi.fn(),
   CancelBulkPower: vi.fn(),
+  GetAbsentStationRetryLimit: vi.fn(),
+  GetAPIListenAddress: vi.fn(),
   GetAPIStatus: vi.fn(),
   GetAutoSleepSettings: vi.fn(),
+  GetBluetoothInitRetrySeconds: vi.fn(),
+  GetBootFallbackSeconds: vi.fn(),
   GetBulkPowerTimeoutSeconds: vi.fn(),
+  GetChannelConfirmAttempts: vi.fn(),
+  GetChannelConfirmIntervalMs: vi.fn(),
+  GetChannelScanFreshnessSeconds: vi.fn(),
+  GetConfirmReconnectDelayMs: vi.fn(),
+  GetConfirmReconnectThreshold: vi.fn(),
+  GetDiscoveryAttempts: vi.fn(),
+  GetDiscoveryRetryDelayMs: vi.fn(),
+  GetIdentifyAttempts: vi.fn(),
+  GetInitialReadTimeoutSeconds: vi.fn(),
+  GetOperationRetryDelayMs: vi.fn(),
+  GetPowerConfirmAttemptsOff: vi.fn(),
+  GetPowerConfirmAttemptsOn: vi.fn(),
+  GetPowerConfirmPollIntervalMs: vi.fn(),
+  GetPowerWriteAttempts: vi.fn(),
+  GetPresenceMissThreshold: vi.fn(),
+  GetRecoveryRetryBaseSeconds: vi.fn(),
+  GetRecoveryRetryMaxSeconds: vi.fn(),
   GetScanDurationSeconds: vi.fn(),
   GetScanOnStartup: vi.fn(),
+  GetScanReadPhaseTimeoutSeconds: vi.fn(),
+  GetSleepFinalWriteTimeoutSeconds: vi.fn(),
+  GetSleepPrepareGapMs: vi.fn(),
+  GetStationOperationTimeoutSeconds: vi.fn(),
   GetStatusPollIntervalSeconds: vi.fn(),
   GetStatusPollingEnabled: vi.fn(),
+  GetStatusReadTimeoutSeconds: vi.fn(),
+  GetStatusRefreshTimeoutSeconds: vi.fn(),
   GetCurrentStationInfo: vi.fn(),
   GetScanStatus: vi.fn(),
   IdentifyStation: vi.fn(),
@@ -23,12 +50,39 @@ const api = vi.hoisted(() => ({
   RenameStationByAddress: vi.fn(),
   ScanAndFetchStations: vi.fn(),
   SetAllStationsPowerDetailed: vi.fn(),
+  SetAbsentStationRetryLimit: vi.fn(),
+  SetAPIListenAddress: vi.fn(),
   SetAutoSleepSettings: vi.fn(),
+  SetBluetoothInitRetrySeconds: vi.fn(),
+  SetBootFallbackSeconds: vi.fn(),
   SetBulkPowerTimeoutSeconds: vi.fn(),
+  SetChannelConfirmAttempts: vi.fn(),
+  SetChannelConfirmIntervalMs: vi.fn(),
+  SetChannelScanFreshnessSeconds: vi.fn(),
+  SetConfirmReconnectDelayMs: vi.fn(),
+  SetConfirmReconnectThreshold: vi.fn(),
+  SetDiscoveryAttempts: vi.fn(),
+  SetDiscoveryRetryDelayMs: vi.fn(),
+  SetIdentifyAttempts: vi.fn(),
+  SetInitialReadTimeoutSeconds: vi.fn(),
+  SetOperationRetryDelayMs: vi.fn(),
+  SetPowerConfirmAttemptsOff: vi.fn(),
+  SetPowerConfirmAttemptsOn: vi.fn(),
+  SetPowerConfirmPollIntervalMs: vi.fn(),
+  SetPowerWriteAttempts: vi.fn(),
+  SetPresenceMissThreshold: vi.fn(),
+  SetRecoveryRetryBaseSeconds: vi.fn(),
+  SetRecoveryRetryMaxSeconds: vi.fn(),
   SetScanDurationSeconds: vi.fn(),
   SetScanOnStartup: vi.fn(),
+  SetScanReadPhaseTimeoutSeconds: vi.fn(),
+  SetSleepFinalWriteTimeoutSeconds: vi.fn(),
+  SetSleepPrepareGapMs: vi.fn(),
+  SetStationOperationTimeoutSeconds: vi.fn(),
   SetStatusPollIntervalSeconds: vi.fn(),
   SetStatusPollingEnabled: vi.fn(),
+  SetStatusReadTimeoutSeconds: vi.fn(),
+  SetStatusRefreshTimeoutSeconds: vi.fn(),
   SetStationChannel: vi.fn(),
   SetStationPower: vi.fn(),
   StopScan: vi.fn()
@@ -88,14 +142,68 @@ beforeEach(() => {
   api.CheckAllStationStatuses.mockResolvedValue([createStation()]);
   api.StopScan.mockResolvedValue(undefined);
   api.ListBluetoothAdapters.mockResolvedValue([]);
+  api.GetAPIListenAddress.mockResolvedValue('127.0.0.1:7575');
   api.GetAutoSleepSettings.mockResolvedValue({ enabled: false, target: 'steamvr', delaySeconds: 300 });
+  api.GetBootFallbackSeconds.mockResolvedValue(8);
   api.GetBulkPowerTimeoutSeconds.mockResolvedValue(120);
+  api.GetDiscoveryAttempts.mockResolvedValue(3);
+  api.GetDiscoveryRetryDelayMs.mockResolvedValue(500);
+  api.GetPowerConfirmAttemptsOff.mockResolvedValue(15);
+  api.GetPowerConfirmAttemptsOn.mockResolvedValue(51);
+  api.GetPowerConfirmPollIntervalMs.mockResolvedValue(200);
   api.GetScanDurationSeconds.mockResolvedValue(5);
+  api.GetSleepFinalWriteTimeoutSeconds.mockResolvedValue(30);
+  api.GetSleepPrepareGapMs.mockResolvedValue(50);
+  api.GetStationOperationTimeoutSeconds.mockResolvedValue(30);
   api.GetStatusPollIntervalSeconds.mockResolvedValue(15);
+  api.GetStatusReadTimeoutSeconds.mockResolvedValue(20);
+  api.GetStatusRefreshTimeoutSeconds.mockResolvedValue(30);
+  api.GetPowerWriteAttempts.mockResolvedValue(2);
+  api.GetOperationRetryDelayMs.mockResolvedValue(500);
+  api.GetIdentifyAttempts.mockResolvedValue(2);
+  api.GetConfirmReconnectThreshold.mockResolvedValue(2);
+  api.GetConfirmReconnectDelayMs.mockResolvedValue(250);
+  api.GetChannelConfirmAttempts.mockResolvedValue(5);
+  api.GetChannelConfirmIntervalMs.mockResolvedValue(250);
+  api.GetPresenceMissThreshold.mockResolvedValue(2);
+  api.GetInitialReadTimeoutSeconds.mockResolvedValue(30);
+  api.GetScanReadPhaseTimeoutSeconds.mockResolvedValue(45);
+  api.GetChannelScanFreshnessSeconds.mockResolvedValue(120);
+  api.GetRecoveryRetryBaseSeconds.mockResolvedValue(30);
+  api.GetRecoveryRetryMaxSeconds.mockResolvedValue(300);
+  api.GetAbsentStationRetryLimit.mockResolvedValue(5);
+  api.GetBluetoothInitRetrySeconds.mockResolvedValue(2);
+  api.SetAPIListenAddress.mockResolvedValue(undefined);
+  api.SetAbsentStationRetryLimit.mockResolvedValue(undefined);
+  api.SetBluetoothInitRetrySeconds.mockResolvedValue(undefined);
+  api.SetChannelConfirmAttempts.mockResolvedValue(undefined);
+  api.SetChannelConfirmIntervalMs.mockResolvedValue(undefined);
+  api.SetChannelScanFreshnessSeconds.mockResolvedValue(undefined);
+  api.SetConfirmReconnectDelayMs.mockResolvedValue(undefined);
+  api.SetConfirmReconnectThreshold.mockResolvedValue(undefined);
+  api.SetIdentifyAttempts.mockResolvedValue(undefined);
+  api.SetInitialReadTimeoutSeconds.mockResolvedValue(undefined);
+  api.SetOperationRetryDelayMs.mockResolvedValue(undefined);
+  api.SetPowerWriteAttempts.mockResolvedValue(undefined);
+  api.SetPresenceMissThreshold.mockResolvedValue(undefined);
+  api.SetRecoveryRetryBaseSeconds.mockResolvedValue(undefined);
+  api.SetRecoveryRetryMaxSeconds.mockResolvedValue(undefined);
+  api.SetScanReadPhaseTimeoutSeconds.mockResolvedValue(undefined);
+  api.SetStatusReadTimeoutSeconds.mockResolvedValue(undefined);
+  api.SetStatusRefreshTimeoutSeconds.mockResolvedValue(undefined);
   api.SetAutoSleepSettings.mockResolvedValue(undefined);
+  api.SetBootFallbackSeconds.mockResolvedValue(undefined);
   api.SetBulkPowerTimeoutSeconds.mockResolvedValue(undefined);
+  api.SetDiscoveryAttempts.mockResolvedValue(undefined);
+  api.SetDiscoveryRetryDelayMs.mockResolvedValue(undefined);
+  api.SetPowerConfirmAttemptsOff.mockResolvedValue(undefined);
+  api.SetPowerConfirmAttemptsOn.mockResolvedValue(undefined);
+  api.SetPowerConfirmPollIntervalMs.mockResolvedValue(undefined);
   api.SetScanDurationSeconds.mockResolvedValue(undefined);
   api.SetScanOnStartup.mockResolvedValue(undefined);
+  api.SetSleepFinalWriteTimeoutSeconds.mockResolvedValue(undefined);
+  api.SetSleepPrepareGapMs.mockResolvedValue(undefined);
+  api.SetStationOperationTimeoutSeconds.mockResolvedValue(undefined);
   api.SetStatusPollIntervalSeconds.mockResolvedValue(undefined);
   api.SetStatusPollingEnabled.mockResolvedValue(undefined);
 });

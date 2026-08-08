@@ -27,6 +27,28 @@ func (f *sleepFinalBlockingCharacteristic) WriteWithoutResponseContext(ctx conte
 	return 0, ctx.Err()
 }
 
+func TestSetPowerStateConfirmsCompatibilityFirmwareWithoutExhaustingBudget(t *testing.T) {
+	// Compatibility firmware that reports boot-like raw values while awake
+	// must confirm immediately through the decode mask instead of polling the
+	// whole confirmation budget and failing.
+	power := &fakeCharacteristic{value: []byte{0x01}, ignoreWrite: true}
+	station := connectedFakeStation(power, nil, nil, Capabilities{PowerRead: true, PowerWrite: true})
+	station.setPowerStateInternal(PowerStateOn, 0x01)
+	station.bootRawTrustedOn = true
+	station.LastPowerReadAt = time.Now()
+	start := time.Now()
+	result, err := SetPowerState(station, PowerStateOn)
+	if err != nil || !result.Confirmed || result.State != PowerStateOn {
+		t.Fatalf("SetPowerState() result=%+v error=%v, want immediate compatibility confirmation", result, err)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("compatibility confirmation took %v, want an immediate masked readback", elapsed)
+	}
+	if len(power.writes) != 1 {
+		t.Fatalf("writes = %d, want a single power-on command", len(power.writes))
+	}
+}
+
 func TestIsGATTCommunicationFailure(t *testing.T) {
 	for _, target := range []error{
 		tinybluetooth.ErrGATTUnreachable,

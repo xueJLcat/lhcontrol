@@ -38,8 +38,8 @@ func readPowerStateInternalContext(ctx context.Context, station *BaseStation) er
 		newState = PowerStateOn
 	} else if rawDecoded == PowerStateBooting && newState == PowerStateOn {
 		// The same connection has reported a boot-like value throughout the
-		// fallback window. Keep it stable from now on, but do not call the raw
-		// value confirmed: IsPowerStateVerified remains strict below.
+		// fallback window. Keep it stable from now on; IsPowerStateVerified
+		// treats this compatibility On as verified for operation decisions.
 		station.bootRawTrustedOn = true
 	} else if rawDecoded != PowerStateBooting {
 		station.bootRawTrustedOn = false
@@ -55,8 +55,6 @@ func readPowerStateInternalContext(ctx context.Context, station *BaseStation) er
 	return nil
 }
 
-const bootingFallbackAfter = 8 * time.Second
-
 // Some Lighthouse 2.0 firmware reports booting raw values (such as 0x01)
 // both while starting and while already awake. Always expose a fresh
 // boot-like observation as Booting, even after On, then fall back after a
@@ -68,7 +66,16 @@ func decodePowerStateWithHistory(raw byte, previous PowerState, bootingSince, no
 	if state != PowerStateBooting {
 		return state
 	}
-	if previous == PowerStateBooting && !bootingSince.IsZero() && now.Sub(bootingSince) >= bootingFallbackAfter {
+	// Known limitation: when the previous state was On, booting raw values are
+	// masked back to On. This favors firmware that reports booting values while
+	// already awake, but it hides a genuine reboot that begins while the station
+	// is On (the transition is only visible once the firmware reports a stable
+	// value). This masking is deliberate and covered by tests; do not remove it
+	// without re-evaluating the awake-but-reporting-booting firmware behavior.
+	if previous == PowerStateOn {
+		return PowerStateOn
+	}
+	if previous == PowerStateBooting && !bootingSince.IsZero() && now.Sub(bootingSince) >= CurrentTiming().BootFallbackAfter {
 		return PowerStateOn
 	}
 	return state

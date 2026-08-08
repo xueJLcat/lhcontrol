@@ -372,6 +372,13 @@ func RequiresReconnect(err error) bool {
 		if RequiresReconnect(transportErr.Err) {
 			return true
 		}
+		if errors.Is(transportErr.Err, context.Canceled) ||
+			errors.Is(transportErr.Err, context.DeadlineExceeded) {
+			// The operation's own cancellation/deadline aborted the transport
+			// call; the connection itself is not known to be broken, so a
+			// healthy link must not pay a reconnect for it.
+			return false
+		}
 		if IsUnsupportedCapabilityError(transportErr.Err) {
 			return false
 		}
@@ -382,6 +389,9 @@ func RequiresReconnect(err error) bool {
 		errors.Is(err, bluetooth.ErrGATTAccessDenied) ||
 		errors.Is(err, bluetooth.ErrGATTCommunication) {
 		return true
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
 	}
 	return RequiresReconnect(errors.Unwrap(err))
 }

@@ -255,7 +255,14 @@ export class ExternalScanCoordinator {
     statusOperation: number,
     capturedStationRevisions: Map<string, number>
   ): Promise<void> {
-    if (!this.host.applyStationList(await this.host.getCurrentStationInfo(), revision, capturedStationRevisions)) {
+    // Match recoverUntracked: a transient list-read rejection must leave the
+    // recovery epochs pending for a retry instead of escaping to the periodic
+    // check, which would overwrite the status with a misleading error.
+    const updated = await this.host.getCurrentStationInfo().catch(() => null);
+    if (updated === null) {
+      return;
+    }
+    if (!this.host.applyStationList(updated, revision, capturedStationRevisions)) {
       return;
     }
     const scanStatus = await this.host.getScanStatus().catch(() => null);

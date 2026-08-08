@@ -255,14 +255,15 @@ func (bs *BaseStation) MarkSeen(now time.Time) {
 	bs.mutex.Unlock()
 }
 
-// MarkMissed requires two consecutive successful scans to mark a station
-// absent. A single Windows BLE scan can miss a station while its GATT session
-// is still being released.
+// MarkMissed requires several consecutive successful scans to mark a station
+// absent (the threshold is user-tunable; the default is two because a single
+// Windows BLE scan can miss a station while its GATT session is still being
+// released).
 func (bs *BaseStation) MarkMissed() {
 	bs.mutex.Lock()
 	bs.presenceUncertain = false
 	bs.MissedScans++
-	if bs.MissedScans >= 2 {
+	if bs.MissedScans >= CurrentTiming().PresenceMissThreshold {
 		bs.Present = false
 	}
 	bs.mutex.Unlock()

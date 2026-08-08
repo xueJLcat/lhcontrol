@@ -71,6 +71,7 @@ export class StationStore {
   private statusCheckInterval: ReturnType<typeof setInterval> | null = null;
   private statusPollIntervalSeconds = DEFAULT_STATUS_POLL_INTERVAL_SECONDS;
   private statusPollingEnabled = true;
+  private apiStatusStarted = false;
   private cancelExternalScanListener: (() => void) | null = null;
   private cancelExternalScanFailureListener: (() => void) | null = null;
   private cancelExternalScanStartedListener: (() => void) | null = null;
@@ -397,8 +398,12 @@ export class StationStore {
       MAX_STATUS_POLL_INTERVAL_SECONDS,
       Math.max(MIN_STATUS_POLL_INTERVAL_SECONDS, Math.round(intervalSeconds))
     );
-    if (next === this.statusPollIntervalSeconds && this.statusCheckInterval) return;
+    // Unchanged interval: only the very first call must fall through so the
+    // health poller is started; with station polling disabled the interval
+    // timer is null, which used to trigger a redundant health request here.
+    if (next === this.statusPollIntervalSeconds && this.apiStatusStarted) return;
     this.statusPollIntervalSeconds = next;
+    this.apiStatusStarted = true;
 
     if (this.statusCheckInterval) clearInterval(this.statusCheckInterval);
     this.statusCheckInterval = null;
@@ -476,7 +481,10 @@ export class StationStore {
     void (async () => {
       const [startupScanning, scanOnStartup] = await Promise.all([
         IsScanning().catch(() => false),
-        GetScanOnStartup().catch(() => true)
+        // Fail closed: when the persisted preference is unreadable, skipping
+        // the scan honors a disabled setting instead of triggering a scan the
+        // user explicitly turned off.
+        GetScanOnStartup().catch(() => false)
       ]);
       // Do not allow the first polling tick to acquire the backend operation
       // lock before the initial external-scan check can start the local scan.

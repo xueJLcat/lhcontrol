@@ -28,7 +28,7 @@ func (m *Manager) GetStationInfo() []StationInfo {
 		if snapshot.Present &&
 			snapshot.MissedScans == 0 &&
 			!snapshot.PresenceUncertain &&
-			isRecent(snapshot.LastSeenAt, now, channelScanFreshnessWindow) &&
+			isRecent(snapshot.LastSeenAt, now, m.channelScanFreshnessWindowDuration()) &&
 			snapshot.Channel != bluetooth.ChannelUnknown &&
 			isRecent(snapshot.LastChannelReadAt, now, displayFreshnessWindow) {
 			channelCounts[snapshot.Channel]++
@@ -50,7 +50,7 @@ func (m *Manager) GetStationInfo() []StationInfo {
 			!snapshot.PresenceUncertain &&
 			!snapshot.LastSeenAt.IsZero()
 		scanFresh := seenInLatestScan &&
-			isRecent(snapshot.LastSeenAt, now, channelScanFreshnessWindow)
+			isRecent(snapshot.LastSeenAt, now, m.channelScanFreshnessWindowDuration())
 		metadataFresh := isRecent(snapshot.MetadataReadAt, now, metadataFreshnessWindow)
 		stationInfos = append(stationInfos, StationInfo{
 			Name:                name,

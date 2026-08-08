@@ -251,13 +251,19 @@ export class StationActionController {
   async cancelBulkPower() {
     if (this.host.globalOperation !== 'bulk-power' || this.host.cancellingBulk) return;
     this.host.cancellingBulk = true;
+    // Reuse the running bulk's status epoch instead of starting a new one: a
+    // fresh epoch would invalidate the bulk's terminal "cancelled" summary
+    // write. Committing under the captured epoch still drops this message when
+    // a newer status owner takes over mid-cancellation.
+    const statusOperation = this.host.gates.currentStatusEpoch;
     this.host.statusMessage = t('Stopping bulk power...');
     try {
       await CancelBulkPower();
     } catch (error) {
       if (!this.host.disposed) {
-        this.host.statusMessage = `${t('Cancel bulk power')}: ${String(error)}`;
-        pushToast(this.host.statusMessage);
+        const message = `${t('Cancel bulk power')}: ${String(error)}`;
+        if (this.host.gates.canCommitStatus(statusOperation)) this.host.statusMessage = message;
+        pushToast(message);
       }
     } finally {
       if (!this.host.disposed) this.host.cancellingBulk = false;

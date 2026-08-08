@@ -9,25 +9,79 @@ export function CancelBulkPower():Promise<void>;
 
 export function CheckAllStationStatuses():Promise<Array<station.StationInfo>>;
 
+export function GetAPIListenAddress():Promise<string>;
+
 export function GetAPIStatus():Promise<main.APIStatus>;
+
+export function GetAbsentStationRetryLimit():Promise<number>;
 
 export function GetAutoSleepSettings():Promise<autosleep.Settings>;
 
+export function GetBluetoothInitRetrySeconds():Promise<number>;
+
+export function GetBootFallbackSeconds():Promise<number>;
+
 export function GetBulkPowerTimeoutSeconds():Promise<number>;
+
+export function GetChannelConfirmAttempts():Promise<number>;
+
+export function GetChannelConfirmIntervalMs():Promise<number>;
+
+export function GetChannelScanFreshnessSeconds():Promise<number>;
+
+export function GetConfirmReconnectDelayMs():Promise<number>;
+
+export function GetConfirmReconnectThreshold():Promise<number>;
 
 export function GetCurrentStationInfo():Promise<Array<station.StationInfo>>;
 
+export function GetDiscoveryAttempts():Promise<number>;
+
+export function GetDiscoveryRetryDelayMs():Promise<number>;
+
+export function GetIdentifyAttempts():Promise<number>;
+
+export function GetInitialReadTimeoutSeconds():Promise<number>;
+
 export function GetLanguage():Promise<string>;
+
+export function GetOperationRetryDelayMs():Promise<number>;
+
+export function GetPowerConfirmAttemptsOff():Promise<number>;
+
+export function GetPowerConfirmAttemptsOn():Promise<number>;
+
+export function GetPowerConfirmPollIntervalMs():Promise<number>;
+
+export function GetPowerWriteAttempts():Promise<number>;
+
+export function GetPresenceMissThreshold():Promise<number>;
+
+export function GetRecoveryRetryBaseSeconds():Promise<number>;
+
+export function GetRecoveryRetryMaxSeconds():Promise<number>;
 
 export function GetScanDurationSeconds():Promise<number>;
 
 export function GetScanOnStartup():Promise<boolean>;
 
+export function GetScanReadPhaseTimeoutSeconds():Promise<number>;
+
 export function GetScanStatus():Promise<station.ScanStatus>;
+
+export function GetSleepFinalWriteTimeoutSeconds():Promise<number>;
+
+export function GetSleepPrepareGapMs():Promise<number>;
+
+export function GetStationOperationTimeoutSeconds():Promise<number>;
 
 export function GetStatusPollIntervalSeconds():Promise<number>;
 
 export function GetStatusPollingEnabled():Promise<boolean>;
+
+export function GetStatusReadTimeoutSeconds():Promise<number>;
+
+export function GetStatusRefreshTimeoutSeconds():Promise<number>;
 
 export function IdentifyStation(arg1:string):Promise<void>;
 
@@ -53,26 +107,80 @@ export function SaveConfig():Promise<void>;
 
 export function ScanAndFetchStations():Promise<Array<station.StationInfo>>;
 
+export function SetAPIListenAddress(arg1:string):Promise<void>;
+
+export function SetAbsentStationRetryLimit(arg1:number):Promise<void>;
+
 export function SetAllStationsPower(arg1:string):Promise<void>;
 
 export function SetAllStationsPowerDetailed(arg1:string):Promise<station.BulkPowerResult>;
 
 export function SetAutoSleepSettings(arg1:autosleep.Settings):Promise<void>;
 
+export function SetBluetoothInitRetrySeconds(arg1:number):Promise<void>;
+
+export function SetBootFallbackSeconds(arg1:number):Promise<void>;
+
 export function SetBulkPowerTimeoutSeconds(arg1:number):Promise<void>;
 
+export function SetChannelConfirmAttempts(arg1:number):Promise<void>;
+
+export function SetChannelConfirmIntervalMs(arg1:number):Promise<void>;
+
+export function SetChannelScanFreshnessSeconds(arg1:number):Promise<void>;
+
+export function SetConfirmReconnectDelayMs(arg1:number):Promise<void>;
+
+export function SetConfirmReconnectThreshold(arg1:number):Promise<void>;
+
+export function SetDiscoveryAttempts(arg1:number):Promise<void>;
+
+export function SetDiscoveryRetryDelayMs(arg1:number):Promise<void>;
+
+export function SetIdentifyAttempts(arg1:number):Promise<void>;
+
+export function SetInitialReadTimeoutSeconds(arg1:number):Promise<void>;
+
 export function SetLanguage(arg1:string):Promise<void>;
+
+export function SetOperationRetryDelayMs(arg1:number):Promise<void>;
+
+export function SetPowerConfirmAttemptsOff(arg1:number):Promise<void>;
+
+export function SetPowerConfirmAttemptsOn(arg1:number):Promise<void>;
+
+export function SetPowerConfirmPollIntervalMs(arg1:number):Promise<void>;
+
+export function SetPowerWriteAttempts(arg1:number):Promise<void>;
+
+export function SetPresenceMissThreshold(arg1:number):Promise<void>;
+
+export function SetRecoveryRetryBaseSeconds(arg1:number):Promise<void>;
+
+export function SetRecoveryRetryMaxSeconds(arg1:number):Promise<void>;
 
 export function SetScanDurationSeconds(arg1:number):Promise<void>;
 
 export function SetScanOnStartup(arg1:boolean):Promise<void>;
 
+export function SetScanReadPhaseTimeoutSeconds(arg1:number):Promise<void>;
+
+export function SetSleepFinalWriteTimeoutSeconds(arg1:number):Promise<void>;
+
+export function SetSleepPrepareGapMs(arg1:number):Promise<void>;
+
 export function SetStationChannel(arg1:string,arg2:number,arg3:boolean):Promise<station.ChannelChangeResult>;
+
+export function SetStationOperationTimeoutSeconds(arg1:number):Promise<void>;
 
 export function SetStationPower(arg1:string,arg2:string):Promise<station.PowerActionResult>;
 
 export function SetStatusPollIntervalSeconds(arg1:number):Promise<void>;
 
 export function SetStatusPollingEnabled(arg1:boolean):Promise<void>;
+
+export function SetStatusReadTimeoutSeconds(arg1:number):Promise<void>;
+
+export function SetStatusRefreshTimeoutSeconds(arg1:number):Promise<void>;
 
 export function StopScan():Promise<void>;

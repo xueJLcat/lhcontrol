@@ -62,7 +62,7 @@ func (m *Manager) SetStationChannel(
 		return result, err
 	}
 	if err := operationContext.Err(); err != nil {
-		return result, err
+		return result, stationOperationContextError(err)
 	}
 	if !m.channelOperationMutex.TryLock() {
 		return result, ErrOperationInProgress
@@ -73,13 +73,13 @@ func (m *Manager) SetStationChannel(
 	if !targetSnapshot.Present || targetSnapshot.MissedScans > 0 || targetSnapshot.PresenceUncertain {
 		return result, fmt.Errorf("%w: station %s was not seen in the latest scan", ErrNotFound, address)
 	}
-	if !isRecent(targetSnapshot.LastSeenAt, time.Now(), channelScanFreshnessWindow) {
+	if !isRecent(targetSnapshot.LastSeenAt, time.Now(), m.channelScanFreshnessWindowDuration()) {
 		return result, fmt.Errorf("%w before changing a channel", ErrScanRequired)
 	}
 	capabilities := targetSnapshot.Capabilities
 	if !capabilities.ChannelRead || !capabilities.ChannelWrite {
 		err = runSafely("channel capability refresh", func() error {
-			discoveryContext, cancelDiscovery := context.WithTimeout(operationContext, m.initialReadTimeout)
+			discoveryContext, cancelDiscovery := context.WithTimeout(operationContext, m.initialReadTimeoutDuration())
 			defer cancelDiscovery()
 			var refreshErr error
 			capabilities, refreshErr = m.bluetoothOps.refreshCapabilities(discoveryContext, stationPtr)
@@ -101,7 +101,7 @@ func (m *Manager) SetStationChannel(
 	if !targetSnapshot.Present || targetSnapshot.MissedScans > 0 || targetSnapshot.PresenceUncertain {
 		return result, fmt.Errorf("%w: station %s was not seen in the latest scan", ErrNotFound, address)
 	}
-	if !isRecent(targetSnapshot.LastSeenAt, time.Now(), channelScanFreshnessWindow) {
+	if !isRecent(targetSnapshot.LastSeenAt, time.Now(), m.channelScanFreshnessWindowDuration()) {
 		return result, fmt.Errorf("%w before changing a channel", ErrScanRequired)
 	}
 	if targetSnapshot.Channel == channel && isOperationallyFresh(targetSnapshot.LastChannelReadAt, time.Now()) {
@@ -122,7 +122,7 @@ func (m *Manager) SetStationChannel(
 			continue
 		}
 		if snapshot.MissedScans > 0 || snapshot.PresenceUncertain ||
-			!isRecent(snapshot.LastSeenAt, conflictCheckTime, channelScanFreshnessWindow) ||
+			!isRecent(snapshot.LastSeenAt, conflictCheckTime, m.channelScanFreshnessWindowDuration()) ||
 			!isOperationallyFresh(snapshot.LastChannelReadAt, conflictCheckTime) {
 			hasUnknown = true
 			continue

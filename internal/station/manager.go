@@ -13,25 +13,18 @@ import (
 func NewManager(cfg *config.Config) *Manager {
 	lifecycleContext, cancelLifecycle := context.WithCancel(context.Background())
 	manager := &Manager{
-		stations:                make(map[string]*bluetooth.BaseStation),
-		config:                  cfg,
-		activeDeviceOperations:  make(map[string]activeDeviceOperation),
-		deviceOperationSlots:    make(chan struct{}, 2),
-		statusRetries:           make(map[string]statusRetry),
-		statusRecoveryWake:      make(chan struct{}, 1),
-		statusRetryBase:         30 * time.Second,
-		statusRetryMax:          5 * time.Minute,
-		statusBusyRetry:         250 * time.Millisecond,
-		initialReadTimeout:      defaultInitialReadTimeout,
-		initialReadPhaseTimeout: defaultInitialReadPhaseTimeout,
-		statusReadTimeout:       defaultStatusReadTimeout,
-		statusRefreshTimeout:    defaultStatusRefreshTimeout,
-		stationOperationTimeout: defaultStationOperationTimeout,
-		scanStatus:              ScanStatus{State: "idle", Warnings: []string{}},
-		initializeBluetooth:     bluetooth.Initialize,
-		shutdownCh:              make(chan struct{}),
-		lifecycleContext:        lifecycleContext,
-		cancelLifecycle:         cancelLifecycle,
+		stations:               make(map[string]*bluetooth.BaseStation),
+		config:                 cfg,
+		activeDeviceOperations: make(map[string]activeDeviceOperation),
+		deviceOperationSlots:   make(chan struct{}, 2),
+		statusRetries:          make(map[string]statusRetry),
+		statusRecoveryWake:     make(chan struct{}, 1),
+		statusBusyRetry:        250 * time.Millisecond,
+		scanStatus:             ScanStatus{State: "idle", Warnings: []string{}},
+		initializeBluetooth:    bluetooth.Initialize,
+		shutdownCh:             make(chan struct{}),
+		lifecycleContext:       lifecycleContext,
+		cancelLifecycle:        cancelLifecycle,
 		bluetoothOps: bluetoothOperations{
 			scanForDurationContext: bluetooth.ScanForDurationContext,
 			readPowerStateContext:  bluetooth.ReadPowerStateContext,
@@ -53,15 +46,16 @@ func NewManager(cfg *config.Config) *Manager {
 }
 
 // newStationOperationContext gives one physical-device action a hard upper
-// bound. Tests that construct a Manager directly still receive the production
-// default when the injectable field is left at zero.
+// bound. The timeout follows the user-configured value; tests that construct
+// a Manager directly can still pin it through the injectable field and fall
+// back to the production default when it is left at zero.
 func (m *Manager) newStationOperationContext(parent context.Context) (context.Context, context.CancelFunc) {
 	if parent == nil {
 		parent = m.lifecycleContext
 	}
 	timeout := m.stationOperationTimeout
 	if timeout <= 0 {
-		timeout = defaultStationOperationTimeout
+		timeout = m.config.StationOperationTimeout()
 	}
 	return context.WithTimeout(parent, timeout)
 }
@@ -124,14 +118,72 @@ func (m *Manager) noteStatusFailureKind(address string, kind statusRetryKind) {
 	m.scheduleStatusRecovery()
 }
 func (m *Manager) statusRetryDelay(failures int) time.Duration {
-	delay := m.statusRetryBase
-	for attempt := 1; attempt < failures && delay < m.statusRetryMax; attempt++ {
+	base := m.statusRetryBaseDelay()
+	maxDelay := m.statusRetryMaxDelay()
+	delay := base
+	for attempt := 1; attempt < failures && delay < maxDelay; attempt++ {
 		delay *= 2
 	}
-	if delay > m.statusRetryMax {
-		return m.statusRetryMax
+	if delay > maxDelay {
+		return maxDelay
 	}
 	return delay
+}
+
+// Tunable timing fields may be overridden directly in tests. Production runs
+// leave them at zero and follow the user-configured values.
+func (m *Manager) statusRetryBaseDelay() time.Duration {
+	if m.statusRetryBase > 0 {
+		return m.statusRetryBase
+	}
+	return m.config.RecoveryRetryBase()
+}
+
+func (m *Manager) statusRetryMaxDelay() time.Duration {
+	if m.statusRetryMax > 0 {
+		return m.statusRetryMax
+	}
+	return m.config.RecoveryRetryMax()
+}
+
+func (m *Manager) absentStationRetryLimit() int {
+	return m.config.GetAbsentStationRetryLimit()
+}
+
+func (m *Manager) initialReadTimeoutDuration() time.Duration {
+	if m.initialReadTimeout > 0 {
+		return m.initialReadTimeout
+	}
+	return m.config.InitialReadTimeout()
+}
+
+func (m *Manager) scanReadPhaseTimeoutDuration() time.Duration {
+	if m.initialReadPhaseTimeout > 0 {
+		return m.initialReadPhaseTimeout
+	}
+	return m.config.ScanReadPhaseTimeout()
+}
+
+func (m *Manager) statusReadTimeoutDuration() time.Duration {
+	if m.statusReadTimeout > 0 {
+		return m.statusReadTimeout
+	}
+	return m.config.StatusReadTimeout()
+}
+
+func (m *Manager) statusRefreshTimeoutDuration() time.Duration {
+	if m.statusRefreshTimeout > 0 {
+		return m.statusRefreshTimeout
+	}
+	return m.config.StatusRefreshTimeout()
+}
+
+func (m *Manager) channelScanFreshnessWindowDuration() time.Duration {
+	return m.config.ChannelScanFreshness()
+}
+
+func (m *Manager) initializeRetryCooldown() time.Duration {
+	return m.config.BluetoothInitRetry()
 }
 func (m *Manager) deferStatusRecovery(address string, delay time.Duration) {
 	m.statusRetryMutex.Lock()
@@ -263,14 +315,15 @@ func (m *Manager) stopExhaustedAbsentRecovery(address string, station *bluetooth
 	changed := false
 	if tracked {
 		kinds := effectiveStatusRetryKinds(retry)
-		if kinds&statusRetryConnection != 0 && retry.failures >= statusAbsentRetryLimit {
+		retryLimit := m.absentStationRetryLimit()
+		if kinds&statusRetryConnection != 0 && retry.failures >= retryLimit {
 			retry.kinds = kinds &^ statusRetryConnection
 			retry.failures = 0
 			retry.lastAttempt = time.Time{}
 			retry.nextAt = time.Time{}
 			changed = true
 		}
-		if kinds&statusRetryChannel != 0 && retry.channelFailures >= statusAbsentRetryLimit {
+		if kinds&statusRetryChannel != 0 && retry.channelFailures >= retryLimit {
 			retry.kinds &^= statusRetryChannel
 			retry.channelFailures = 0
 			retry.channelLastAttempt = time.Time{}
@@ -347,7 +400,7 @@ func (m *Manager) Initialize() error {
 	defer m.initializeMutex.Unlock()
 	m.initializeErr = m.initializeBluetooth()
 	if m.initializeErr != nil {
-		m.nextInitializeAt = time.Now().Add(2 * time.Second)
+		m.nextInitializeAt = time.Now().Add(m.initializeRetryCooldown())
 	} else {
 		m.nextInitializeAt = time.Time{}
 	}
@@ -370,7 +423,7 @@ func (m *Manager) ensureReady() error {
 	}
 	m.initializeErr = m.initializeBluetooth()
 	if m.initializeErr != nil {
-		m.nextInitializeAt = time.Now().Add(2 * time.Second)
+		m.nextInitializeAt = time.Now().Add(m.initializeRetryCooldown())
 		return fmt.Errorf("Bluetooth is unavailable; turn on Bluetooth or check the adapter, then retry: %w", m.initializeErr)
 	}
 	m.nextInitializeAt = time.Time{}
@@ -385,7 +438,7 @@ func (m *Manager) markBluetoothUnavailable(err error) {
 	}
 	m.initializeMutex.Lock()
 	m.initializeErr = err
-	m.nextInitializeAt = time.Now().Add(2 * time.Second)
+	m.nextInitializeAt = time.Now().Add(m.initializeRetryCooldown())
 	m.initializeMutex.Unlock()
 	if cleanupErr := bluetooth.InvalidateAllConnections(); cleanupErr != nil {
 		log.Printf("Bluetooth cleanup after adapter loss is pending: %v", cleanupErr)

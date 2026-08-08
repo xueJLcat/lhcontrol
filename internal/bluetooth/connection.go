@@ -67,7 +67,8 @@ func connectAndDiscoverInternalContext(ctx context.Context, station *BaseStation
 
 		var err error
 
-		const maxRetries = 3
+		discoveryTiming := CurrentTiming()
+		maxRetries := discoveryTiming.DiscoveryAttempts
 		for i := 0; i < maxRetries; i++ {
 			if contextErr := ctx.Err(); contextErr != nil {
 				return contextErr
@@ -80,7 +81,7 @@ func connectAndDiscoverInternalContext(ctx context.Context, station *BaseStation
 				select {
 				case <-ctx.Done():
 					return ctx.Err()
-				case <-time.After(500 * time.Millisecond):
+				case <-time.After(discoveryTiming.DiscoveryRetryDelay):
 				}
 				device, connectErr := connectContext(ctx, station.Address)
 				if connectErr != nil {

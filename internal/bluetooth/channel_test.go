@@ -1,6 +1,7 @@
 package bluetooth
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"testing"
@@ -244,6 +245,23 @@ func TestUnsupportedCapabilityRejectionNeverRequiresReconnect(t *testing.T) {
 	}
 	if RequiresReconnect(err) {
 		t.Fatalf("standby value rejection incorrectly required reconnect: %v", err)
+	}
+}
+func TestContextCancellationDoesNotRequireReconnect(t *testing.T) {
+	// An operation's own cancellation or deadline aborts the transport call;
+	// the connection is not known to be broken, so a healthy link must not pay
+	// a reconnect. Both bare and transport-wrapped context errors are covered,
+	// and a genuine transport failure still requires reconnect.
+	for _, contextErr := range []error{context.Canceled, context.DeadlineExceeded} {
+		if RequiresReconnect(contextErr) {
+			t.Fatalf("bare %v incorrectly required reconnect", contextErr)
+		}
+		if RequiresReconnect(transportError("read power characteristic", contextErr)) {
+			t.Fatalf("transport-wrapped %v incorrectly required reconnect", contextErr)
+		}
+	}
+	if !RequiresReconnect(transportError("read power characteristic", errors.New("connection reset"))) {
+		t.Fatal("genuine transport failure did not require reconnect")
 	}
 }
 func TestSetChannelAcceptsConfirmedReadbackAfterWriteError(t *testing.T) {

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -608,6 +609,271 @@ func TestAPIServerServesRegisteredRoutesOverLoopback(t *testing.T) {
 	if !status.Running || status.Address != listener.Addr().String() || status.Error != "" {
 
 		t.Fatalf("health response = %+v, want running loopback status", status)
+
+	}
+
+}
+
+func reserveFreeAddress(t *testing.T) string {
+
+	t.Helper()
+
+	reservation, err := net.Listen("tcp", "127.0.0.1:0")
+
+	if err != nil {
+
+		t.Fatal(err)
+
+	}
+
+	address := reservation.Addr().String()
+
+	if err := reservation.Close(); err != nil {
+
+		t.Fatal(err)
+
+	}
+
+	return address
+
+}
+
+func TestSetAPIListenAddressRejectsInvalidValues(t *testing.T) {
+
+	t.Setenv("AppData", t.TempDir())
+
+	app := NewApp()
+
+	for _, invalid := range []string{"", "no-port", "127.0.0.1:not-a-port", "127.0.0.1:80", "[::1]:99999"} {
+
+		if err := app.SetAPIListenAddress(invalid); err == nil {
+
+			t.Fatalf("SetAPIListenAddress(%q) unexpectedly succeeded", invalid)
+
+		}
+
+	}
+
+	if got := app.GetAPIListenAddress(); got != "127.0.0.1:7575" {
+
+		t.Fatalf("API listen address after rejected changes = %q", got)
+
+	}
+
+}
+
+func TestSetAPIListenAddressHotRestartsServer(t *testing.T) {
+
+	t.Setenv("AppData", t.TempDir())
+
+	first := reserveFreeAddress(t)
+
+	second := reserveFreeAddress(t)
+
+	app := NewApp()
+
+	app.apiStatus.Address = first
+
+	app.apiRetryDelay = 5 * time.Millisecond
+
+	registerAPIRoutes(app.api, &fakeAPIStationManager{}, scanEventCallbacks{}, app.GetAPIStatus)
+
+	app.startAPIServer()
+
+	t.Cleanup(func() {
+
+		app.apiLifecycleMutex.Lock()
+
+		cancel := app.apiCancel
+
+		app.apiCancel = nil
+
+		app.apiLifecycleMutex.Unlock()
+
+		if cancel != nil {
+
+			cancel()
+
+		}
+
+		_ = app.api.Shutdown()
+
+		app.apiWG.Wait()
+
+	})
+
+	deadline := time.Now().Add(2 * time.Second)
+
+	for !app.GetAPIStatus().Running && time.Now().Before(deadline) {
+
+		time.Sleep(time.Millisecond)
+
+	}
+
+	if status := app.GetAPIStatus(); !status.Running || status.Address != first {
+
+		t.Fatalf("initial API status = %+v, want running on %s", status, first)
+
+	}
+
+	if err := app.SetAPIListenAddress(second); err != nil {
+
+		t.Fatalf("SetAPIListenAddress() error = %v", err)
+
+	}
+
+	deadline = time.Now().Add(2 * time.Second)
+
+	for !(app.GetAPIStatus().Running && app.GetAPIStatus().Address == second) && time.Now().Before(deadline) {
+
+		time.Sleep(time.Millisecond)
+
+	}
+
+	status := app.GetAPIStatus()
+
+	if !status.Running || status.Address != second {
+
+		t.Fatalf("API status after address change = %+v, want running on %s", status, second)
+
+	}
+
+	response, err := http.Get("http://" + second + "/health")
+
+	if err != nil {
+
+		t.Fatalf("loopback health request on new address: %v", err)
+
+	}
+
+	defer response.Body.Close()
+
+	if response.StatusCode != http.StatusOK {
+
+		t.Fatalf("health status on new address = %d, want 200", response.StatusCode)
+
+	}
+
+	restarted := NewApp()
+
+	if err := restarted.config.Load(); err != nil {
+
+		t.Fatalf("config.Load() error = %v", err)
+
+	}
+
+	if got := restarted.GetAPIListenAddress(); got != second {
+
+		t.Fatalf("persisted API listen address = %q, want %q", got, second)
+
+	}
+
+}
+
+// TestConcurrentRestartsDoNotRaceTheWaitGroup hammers restartAPIServer from
+// many goroutines. Before the lifecycle gate serialized restart against itself
+// and against shutdown, a WaitGroup Wait could race a concurrent Add and panic
+// with "WaitGroup is reused before previous Wait has returned". Run with -race.
+func TestConcurrentRestartsDoNotRaceTheWaitGroup(t *testing.T) {
+
+	app := NewApp()
+
+	app.listen = func(string, string) (net.Listener, error) {
+
+		return net.Listen("tcp", "127.0.0.1:0")
+
+	}
+
+	// Keep serving until the listener is closed by the cancellation watcher,
+	// mirroring how fiber's Listener behaves on shutdown.
+
+	app.serveListener = func(listener net.Listener) error {
+
+		for {
+
+			conn, err := listener.Accept()
+
+			if err != nil {
+
+				return err
+
+			}
+
+			_ = conn.Close()
+
+		}
+
+	}
+
+	app.startAPIServer()
+
+	t.Cleanup(func() {
+
+		app.apiLifecycleGate.Lock()
+
+		defer app.apiLifecycleGate.Unlock()
+
+		app.apiLifecycleMutex.Lock()
+
+		cancel := app.apiCancel
+
+		app.apiCancel = nil
+
+		app.apiLifecycleMutex.Unlock()
+
+		if cancel != nil {
+
+			cancel()
+
+		}
+
+		app.apiWG.Wait()
+
+	})
+
+	const workers = 8
+
+	const iterations = 25
+
+	var wg sync.WaitGroup
+
+	start := make(chan struct{})
+
+	for i := 0; i < workers; i++ {
+
+		wg.Add(1)
+
+		go func() {
+
+			defer wg.Done()
+
+			<-start
+
+			for j := 0; j < iterations; j++ {
+
+				app.restartAPIServer()
+
+			}
+
+		}()
+
+	}
+
+	close(start)
+
+	wg.Wait()
+
+	deadline := time.Now().Add(2 * time.Second)
+
+	for !app.GetAPIStatus().Running && time.Now().Before(deadline) {
+
+		time.Sleep(time.Millisecond)
+
+	}
+
+	if status := app.GetAPIStatus(); !status.Running {
+
+		t.Fatalf("API status after concurrent restarts = %+v, want running", status)
 
 	}
 

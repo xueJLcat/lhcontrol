@@ -173,6 +173,7 @@ func TestBulkPowerDoesNotStartQueuedWorkAfterShutdown(t *testing.T) {
 			CapabilitiesKnown: true,
 		}
 	}
+	stubPowerVerificationRead(manager)
 	manager.bluetoothOps.setPowerState = func(context.Context, *internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
 		started <- struct{}{}
 		<-release
@@ -235,6 +236,7 @@ func TestBulkPowerResultsUseStableStationOrder(t *testing.T) {
 	} {
 		manager.stations[key] = station
 	}
+	stubPowerVerificationRead(manager)
 
 	want := []string{
 		"44:22:33:44:55:66",
@@ -265,6 +267,7 @@ func TestBulkPowerReportsConfirmedUnsupportedCapabilitiesAsSkipped(t *testing.T)
 	manager.stations[address] = &internalbluetooth.BaseStation{
 		Name: "LHB-UNSUPPORTED", Address: mustAddress(t, address), Present: true,
 	}
+	stubPowerVerificationRead(manager)
 	manager.bluetoothOps.ensureCapabilities = func(context.Context, *internalbluetooth.BaseStation) (internalbluetooth.Capabilities, error) {
 		return internalbluetooth.Capabilities{}, nil
 	}
@@ -290,6 +293,7 @@ func TestBulkPowerKeepsCapabilityConnectionFailuresAsFailed(t *testing.T) {
 	manager.stations[address] = &internalbluetooth.BaseStation{
 		Name: "LHB-FAILED", Address: mustAddress(t, address), Present: true,
 	}
+	stubPowerVerificationRead(manager)
 	manager.bluetoothOps.ensureCapabilities = func(context.Context, *internalbluetooth.BaseStation) (internalbluetooth.Capabilities, error) {
 		return internalbluetooth.Capabilities{}, errors.New("connection failed")
 	}
@@ -311,6 +315,7 @@ func TestBulkPowerLateUnsupportedCapabilityIsSkipped(t *testing.T) {
 		Name: "LHB-LATE-UNSUPPORTED", Address: mustAddress(t, address), Present: true,
 		Capabilities: internalbluetooth.Capabilities{PowerWrite: true}, CapabilitiesKnown: true,
 	}
+	stubPowerVerificationRead(manager)
 	manager.bluetoothOps.ensureCapabilities = func(context.Context, *internalbluetooth.BaseStation) (internalbluetooth.Capabilities, error) {
 		return internalbluetooth.Capabilities{PowerWrite: true}, nil
 	}
@@ -341,6 +346,7 @@ func TestBulkConfirmationTransportFailureKeepsRecoveryScheduled(t *testing.T) {
 		Capabilities: internalbluetooth.Capabilities{PowerWrite: true}, CapabilitiesKnown: true,
 	}
 	manager.stations[address] = station
+	stubPowerVerificationRead(manager)
 	manager.bluetoothOps.setPowerState = func(context.Context, *internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
 		return internalbluetooth.PowerControlResult{}, &internalbluetooth.PowerConfirmationError{
 			Target: internalbluetooth.PowerStateOn,
@@ -373,6 +379,7 @@ func TestBulkPowerConfirmationUnsupportedReadIsNotSkipped(t *testing.T) {
 		Capabilities:      internalbluetooth.Capabilities{PowerRead: true, PowerWrite: true},
 		CapabilitiesKnown: true,
 	}
+	stubPowerVerificationRead(manager)
 	manager.bluetoothOps.setPowerState = func(context.Context, *internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
 		return internalbluetooth.PowerControlResult{State: internalbluetooth.PowerStateUnknown}, &internalbluetooth.PowerConfirmationError{
 			Target: internalbluetooth.PowerStateOn,
@@ -419,6 +426,7 @@ func TestBulkUnconfirmedSuccessClearsOnlyConnectionRecovery(t *testing.T) {
 		channelNextAt: time.Now().Add(time.Hour),
 	}
 	manager.statusRetryMutex.Unlock()
+	stubPowerVerificationRead(manager)
 	manager.bluetoothOps.setPowerState = func(context.Context, *internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
 		return internalbluetooth.PowerControlResult{State: internalbluetooth.PowerStateOn, Confirmed: false}, nil
 	}
@@ -455,6 +463,7 @@ func TestBulkConfirmationFailureClearsOnlyConnectionRecovery(t *testing.T) {
 		channelNextAt: time.Now().Add(time.Hour),
 	}
 	manager.statusRetryMutex.Unlock()
+	stubPowerVerificationRead(manager)
 	manager.bluetoothOps.setPowerState = func(context.Context, *internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
 		return internalbluetooth.PowerControlResult{State: internalbluetooth.PowerStateUnknown, Confirmed: false},
 			&internalbluetooth.PowerConfirmationError{
@@ -484,6 +493,10 @@ func TestStaleBootingStationIsNotSkippedByBulkSelection(t *testing.T) {
 	manager.stations["booting"] = &internalbluetooth.BaseStation{
 		Name: "LHB-BOOTING", Present: true, PowerState: internalbluetooth.PowerStateBooting,
 		Capabilities: internalbluetooth.Capabilities{PowerWrite: false}, CapabilitiesKnown: true,
+	}
+	stubPowerVerificationRead(manager)
+	manager.bluetoothOps.refreshCapabilities = func(context.Context, *internalbluetooth.BaseStation) (internalbluetooth.Capabilities, error) {
+		return internalbluetooth.Capabilities{}, errors.New("connection failed")
 	}
 
 	result, err := manager.SetAllStationsPowerDetailed("on")
@@ -645,6 +658,7 @@ func TestBulkShutdownCancellationReturnsSkippedResults(t *testing.T) {
 			Name: "LHB-BULK-SHUTDOWN", Address: mustAddress(t, address), Present: true,
 		}
 	}
+	stubPowerVerificationRead(manager)
 	discoveryStarted := make(chan struct{})
 	var startOnce sync.Once
 	manager.bluetoothOps.ensureCapabilities = func(ctx context.Context, _ *internalbluetooth.BaseStation) (internalbluetooth.Capabilities, error) {
@@ -699,6 +713,7 @@ func TestBulkPowerContextCancellationPreservesPossiblySentResult(t *testing.T) {
 		Name: "LHB-CANCELLED-CONFIRMATION", Address: mustAddress(t, address), Present: true,
 		Capabilities: internalbluetooth.Capabilities{PowerWrite: true}, CapabilitiesKnown: true,
 	}
+	stubPowerVerificationRead(manager)
 	started := make(chan struct{})
 	manager.bluetoothOps.setPowerState = func(ctx context.Context, _ *internalbluetooth.BaseStation, target internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
 		close(started)
@@ -739,6 +754,7 @@ func TestCancelBulkPowerStopsActiveOperation(t *testing.T) {
 		Name: "LHB-CANCEL", Address: mustAddress(t, address), Present: true,
 		Capabilities: internalbluetooth.Capabilities{PowerWrite: true}, CapabilitiesKnown: true,
 	}
+	stubPowerVerificationRead(manager)
 	started := make(chan struct{})
 	manager.bluetoothOps.setPowerState = func(ctx context.Context, _ *internalbluetooth.BaseStation, _ internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
 		close(started)
@@ -778,6 +794,7 @@ func TestBulkPowerReportsCallerDeadline(t *testing.T) {
 		Name: "LHB-TIMEOUT", Address: mustAddress(t, address), Present: true,
 		Capabilities: internalbluetooth.Capabilities{PowerWrite: true}, CapabilitiesKnown: true,
 	}
+	stubPowerVerificationRead(manager)
 	manager.bluetoothOps.setPowerState = func(ctx context.Context, _ *internalbluetooth.BaseStation, _ internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
 		<-ctx.Done()
 		return internalbluetooth.PowerControlResult{}, ctx.Err()

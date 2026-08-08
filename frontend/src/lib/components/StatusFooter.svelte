@@ -25,6 +25,16 @@
   const apiTitle = $derived(apiError || (apiAddress ? `HTTP API ${apiAddress}` : t('HTTP API unavailable')));
   const configTitle = $derived(configWarnings.join('\n') || t('Configuration changes cannot be saved'));
 
+  // When the config panel's visibility condition disappears (warnings cleared
+  // or API offline) the panel hides, but without this reset detail would stay
+  // 'config' and the first click on the reappearing pill would toggle it to
+  // null instead of opening the panel.
+  $effect(() => {
+    if (detail === 'config' && !(apiRunning && (configWarnings.length > 0 || !configWritable))) {
+      detail = null;
+    }
+  });
+
   function toggle(target: 'config' | 'api') {
     detail = detail === target ? null : target;
   }

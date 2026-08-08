@@ -38,12 +38,17 @@ func TestIsRecentRejectsFutureTimestamps(t *testing.T) {
 }
 
 func TestAbsentRecoveryStopsExhaustedKindsIndependently(t *testing.T) {
-	manager := NewManager(config.NewConfig())
+	// Drive the limit through the config (a non-default value) so a wiring
+	// regression that hardcodes the old constant would fail this test.
+	const limit = 3
+	cfg := config.NewConfig()
+	cfg.AbsentStationRetryLimit = limit
+	manager := NewManager(cfg)
 	address := "11:22:33:44:55:65"
 	station := &internalbluetooth.BaseStation{Address: mustAddress(t, address), Present: false}
 	manager.statusRetries[address] = statusRetry{
-		failures:        statusAbsentRetryLimit,
-		channelFailures: statusAbsentRetryLimit - 1,
+		failures:        limit,
+		channelFailures: limit - 1,
 		nextAt:          time.Now(),
 		channelNextAt:   time.Now(),
 		kinds:           statusRetryConnection | statusRetryChannel,
@@ -53,12 +58,12 @@ func TestAbsentRecoveryStopsExhaustedKindsIndependently(t *testing.T) {
 	manager.statusRetryMutex.Lock()
 	retry, tracked := manager.statusRetries[address]
 	manager.statusRetryMutex.Unlock()
-	if !tracked || effectiveStatusRetryKinds(retry) != statusRetryChannel || retry.channelFailures != statusAbsentRetryLimit-1 {
+	if !tracked || effectiveStatusRetryKinds(retry) != statusRetryChannel || retry.channelFailures != limit-1 {
 		t.Fatalf("retry after connection exhaustion = %+v tracked=%v, want channel-only", retry, tracked)
 	}
 
 	manager.statusRetryMutex.Lock()
-	retry.channelFailures = statusAbsentRetryLimit
+	retry.channelFailures = limit
 	manager.statusRetries[address] = retry
 	manager.statusRetryMutex.Unlock()
 	manager.stopExhaustedAbsentRecovery(address, station)
@@ -366,7 +371,10 @@ func TestStatusRecoveryProcessesScheduleRequestedDuringActiveRound(t *testing.T)
 }
 
 func TestAbsentStationRecoveryStopsAfterBoundedFailures(t *testing.T) {
-	manager := NewManager(config.NewConfig())
+	const limit = 3
+	cfg := config.NewConfig()
+	cfg.AbsentStationRetryLimit = limit
+	manager := NewManager(cfg)
 	defer manager.Shutdown()
 	address := "11:22:33:44:55:79"
 	manager.stations[address] = &internalbluetooth.BaseStation{
@@ -374,7 +382,7 @@ func TestAbsentStationRecoveryStopsAfterBoundedFailures(t *testing.T) {
 	}
 	manager.statusRetryMutex.Lock()
 	manager.statusRetries[address] = statusRetry{
-		failures: statusAbsentRetryLimit - 1,
+		failures: limit - 1,
 		kinds:    statusRetryConnection,
 		nextAt:   time.Now().Add(-time.Second),
 	}

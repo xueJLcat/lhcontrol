@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -30,14 +31,16 @@ func TestSinglePowerOperationHasHardTimeoutAndReleasesOperation(t *testing.T) {
 		Name: "LHB-TIMEOUT", Address: mustAddress(t, address), Present: true,
 		Capabilities: internalbluetooth.Capabilities{PowerWrite: true}, CapabilitiesKnown: true,
 	}
+	stubPowerVerificationRead(manager)
 	manager.bluetoothOps.setPowerState = func(ctx context.Context, _ *internalbluetooth.BaseStation, _ internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
 		<-ctx.Done()
 		return internalbluetooth.PowerControlResult{}, ctx.Err()
 	}
 
 	start := time.Now()
-	if _, err := manager.SetStationPower(address, "on"); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("SetStationPower() error = %v, want context deadline", err)
+	_, err := manager.SetStationPower(address, "on")
+	if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, ErrStationOperationTimeout) {
+		t.Fatalf("SetStationPower() error = %v, want the station operation timeout sentinel", err)
 	}
 	if elapsed := time.Since(start); elapsed > time.Second {
 		t.Fatalf("SetStationPower() took %v, want a bounded return", elapsed)
@@ -101,7 +104,10 @@ func TestSetAllStationsPowerSkipsIneligibleStations(t *testing.T) {
 	}
 }
 
-func TestInferredBootRawStateIsUnconfirmedAndActionableByBulkPower(t *testing.T) {
+func TestInferredBootRawStateIsVerifiedAndSkippedByBulkPower(t *testing.T) {
+	// Compatibility firmware reports boot-like raw values while awake. The
+	// inferred On state counts as verified, so bulk power must skip the
+	// station as already at target instead of forcing a real write.
 	manager := NewManager(config.NewConfig())
 	defer manager.Shutdown()
 	address := "11:22:33:44:55:84"
@@ -113,25 +119,25 @@ func TestInferredBootRawStateIsUnconfirmedAndActionableByBulkPower(t *testing.T)
 	}
 
 	infos := manager.GetStationInfo()
-	if len(infos) != 1 || !infos[0].PowerFresh || infos[0].PowerStateConfirmed {
-		t.Fatalf("station info = %+v, want fresh inferred On state reported as unconfirmed", infos)
+	if len(infos) != 1 || !infos[0].PowerFresh || !infos[0].PowerStateConfirmed {
+		t.Fatalf("station info = %+v, want fresh inferred On state reported as confirmed", infos)
 	}
 
-	var powerCalls atomic.Int32
 	manager.bluetoothOps.setPowerState = func(context.Context, *internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
-		powerCalls.Add(1)
-		return internalbluetooth.PowerControlResult{State: internalbluetooth.PowerStateOn, Confirmed: true}, nil
+		t.Fatal("power write was attempted for a station already at the target state")
+		return internalbluetooth.PowerControlResult{}, nil
+	}
+	manager.bluetoothOps.fetchInitialPowerState = func(context.Context, *internalbluetooth.BaseStation) error {
+		return nil
 	}
 	result, err := manager.SetAllStationsPowerDetailed("on")
 	if err != nil {
 		t.Fatalf("SetAllStationsPowerDetailed() error = %v", err)
 	}
-	if powerCalls.Load() != 1 {
-		t.Fatalf("bulk power writes = %d, want the inferred station handled", powerCalls.Load())
-	}
-	if len(result.Results) != 1 || result.Results[0].Skipped || !result.Results[0].CommandSent ||
-		!result.Results[0].Success || !result.Results[0].Confirmed {
-		t.Fatalf("bulk result = %+v, want a confirmed power command", result.Results)
+	if len(result.Results) != 1 || !result.Results[0].Skipped || result.Results[0].CommandSent ||
+		!result.Results[0].Success || !result.Results[0].Confirmed ||
+		result.Results[0].Reason != "already at target state" {
+		t.Fatalf("bulk result = %+v, want a confirmed no-op skip", result.Results)
 	}
 }
 
@@ -142,6 +148,7 @@ func TestSingleStandbyRefreshesCachedUnsupportedCapability(t *testing.T) {
 		Name: "LHB-STANDBY", Address: mustAddress(t, address), Present: true,
 		Capabilities: internalbluetooth.Capabilities{PowerWrite: true, Standby: false}, CapabilitiesKnown: true,
 	}
+	stubPowerVerificationRead(manager)
 	var refreshes atomic.Int32
 	manager.bluetoothOps.refreshCapabilities = func(context.Context, *internalbluetooth.BaseStation) (internalbluetooth.Capabilities, error) {
 		refreshes.Add(1)
@@ -166,6 +173,7 @@ func TestBulkStandbyRefreshesCachedUnsupportedCapability(t *testing.T) {
 		Name: "LHB-BULK-STANDBY", Address: mustAddress(t, address), Present: true,
 		Capabilities: internalbluetooth.Capabilities{PowerWrite: true, Standby: false}, CapabilitiesKnown: true,
 	}
+	stubPowerVerificationRead(manager)
 	var refreshes atomic.Int32
 	manager.bluetoothOps.refreshCapabilities = func(context.Context, *internalbluetooth.BaseStation) (internalbluetooth.Capabilities, error) {
 		refreshes.Add(1)
@@ -245,6 +253,7 @@ func TestSinglePowerConfirmationUnsupportedReadPreservesCommandSent(t *testing.T
 		Capabilities:      internalbluetooth.Capabilities{PowerRead: true, PowerWrite: true},
 		CapabilitiesKnown: true,
 	}
+	stubPowerVerificationRead(manager)
 	manager.bluetoothOps.ensureCapabilities = func(context.Context, *internalbluetooth.BaseStation) (internalbluetooth.Capabilities, error) {
 		return internalbluetooth.Capabilities{PowerRead: true, PowerWrite: true}, nil
 	}
@@ -413,6 +422,58 @@ func TestSinglePowerRejectsFreshBootingStation(t *testing.T) {
 	}
 	manager.bluetoothOps.setPowerState = func(context.Context, *internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
 		t.Fatal("power write was attempted while station was booting")
+		return internalbluetooth.PowerControlResult{}, nil
+	}
+
+	_, err := manager.SetStationPower(address, "on")
+	if !errors.Is(err, ErrStationTransitioning) || !strings.Contains(err.Error(), "station is booting") {
+		t.Fatalf("SetStationPower() error = %v, want booting ErrStationTransitioning", err)
+	}
+}
+
+func TestSinglePowerRejectsBootingStateReachedWhileWaitingToBegin(t *testing.T) {
+	// The pre-begin check sees a healthy snapshot, but a background read that
+	// drains during the slot wait can flip the station into a fresh boot. The
+	// post-begin classification must still reject the write, matching the bulk
+	// worker re-check.
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	if err := manager.beginRecoveryStationOperation("RECOVERY"); err != nil {
+		t.Fatalf("begin recovery: %v", err)
+	}
+	if err := manager.beginStationOperation("FIRST"); err != nil {
+		t.Fatalf("reserve foreground slot: %v", err)
+	}
+	defer manager.endStationOperation("FIRST")
+
+	address := "11:22:33:44:55:7E"
+	station := &internalbluetooth.BaseStation{
+		Name:              "LHB-RACE-BOOT",
+		Address:           mustAddress(t, address),
+		Present:           true,
+		PowerState:        internalbluetooth.PowerStateOn,
+		RawPowerState:     0x0B,
+		LastPowerReadAt:   time.Now(),
+		Capabilities:      internalbluetooth.Capabilities{PowerWrite: true},
+		CapabilitiesKnown: true,
+	}
+	manager.stations[address] = station
+
+	var hookOnce sync.Once
+	manager.foregroundSlotMissHook = func() {
+		hookOnce.Do(func() {
+			station.PowerState = internalbluetooth.PowerStateBooting
+			station.RawPowerState = 0x01
+			station.LastPowerReadAt = time.Now()
+			manager.endRecoveryStationOperation("RECOVERY")
+		})
+	}
+	manager.bluetoothOps.fetchInitialPowerState = func(context.Context, *internalbluetooth.BaseStation) error {
+		t.Fatal("cache verification read was attempted for a station that turned booting after begin")
+		return nil
+	}
+	manager.bluetoothOps.setPowerState = func(context.Context, *internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
+		t.Fatal("power write was attempted for a station that turned booting after begin")
 		return internalbluetooth.PowerControlResult{}, nil
 	}
 

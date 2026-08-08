@@ -183,6 +183,22 @@ describe('ExternalScanCoordinator', () => {
     expect(coordinator.hasPendingRecovery()).toBe(false);
   });
 
+  it('keeps a tracked terminal recovery pending when the station list read rejects', async () => {
+    const { host, state } = createHost();
+    const coordinator = new ExternalScanCoordinator(host);
+    coordinator.markRecoveryPending();
+    expect(coordinator.hasPendingRecovery()).toBe(true);
+    (host.getCurrentStationInfo as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('backend busy'));
+
+    // A transient rejection must resolve without throwing (so the periodic
+    // check does not surface a misleading error) and must leave the recovery
+    // epochs pending for a retry on the next tick.
+    await expect(coordinator.recoverTrackedTerminal(1, state.statusEpoch, new Map())).resolves.toBeUndefined();
+
+    expect(host.applyStationList).not.toHaveBeenCalled();
+    expect(coordinator.hasPendingRecovery()).toBe(true);
+  });
+
   it('finishes a stop whose scan already ended and writes the terminal status', async () => {
     const { host, state } = createHost();
     const coordinator = new ExternalScanCoordinator(host);

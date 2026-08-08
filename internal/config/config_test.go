@@ -618,6 +618,489 @@ func TestSetStatusPollIntervalRollsBackWhenPersistenceFails(t *testing.T) {
 	}
 }
 
+func TestNewSettingsRollBackWhenPersistenceFails(t *testing.T) {
+	t.Setenv("AppData", t.TempDir())
+	originalWriter := configFileWriter
+	configFileWriter = func(string, []byte, os.FileMode) error { return errors.New("disk full") }
+	t.Cleanup(func() { configFileWriter = originalWriter })
+	cfg := NewConfig()
+
+	if err := cfg.SetScanOnStartup(false); err == nil {
+		t.Fatal("SetScanOnStartup() unexpectedly succeeded")
+	}
+	if !cfg.GetScanOnStartup() {
+		t.Fatal("failed save retained scan-on-startup disabled")
+	}
+	if err := cfg.SetStatusPollingEnabled(false); err == nil {
+		t.Fatal("SetStatusPollingEnabled() unexpectedly succeeded")
+	}
+	if !cfg.GetStatusPollingEnabled() {
+		t.Fatal("failed save retained status polling disabled")
+	}
+	if err := cfg.SetScanDurationSeconds(20); err == nil {
+		t.Fatal("SetScanDurationSeconds() unexpectedly succeeded")
+	}
+	if got := cfg.GetScanDurationSeconds(); got != DefaultScanDurationSeconds {
+		t.Fatalf("failed save retained scan duration %d", got)
+	}
+	if err := cfg.SetBulkPowerTimeoutSeconds(300); err == nil {
+		t.Fatal("SetBulkPowerTimeoutSeconds() unexpectedly succeeded")
+	}
+	if got := cfg.GetBulkPowerTimeoutSeconds(); got != DefaultBulkPowerTimeoutSeconds {
+		t.Fatalf("failed save retained bulk timeout %d", got)
+	}
+}
+
+func TestLoadBlocksPersistenceWhenConfigPathUnresolvable(t *testing.T) {
+	// An empty AppData leaves os.UserConfigDir without a usable directory, so
+	// Load cannot even locate a stored config. Persistence must stay blocked
+	// afterwards; otherwise the first successful save would overwrite a config
+	// that was never read.
+	t.Setenv("AppData", "")
+	cfg := NewConfig()
+	if err := cfg.Load(); err == nil {
+		t.Fatal("Load() unexpectedly succeeded with an unresolvable config path")
+	}
+	if cfg.PersistenceError() == nil {
+		t.Fatal("Load() did not record a persistence error")
+	}
+	if err := cfg.SetScanDurationSeconds(10); err == nil {
+		t.Fatal("SetScanDurationSeconds() unexpectedly succeeded while persistence is blocked")
+	}
+}
+
+func TestSaveSanitizesDirectlyAssignedFields(t *testing.T) {
+	configDirectory := useTemporaryConfigDirectory(t)
+	cfg := NewConfig()
+	cfg.ScanDurationSeconds = 0
+	cfg.BulkPowerTimeoutSeconds = 99999
+	cfg.StatusPollIntervalSeconds = -5
+	if err := cfg.Save(); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+	content, err := os.ReadFile(filepath.Join(configDirectory, "config.json"))
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	written := string(content)
+	for _, want := range []string{
+		fmt.Sprintf(`"scanDurationSeconds": %d`, DefaultScanDurationSeconds),
+		fmt.Sprintf(`"bulkPowerTimeoutSeconds": %d`, DefaultBulkPowerTimeoutSeconds),
+		fmt.Sprintf(`"statusPollIntervalSeconds": %d`, DefaultStatusPollIntervalSeconds),
+	} {
+		if !strings.Contains(written, want) {
+			t.Fatalf("persisted config = %s, want it to contain %s", written, want)
+		}
+	}
+}
+
+func TestStatusDisplayFreshnessWindowHasSafeMinimum(t *testing.T) {
+	cfg := NewConfig()
+	cfg.StatusPollIntervalSeconds = MinStatusPollIntervalSeconds
+	want := time.Duration(MinimumDisplayFreshnessSeconds) * time.Second
+	if got := cfg.StatusDisplayFreshnessWindow(); got != want {
+		t.Fatalf("StatusDisplayFreshnessWindow() = %v, want the %v minimum", got, want)
+	}
+}
+
+func TestStationOperationTimeoutPersistsValidatesAndCouplesToBulk(t *testing.T) {
+	useTemporaryConfigDirectory(t)
+	cfg := NewConfig()
+	if got := cfg.GetStationOperationTimeoutSeconds(); got != DefaultStationOperationTimeoutSeconds {
+		t.Fatalf("default station operation timeout = %d, want %d", got, DefaultStationOperationTimeoutSeconds)
+	}
+	if err := cfg.SetStationOperationTimeoutSeconds(MinStationOperationTimeoutSeconds - 1); err == nil {
+		t.Fatal("SetStationOperationTimeoutSeconds accepted a below-minimum value")
+	}
+	if err := cfg.SetStationOperationTimeoutSeconds(MaxStationOperationTimeoutSeconds + 1); err == nil {
+		t.Fatal("SetStationOperationTimeoutSeconds accepted an above-maximum value")
+	}
+	if err := cfg.SetStationOperationTimeoutSeconds(60); err != nil {
+		t.Fatalf("SetStationOperationTimeoutSeconds() error = %v", err)
+	}
+	// The bulk budget must never fall below the per-station budget.
+	if err := cfg.SetBulkPowerTimeoutSeconds(45); err == nil {
+		t.Fatal("SetBulkPowerTimeoutSeconds accepted a value below the station operation timeout")
+	}
+	if err := cfg.SetBulkPowerTimeoutSeconds(90); err != nil {
+		t.Fatalf("SetBulkPowerTimeoutSeconds() error = %v", err)
+	}
+	if err := cfg.SetStationOperationTimeoutSeconds(110); err == nil {
+		t.Fatal("SetStationOperationTimeoutSeconds accepted a value above the bulk timeout")
+	}
+
+	reloaded := NewConfig()
+	if err := reloaded.Load(); err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if got := reloaded.GetStationOperationTimeoutSeconds(); got != 60 {
+		t.Fatalf("reloaded station operation timeout = %d, want 60", got)
+	}
+	if got := reloaded.GetBulkPowerTimeoutSeconds(); got != 90 {
+		t.Fatalf("reloaded bulk timeout = %d, want 90", got)
+	}
+}
+
+func TestLoadRepairsBulkTimeoutBelowStationOperationTimeout(t *testing.T) {
+	configDirectory := useTemporaryConfigDirectory(t)
+	if err := os.WriteFile(
+		filepath.Join(configDirectory, "config.json"),
+		[]byte(`{"bulkPowerTimeoutSeconds":45,"stationOperationTimeoutSeconds":60}`),
+		0o644,
+	); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	cfg := NewConfig()
+	if err := cfg.Load(); err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if got := cfg.GetBulkPowerTimeoutSeconds(); got != 60 {
+		t.Fatalf("repaired bulk timeout = %d, want it raised to the station operation timeout 60", got)
+	}
+}
+
+func TestPowerTimingSettingsPersistValidateAndSanitize(t *testing.T) {
+	useTemporaryConfigDirectory(t)
+	cfg := NewConfig()
+	if err := cfg.SetPowerConfirmAttemptsOn(MinPowerConfirmAttempts - 1); err == nil {
+		t.Fatal("SetPowerConfirmAttemptsOn accepted a below-minimum value")
+	}
+	if err := cfg.SetPowerConfirmAttemptsOn(25); err != nil {
+		t.Fatalf("SetPowerConfirmAttemptsOn() error = %v", err)
+	}
+	if err := cfg.SetPowerConfirmAttemptsOff(MaxPowerConfirmAttempts + 1); err == nil {
+		t.Fatal("SetPowerConfirmAttemptsOff accepted an above-maximum value")
+	}
+	if err := cfg.SetPowerConfirmAttemptsOff(12); err != nil {
+		t.Fatalf("SetPowerConfirmAttemptsOff() error = %v", err)
+	}
+	if err := cfg.SetPowerConfirmPollIntervalMs(MinPowerConfirmPollIntervalMs - 1); err == nil {
+		t.Fatal("SetPowerConfirmPollIntervalMs accepted a below-minimum value")
+	}
+	if err := cfg.SetPowerConfirmPollIntervalMs(500); err != nil {
+		t.Fatalf("SetPowerConfirmPollIntervalMs() error = %v", err)
+	}
+	if err := cfg.SetBootFallbackSeconds(MaxBootFallbackSeconds + 1); err == nil {
+		t.Fatal("SetBootFallbackSeconds accepted an above-maximum value")
+	}
+	if err := cfg.SetBootFallbackSeconds(20); err != nil {
+		t.Fatalf("SetBootFallbackSeconds() error = %v", err)
+	}
+	if got := cfg.PowerConfirmPollInterval(); got != 500*time.Millisecond {
+		t.Fatalf("PowerConfirmPollInterval() = %v, want 500ms", got)
+	}
+	if got := cfg.BootFallback(); got != 20*time.Second {
+		t.Fatalf("BootFallback() = %v, want 20s", got)
+	}
+
+	reloaded := NewConfig()
+	if err := reloaded.Load(); err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if got := reloaded.GetPowerConfirmAttemptsOn(); got != 25 {
+		t.Fatalf("reloaded confirm attempts on = %d, want 25", got)
+	}
+	if got := reloaded.GetPowerConfirmAttemptsOff(); got != 12 {
+		t.Fatalf("reloaded confirm attempts off = %d, want 12", got)
+	}
+	if got := reloaded.GetPowerConfirmPollIntervalMs(); got != 500 {
+		t.Fatalf("reloaded confirm poll interval = %d, want 500", got)
+	}
+	if got := reloaded.GetBootFallbackSeconds(); got != 20 {
+		t.Fatalf("reloaded boot fallback = %d, want 20", got)
+	}
+}
+
+func TestConnectionTimingSettingsPersistAndValidate(t *testing.T) {
+	useTemporaryConfigDirectory(t)
+	cfg := NewConfig()
+	if err := cfg.SetSleepFinalWriteTimeoutSeconds(MinSleepFinalWriteTimeoutSeconds - 1); err == nil {
+		t.Fatal("SetSleepFinalWriteTimeoutSeconds accepted a below-minimum value")
+	}
+	if err := cfg.SetSleepFinalWriteTimeoutSeconds(60); err != nil {
+		t.Fatalf("SetSleepFinalWriteTimeoutSeconds() error = %v", err)
+	}
+	if err := cfg.SetSleepPrepareGapMs(MaxSleepPrepareGapMs + 1); err == nil {
+		t.Fatal("SetSleepPrepareGapMs accepted an above-maximum value")
+	}
+	if err := cfg.SetSleepPrepareGapMs(0); err != nil {
+		t.Fatalf("SetSleepPrepareGapMs() error = %v, want 0 to disable the gap", err)
+	}
+	if err := cfg.SetDiscoveryAttempts(MinDiscoveryAttempts - 1); err == nil {
+		t.Fatal("SetDiscoveryAttempts accepted a below-minimum value")
+	}
+	if err := cfg.SetDiscoveryAttempts(5); err != nil {
+		t.Fatalf("SetDiscoveryAttempts() error = %v", err)
+	}
+	if err := cfg.SetDiscoveryRetryDelayMs(MinDiscoveryRetryDelayMs - 1); err == nil {
+		t.Fatal("SetDiscoveryRetryDelayMs accepted a below-minimum value")
+	}
+	if err := cfg.SetDiscoveryRetryDelayMs(1000); err != nil {
+		t.Fatalf("SetDiscoveryRetryDelayMs() error = %v", err)
+	}
+	if got := cfg.SleepFinalWriteTimeout(); got != 60*time.Second {
+		t.Fatalf("SleepFinalWriteTimeout() = %v, want 60s", got)
+	}
+	if got := cfg.SleepPrepareGap(); got != 0 {
+		t.Fatalf("SleepPrepareGap() = %v, want 0", got)
+	}
+	if got := cfg.DiscoveryRetryDelay(); got != time.Second {
+		t.Fatalf("DiscoveryRetryDelay() = %v, want 1s", got)
+	}
+
+	reloaded := NewConfig()
+	if err := reloaded.Load(); err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if reloaded.GetSleepFinalWriteTimeoutSeconds() != 60 || reloaded.GetSleepPrepareGapMs() != 0 ||
+		reloaded.GetDiscoveryAttempts() != 5 || reloaded.GetDiscoveryRetryDelayMs() != 1000 {
+		t.Fatalf("reloaded connection timing = final %d, gap %d, attempts %d, delay %d",
+			reloaded.GetSleepFinalWriteTimeoutSeconds(), reloaded.GetSleepPrepareGapMs(),
+			reloaded.GetDiscoveryAttempts(), reloaded.GetDiscoveryRetryDelayMs())
+	}
+}
+
+func TestAPIListenAddressValidatesAndPersists(t *testing.T) {
+	useTemporaryConfigDirectory(t)
+	cfg := NewConfig()
+	if got := cfg.GetAPIListenAddress(); got != DefaultAPIListenAddress {
+		t.Fatalf("default API listen address = %q", got)
+	}
+	for _, invalid := range []string{"", "no-port", "127.0.0.1:http", "127.0.0.1:80", ":7575", "[::1]:99999"} {
+		if err := cfg.SetAPIListenAddress(invalid); err == nil {
+			t.Fatalf("SetAPIListenAddress(%q) unexpectedly succeeded", invalid)
+		}
+	}
+	if err := cfg.SetAPIListenAddress("127.0.0.1:8080"); err != nil {
+		t.Fatalf("SetAPIListenAddress() error = %v", err)
+	}
+
+	reloaded := NewConfig()
+	if err := reloaded.Load(); err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if got := reloaded.GetAPIListenAddress(); got != "127.0.0.1:8080" {
+		t.Fatalf("reloaded API listen address = %q", got)
+	}
+}
+
+func TestAdvancedSettingsPersistValidateAndCouple(t *testing.T) {
+	useTemporaryConfigDirectory(t)
+	cfg := NewConfig()
+
+	if err := cfg.SetPowerWriteAttempts(MaxPowerWriteAttempts + 1); err == nil {
+		t.Fatal("SetPowerWriteAttempts accepted an above-maximum value")
+	}
+	if err := cfg.SetPowerWriteAttempts(3); err != nil {
+		t.Fatalf("SetPowerWriteAttempts() error = %v", err)
+	}
+	if err := cfg.SetOperationRetryDelayMs(250); err != nil {
+		t.Fatalf("SetOperationRetryDelayMs() error = %v", err)
+	}
+	if err := cfg.SetChannelConfirmAttempts(0); err == nil {
+		t.Fatal("SetChannelConfirmAttempts accepted a below-minimum value")
+	}
+	if err := cfg.SetChannelConfirmAttempts(8); err != nil {
+		t.Fatalf("SetChannelConfirmAttempts() error = %v", err)
+	}
+	if err := cfg.SetConfirmReconnectThreshold(3); err != nil {
+		t.Fatalf("SetConfirmReconnectThreshold() error = %v", err)
+	}
+	if err := cfg.SetConfirmReconnectDelayMs(500); err != nil {
+		t.Fatalf("SetConfirmReconnectDelayMs() error = %v", err)
+	}
+	if err := cfg.SetIdentifyAttempts(4); err != nil {
+		t.Fatalf("SetIdentifyAttempts() error = %v", err)
+	}
+	if err := cfg.SetPresenceMissThreshold(MaxPresenceMissThreshold + 1); err == nil {
+		t.Fatal("SetPresenceMissThreshold accepted an above-maximum value")
+	}
+	if err := cfg.SetPresenceMissThreshold(3); err != nil {
+		t.Fatalf("SetPresenceMissThreshold() error = %v", err)
+	}
+	if err := cfg.SetAbsentStationRetryLimit(8); err != nil {
+		t.Fatalf("SetAbsentStationRetryLimit() error = %v", err)
+	}
+	if err := cfg.SetBluetoothInitRetrySeconds(5); err != nil {
+		t.Fatalf("SetBluetoothInitRetrySeconds() error = %v", err)
+	}
+
+	// Coupled recovery schedule: base may not exceed max and vice versa. All
+	// rejected values here stay inside their own ranges, so the failures prove
+	// the cross-field checks rather than plain range validation.
+	if err := cfg.SetRecoveryRetryBaseSeconds(90); err != nil {
+		t.Fatalf("SetRecoveryRetryBaseSeconds() error = %v", err)
+	}
+	if err := cfg.SetRecoveryRetryMaxSeconds(60); err == nil {
+		t.Fatal("SetRecoveryRetryMaxSeconds accepted a value below the retry base")
+	}
+	if err := cfg.SetRecoveryRetryMaxSeconds(90); err != nil {
+		t.Fatalf("SetRecoveryRetryMaxSeconds() error = %v", err)
+	}
+	if err := cfg.SetRecoveryRetryBaseSeconds(100); err == nil {
+		t.Fatal("SetRecoveryRetryBaseSeconds accepted a value above the retry maximum")
+	}
+	if err := cfg.SetRecoveryRetryBaseSeconds(45); err != nil {
+		t.Fatalf("SetRecoveryRetryBaseSeconds() error = %v", err)
+	}
+	if err := cfg.SetRecoveryRetryMaxSeconds(600); err != nil {
+		t.Fatalf("SetRecoveryRetryMaxSeconds() error = %v", err)
+	}
+
+	// Coupled read budgets: the initial read stays inside the per-station
+	// operation budget and inside the scan read phase, while the status
+	// refresh covers the status read. The default station operation timeout is
+	// 30, so a 60s initial read must be rejected until the budget is raised.
+	if err := cfg.SetInitialReadTimeoutSeconds(MaxInitialReadTimeoutSeconds); err == nil {
+		t.Fatal("SetInitialReadTimeoutSeconds accepted a value above the station operation timeout")
+	}
+	if err := cfg.SetStationOperationTimeoutSeconds(60); err != nil {
+		t.Fatalf("SetStationOperationTimeoutSeconds() error = %v", err)
+	}
+	if err := cfg.SetInitialReadTimeoutSeconds(60); err == nil {
+		t.Fatal("SetInitialReadTimeoutSeconds accepted a value above the scan read phase timeout")
+	}
+	if err := cfg.SetScanReadPhaseTimeoutSeconds(20); err == nil {
+		t.Fatal("SetScanReadPhaseTimeoutSeconds accepted a value below the initial read timeout")
+	}
+	if err := cfg.SetScanReadPhaseTimeoutSeconds(60); err != nil {
+		t.Fatalf("SetScanReadPhaseTimeoutSeconds() error = %v", err)
+	}
+	if err := cfg.SetInitialReadTimeoutSeconds(60); err != nil {
+		t.Fatalf("SetInitialReadTimeoutSeconds() error = %v", err)
+	}
+	if err := cfg.SetStationOperationTimeoutSeconds(35); err == nil {
+		t.Fatal("SetStationOperationTimeoutSeconds accepted a value below the initial read timeout")
+	}
+	if err := cfg.SetScanReadPhaseTimeoutSeconds(45); err == nil {
+		t.Fatal("SetScanReadPhaseTimeoutSeconds accepted a value below the initial read timeout")
+	}
+	if err := cfg.SetStatusReadTimeoutSeconds(60); err == nil {
+		t.Fatal("SetStatusReadTimeoutSeconds accepted a value above the status refresh timeout")
+	}
+	if err := cfg.SetStatusReadTimeoutSeconds(25); err != nil {
+		t.Fatalf("SetStatusReadTimeoutSeconds() error = %v", err)
+	}
+	if err := cfg.SetStatusRefreshTimeoutSeconds(10); err == nil {
+		t.Fatal("SetStatusRefreshTimeoutSeconds accepted a value below the status read timeout")
+	}
+	if err := cfg.SetStatusRefreshTimeoutSeconds(40); err != nil {
+		t.Fatalf("SetStatusRefreshTimeoutSeconds() error = %v", err)
+	}
+	if err := cfg.SetChannelScanFreshnessSeconds(240); err != nil {
+		t.Fatalf("SetChannelScanFreshnessSeconds() error = %v", err)
+	}
+
+	if got := cfg.OperationRetryDelay(); got != 250*time.Millisecond {
+		t.Fatalf("OperationRetryDelay() = %v, want 250ms", got)
+	}
+	if got := cfg.ChannelConfirmInterval(); got != time.Duration(DefaultChannelConfirmIntervalMs)*time.Millisecond {
+		t.Fatalf("ChannelConfirmInterval() = %v, want the default %dms", got, DefaultChannelConfirmIntervalMs)
+	}
+	if got := cfg.RecoveryRetryBase(); got != 45*time.Second {
+		t.Fatalf("RecoveryRetryBase() = %v, want 45s", got)
+	}
+	if got := cfg.InitialReadTimeout(); got != 60*time.Second {
+		t.Fatalf("InitialReadTimeout() = %v, want 60s", got)
+	}
+	if got := cfg.ChannelScanFreshness(); got != 240*time.Second {
+		t.Fatalf("ChannelScanFreshness() = %v, want 240s", got)
+	}
+
+	reloaded := NewConfig()
+	if err := reloaded.Load(); err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if reloaded.GetPowerWriteAttempts() != 3 || reloaded.GetOperationRetryDelayMs() != 250 ||
+		reloaded.GetChannelConfirmAttempts() != 8 || reloaded.GetConfirmReconnectThreshold() != 3 ||
+		reloaded.GetConfirmReconnectDelayMs() != 500 || reloaded.GetIdentifyAttempts() != 4 ||
+		reloaded.GetPresenceMissThreshold() != 3 || reloaded.GetRecoveryRetryBaseSeconds() != 45 ||
+		reloaded.GetRecoveryRetryMaxSeconds() != 600 || reloaded.GetAbsentStationRetryLimit() != 8 ||
+		reloaded.GetInitialReadTimeoutSeconds() != 60 || reloaded.GetScanReadPhaseTimeoutSeconds() != 60 ||
+		reloaded.GetStatusReadTimeoutSeconds() != 25 || reloaded.GetStatusRefreshTimeoutSeconds() != 40 ||
+		reloaded.GetChannelScanFreshnessSeconds() != 240 || reloaded.GetBluetoothInitRetrySeconds() != 5 {
+		t.Fatalf("reloaded advanced settings = pw %d, ord %d, cca %d, crt %d, crd %d, ia %d, pmt %d, rrb %d, rrm %d, arl %d, irt %d, srp %d, srt %d, srf %d, csf %d, bir %d",
+			reloaded.GetPowerWriteAttempts(), reloaded.GetOperationRetryDelayMs(), reloaded.GetChannelConfirmAttempts(),
+			reloaded.GetConfirmReconnectThreshold(), reloaded.GetConfirmReconnectDelayMs(), reloaded.GetIdentifyAttempts(),
+			reloaded.GetPresenceMissThreshold(), reloaded.GetRecoveryRetryBaseSeconds(), reloaded.GetRecoveryRetryMaxSeconds(),
+			reloaded.GetAbsentStationRetryLimit(), reloaded.GetInitialReadTimeoutSeconds(), reloaded.GetScanReadPhaseTimeoutSeconds(),
+			reloaded.GetStatusReadTimeoutSeconds(), reloaded.GetStatusRefreshTimeoutSeconds(), reloaded.GetChannelScanFreshnessSeconds(),
+			reloaded.GetBluetoothInitRetrySeconds())
+	}
+}
+
+func TestLoadRepairsContradictoryAdvancedSettings(t *testing.T) {
+	configDirectory := useTemporaryConfigDirectory(t)
+	if err := os.WriteFile(
+		filepath.Join(configDirectory, "config.json"),
+		[]byte(`{"stationOperationTimeoutSeconds":30,"initialReadTimeoutSeconds":60,"scanReadPhaseTimeoutSeconds":15,"statusReadTimeoutSeconds":60,"statusRefreshTimeoutSeconds":10,"recoveryRetryBaseSeconds":120,"recoveryRetryMaxSeconds":60}`),
+		0o644,
+	); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	cfg := NewConfig()
+	if err := cfg.Load(); err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if got := cfg.GetInitialReadTimeoutSeconds(); got != 30 {
+		t.Fatalf("repaired initial read timeout = %d, want it clamped to the station operation timeout 30", got)
+	}
+	if got := cfg.GetScanReadPhaseTimeoutSeconds(); got != 30 {
+		t.Fatalf("repaired scan read phase timeout = %d, want it raised to the initial read timeout 30", got)
+	}
+	if got := cfg.GetStatusRefreshTimeoutSeconds(); got != 60 {
+		t.Fatalf("repaired status refresh timeout = %d, want it raised to the status read timeout 60", got)
+	}
+	if got := cfg.GetRecoveryRetryBaseSeconds(); got != 60 {
+		t.Fatalf("repaired recovery retry base = %d, want it clamped to the retry maximum 60", got)
+	}
+}
+
+func TestLoadSanitizesInvalidAPIListenAddress(t *testing.T) {
+	configDirectory := useTemporaryConfigDirectory(t)
+	if err := os.WriteFile(
+		filepath.Join(configDirectory, "config.json"),
+		[]byte(`{"apiListenAddress":"not-an-address"}`),
+		0o644,
+	); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	cfg := NewConfig()
+	if err := cfg.Load(); err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if got := cfg.GetAPIListenAddress(); got != DefaultAPIListenAddress {
+		t.Fatalf("sanitized API listen address = %q, want the default", got)
+	}
+}
+
+func TestLoadSanitizesInvalidPowerTimingValues(t *testing.T) {
+	configDirectory := useTemporaryConfigDirectory(t)
+	if err := os.WriteFile(
+		filepath.Join(configDirectory, "config.json"),
+		[]byte(`{"powerConfirmAttemptsOn":1,"powerConfirmAttemptsOff":9999,"powerConfirmPollIntervalMs":-5,"bootFallbackSeconds":0}`),
+		0o644,
+	); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	cfg := NewConfig()
+	if err := cfg.Load(); err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if got := cfg.GetPowerConfirmAttemptsOn(); got != DefaultPowerConfirmAttemptsOn {
+		t.Fatalf("sanitized confirm attempts on = %d, want %d", got, DefaultPowerConfirmAttemptsOn)
+	}
+	if got := cfg.GetPowerConfirmAttemptsOff(); got != DefaultPowerConfirmAttemptsOff {
+		t.Fatalf("sanitized confirm attempts off = %d, want %d", got, DefaultPowerConfirmAttemptsOff)
+	}
+	if got := cfg.GetPowerConfirmPollIntervalMs(); got != DefaultPowerConfirmPollIntervalMs {
+		t.Fatalf("sanitized confirm poll interval = %d, want %d", got, DefaultPowerConfirmPollIntervalMs)
+	}
+	if got := cfg.GetBootFallbackSeconds(); got != DefaultBootFallbackSeconds {
+		t.Fatalf("sanitized boot fallback = %d, want %d", got, DefaultBootFallbackSeconds)
+	}
+}
+
 func TestScanAndPollingPreferencesPersist(t *testing.T) {
 	useTemporaryConfigDirectory(t)
 	cfg := NewConfig()

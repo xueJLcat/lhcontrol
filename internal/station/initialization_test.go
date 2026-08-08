@@ -169,6 +169,7 @@ func TestStandbyValueNotAllowedRejectionKeepsConnectionAndSkipsRecovery(t *testi
 		CapabilitiesKnown: true,
 	}
 	manager.stations[address] = station
+	stubPowerVerificationRead(manager)
 	standbyErr := &internalbluetooth.UnsupportedCapabilityError{
 		Capability: "standby",
 		Err: &internalbluetooth.DeviceTransportError{

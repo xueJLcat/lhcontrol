@@ -175,6 +175,578 @@ func (a *App) SetStatusPollIntervalSeconds(intervalSeconds int) error {
 
 }
 
+func (a *App) GetStationOperationTimeoutSeconds() int {
+
+	return a.config.GetStationOperationTimeoutSeconds()
+
+}
+
+func (a *App) SetStationOperationTimeoutSeconds(timeoutSeconds int) error {
+
+	err := a.config.SetStationOperationTimeoutSeconds(timeoutSeconds)
+
+	a.setConfigPersistenceStatus()
+
+	return err
+
+}
+
+func (a *App) GetPowerConfirmAttemptsOn() int {
+
+	return a.config.GetPowerConfirmAttemptsOn()
+
+}
+
+func (a *App) SetPowerConfirmAttemptsOn(attempts int) error {
+
+	err := a.config.SetPowerConfirmAttemptsOn(attempts)
+
+	a.setConfigPersistenceStatus()
+
+	if err == nil {
+
+		a.applyBluetoothTiming()
+
+	}
+
+	return err
+
+}
+
+func (a *App) GetPowerConfirmAttemptsOff() int {
+
+	return a.config.GetPowerConfirmAttemptsOff()
+
+}
+
+func (a *App) SetPowerConfirmAttemptsOff(attempts int) error {
+
+	err := a.config.SetPowerConfirmAttemptsOff(attempts)
+
+	a.setConfigPersistenceStatus()
+
+	if err == nil {
+
+		a.applyBluetoothTiming()
+
+	}
+
+	return err
+
+}
+
+func (a *App) GetPowerConfirmPollIntervalMs() int {
+
+	return a.config.GetPowerConfirmPollIntervalMs()
+
+}
+
+func (a *App) SetPowerConfirmPollIntervalMs(intervalMs int) error {
+
+	err := a.config.SetPowerConfirmPollIntervalMs(intervalMs)
+
+	a.setConfigPersistenceStatus()
+
+	if err == nil {
+
+		a.applyBluetoothTiming()
+
+	}
+
+	return err
+
+}
+
+func (a *App) GetBootFallbackSeconds() int {
+
+	return a.config.GetBootFallbackSeconds()
+
+}
+
+func (a *App) SetBootFallbackSeconds(fallbackSeconds int) error {
+
+	err := a.config.SetBootFallbackSeconds(fallbackSeconds)
+
+	a.setConfigPersistenceStatus()
+
+	if err == nil {
+
+		a.applyBluetoothTiming()
+
+	}
+
+	return err
+
+}
+
+func (a *App) GetSleepFinalWriteTimeoutSeconds() int {
+
+	return a.config.GetSleepFinalWriteTimeoutSeconds()
+
+}
+
+func (a *App) SetSleepFinalWriteTimeoutSeconds(timeoutSeconds int) error {
+
+	err := a.config.SetSleepFinalWriteTimeoutSeconds(timeoutSeconds)
+
+	a.setConfigPersistenceStatus()
+
+	if err == nil {
+
+		a.applyBluetoothTiming()
+
+	}
+
+	return err
+
+}
+
+func (a *App) GetSleepPrepareGapMs() int {
+
+	return a.config.GetSleepPrepareGapMs()
+
+}
+
+func (a *App) SetSleepPrepareGapMs(gapMs int) error {
+
+	err := a.config.SetSleepPrepareGapMs(gapMs)
+
+	a.setConfigPersistenceStatus()
+
+	if err == nil {
+
+		a.applyBluetoothTiming()
+
+	}
+
+	return err
+
+}
+
+func (a *App) GetDiscoveryAttempts() int {
+
+	return a.config.GetDiscoveryAttempts()
+
+}
+
+func (a *App) SetDiscoveryAttempts(attempts int) error {
+
+	err := a.config.SetDiscoveryAttempts(attempts)
+
+	a.setConfigPersistenceStatus()
+
+	if err == nil {
+
+		a.applyBluetoothTiming()
+
+	}
+
+	return err
+
+}
+
+func (a *App) GetDiscoveryRetryDelayMs() int {
+
+	return a.config.GetDiscoveryRetryDelayMs()
+
+}
+
+func (a *App) SetDiscoveryRetryDelayMs(delayMs int) error {
+
+	err := a.config.SetDiscoveryRetryDelayMs(delayMs)
+
+	a.setConfigPersistenceStatus()
+
+	if err == nil {
+
+		a.applyBluetoothTiming()
+
+	}
+
+	return err
+
+}
+
+// GetAPIListenAddress returns the configured HTTP API listen address.
+
+func (a *App) GetAPIListenAddress() string {
+
+	return a.config.GetAPIListenAddress()
+
+}
+
+// SetAPIListenAddress validates and persists the HTTP API listen address and
+// hot-restarts the listener loop so the change applies without app restart.
+
+func (a *App) SetAPIListenAddress(address string) error {
+
+	err := a.config.SetAPIListenAddress(address)
+
+	a.setConfigPersistenceStatus()
+
+	if err != nil {
+
+		return err
+
+	}
+
+	// The listener loop binds whatever address the status advertises, so
+	// publish the new address before restarting the loop.
+
+	a.setAPIAddress(address)
+
+	a.restartAPIServer()
+
+	return nil
+
+}
+
+func (a *App) GetPowerWriteAttempts() int {
+
+	return a.config.GetPowerWriteAttempts()
+
+}
+
+func (a *App) SetPowerWriteAttempts(attempts int) error {
+
+	err := a.config.SetPowerWriteAttempts(attempts)
+
+	a.setConfigPersistenceStatus()
+
+	if err == nil {
+
+		a.applyBluetoothTiming()
+
+	}
+
+	return err
+
+}
+
+func (a *App) GetOperationRetryDelayMs() int {
+
+	return a.config.GetOperationRetryDelayMs()
+
+}
+
+func (a *App) SetOperationRetryDelayMs(delayMs int) error {
+
+	err := a.config.SetOperationRetryDelayMs(delayMs)
+
+	a.setConfigPersistenceStatus()
+
+	if err == nil {
+
+		a.applyBluetoothTiming()
+
+	}
+
+	return err
+
+}
+
+func (a *App) GetChannelConfirmAttempts() int {
+
+	return a.config.GetChannelConfirmAttempts()
+
+}
+
+func (a *App) SetChannelConfirmAttempts(attempts int) error {
+
+	err := a.config.SetChannelConfirmAttempts(attempts)
+
+	a.setConfigPersistenceStatus()
+
+	if err == nil {
+
+		a.applyBluetoothTiming()
+
+	}
+
+	return err
+
+}
+
+func (a *App) GetChannelConfirmIntervalMs() int {
+
+	return a.config.GetChannelConfirmIntervalMs()
+
+}
+
+func (a *App) SetChannelConfirmIntervalMs(intervalMs int) error {
+
+	err := a.config.SetChannelConfirmIntervalMs(intervalMs)
+
+	a.setConfigPersistenceStatus()
+
+	if err == nil {
+
+		a.applyBluetoothTiming()
+
+	}
+
+	return err
+
+}
+
+func (a *App) GetConfirmReconnectThreshold() int {
+
+	return a.config.GetConfirmReconnectThreshold()
+
+}
+
+func (a *App) SetConfirmReconnectThreshold(threshold int) error {
+
+	err := a.config.SetConfirmReconnectThreshold(threshold)
+
+	a.setConfigPersistenceStatus()
+
+	if err == nil {
+
+		a.applyBluetoothTiming()
+
+	}
+
+	return err
+
+}
+
+func (a *App) GetConfirmReconnectDelayMs() int {
+
+	return a.config.GetConfirmReconnectDelayMs()
+
+}
+
+func (a *App) SetConfirmReconnectDelayMs(delayMs int) error {
+
+	err := a.config.SetConfirmReconnectDelayMs(delayMs)
+
+	a.setConfigPersistenceStatus()
+
+	if err == nil {
+
+		a.applyBluetoothTiming()
+
+	}
+
+	return err
+
+}
+
+func (a *App) GetIdentifyAttempts() int {
+
+	return a.config.GetIdentifyAttempts()
+
+}
+
+func (a *App) SetIdentifyAttempts(attempts int) error {
+
+	err := a.config.SetIdentifyAttempts(attempts)
+
+	a.setConfigPersistenceStatus()
+
+	if err == nil {
+
+		a.applyBluetoothTiming()
+
+	}
+
+	return err
+
+}
+
+func (a *App) GetPresenceMissThreshold() int {
+
+	return a.config.GetPresenceMissThreshold()
+
+}
+
+func (a *App) SetPresenceMissThreshold(threshold int) error {
+
+	err := a.config.SetPresenceMissThreshold(threshold)
+
+	a.setConfigPersistenceStatus()
+
+	if err == nil {
+
+		a.applyBluetoothTiming()
+
+	}
+
+	return err
+
+}
+
+func (a *App) GetRecoveryRetryBaseSeconds() int {
+
+	return a.config.GetRecoveryRetryBaseSeconds()
+
+}
+
+func (a *App) SetRecoveryRetryBaseSeconds(baseSeconds int) error {
+
+	err := a.config.SetRecoveryRetryBaseSeconds(baseSeconds)
+
+	a.setConfigPersistenceStatus()
+
+	return err
+
+}
+
+func (a *App) GetRecoveryRetryMaxSeconds() int {
+
+	return a.config.GetRecoveryRetryMaxSeconds()
+
+}
+
+func (a *App) SetRecoveryRetryMaxSeconds(maxSeconds int) error {
+
+	err := a.config.SetRecoveryRetryMaxSeconds(maxSeconds)
+
+	a.setConfigPersistenceStatus()
+
+	return err
+
+}
+
+func (a *App) GetAbsentStationRetryLimit() int {
+
+	return a.config.GetAbsentStationRetryLimit()
+
+}
+
+func (a *App) SetAbsentStationRetryLimit(limit int) error {
+
+	err := a.config.SetAbsentStationRetryLimit(limit)
+
+	a.setConfigPersistenceStatus()
+
+	return err
+
+}
+
+func (a *App) GetInitialReadTimeoutSeconds() int {
+
+	return a.config.GetInitialReadTimeoutSeconds()
+
+}
+
+func (a *App) SetInitialReadTimeoutSeconds(timeoutSeconds int) error {
+
+	err := a.config.SetInitialReadTimeoutSeconds(timeoutSeconds)
+
+	a.setConfigPersistenceStatus()
+
+	return err
+
+}
+
+func (a *App) GetScanReadPhaseTimeoutSeconds() int {
+
+	return a.config.GetScanReadPhaseTimeoutSeconds()
+
+}
+
+func (a *App) SetScanReadPhaseTimeoutSeconds(timeoutSeconds int) error {
+
+	err := a.config.SetScanReadPhaseTimeoutSeconds(timeoutSeconds)
+
+	a.setConfigPersistenceStatus()
+
+	return err
+
+}
+
+func (a *App) GetStatusReadTimeoutSeconds() int {
+
+	return a.config.GetStatusReadTimeoutSeconds()
+
+}
+
+func (a *App) SetStatusReadTimeoutSeconds(timeoutSeconds int) error {
+
+	err := a.config.SetStatusReadTimeoutSeconds(timeoutSeconds)
+
+	a.setConfigPersistenceStatus()
+
+	return err
+
+}
+
+func (a *App) GetStatusRefreshTimeoutSeconds() int {
+
+	return a.config.GetStatusRefreshTimeoutSeconds()
+
+}
+
+func (a *App) SetStatusRefreshTimeoutSeconds(timeoutSeconds int) error {
+
+	err := a.config.SetStatusRefreshTimeoutSeconds(timeoutSeconds)
+
+	a.setConfigPersistenceStatus()
+
+	return err
+
+}
+
+func (a *App) GetChannelScanFreshnessSeconds() int {
+
+	return a.config.GetChannelScanFreshnessSeconds()
+
+}
+
+func (a *App) SetChannelScanFreshnessSeconds(freshnessSeconds int) error {
+
+	err := a.config.SetChannelScanFreshnessSeconds(freshnessSeconds)
+
+	a.setConfigPersistenceStatus()
+
+	return err
+
+}
+
+func (a *App) GetBluetoothInitRetrySeconds() int {
+
+	return a.config.GetBluetoothInitRetrySeconds()
+
+}
+
+func (a *App) SetBluetoothInitRetrySeconds(retrySeconds int) error {
+
+	err := a.config.SetBluetoothInitRetrySeconds(retrySeconds)
+
+	a.setConfigPersistenceStatus()
+
+	return err
+
+}
+
+// applyBluetoothTiming pushes the persisted protocol-timing settings into the
+// bluetooth layer, which intentionally does not read the config package.
+
+func (a *App) applyBluetoothTiming() {
+
+	bluetooth.ConfigureTiming(bluetooth.TimingPolicy{
+		ConfirmAttemptsOn:         a.config.GetPowerConfirmAttemptsOn(),
+		ConfirmAttemptsOff:        a.config.GetPowerConfirmAttemptsOff(),
+		ConfirmPollInterval:       a.config.PowerConfirmPollInterval(),
+		BootFallbackAfter:         a.config.BootFallback(),
+		FinalSleepWrite:           a.config.SleepFinalWriteTimeout(),
+		PrepareGap:                a.config.SleepPrepareGap(),
+		DiscoveryAttempts:         a.config.GetDiscoveryAttempts(),
+		DiscoveryRetryDelay:       a.config.DiscoveryRetryDelay(),
+		WriteAttempts:             a.config.GetPowerWriteAttempts(),
+		OperationRetryDelay:       a.config.OperationRetryDelay(),
+		ChannelConfirmAttempts:    a.config.GetChannelConfirmAttempts(),
+		ChannelConfirmInterval:    a.config.ChannelConfirmInterval(),
+		ConfirmReconnectThreshold: a.config.GetConfirmReconnectThreshold(),
+		ConfirmReconnectDelay:     a.config.ConfirmReconnectDelay(),
+		IdentifyAttempts:          a.config.GetIdentifyAttempts(),
+		PresenceMissThreshold:     a.config.GetPresenceMissThreshold(),
+	})
+
+}
+
 // applyAutoSleep (re)starts the auto-sleep watcher goroutine to match the
 
 // given settings. Calling it repeatedly is safe: the previous watcher is
@@ -333,7 +905,8 @@ func timedOutAutoSleepEvent(results []station.BulkPowerStationResult, reason str
 
 	for _, entry := range results {
 
-		if entry.Skipped && !entry.Success && entry.Reason == "bulk operation timed out" {
+		if entry.Skipped && !entry.Success &&
+			(entry.Reason == station.ReasonBulkOperationTimeout || entry.Reason == station.ReasonStationOperationTimeout) {
 
 			timedOutSkipped++
 

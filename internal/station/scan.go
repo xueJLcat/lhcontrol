@@ -299,7 +299,7 @@ func (m *Manager) scanAndFetchStations(ctx context.Context) ([]StationInfo, int,
 	}
 	m.stationsMutex.Unlock()
 	if len(stationsToFetch) > 0 && scanContextError(ctx) == nil {
-		phaseContext, cancelPhase := context.WithTimeout(ctx, m.initialReadPhaseTimeout)
+		phaseContext, cancelPhase := context.WithTimeout(ctx, m.scanReadPhaseTimeoutDuration())
 		defer cancelPhase()
 		var wg sync.WaitGroup
 		type initialReadResult struct {
@@ -332,7 +332,7 @@ func (m *Manager) scanAndFetchStations(ctx context.Context) ([]StationInfo, int,
 					readResults[resultIndex].err = err
 					return
 				}
-				readContext, cancelRead := context.WithTimeout(phaseContext, m.initialReadTimeout)
+				readContext, cancelRead := context.WithTimeout(phaseContext, m.initialReadTimeoutDuration())
 				defer cancelRead()
 				readResults[resultIndex].err = runSafely("initial station read", func() error {
 					return m.bluetoothOps.fetchInitialPowerState(readContext, ptr)

@@ -10,24 +10,108 @@ export function CheckAllStationStatuses() {
   return window['go']['main']['App']['CheckAllStationStatuses']();
 }
 
+export function GetAPIListenAddress() {
+  return window['go']['main']['App']['GetAPIListenAddress']();
+}
+
 export function GetAPIStatus() {
   return window['go']['main']['App']['GetAPIStatus']();
+}
+
+export function GetAbsentStationRetryLimit() {
+  return window['go']['main']['App']['GetAbsentStationRetryLimit']();
 }
 
 export function GetAutoSleepSettings() {
   return window['go']['main']['App']['GetAutoSleepSettings']();
 }
 
+export function GetBluetoothInitRetrySeconds() {
+  return window['go']['main']['App']['GetBluetoothInitRetrySeconds']();
+}
+
+export function GetBootFallbackSeconds() {
+  return window['go']['main']['App']['GetBootFallbackSeconds']();
+}
+
 export function GetBulkPowerTimeoutSeconds() {
   return window['go']['main']['App']['GetBulkPowerTimeoutSeconds']();
+}
+
+export function GetChannelConfirmAttempts() {
+  return window['go']['main']['App']['GetChannelConfirmAttempts']();
+}
+
+export function GetChannelConfirmIntervalMs() {
+  return window['go']['main']['App']['GetChannelConfirmIntervalMs']();
+}
+
+export function GetChannelScanFreshnessSeconds() {
+  return window['go']['main']['App']['GetChannelScanFreshnessSeconds']();
+}
+
+export function GetConfirmReconnectDelayMs() {
+  return window['go']['main']['App']['GetConfirmReconnectDelayMs']();
+}
+
+export function GetConfirmReconnectThreshold() {
+  return window['go']['main']['App']['GetConfirmReconnectThreshold']();
 }
 
 export function GetCurrentStationInfo() {
   return window['go']['main']['App']['GetCurrentStationInfo']();
 }
 
+export function GetDiscoveryAttempts() {
+  return window['go']['main']['App']['GetDiscoveryAttempts']();
+}
+
+export function GetDiscoveryRetryDelayMs() {
+  return window['go']['main']['App']['GetDiscoveryRetryDelayMs']();
+}
+
+export function GetIdentifyAttempts() {
+  return window['go']['main']['App']['GetIdentifyAttempts']();
+}
+
+export function GetInitialReadTimeoutSeconds() {
+  return window['go']['main']['App']['GetInitialReadTimeoutSeconds']();
+}
+
 export function GetLanguage() {
   return window['go']['main']['App']['GetLanguage']();
+}
+
+export function GetOperationRetryDelayMs() {
+  return window['go']['main']['App']['GetOperationRetryDelayMs']();
+}
+
+export function GetPowerConfirmAttemptsOff() {
+  return window['go']['main']['App']['GetPowerConfirmAttemptsOff']();
+}
+
+export function GetPowerConfirmAttemptsOn() {
+  return window['go']['main']['App']['GetPowerConfirmAttemptsOn']();
+}
+
+export function GetPowerConfirmPollIntervalMs() {
+  return window['go']['main']['App']['GetPowerConfirmPollIntervalMs']();
+}
+
+export function GetPowerWriteAttempts() {
+  return window['go']['main']['App']['GetPowerWriteAttempts']();
+}
+
+export function GetPresenceMissThreshold() {
+  return window['go']['main']['App']['GetPresenceMissThreshold']();
+}
+
+export function GetRecoveryRetryBaseSeconds() {
+  return window['go']['main']['App']['GetRecoveryRetryBaseSeconds']();
+}
+
+export function GetRecoveryRetryMaxSeconds() {
+  return window['go']['main']['App']['GetRecoveryRetryMaxSeconds']();
 }
 
 export function GetScanDurationSeconds() {
@@ -38,8 +122,24 @@ export function GetScanOnStartup() {
   return window['go']['main']['App']['GetScanOnStartup']();
 }
 
+export function GetScanReadPhaseTimeoutSeconds() {
+  return window['go']['main']['App']['GetScanReadPhaseTimeoutSeconds']();
+}
+
 export function GetScanStatus() {
   return window['go']['main']['App']['GetScanStatus']();
+}
+
+export function GetSleepFinalWriteTimeoutSeconds() {
+  return window['go']['main']['App']['GetSleepFinalWriteTimeoutSeconds']();
+}
+
+export function GetSleepPrepareGapMs() {
+  return window['go']['main']['App']['GetSleepPrepareGapMs']();
+}
+
+export function GetStationOperationTimeoutSeconds() {
+  return window['go']['main']['App']['GetStationOperationTimeoutSeconds']();
 }
 
 export function GetStatusPollIntervalSeconds() {
@@ -48,6 +148,14 @@ export function GetStatusPollIntervalSeconds() {
 
 export function GetStatusPollingEnabled() {
   return window['go']['main']['App']['GetStatusPollingEnabled']();
+}
+
+export function GetStatusReadTimeoutSeconds() {
+  return window['go']['main']['App']['GetStatusReadTimeoutSeconds']();
+}
+
+export function GetStatusRefreshTimeoutSeconds() {
+  return window['go']['main']['App']['GetStatusRefreshTimeoutSeconds']();
 }
 
 export function IdentifyStation(arg1) {
@@ -98,6 +206,14 @@ export function ScanAndFetchStations() {
   return window['go']['main']['App']['ScanAndFetchStations']();
 }
 
+export function SetAPIListenAddress(arg1) {
+  return window['go']['main']['App']['SetAPIListenAddress'](arg1);
+}
+
+export function SetAbsentStationRetryLimit(arg1) {
+  return window['go']['main']['App']['SetAbsentStationRetryLimit'](arg1);
+}
+
 export function SetAllStationsPower(arg1) {
   return window['go']['main']['App']['SetAllStationsPower'](arg1);
 }
@@ -110,12 +226,88 @@ export function SetAutoSleepSettings(arg1) {
   return window['go']['main']['App']['SetAutoSleepSettings'](arg1);
 }
 
+export function SetBluetoothInitRetrySeconds(arg1) {
+  return window['go']['main']['App']['SetBluetoothInitRetrySeconds'](arg1);
+}
+
+export function SetBootFallbackSeconds(arg1) {
+  return window['go']['main']['App']['SetBootFallbackSeconds'](arg1);
+}
+
 export function SetBulkPowerTimeoutSeconds(arg1) {
   return window['go']['main']['App']['SetBulkPowerTimeoutSeconds'](arg1);
 }
 
+export function SetChannelConfirmAttempts(arg1) {
+  return window['go']['main']['App']['SetChannelConfirmAttempts'](arg1);
+}
+
+export function SetChannelConfirmIntervalMs(arg1) {
+  return window['go']['main']['App']['SetChannelConfirmIntervalMs'](arg1);
+}
+
+export function SetChannelScanFreshnessSeconds(arg1) {
+  return window['go']['main']['App']['SetChannelScanFreshnessSeconds'](arg1);
+}
+
+export function SetConfirmReconnectDelayMs(arg1) {
+  return window['go']['main']['App']['SetConfirmReconnectDelayMs'](arg1);
+}
+
+export function SetConfirmReconnectThreshold(arg1) {
+  return window['go']['main']['App']['SetConfirmReconnectThreshold'](arg1);
+}
+
+export function SetDiscoveryAttempts(arg1) {
+  return window['go']['main']['App']['SetDiscoveryAttempts'](arg1);
+}
+
+export function SetDiscoveryRetryDelayMs(arg1) {
+  return window['go']['main']['App']['SetDiscoveryRetryDelayMs'](arg1);
+}
+
+export function SetIdentifyAttempts(arg1) {
+  return window['go']['main']['App']['SetIdentifyAttempts'](arg1);
+}
+
+export function SetInitialReadTimeoutSeconds(arg1) {
+  return window['go']['main']['App']['SetInitialReadTimeoutSeconds'](arg1);
+}
+
 export function SetLanguage(arg1) {
   return window['go']['main']['App']['SetLanguage'](arg1);
+}
+
+export function SetOperationRetryDelayMs(arg1) {
+  return window['go']['main']['App']['SetOperationRetryDelayMs'](arg1);
+}
+
+export function SetPowerConfirmAttemptsOff(arg1) {
+  return window['go']['main']['App']['SetPowerConfirmAttemptsOff'](arg1);
+}
+
+export function SetPowerConfirmAttemptsOn(arg1) {
+  return window['go']['main']['App']['SetPowerConfirmAttemptsOn'](arg1);
+}
+
+export function SetPowerConfirmPollIntervalMs(arg1) {
+  return window['go']['main']['App']['SetPowerConfirmPollIntervalMs'](arg1);
+}
+
+export function SetPowerWriteAttempts(arg1) {
+  return window['go']['main']['App']['SetPowerWriteAttempts'](arg1);
+}
+
+export function SetPresenceMissThreshold(arg1) {
+  return window['go']['main']['App']['SetPresenceMissThreshold'](arg1);
+}
+
+export function SetRecoveryRetryBaseSeconds(arg1) {
+  return window['go']['main']['App']['SetRecoveryRetryBaseSeconds'](arg1);
+}
+
+export function SetRecoveryRetryMaxSeconds(arg1) {
+  return window['go']['main']['App']['SetRecoveryRetryMaxSeconds'](arg1);
 }
 
 export function SetScanDurationSeconds(arg1) {
@@ -126,8 +318,24 @@ export function SetScanOnStartup(arg1) {
   return window['go']['main']['App']['SetScanOnStartup'](arg1);
 }
 
+export function SetScanReadPhaseTimeoutSeconds(arg1) {
+  return window['go']['main']['App']['SetScanReadPhaseTimeoutSeconds'](arg1);
+}
+
+export function SetSleepFinalWriteTimeoutSeconds(arg1) {
+  return window['go']['main']['App']['SetSleepFinalWriteTimeoutSeconds'](arg1);
+}
+
+export function SetSleepPrepareGapMs(arg1) {
+  return window['go']['main']['App']['SetSleepPrepareGapMs'](arg1);
+}
+
 export function SetStationChannel(arg1, arg2, arg3) {
   return window['go']['main']['App']['SetStationChannel'](arg1, arg2, arg3);
+}
+
+export function SetStationOperationTimeoutSeconds(arg1) {
+  return window['go']['main']['App']['SetStationOperationTimeoutSeconds'](arg1);
 }
 
 export function SetStationPower(arg1, arg2) {
@@ -140,6 +348,14 @@ export function SetStatusPollIntervalSeconds(arg1) {
 
 export function SetStatusPollingEnabled(arg1) {
   return window['go']['main']['App']['SetStatusPollingEnabled'](arg1);
+}
+
+export function SetStatusReadTimeoutSeconds(arg1) {
+  return window['go']['main']['App']['SetStatusReadTimeoutSeconds'](arg1);
+}
+
+export function SetStatusRefreshTimeoutSeconds(arg1) {
+  return window['go']['main']['App']['SetStatusRefreshTimeoutSeconds'](arg1);
 }
 
 export function StopScan() {

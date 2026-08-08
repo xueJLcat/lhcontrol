@@ -19,14 +19,29 @@ var ErrChannelConflict = errors.New("channel conflicts with another visible stat
 var ErrScanRequired = errors.New("a recent successful scan is required")
 var ErrShuttingDown = errors.New("application is shutting down")
 
+// ErrBulkOperationTimeout reports that the whole bulk operation exceeded its
+// configured timeout. ErrStationOperationTimeout reports that a single
+// station's operation budget expired while the bulk deadline had not.
+var ErrBulkOperationTimeout = errors.New(ReasonBulkOperationTimeout)
+var ErrStationOperationTimeout = errors.New(ReasonStationOperationTimeout)
+
+// Result Reason values are part of the public result contract; consumers must
+// compare them against these constants instead of duplicating the strings.
+const (
+	ReasonBulkOperationTimeout    = "bulk operation timed out"
+	ReasonStationOperationTimeout = "station operation timed out"
+	ReasonOperationCancelled      = "operation cancelled"
+	ReasonShuttingDown            = "application is shutting down"
+	ReasonStationBooting          = "station is booting"
+	ReasonAlreadyAtTarget         = "already at target state"
+	ReasonUnsupportedCapability   = "power control is not supported"
+	ReasonUnsupportedStandby      = "standby is not supported"
+)
+
+// Timing budgets live in config (user-tunable) and are read through the
+// Manager accessors; only the non-tunable safety windows stay as constants.
 const (
 	operationSafetyFreshnessWindow = 45 * time.Second
-	channelScanFreshnessWindow     = 2 * time.Minute
-	defaultInitialReadTimeout      = 30 * time.Second
-	defaultStatusReadTimeout       = 20 * time.Second
-	defaultInitialReadPhaseTimeout = 45 * time.Second
-	defaultStatusRefreshTimeout    = 30 * time.Second
-	defaultStationOperationTimeout = 30 * time.Second
 	metadataFreshnessWindow        = 24 * time.Hour
 )
 
@@ -246,6 +261,5 @@ const (
 	statusRetryChannel
 	statusRetryMetadata
 	statusRetryRefresh
-	statusAbsentRetryLimit = 5
-	metadataRetryLimit     = 5
+	metadataRetryLimit = 5
 )

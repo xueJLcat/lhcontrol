@@ -209,3 +209,92 @@ func TestWatcherCancelsActiveTriggerWhenProcessRelaunches(t *testing.T) {
 		t.Fatal("relaunch did not cancel the active automatic-sleep action")
 	}
 }
+
+// TestWatcherDefersTriggerUntilPreviousActionStops covers the case where the
+// monitor fires while the previous sleep action is still draining. The new
+// trigger must be deferred and then run once the previous action completes,
+// instead of being silently dropped (which would leave the stations awake).
+func TestWatcherDefersTriggerUntilPreviousActionStops(t *testing.T) {
+	var running atomic.Bool
+	base := time.Now()
+	var step atomic.Int64
+	// The first trigger call blocks until released regardless of cancellation,
+	// emulating a slow action that is still ending when the next session's
+	// delay elapses.
+	var calls atomic.Int32
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	firstStarted := make(chan struct{})
+	secondFired := make(chan struct{})
+	var firstOnce sync.Once
+
+	watcher := &Watcher{
+		Settings: Settings{Enabled: true, Target: string(TargetSteamVR), DelaySeconds: 60},
+		Interval: time.Millisecond,
+		IsRunning: func(string) (bool, error) {
+			return running.Load(), nil
+		},
+		Now: func() time.Time {
+			return base.Add(time.Duration(step.Load()) * time.Minute)
+		},
+		Trigger: func(ctx context.Context) {
+			n := calls.Add(1)
+			if n == 1 {
+				firstOnce.Do(func() { close(firstStarted) })
+				<-release
+				return
+			}
+			close(secondFired)
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		watcher.Run(ctx)
+	}()
+	defer func() {
+		releaseOnce.Do(func() { close(release) })
+		cancel()
+		<-done
+	}()
+
+	// Session one: observe running, close (recording the close timestamp at
+	// the current clock), then advance the clock past the delay so the first
+	// action starts and blocks.
+	running.Store(true)
+	time.Sleep(20 * time.Millisecond)
+	running.Store(false)
+	time.Sleep(20 * time.Millisecond)
+	step.Add(1)
+	select {
+	case <-firstStarted:
+	case <-time.After(time.Second):
+		t.Fatal("watcher did not start the first automatic-sleep action")
+	}
+
+	// Session two while the first action is still ending: relaunch, close
+	// again, and elapse the delay. The monitor fires but the previous action
+	// has not returned, so the trigger must be deferred rather than dropped.
+	running.Store(true)
+	time.Sleep(20 * time.Millisecond)
+	running.Store(false)
+	time.Sleep(20 * time.Millisecond)
+	step.Add(1)
+	time.Sleep(50 * time.Millisecond)
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("trigger calls while the previous action was draining = %d, want 1 (deferred, not fired early)", got)
+	}
+
+	// Release the first action; the deferred trigger must then run.
+	releaseOnce.Do(func() { close(release) })
+	select {
+	case <-secondFired:
+	case <-time.After(time.Second):
+		t.Fatal("deferred trigger was dropped instead of running after the previous action stopped")
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("trigger calls after the deferred trigger = %d, want 2", got)
+	}
+}

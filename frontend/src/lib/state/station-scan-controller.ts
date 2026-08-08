@@ -28,6 +28,7 @@ export interface StationScanHost {
   startupPending: boolean;
   readonly disposed: boolean;
   readonly autoSleepRunning: boolean;
+  readonly externalOperationRunning: boolean;
   readonly isStatusChecking: boolean;
   readonly isLoading: boolean;
   readonly isBulkLoading: boolean;
@@ -50,7 +51,10 @@ export interface StationScanHost {
 export class StationScanController {
   constructor(private host: StationScanHost) {}
   async periodicStatusCheck() {
-    if (this.host.startupPending || this.host.autoSleepRunning || this.host.isStatusChecking || this.host.isLoading || this.host.isBulkLoading || this.host.anyDeviceOperation) return;
+    // External HTTP operations hold the backend's global operation lock, so a
+    // status poll started in that window can only fail with "operation in
+    // progress" and would overwrite the status line with a spurious error.
+    if (this.host.startupPending || this.host.autoSleepRunning || this.host.externalOperationRunning || this.host.isStatusChecking || this.host.isLoading || this.host.isBulkLoading || this.host.anyDeviceOperation) return;
     this.host.globalOperation = 'status-refresh';
     const statusOperation = this.host.gates.currentStatusEpoch;
     const revision = this.host.listRevisions.next();

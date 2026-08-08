@@ -479,6 +479,26 @@ describe('StationStore external HTTP operation events', () => {
     expect(store.bulkLocked).toBe(false);
     expect(store.stationLocked).toBe(false);
   });
+
+  it('skips periodic status checks while an external operation is running', async () => {
+    const { store } = mountStore();
+    await vi.waitFor(() => expect(runtime.handlers.has('external-operation')).toBe(true));
+    await vi.waitFor(() => expect(store.stations).toHaveLength(1));
+
+    runtime.handlers.get('external-operation')?.({ id: 21, phase: 'started', kind: 'bulk-power' });
+    await vi.waitFor(() => expect(store.externalOperationRunning).toBe(true));
+
+    // The backend rejects concurrent status refreshes while an external
+    // operation holds the global lock; the poller must not even ask.
+    backend.CheckAllStationStatuses.mockClear();
+    await (store as unknown as { periodicStatusCheck(): Promise<void> }).periodicStatusCheck();
+    expect(backend.CheckAllStationStatuses).not.toHaveBeenCalled();
+
+    runtime.handlers.get('external-operation')?.({ id: 21, phase: 'finished', kind: 'bulk-power' });
+    await vi.waitFor(() => expect(store.externalOperationRunning).toBe(false));
+    await (store as unknown as { periodicStatusCheck(): Promise<void> }).periodicStatusCheck();
+    expect(backend.CheckAllStationStatuses).toHaveBeenCalled();
+  });
 });
 
 describe('StationStore external station updates', () => {

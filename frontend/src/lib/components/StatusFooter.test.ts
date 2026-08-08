@@ -83,6 +83,30 @@ describe('StatusFooter', () => {
     await waitFor(() => expect(screen.queryByText('stale warning')).not.toBeInTheDocument());
   });
 
+  it('reopens the config panel on the first click after the warnings return', async () => {
+    const base = {
+      statusMessage: 'Ready.',
+      apiRunning: true,
+      apiError: '',
+      apiAddress: '127.0.0.1:7575',
+      configWritable: true
+    };
+    const view = render(StatusFooter, { props: { ...base, configWarnings: ['disk almost full'] } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Config warning' }));
+    expect(screen.getByText('disk almost full')).toBeInTheDocument();
+
+    // The warning clears: the panel hides and its open state must reset.
+    await view.rerender({ ...base, configWarnings: [] });
+    await waitFor(() => expect(screen.queryByText('disk almost full')).not.toBeInTheDocument());
+
+    // The warning returns: a single click must open the panel again.
+    await view.rerender({ ...base, configWarnings: ['disk almost full again'] });
+    const control = await screen.findByRole('button', { name: 'Config warning' });
+    await fireEvent.click(control);
+    expect(control).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByText('disk almost full again')).toBeInTheDocument();
+  });
+
   it('expands the API pill to reveal the error or address', async () => {
     renderFooter({ apiRunning: false, apiError: 'API crashed' });
     const control = screen.getByRole('button', { name: 'API offline' });

@@ -63,6 +63,12 @@ func (s *scanSession) requestStop(reason scanStopReason) error {
 
 func (s *scanSession) requestStopAsync(reason scanStopReason) {
 	s.mutex.Lock()
+	if s.finished {
+		// The scan already ended on its own; recording a stop reason here
+		// would misclassify that natural finish as a duration/cancel stop.
+		s.mutex.Unlock()
+		return
+	}
 	currentReason := scanStopReason(s.reason.Load())
 	if currentReason == scanStopNone || reason == scanStopCancelled {
 		// The latch is set in the same critical section that stores the
@@ -74,7 +80,7 @@ func (s *scanSession) requestStopAsync(reason scanStopReason) {
 		}
 		s.reason.Store(uint32(reason))
 	}
-	shouldStop := s.started && !s.finished
+	shouldStop := s.started
 	s.mutex.Unlock()
 	if shouldStop {
 		s.issueStop()
@@ -247,17 +253,21 @@ func ScanForDurationContext(ctx context.Context, duration time.Duration) ([]Disc
 	log.Printf("[BT] ScanForDuration (AfterFunc): Finished. Found %d stations.", len(results))
 
 	reason := session.stopReason()
+	// A scan whose duration elapsed and whose stop was accepted keeps its
+	// discovery results even when the watcher's stop tail reports a final
+	// error (for example the watcher lingered in Stopping past the stop
+	// budget, or the Stopped event arrived with an error code): the duration
+	// fully ran, so discarding valid stations would lose them for no reason.
+	// This also preserves results when a cancellation lands in the
+	// stop-handshake window after the duration already elapsed. Checked before
+	// the scanErr early return so that tail-of-stop errors cannot shadow it.
+	if session.durationStopIssuedFlag() && session.stopErr == nil {
+		return results, nil
+	}
 	if scanErr != nil {
 		if err := scanCompletionError(scanErr); err != nil {
 			return nil, err
 		}
-	}
-	// A scan whose duration elapsed and whose stop completed cleanly keeps
-	// its discovery results even when a cancellation lands in the
-	// stop-handshake window: the scan work is already done, so reporting
-	// it as cancelled would discard valid stations for no reason.
-	if session.durationStopIssuedFlag() && session.stopErr == nil {
-		return results, nil
 	}
 	// A watcher that failed to stop or timed out after a cancellation
 	// request must be reported as a failure so callers (HTTP, Wails,

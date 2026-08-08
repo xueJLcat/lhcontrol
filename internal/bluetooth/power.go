@@ -5,11 +5,155 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"sync"
 	"time"
 	"tinygo.org/x/bluetooth"
 )
 
-var finalSleepWriteTimeout = 30 * time.Second
+// finalSleepWriteTimeout is a test seam: a positive value overrides the
+// policy-driven final sleep write deadline, zero follows the TimingPolicy.
+var finalSleepWriteTimeout time.Duration
+
+// TimingPolicy carries the user-tunable protocol timing knobs. The bluetooth
+// package stays configuration-free; the application layer pushes values
+// through ConfigureTiming after loading or changing settings. Zero-valued
+// fields keep the built-in defaults.
+type TimingPolicy struct {
+	ConfirmAttemptsOn   int
+	ConfirmAttemptsOff  int
+	ConfirmPollInterval time.Duration
+	BootFallbackAfter   time.Duration
+	// FinalSleepWrite bounds the paired-write sleep command that must be
+	// completed even when the caller context is already cancelled.
+	FinalSleepWrite time.Duration
+	// PrepareGap is the firmware settling delay between the prepare (0x01)
+	// and final (0x00) writes of the paired sleep sequence.
+	PrepareGap time.Duration
+	// DiscoveryAttempts/DiscoveryRetryDelay bound GATT service discovery
+	// retries when a first connection attempt fails.
+	DiscoveryAttempts   int
+	DiscoveryRetryDelay time.Duration
+	// WriteAttempts bounds the power command write loop (including the
+	// reconnect fallback between attempts); OperationRetryDelay is the backoff
+	// between those attempts.
+	WriteAttempts       int
+	OperationRetryDelay time.Duration
+	// ChannelConfirmAttempts/ChannelConfirmInterval drive the channel write
+	// readback polling.
+	ChannelConfirmAttempts int
+	ChannelConfirmInterval time.Duration
+	// ConfirmReconnectThreshold/ConfirmReconnectDelay apply to both power and
+	// channel confirmation: after that many consecutive read errors a
+	// reconnect is attempted, waiting the delay first.
+	ConfirmReconnectThreshold int
+	ConfirmReconnectDelay     time.Duration
+	IdentifyAttempts          int
+	PresenceMissThreshold     int
+}
+
+const (
+	defaultConfirmAttemptsOn         = 51
+	defaultConfirmAttemptsOff        = 15
+	defaultConfirmPollInterval       = 200 * time.Millisecond
+	defaultBootFallbackAfter         = 8 * time.Second
+	defaultFinalSleepWrite           = 30 * time.Second
+	defaultPrepareGap                = 50 * time.Millisecond
+	defaultDiscoveryAttempts         = 3
+	defaultDiscoveryRetryDelay       = 500 * time.Millisecond
+	defaultWriteAttempts             = 2
+	defaultOperationRetryDelay       = 500 * time.Millisecond
+	defaultChannelConfirmAttempts    = 5
+	defaultChannelConfirmInterval    = 250 * time.Millisecond
+	defaultConfirmReconnectThreshold = 2
+	defaultConfirmReconnectDelay     = 250 * time.Millisecond
+	defaultIdentifyAttempts          = 2
+	defaultPresenceMissThreshold     = 2
+)
+
+var (
+	timingMutex  sync.RWMutex
+	timingPolicy = TimingPolicy{
+		ConfirmAttemptsOn:         defaultConfirmAttemptsOn,
+		ConfirmAttemptsOff:        defaultConfirmAttemptsOff,
+		ConfirmPollInterval:       defaultConfirmPollInterval,
+		BootFallbackAfter:         defaultBootFallbackAfter,
+		FinalSleepWrite:           defaultFinalSleepWrite,
+		PrepareGap:                defaultPrepareGap,
+		DiscoveryAttempts:         defaultDiscoveryAttempts,
+		DiscoveryRetryDelay:       defaultDiscoveryRetryDelay,
+		WriteAttempts:             defaultWriteAttempts,
+		OperationRetryDelay:       defaultOperationRetryDelay,
+		ChannelConfirmAttempts:    defaultChannelConfirmAttempts,
+		ChannelConfirmInterval:    defaultChannelConfirmInterval,
+		ConfirmReconnectThreshold: defaultConfirmReconnectThreshold,
+		ConfirmReconnectDelay:     defaultConfirmReconnectDelay,
+		IdentifyAttempts:          defaultIdentifyAttempts,
+		PresenceMissThreshold:     defaultPresenceMissThreshold,
+	}
+)
+
+// ConfigureTiming replaces the active timing policy, filling zero-valued
+// fields with the built-in defaults so partial updates stay safe.
+func ConfigureTiming(policy TimingPolicy) {
+	if policy.ConfirmAttemptsOn <= 0 {
+		policy.ConfirmAttemptsOn = defaultConfirmAttemptsOn
+	}
+	if policy.ConfirmAttemptsOff <= 0 {
+		policy.ConfirmAttemptsOff = defaultConfirmAttemptsOff
+	}
+	if policy.ConfirmPollInterval <= 0 {
+		policy.ConfirmPollInterval = defaultConfirmPollInterval
+	}
+	if policy.BootFallbackAfter <= 0 {
+		policy.BootFallbackAfter = defaultBootFallbackAfter
+	}
+	if policy.FinalSleepWrite <= 0 {
+		policy.FinalSleepWrite = defaultFinalSleepWrite
+	}
+	if policy.PrepareGap < 0 {
+		policy.PrepareGap = defaultPrepareGap
+	}
+	if policy.DiscoveryAttempts <= 0 {
+		policy.DiscoveryAttempts = defaultDiscoveryAttempts
+	}
+	if policy.DiscoveryRetryDelay <= 0 {
+		policy.DiscoveryRetryDelay = defaultDiscoveryRetryDelay
+	}
+	if policy.WriteAttempts <= 0 {
+		policy.WriteAttempts = defaultWriteAttempts
+	}
+	if policy.OperationRetryDelay <= 0 {
+		policy.OperationRetryDelay = defaultOperationRetryDelay
+	}
+	if policy.ChannelConfirmAttempts <= 0 {
+		policy.ChannelConfirmAttempts = defaultChannelConfirmAttempts
+	}
+	if policy.ChannelConfirmInterval <= 0 {
+		policy.ChannelConfirmInterval = defaultChannelConfirmInterval
+	}
+	if policy.ConfirmReconnectThreshold <= 0 {
+		policy.ConfirmReconnectThreshold = defaultConfirmReconnectThreshold
+	}
+	if policy.ConfirmReconnectDelay <= 0 {
+		policy.ConfirmReconnectDelay = defaultConfirmReconnectDelay
+	}
+	if policy.IdentifyAttempts <= 0 {
+		policy.IdentifyAttempts = defaultIdentifyAttempts
+	}
+	if policy.PresenceMissThreshold <= 0 {
+		policy.PresenceMissThreshold = defaultPresenceMissThreshold
+	}
+	timingMutex.Lock()
+	timingPolicy = policy
+	timingMutex.Unlock()
+}
+
+// CurrentTiming returns the active timing policy.
+func CurrentTiming() TimingPolicy {
+	timingMutex.RLock()
+	defer timingMutex.RUnlock()
+	return timingPolicy
+}
 
 func writeCharacteristicValueInternal(ctx context.Context, characteristic characteristicIO, value byte) error {
 	if characteristic == nil {
@@ -84,11 +228,13 @@ func writePowerValueInternal(ctx context.Context, station *BaseStation, value by
 // transitions are not always visible immediately after a successful GATT write.
 // Assumes caller holds station.mutex. Inter-attempt sleeps release the lock so
 // snapshots and other short readers are not queued behind the whole polling
-// window (up to ~10s for On); the lock is always held again on return.
+// window; the lock is always held again on return. Attempt counts and the
+// poll interval follow the user-configured TimingPolicy.
 func confirmPowerStateInternalContext(ctx context.Context, station *BaseStation, expectedState PowerState) error {
-	attempts := 15
+	timing := CurrentTiming()
+	attempts := timing.ConfirmAttemptsOff
 	if expectedState == PowerStateOn {
-		attempts = 51
+		attempts = timing.ConfirmAttemptsOn
 	}
 	var lastErr error
 	consecutiveReadErrors := 0
@@ -101,7 +247,7 @@ func confirmPowerStateInternalContext(ctx context.Context, station *BaseStation,
 		}
 		if attempt > 0 {
 			station.mutex.Unlock()
-			err := sleepContext(ctx, 200*time.Millisecond)
+			err := sleepContext(ctx, timing.ConfirmPollInterval)
 			station.mutex.Lock()
 			if err != nil {
 				if lastErr != nil {
@@ -119,10 +265,10 @@ func confirmPowerStateInternalContext(ctx context.Context, station *BaseStation,
 				return err
 			}
 			consecutiveReadErrors++
-			if consecutiveReadErrors >= 2 && attempt < attempts-1 {
+			if consecutiveReadErrors >= timing.ConfirmReconnectThreshold && attempt < attempts-1 {
 				_ = disconnectInternal(station)
 				station.mutex.Unlock()
-				sleepErr := sleepContext(ctx, 250*time.Millisecond)
+				sleepErr := sleepContext(ctx, timing.ConfirmReconnectDelay)
 				station.mutex.Lock()
 				if sleepErr != nil {
 					return errors.Join(lastErr, sleepErr)
@@ -136,7 +282,7 @@ func confirmPowerStateInternalContext(ctx context.Context, station *BaseStation,
 			continue
 		}
 		consecutiveReadErrors = 0
-		if IsPowerStateConfirmed(expectedState, station.RawPowerState) {
+		if station.PowerState == expectedState {
 			return nil
 		}
 		lastErr = fmt.Errorf(
@@ -161,11 +307,17 @@ func IsPowerStateConfirmed(expectedState PowerState, raw int) bool {
 	}
 }
 
-// IsPowerStateVerified reports whether a decoded state is backed by a stable
-// protocol value. Compatibility fallbacks from persistent boot-like values
-// remain inferred and must never be presented as confirmed readback.
+// IsPowerStateVerified reports whether a decoded state is backed by a raw
+// value that decodePowerStateWithHistory accepts as that stable state. Some
+// Lighthouse 2.0 firmware keeps reporting booting raw values (such as 0x01)
+// while already awake, and the decode history falls back to On for them, so
+// verification follows the displayed state instead of raw values such
+// firmware never produces.
 func IsPowerStateVerified(decoded PowerState, raw int) bool {
-	return IsPowerStateConfirmed(decoded, raw)
+	if IsPowerStateConfirmed(decoded, raw) {
+		return true
+	}
+	return decoded == PowerStateOn && (raw == 0x01 || raw == 0x08)
 }
 
 type PowerControlResult struct {
@@ -226,7 +378,7 @@ func SetPowerStateContext(ctx context.Context, station *BaseStation, target Powe
 	// station. Re-arm boot-state observation before writing so the previous
 	// connection's compatibility inference cannot hide that transition.
 	station.bootRawTrustedOn = false
-	const maxRetries = 2
+	maxRetries := CurrentTiming().WriteAttempts
 	var err error
 	var ambiguousWrite error
 	ambiguousSleepPrepare := false
@@ -247,6 +399,10 @@ func SetPowerStateContext(ctx context.Context, station *BaseStation, target Powe
 		if err = connectAndDiscoverInternalContext(ctx, station); err != nil {
 			log.Printf("Bluetooth: connect/discover failed during power attempt %d/%d for %s: %v", i+1, maxRetries, station.Name, err)
 			if i == maxRetries-1 {
+				// Cancellation during discovery leaves the session connected;
+				// disconnect so the station is not left holding a live GATT
+				// session (idempotent when discovery already cleaned up).
+				_ = disconnectInternal(station)
 				return PowerControlResult{}, fmt.Errorf("failed to connect/discover before power command: %w", err)
 			}
 			_ = disconnectInternal(station)
@@ -254,7 +410,7 @@ func SetPowerStateContext(ctx context.Context, station *BaseStation, target Powe
 			// are not queued behind the wait; the lock is held again before
 			// the next attempt touches station state.
 			station.mutex.Unlock()
-			waitErr := sleepContext(ctx, 500*time.Millisecond)
+			waitErr := sleepContext(ctx, CurrentTiming().OperationRetryDelay)
 			station.mutex.Lock()
 			if waitErr != nil {
 				return PowerControlResult{}, waitErr
@@ -271,13 +427,28 @@ func SetPowerStateContext(ctx context.Context, station *BaseStation, target Powe
 			if err == nil {
 				// Once prepare has been sent, complete this paired write even when
 				// shutdown cancels ctx. Leaving a sleeping station prepared can wake it.
-				time.Sleep(50 * time.Millisecond)
+				timing := CurrentTiming()
+				if timing.PrepareGap > 0 {
+					// Release the station lock during the firmware settling gap so
+					// short readers are not queued behind it, matching every other
+					// wait in this package.
+					station.mutex.Unlock()
+					waitErr := sleepContext(context.WithoutCancel(ctx), timing.PrepareGap)
+					station.mutex.Lock()
+					if waitErr != nil {
+						return PowerControlResult{}, waitErr
+					}
+				}
 				sleepFinalAttempted = true
 				// Once prepare succeeds, the final sleep write is a bounded cleanup
 				// action. Give it an independent hard deadline: reusing an expired
 				// caller deadline here can leave the station prepared (and awake)
 				// without ever attempting the matching sleep command.
-				finalContext, cancelFinal := context.WithTimeout(context.WithoutCancel(ctx), finalSleepWriteTimeout)
+				finalBudget := finalSleepWriteTimeout
+				if finalBudget <= 0 {
+					finalBudget = timing.FinalSleepWrite
+				}
+				finalContext, cancelFinal := context.WithTimeout(context.WithoutCancel(ctx), finalBudget)
 				err = writePowerValueInternal(finalContext, station, command)
 				cancelFinal()
 			}
@@ -315,7 +486,7 @@ func SetPowerStateContext(ctx context.Context, station *BaseStation, target Powe
 		_ = disconnectInternal(station)
 		if i < maxRetries-1 {
 			station.mutex.Unlock()
-			waitErr := sleepContext(ctx, 500*time.Millisecond)
+			waitErr := sleepContext(ctx, CurrentTiming().OperationRetryDelay)
 			station.mutex.Lock()
 			if waitErr != nil {
 				return PowerControlResult{}, waitErr

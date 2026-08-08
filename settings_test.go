@@ -2,6 +2,10 @@ package main
 
 import (
 	"testing"
+	"time"
+
+	"lhcontrol/internal/bluetooth"
+	"lhcontrol/internal/config"
 )
 
 func TestBluetoothAdapterSettingsBindings(t *testing.T) {
@@ -202,5 +206,197 @@ func TestScanAndStatusPollingBindingsPersist(t *testing.T) {
 	}
 	if restarted.GetScanOnStartup() || restarted.GetStatusPollingEnabled() || restarted.GetScanDurationSeconds() != 12 {
 		t.Fatalf("restarted scan settings = startup %v, polling %v, duration %d", restarted.GetScanOnStartup(), restarted.GetStatusPollingEnabled(), restarted.GetScanDurationSeconds())
+	}
+}
+
+func TestStationOperationTimeoutBindingsPersistAndCouple(t *testing.T) {
+	t.Setenv("AppData", t.TempDir())
+	app := NewApp()
+	if got := app.GetStationOperationTimeoutSeconds(); got != 30 {
+		t.Fatalf("default station operation timeout = %d, want 30", got)
+	}
+	if err := app.SetStationOperationTimeoutSeconds(29); err == nil {
+		t.Fatal("SetStationOperationTimeoutSeconds accepted a below-minimum value")
+	}
+	if err := app.SetStationOperationTimeoutSeconds(60); err != nil {
+		t.Fatalf("SetStationOperationTimeoutSeconds() error = %v", err)
+	}
+	if err := app.SetBulkPowerTimeoutSeconds(45); err == nil {
+		t.Fatal("SetBulkPowerTimeoutSeconds accepted a value below the station operation timeout")
+	}
+
+	restarted := NewApp()
+	if err := restarted.config.Load(); err != nil {
+		t.Fatalf("config.Load() error = %v", err)
+	}
+	if got := restarted.GetStationOperationTimeoutSeconds(); got != 60 {
+		t.Fatalf("station operation timeout after restart = %d, want 60", got)
+	}
+}
+
+func TestPowerTimingBindingsApplyToBluetoothPolicy(t *testing.T) {
+	t.Setenv("AppData", t.TempDir())
+	app := NewApp()
+	app.applyBluetoothTiming()
+	base := bluetooth.CurrentTiming()
+	if base.ConfirmAttemptsOn == 0 || base.ConfirmAttemptsOff == 0 || base.ConfirmPollInterval <= 0 || base.BootFallbackAfter <= 0 {
+		t.Fatalf("applyBluetoothTiming left zero policy values: %+v", base)
+	}
+
+	if err := app.SetPowerConfirmAttemptsOn(33); err != nil {
+		t.Fatalf("SetPowerConfirmAttemptsOn() error = %v", err)
+	}
+	if err := app.SetPowerConfirmAttemptsOff(9); err != nil {
+		t.Fatalf("SetPowerConfirmAttemptsOff() error = %v", err)
+	}
+	if err := app.SetPowerConfirmPollIntervalMs(400); err != nil {
+		t.Fatalf("SetPowerConfirmPollIntervalMs() error = %v", err)
+	}
+	if err := app.SetBootFallbackSeconds(15); err != nil {
+		t.Fatalf("SetBootFallbackSeconds() error = %v", err)
+	}
+	if err := app.SetPowerConfirmAttemptsOn(config.MinPowerConfirmAttempts - 1); err == nil {
+		t.Fatal("SetPowerConfirmAttemptsOn accepted a below-minimum value")
+	}
+
+	applied := bluetooth.CurrentTiming()
+	if applied.ConfirmAttemptsOn != 33 || applied.ConfirmAttemptsOff != 9 ||
+		applied.ConfirmPollInterval != 400*time.Millisecond || applied.BootFallbackAfter != 15*time.Second {
+		t.Fatalf("bluetooth timing policy = %+v, want the configured values applied", applied)
+	}
+
+	restarted := NewApp()
+	if err := restarted.config.Load(); err != nil {
+		t.Fatalf("config.Load() error = %v", err)
+	}
+	if restarted.GetPowerConfirmAttemptsOn() != 33 || restarted.GetPowerConfirmAttemptsOff() != 9 ||
+		restarted.GetPowerConfirmPollIntervalMs() != 400 || restarted.GetBootFallbackSeconds() != 15 {
+		t.Fatalf("power timing after restart = on %d, off %d, interval %d, fallback %d",
+			restarted.GetPowerConfirmAttemptsOn(), restarted.GetPowerConfirmAttemptsOff(),
+			restarted.GetPowerConfirmPollIntervalMs(), restarted.GetBootFallbackSeconds())
+	}
+}
+
+func TestConnectionTimingBindingsApplyToBluetoothPolicy(t *testing.T) {
+	t.Setenv("AppData", t.TempDir())
+	app := NewApp()
+	if err := app.SetSleepFinalWriteTimeoutSeconds(60); err != nil {
+		t.Fatalf("SetSleepFinalWriteTimeoutSeconds() error = %v", err)
+	}
+	if err := app.SetSleepPrepareGapMs(100); err != nil {
+		t.Fatalf("SetSleepPrepareGapMs() error = %v", err)
+	}
+	if err := app.SetDiscoveryAttempts(5); err != nil {
+		t.Fatalf("SetDiscoveryAttempts() error = %v", err)
+	}
+	if err := app.SetDiscoveryRetryDelayMs(1000); err != nil {
+		t.Fatalf("SetDiscoveryRetryDelayMs() error = %v", err)
+	}
+	if err := app.SetSleepFinalWriteTimeoutSeconds(config.MinSleepFinalWriteTimeoutSeconds - 1); err == nil {
+		t.Fatal("SetSleepFinalWriteTimeoutSeconds accepted a below-minimum value")
+	}
+
+	applied := bluetooth.CurrentTiming()
+	if applied.FinalSleepWrite != 60*time.Second || applied.PrepareGap != 100*time.Millisecond ||
+		applied.DiscoveryAttempts != 5 || applied.DiscoveryRetryDelay != time.Second {
+		t.Fatalf("bluetooth connection timing policy = %+v, want the configured values applied", applied)
+	}
+}
+
+func TestAdvancedTimingBindingsApplyToBluetoothPolicy(t *testing.T) {
+	t.Setenv("AppData", t.TempDir())
+	app := NewApp()
+	if err := app.SetPowerWriteAttempts(3); err != nil {
+		t.Fatalf("SetPowerWriteAttempts() error = %v", err)
+	}
+	if err := app.SetOperationRetryDelayMs(300); err != nil {
+		t.Fatalf("SetOperationRetryDelayMs() error = %v", err)
+	}
+	if err := app.SetChannelConfirmAttempts(8); err != nil {
+		t.Fatalf("SetChannelConfirmAttempts() error = %v", err)
+	}
+	if err := app.SetChannelConfirmIntervalMs(400); err != nil {
+		t.Fatalf("SetChannelConfirmIntervalMs() error = %v", err)
+	}
+	if err := app.SetConfirmReconnectThreshold(3); err != nil {
+		t.Fatalf("SetConfirmReconnectThreshold() error = %v", err)
+	}
+	if err := app.SetConfirmReconnectDelayMs(600); err != nil {
+		t.Fatalf("SetConfirmReconnectDelayMs() error = %v", err)
+	}
+	if err := app.SetIdentifyAttempts(4); err != nil {
+		t.Fatalf("SetIdentifyAttempts() error = %v", err)
+	}
+	if err := app.SetPresenceMissThreshold(3); err != nil {
+		t.Fatalf("SetPresenceMissThreshold() error = %v", err)
+	}
+	if err := app.SetPowerWriteAttempts(config.MaxPowerWriteAttempts + 1); err == nil {
+		t.Fatal("SetPowerWriteAttempts accepted an above-maximum value")
+	}
+
+	applied := bluetooth.CurrentTiming()
+	if applied.WriteAttempts != 3 || applied.OperationRetryDelay != 300*time.Millisecond ||
+		applied.ChannelConfirmAttempts != 8 || applied.ChannelConfirmInterval != 400*time.Millisecond ||
+		applied.ConfirmReconnectThreshold != 3 || applied.ConfirmReconnectDelay != 600*time.Millisecond ||
+		applied.IdentifyAttempts != 4 || applied.PresenceMissThreshold != 3 {
+		t.Fatalf("bluetooth advanced timing policy = %+v, want the configured values applied", applied)
+	}
+}
+
+func TestAdvancedStationBindingsPersist(t *testing.T) {
+	t.Setenv("AppData", t.TempDir())
+	app := NewApp()
+	if err := app.SetRecoveryRetryBaseSeconds(45); err != nil {
+		t.Fatalf("SetRecoveryRetryBaseSeconds() error = %v", err)
+	}
+	if err := app.SetRecoveryRetryMaxSeconds(600); err != nil {
+		t.Fatalf("SetRecoveryRetryMaxSeconds() error = %v", err)
+	}
+	if err := app.SetAbsentStationRetryLimit(8); err != nil {
+		t.Fatalf("SetAbsentStationRetryLimit() error = %v", err)
+	}
+	if err := app.SetInitialReadTimeoutSeconds(30); err != nil {
+		t.Fatalf("SetInitialReadTimeoutSeconds() error = %v", err)
+	}
+	if err := app.SetScanReadPhaseTimeoutSeconds(60); err != nil {
+		t.Fatalf("SetScanReadPhaseTimeoutSeconds() error = %v", err)
+	}
+	if err := app.SetStatusReadTimeoutSeconds(25); err != nil {
+		t.Fatalf("SetStatusReadTimeoutSeconds() error = %v", err)
+	}
+	if err := app.SetStatusRefreshTimeoutSeconds(40); err != nil {
+		t.Fatalf("SetStatusRefreshTimeoutSeconds() error = %v", err)
+	}
+	if err := app.SetChannelScanFreshnessSeconds(240); err != nil {
+		t.Fatalf("SetChannelScanFreshnessSeconds() error = %v", err)
+	}
+	if err := app.SetBluetoothInitRetrySeconds(5); err != nil {
+		t.Fatalf("SetBluetoothInitRetrySeconds() error = %v", err)
+	}
+	// Cross-field rule proven inside the ranges: max drops to 60, so a base of
+	// 90 (legal on its own) must be rejected.
+	if err := app.SetRecoveryRetryMaxSeconds(config.MinRecoveryRetryMaxSeconds); err != nil {
+		t.Fatalf("SetRecoveryRetryMaxSeconds() error = %v", err)
+	}
+	if err := app.SetRecoveryRetryBaseSeconds(90); err == nil {
+		t.Fatal("SetRecoveryRetryBaseSeconds accepted a value above the retry maximum")
+	}
+	if err := app.SetRecoveryRetryMaxSeconds(600); err != nil {
+		t.Fatalf("SetRecoveryRetryMaxSeconds() error = %v", err)
+	}
+
+	restarted := NewApp()
+	if err := restarted.config.Load(); err != nil {
+		t.Fatalf("config.Load() error = %v", err)
+	}
+	if restarted.GetRecoveryRetryBaseSeconds() != 45 || restarted.GetRecoveryRetryMaxSeconds() != 600 ||
+		restarted.GetAbsentStationRetryLimit() != 8 || restarted.GetInitialReadTimeoutSeconds() != 30 ||
+		restarted.GetScanReadPhaseTimeoutSeconds() != 60 || restarted.GetStatusReadTimeoutSeconds() != 25 ||
+		restarted.GetStatusRefreshTimeoutSeconds() != 40 || restarted.GetChannelScanFreshnessSeconds() != 240 ||
+		restarted.GetBluetoothInitRetrySeconds() != 5 {
+		t.Fatalf("advanced station settings after restart = base %d, max %d, limit %d, irt %d, srp %d, srt %d, srf %d, csf %d, bir %d",
+			restarted.GetRecoveryRetryBaseSeconds(), restarted.GetRecoveryRetryMaxSeconds(), restarted.GetAbsentStationRetryLimit(),
+			restarted.GetInitialReadTimeoutSeconds(), restarted.GetScanReadPhaseTimeoutSeconds(), restarted.GetStatusReadTimeoutSeconds(),
+			restarted.GetStatusRefreshTimeoutSeconds(), restarted.GetChannelScanFreshnessSeconds(), restarted.GetBluetoothInitRetrySeconds())
 	}
 }

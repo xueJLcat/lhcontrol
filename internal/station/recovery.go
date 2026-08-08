@@ -16,7 +16,7 @@ func (m *Manager) CheckAllStationStatuses() ([]StationInfo, error) {
 		return m.GetStationInfo(), fmt.Errorf("status refresh already in progress: %w", ErrOperationInProgress)
 	}
 	defer m.statusOperationMutex.Unlock()
-	refreshContext, cancelRefresh := context.WithTimeout(m.lifecycleContext, m.statusRefreshTimeout)
+	refreshContext, cancelRefresh := context.WithTimeout(m.lifecycleContext, m.statusRefreshTimeoutDuration())
 	defer cancelRefresh()
 	statusDone := m.beginStatusLifecycle(cancelRefresh)
 	defer m.endStatusLifecycle(statusDone)
@@ -76,7 +76,7 @@ func (m *Manager) CheckAllStationStatuses() ([]StationInfo, error) {
 			for item := range work {
 				ptr := item.station
 				address := ptr.Snapshot().Address
-				readContext, cancelRead := context.WithTimeout(refreshContext, m.statusReadTimeout)
+				readContext, cancelRead := context.WithTimeout(refreshContext, m.statusReadTimeoutDuration())
 				if err := m.beginStationOperationKindContext(address, deviceOperationStatus, cancelRead); err != nil {
 					cancelRead()
 					if errors.Is(err, ErrOperationInProgress) {
@@ -435,7 +435,7 @@ func (m *Manager) recoverOneStation(
 		// The refresh phase gets its own budget so a slow capability discovery
 		// cannot starve the subsequent status read into a deadline failure,
 		// which would be misclassified as a connection failure.
-		refreshContext, cancelRefresh := context.WithTimeout(recoveryContext, m.initialReadTimeout)
+		refreshContext, cancelRefresh := context.WithTimeout(recoveryContext, m.initialReadTimeoutDuration())
 		refreshErr := runSafely("station metadata recovery", func() error {
 			_, err := m.bluetoothOps.refreshCapabilities(refreshContext, station)
 			return err
@@ -456,7 +456,7 @@ func (m *Manager) recoverOneStation(
 			return 0
 		}
 	}
-	readContext, cancelRead := context.WithTimeout(recoveryContext, m.initialReadTimeout)
+	readContext, cancelRead := context.WithTimeout(recoveryContext, m.initialReadTimeoutDuration())
 	defer cancelRead()
 	err := runSafely("station status recovery", func() error {
 		return m.bluetoothOps.fetchInitialPowerState(readContext, station)

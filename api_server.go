@@ -58,6 +58,56 @@ func (a *App) startAPIServer() {
 
 }
 
+// restartAPIServer stops the active listener loop and starts a new one so a
+// changed listen address applies without restarting the application. The
+// generation bump detaches the dying goroutine's cleanup so it cannot clear
+// the freshly registered cancel function.
+//
+// The lifecycle gate serializes restart against shutdown and against other
+// restarts: apiWG.Wait followed by apiWG.Add inside startAPIServer would
+// otherwise violate the WaitGroup contract when two waiters wake up
+// concurrently, and a restart racing shutdown could resurrect a listener
+// after the app started shutting down.
+func (a *App) restartAPIServer() {
+
+	a.apiLifecycleGate.Lock()
+
+	defer a.apiLifecycleGate.Unlock()
+
+	if a.shuttingDown.Load() {
+
+		return
+
+	}
+
+	a.apiLifecycleMutex.Lock()
+
+	cancelAPI := a.apiCancel
+
+	a.apiCancel = nil
+
+	a.apiGeneration++
+
+	a.apiLifecycleMutex.Unlock()
+
+	if cancelAPI != nil {
+
+		cancelAPI()
+
+	}
+
+	a.apiWG.Wait()
+
+	if a.shuttingDown.Load() {
+
+		return
+
+	}
+
+	a.startAPIServer()
+
+}
+
 func (a *App) runAPIServer(ctx context.Context) {
 
 	for {

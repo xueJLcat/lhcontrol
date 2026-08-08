@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"sync/atomic"
 
 	"lhcontrol/internal/bluetooth"
 	"lhcontrol/internal/station"
@@ -30,6 +32,10 @@ func apiStatusForError(err error) int {
 		status = fiber.StatusUnprocessableEntity
 	case errors.Is(err, station.ErrShuttingDown):
 		status = fiber.StatusServiceUnavailable
+	case errors.Is(err, station.ErrBulkOperationTimeout),
+		errors.Is(err, station.ErrStationOperationTimeout),
+		errors.Is(err, context.DeadlineExceeded):
+		status = fiber.StatusRequestTimeout
 	}
 	return status
 }
@@ -141,8 +147,13 @@ type externalOperationEvent struct {
 	Revision uint64 `json:"revision"`
 }
 
+// fallbackExternalOperationID keeps concurrent operations distinguishable even
+// when a caller registers an operation sink without an ID allocator; a shared
+// zero ID would make started/finished events overwrite each other.
+var fallbackExternalOperationID atomic.Uint64
+
 func beginExternalOperation(events scanEventCallbacks, kind string) func() {
-	id := uint64(0)
+	id := fallbackExternalOperationID.Add(1)
 	if events.nextOperationID != nil {
 		id = events.nextOperationID()
 	}

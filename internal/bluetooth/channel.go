@@ -18,7 +18,8 @@ func IdentifyContext(ctx context.Context, station *BaseStation) error {
 	station.mutex.Lock()
 	defer station.mutex.Unlock()
 	var lastErr error
-	for attempt := 0; attempt < 2; attempt++ {
+	maxAttempts := CurrentTiming().IdentifyAttempts
+	for attempt := 0; attempt < maxAttempts; attempt++ {
 		if contextErr := ctx.Err(); contextErr != nil {
 			return contextErr
 		}
@@ -41,10 +42,10 @@ func IdentifyContext(ctx context.Context, station *BaseStation) error {
 			station.setOperationErrorInternal(nil)
 			return nil
 		}
-		if attempt == 0 {
+		if attempt < maxAttempts-1 {
 			_ = disconnectInternal(station)
 			station.mutex.Unlock()
-			err := sleepContext(ctx, 250*time.Millisecond)
+			err := sleepContext(ctx, CurrentTiming().OperationRetryDelay)
 			station.mutex.Lock()
 			if err != nil {
 				return err
@@ -85,6 +86,10 @@ func SetChannelContext(ctx context.Context, station *BaseStation, channel int) (
 	station.mutex.Lock()
 	defer station.mutex.Unlock()
 	if err := connectAndDiscoverInternalContext(ctx, station); err != nil {
+		// Cancellation during discovery leaves the session connected;
+		// disconnect so the station is not left holding a live GATT session
+		// (idempotent when discovery already cleaned up).
+		_ = disconnectInternal(station)
 		return result, err
 	}
 	if !station.Capabilities.ChannelWrite || !station.Capabilities.ChannelRead || station.modeCharacteristic == nil {
@@ -141,12 +146,14 @@ func SetChannelContext(ctx context.Context, station *BaseStation, channel int) (
 	result.CommandSent = true
 	var confirmationErr error
 	consecutiveReadErrors := 0
-	for attempt := 0; attempt < 5; attempt++ {
+	confirmTiming := CurrentTiming()
+	confirmAttempts := confirmTiming.ChannelConfirmAttempts
+	for attempt := 0; attempt < confirmAttempts; attempt++ {
 		// Readback waits run outside the station lock so snapshots are not
 		// queued behind the confirmation window; the lock is held again
 		// before station state is read or written.
 		station.mutex.Unlock()
-		sleepErr := sleepContext(ctx, 250*time.Millisecond)
+		sleepErr := sleepContext(ctx, confirmTiming.ChannelConfirmInterval)
 		station.mutex.Lock()
 		if sleepErr != nil {
 			confirmationErr = sleepErr
@@ -161,10 +168,10 @@ func SetChannelContext(ctx context.Context, station *BaseStation, channel int) (
 				break
 			}
 			consecutiveReadErrors++
-			if consecutiveReadErrors >= 2 && attempt < 4 {
+			if consecutiveReadErrors >= confirmTiming.ConfirmReconnectThreshold && attempt < confirmAttempts-1 {
 				_ = disconnectInternal(station)
 				station.mutex.Unlock()
-				sleepErr := sleepContext(ctx, 250*time.Millisecond)
+				sleepErr := sleepContext(ctx, confirmTiming.ConfirmReconnectDelay)
 				station.mutex.Lock()
 				if sleepErr != nil {
 					confirmationErr = errors.Join(confirmationErr, sleepErr)
