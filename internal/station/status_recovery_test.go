@@ -401,6 +401,46 @@ func TestAbsentStationRecoveryStopsAfterBoundedFailures(t *testing.T) {
 	}
 }
 
+func TestRecoveryReadDeadlineDoesNotDisconnectStation(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	address := "11:22:33:44:55:7A"
+	manager.stations[address] = &internalbluetooth.BaseStation{
+		Name: "LHB-SLOW", Address: mustAddress(t, address), Present: false,
+	}
+	manager.statusRetryMutex.Lock()
+	manager.statusRetries[address] = statusRetry{
+		kinds:  statusRetryConnection,
+		nextAt: time.Now().Add(-time.Second),
+	}
+	manager.statusRetryMutex.Unlock()
+	// A read-budget deadline is not evidence the link is broken; a slow but
+	// reachable station must not be disconnected for it.
+	manager.bluetoothOps.fetchInitialPowerState = func(context.Context, *internalbluetooth.BaseStation) error {
+		return fmt.Errorf("read power: %w", context.DeadlineExceeded)
+	}
+	var disconnects atomic.Int32
+	manager.bluetoothOps.disconnectStation = func(*internalbluetooth.BaseStation) error {
+		disconnects.Add(1)
+		return nil
+	}
+
+	manager.runStatusRecoveryRound()
+
+	if got := disconnects.Load(); got != 0 {
+		t.Fatalf("disconnect calls after a read-budget deadline = %d, want 0", got)
+	}
+	manager.statusRetryMutex.Lock()
+	retry, tracked := manager.statusRetries[address]
+	manager.statusRetryMutex.Unlock()
+	if !tracked {
+		t.Fatal("deadline failure did not leave the station scheduled for retry")
+	}
+	if retry.failures == 0 {
+		t.Fatal("deadline failure did not record a backoff failure")
+	}
+}
+
 func TestStatusFailureSchedulesRecoveryWithoutStatusPolling(t *testing.T) {
 	manager := NewManager(config.NewConfig())
 	defer manager.Shutdown()

@@ -8,7 +8,7 @@ import {
   IsScanning
 } from '../backend';
 import type { PowerFeedback, PowerTarget, StationInfo } from '../types';
-import type { ScanErrorInfo } from '../scan-error';
+import { scanErrorCopy, type ScanErrorInfo } from '../scan-error';
 import { pushToast } from '../toast';
 import { deriveOperationLocks, type GlobalOperation } from '../operation-state';
 import { ExternalScanCoordinator, type ExternalScanEvent } from '../external-scan';
@@ -222,6 +222,12 @@ export class StationStore {
       });
     } else if (this.globalOperation === 'status-refresh') {
       this.statusMessage = t('Reading station states...');
+    } else if (this.scanError) {
+      // The scan-failure card is still on screen; rebuilding its status line
+      // keeps the two consistent instead of reverting to "Ready to scan.".
+      this.statusMessage = this.scanError.kind === 'unknown'
+        ? t('Scan failed.')
+        : t('Scan failed: {heading}', { heading: scanErrorCopy(this.scanError).heading });
     } else {
       this.statusMessage = t('Ready to scan.');
     }

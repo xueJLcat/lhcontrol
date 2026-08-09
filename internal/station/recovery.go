@@ -255,7 +255,18 @@ func (m *Manager) statusRecoveryLoop() {
 			}
 		}
 		m.statusRecoveryRunning.Store(true)
-		retryAfter := m.runStatusRecoveryRound()
+		// A panic inside a recovery round (for example a driver panic in the
+		// disconnect/invalidation paths, which are not otherwise wrapped) must
+		// not kill the loop: it is started via sync.Once, so a dead loop would
+		// silence all background recovery until the process restarts. Recover
+		// and back off briefly instead of hot-looping.
+		retryAfter := time.Duration(0)
+		if roundErr := runSafely("status recovery round", func() error {
+			retryAfter = m.runStatusRecoveryRound()
+			return nil
+		}); roundErr != nil {
+			retryAfter = m.statusBusyRetry
+		}
 		m.statusRecoveryRunning.Store(false)
 		if retryAfter > 0 {
 			if timer == nil {
@@ -450,7 +461,16 @@ func (m *Manager) recoverOneStation(
 				return m.statusBusyRetry
 			}
 			m.observeBluetoothError(refreshErr)
-			m.recordUnstructuredStationFailure(station, address, refreshErr)
+			if errors.Is(refreshErr, context.DeadlineExceeded) && !bluetooth.RequiresReconnect(refreshErr) {
+				// A recovery-budget deadline is not evidence the link is broken.
+				// Retry with the normal failure backoff but do not disconnect a
+				// possibly-healthy station, matching the bluetooth layer's rule
+				// that a deadline needs no reconnect and the deliberate intent
+				// above not to misclassify a deadline as a connection failure.
+				m.noteStatusFailure(address)
+			} else {
+				m.recordUnstructuredStationFailure(station, address, refreshErr)
+			}
 			m.noteMetadataFailure(address)
 			m.stopExhaustedAbsentRecovery(address, station)
 			return 0
@@ -488,7 +508,15 @@ func (m *Manager) recoverOneStation(
 		return 0
 	}
 	if err != nil {
-		m.recordUnstructuredStationFailure(station, address, err)
+		if errors.Is(err, context.DeadlineExceeded) && !bluetooth.RequiresReconnect(err) {
+			// A read-budget deadline is not evidence the link is broken: a slow
+			// but reachable station must not be disconnected, and the timeout
+			// should back off (and eventually give up via the absent limit)
+			// rather than being torn down as a connection failure.
+			m.noteStatusFailure(address)
+		} else {
+			m.recordUnstructuredStationFailure(station, address, err)
+		}
 		if metadataAttempted {
 			m.noteMetadataFailure(address)
 		}

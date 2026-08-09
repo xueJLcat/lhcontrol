@@ -186,6 +186,11 @@ export class StationActionController {
   }
 
   async runBulkPower(state: PowerTarget) {
+    // requestBulkPower performs this check, but the confirmation modal calls
+    // runBulkPower directly; re-check so a lock (external scan/operation or
+    // auto-sleep) that lands between the modal opening and the confirm click
+    // cannot start a bulk operation against a busy backend.
+    if (this.host.bulkLocked || this.actionablePowerStations(state).length === 0) return;
     this.host.globalOperation = 'bulk-power';
     this.host.cancellingBulk = false;
     const statusOperation = this.host.gates.beginStatusOperation();
@@ -414,7 +419,7 @@ export class StationActionController {
         if (!this.host.gates.canCommitStationOperation(operationEpoch, address, operationRevision)) return;
       }
       if (result.confirmed === false) {
-        const warning = result.confirmationError || 'Channel readback is unavailable.';
+        const warning = result.confirmationError || t('Channel readback is unavailable.');
         this.host.channelError = `${t('Channel command sent but unconfirmed')}: ${warning} ${t('Readback')}: ${this.channelReadbackLabel(actual)}.`;
         this.host.channelWarning = true;
         if (this.host.gates.canCommitStatus(statusOperation)) this.host.statusMessage = t('{name}: channel command sent, but confirmation failed. {detail}', { name: stationName, detail: warning });

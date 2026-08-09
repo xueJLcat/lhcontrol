@@ -399,6 +399,7 @@ const zhCN = {
   'status unavailable': '状态不可用',
   'Failed to set {target}': '无法设为{target}',
   'Channel command sent but unconfirmed': '频道命令已发送但未确认',
+  'Channel readback is unavailable.': '无法获取频道回读。',
   'Readback': '回读',
   'connected': '已连接',
   'disconnected': '已断开'

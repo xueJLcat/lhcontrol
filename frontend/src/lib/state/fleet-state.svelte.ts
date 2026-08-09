@@ -81,11 +81,15 @@ export class FleetState {
 
   merge(updated: StationInfo[]) {
     if (!updated.length) return;
+    // The map dedupes by address (last wins) so a payload containing the same
+    // new address twice cannot append duplicate cards and double-count them in
+    // the fleet aggregates.
     const byAddress = new Map(updated.map((station) => [station.address, station]));
     const existingAddresses = new Set(this.stations.map((station) => station.address));
+    const newStations = [...byAddress.values()].filter((station) => !existingAddresses.has(station.address));
     this.commit([
       ...this.stations.map((station) => byAddress.get(station.address) ?? station),
-      ...updated.filter((station) => !existingAddresses.has(station.address))
+      ...newStations
     ]);
   }
 

@@ -398,6 +398,11 @@ func (m *Manager) recordUnstructuredStationFailure(
 func (m *Manager) Initialize() error {
 	m.initializeMutex.Lock()
 	defer m.initializeMutex.Unlock()
+	if m.shuttingDown.Load() {
+		// Consistent with ensureReady: do not re-initialize the adapter while
+		// it is being torn down.
+		return ErrShuttingDown
+	}
 	m.initializeErr = m.initializeBluetooth()
 	if m.initializeErr != nil {
 		m.nextInitializeAt = time.Now().Add(m.initializeRetryCooldown())

@@ -87,8 +87,12 @@ export class StationScanController {
         if (this.host.externalScanning) {
           const scanStatus = await GetScanStatus().catch(() => null);
           // A pending stop owns the status message; letting the poll
-          // overwrite "Stopping scan..." contradicts the header button.
+          // overwrite "Stopping scan..." contradicts the header button. The
+          // status-epoch check stops this late-arriving scan message from
+          // clobbering a newer status written meanwhile (for example an
+          // auto-sleep skipped/failed event).
           if (!this.host.disposed && this.host.listRevisions.isCurrent(revision) && scanStatus &&
+            this.host.gates.canCommitStatus(statusOperation) &&
             !this.host.stoppingScan && !this.host.stopRequestPending) {
             this.host.statusMessage = scanStatus.state === 'starting'
               ? t('Preparing external scan...')

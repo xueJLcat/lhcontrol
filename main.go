@@ -33,6 +33,11 @@ type rotatingLogFile struct {
 	maxSize    int64
 	file       *os.File
 	size       int64
+	// closed marks a deliberate Close, distinguishing it from a transient
+	// failure that nulled file; only the former permanently stops writes, so a
+	// failed reopen retries on the next write instead of silently disabling
+	// file logging for the rest of the session.
+	closed bool
 	// rotationDropped counts bytes discarded while the backup could not be
 	// published. Because an oversized log makes every subsequent write retry
 	// the rotation immediately, failures are always consecutive. Budgeting
@@ -145,6 +150,12 @@ func (writer *rotatingLogFile) rotateClosedFile() error {
 // logFileClose releases an open log file handle. Injectable in tests.
 var logFileClose = func(file *os.File) error { return file.Close() }
 
+// closeErrLogger reports rotation failures without routing through the global
+// logger: in production that logger writes into this very rotating file, and
+// logging while the writer mutex is held would re-enter the non-reentrant
+// mutex and deadlock the whole logging subsystem.
+var closeErrLogger = log.New(os.Stderr, "", log.LstdFlags)
+
 // closeFileBestEffort drops the current log handle even when Close reports an
 // error. A handle whose Close failed is unusable anyway; keeping it would make
 // every later rotation retry the same failing Close and permanently break
@@ -154,7 +165,7 @@ func (writer *rotatingLogFile) closeFileBestEffort() {
 		return
 	}
 	if err := logFileClose(writer.file); err != nil {
-		log.Printf("Closing the diagnostic log failed; continuing rotation: %v", err)
+		closeErrLogger.Printf("Closing the diagnostic log failed; continuing rotation: %v", err)
 	}
 	writer.file = nil
 }
@@ -200,11 +211,33 @@ func (writer *rotatingLogFile) truncateLocked() error {
 	return nil
 }
 
+// reopenLocked restores a dropped log handle after a failed rotation so file
+// logging recovers on the next write instead of staying disabled. It does not
+// reset rotationDropped, keeping the in-place-truncation budget intact.
+func (writer *rotatingLogFile) reopenLocked() error {
+	file, err := os.OpenFile(writer.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+	if err != nil {
+		return err
+	}
+	writer.file = file
+	if info, statErr := file.Stat(); statErr == nil {
+		writer.size = info.Size()
+	} else {
+		writer.size = 0
+	}
+	return nil
+}
+
 func (writer *rotatingLogFile) Write(value []byte) (int, error) {
 	writer.mutex.Lock()
 	defer writer.mutex.Unlock()
 	if writer.file == nil {
-		return 0, os.ErrClosed
+		if writer.closed {
+			return 0, os.ErrClosed
+		}
+		if err := writer.reopenLocked(); err != nil {
+			return 0, err
+		}
 	}
 	originalLength := len(value)
 	if int64(len(value)) > writer.maxSize {
@@ -239,7 +272,12 @@ func (writer *rotatingLogFile) Sync() error {
 	writer.mutex.Lock()
 	defer writer.mutex.Unlock()
 	if writer.file == nil {
-		return os.ErrClosed
+		if writer.closed {
+			return os.ErrClosed
+		}
+		if err := writer.reopenLocked(); err != nil {
+			return err
+		}
 	}
 	return writer.file.Sync()
 }
@@ -247,6 +285,7 @@ func (writer *rotatingLogFile) Sync() error {
 func (writer *rotatingLogFile) Close() error {
 	writer.mutex.Lock()
 	defer writer.mutex.Unlock()
+	writer.closed = true
 	if writer.file == nil {
 		return nil
 	}
@@ -275,7 +314,10 @@ func setupLogging(mirrorConsole bool) (*rotatingLogFile, error) {
 	}
 
 	if mirrorConsole {
-		log.SetOutput(io.MultiWriter(logFile, os.Stderr))
+		// Stderr first: MultiWriter stops at the first failing writer, so the
+		// console mirror still receives a message even when the rotating file
+		// write fails (precisely the situation diagnostics must not lose).
+		log.SetOutput(io.MultiWriter(os.Stderr, logFile))
 	} else {
 		log.SetOutput(logFile)
 	}
@@ -295,6 +337,25 @@ func main() {
 	// Setup standard logger flags (applies to console and potentially file)
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
 
+	// Acquire the single-instance lock before opening (and possibly rotating)
+	// the diagnostic log. Otherwise a second instance could rotate or delete
+	// the running instance's active log file. On the already-running path the
+	// log file is never needed, so these messages go to the default logger.
+	releaseInstance, alreadyRunning, err := platform.AcquireSingleInstance(instanceMutexName)
+	if err != nil {
+		log.Printf("FATAL: Failed to acquire the application instance lock: %v", err)
+		os.Exit(1)
+	}
+	if alreadyRunning {
+		log.Println("Application is already running. Bringing existing window to front...")
+		if !platform.BringWindowToFront(appTitle) {
+			log.Printf("Existing lhcontrol process was detected, but its window was not found")
+			os.Exit(1)
+		}
+		return
+	}
+	defer releaseInstance()
+
 	logFile, errLog := setupLogging(*mirrorConsole)
 	if errLog != nil {
 		log.Printf("Error setting up diagnostic logging, continuing without a file: %v", errLog)
@@ -306,30 +367,6 @@ func main() {
 			_ = logFile.Close()
 		}()
 	}
-
-	releaseInstance, alreadyRunning, err := platform.AcquireSingleInstance(instanceMutexName)
-	if err != nil {
-		log.Printf("FATAL: Failed to acquire the application instance lock: %v", err)
-		if logFile != nil {
-			_ = logFile.Sync()
-		}
-		os.Exit(1)
-	}
-	if alreadyRunning {
-		log.Println("Application is already running. Bringing existing window to front...")
-		if !platform.BringWindowToFront(appTitle) {
-			log.Printf("Existing lhcontrol process was detected, but its window was not found")
-			if logFile != nil {
-				_ = logFile.Sync()
-			}
-			os.Exit(1)
-		}
-		if logFile != nil {
-			_ = logFile.Sync()
-		}
-		return
-	}
-	defer releaseInstance()
 	log.Printf("Acquired Windows instance mutex %s", instanceMutexName)
 
 	// Create app
