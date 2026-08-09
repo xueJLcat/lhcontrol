@@ -656,6 +656,10 @@
     delayDraft = String(minutes);
     const delaySeconds = minutes * 60;
     if (delaySeconds !== autoSleep.delaySeconds) {
+      // The input shows whole minutes. Submitting exactly the shown value
+      // must not rewrite a hand-edited delay that is not a whole number of
+      // minutes; only a deliberately different minute count changes it.
+      if (minutes === Math.round(autoSleep.delaySeconds / 60)) return;
       onAutoSleepChange(autosleep.Settings.createFrom({ ...autoSleep, delaySeconds }));
     }
   }
@@ -757,6 +761,10 @@
       apiAddressDraft = apiListenAddress;
       return;
     }
+    // Write the trimmed value back into the draft so the input shows exactly
+    // what was committed; otherwise a padded entry keeps displaying the raw
+    // text while the persisted address differs.
+    apiAddressDraft = address;
     if (address !== apiListenAddress) onAPIListenAddressChange(address);
   }
 

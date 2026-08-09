@@ -134,7 +134,7 @@ func (m *Manager) SetStationPower(address, state string) (PowerActionResult, err
 	operationContext, cancelOperation := m.newStationOperationContext(m.lifecycleContext)
 	defer cancelOperation()
 	if err := m.beginForegroundStationOperationContext(operationContext, canonicalAddress); err != nil {
-		return PowerActionResult{}, err
+		return PowerActionResult{}, stationOperationContextError(err)
 	}
 	defer m.endStationOperation(canonicalAddress)
 	snapshot := stationPtr.Snapshot()
@@ -249,7 +249,7 @@ func (m *Manager) IdentifyStation(address string) error {
 	operationContext, cancelOperation := m.newStationOperationContext(m.lifecycleContext)
 	defer cancelOperation()
 	if err := m.beginForegroundStationOperationContext(operationContext, canonicalAddress); err != nil {
-		return err
+		return stationOperationContextError(err)
 	}
 	defer m.endStationOperation(canonicalAddress)
 	if err := m.ensureReady(); err != nil {
@@ -303,7 +303,7 @@ func (m *Manager) RefreshStationCapabilities(address string) (StationInfo, error
 	operationContext, cancelOperation := m.newStationOperationContext(m.lifecycleContext)
 	defer cancelOperation()
 	if err := m.beginForegroundStationOperationContext(operationContext, canonicalAddress); err != nil {
-		return StationInfo{}, err
+		return StationInfo{}, stationOperationContextError(err)
 	}
 	defer m.endStationOperation(canonicalAddress)
 	if err := m.ensureReady(); err != nil {

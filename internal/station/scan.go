@@ -375,6 +375,12 @@ func (m *Manager) scanAndFetchStations(ctx context.Context) ([]StationInfo, int,
 					Power:   initialErr.Power,
 					Channel: initialErr.Channel,
 				}
+			} else if errors.Is(result.err, context.DeadlineExceeded) && !bluetooth.RequiresReconnect(result.err) {
+				// A per-station read-budget deadline is not evidence the link
+				// is broken, matching recoverOneStation and the status-refresh
+				// rule. Back off and let recovery retry instead of disconnecting
+				// a possibly-healthy station.
+				m.noteStatusFailure(result.address)
 			} else {
 				m.recordUnstructuredStationFailure(result.station, result.address, result.err)
 			}

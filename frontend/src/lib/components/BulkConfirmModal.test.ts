@@ -74,6 +74,21 @@ describe('BulkConfirmModal', () => {
     expect(screen.getByRole('button', { name: 'Put to sleep 0 stations' })).toBeDisabled();
   });
 
+  it('never traps closing while another Bluetooth operation holds the backend', async () => {
+    // busy inside this dialog can only mean an external lock (the dialog
+    // closes before its own bulk runs): Confirm is blocked, but every close
+    // path stays available, and the note must describe the lock instead of a
+    // bulk that has not started.
+    const { onConfirm, onCancel } = renderModal({ busy: true });
+    expect(screen.getByText('Bluetooth operation in progress')).toBeInTheDocument();
+    expect(screen.queryByText('Applying bulk power...')).not.toBeInTheDocument();
+    await fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(onCancel).toHaveBeenCalledOnce();
+    await fireEvent.click(screen.getByRole('button', { name: 'Close bulk power confirmation' }));
+    expect(onCancel).toHaveBeenCalledTimes(2);
+    expect(onConfirm).not.toHaveBeenCalled();
+  });
+
   it('omits empty breakdown rows', () => {
     renderModal({ invisibleCount: 0 });
     expect(screen.queryByText('Not seen in latest scan')).not.toBeInTheDocument();

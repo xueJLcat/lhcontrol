@@ -54,6 +54,37 @@ func TestSinglePowerOperationHasHardTimeoutAndReleasesOperation(t *testing.T) {
 	}
 }
 
+func TestStationOperationTimeoutSentinelWhenBudgetExpiresWaitingForSlot(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	manager.stationOperationTimeout = 25 * time.Millisecond
+	address := "11:22:33:44:55:91"
+	manager.stations[address] = &internalbluetooth.BaseStation{
+		Name: "LHB-SLOT-WAIT", Address: mustAddress(t, address), Present: true,
+		Capabilities: internalbluetooth.Capabilities{PowerWrite: true}, CapabilitiesKnown: true,
+	}
+	stubPowerVerificationRead(manager)
+	manager.bluetoothOps.setPowerState = func(context.Context, *internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
+		return internalbluetooth.PowerControlResult{Confirmed: true}, nil
+	}
+	// A background status read holding the station slot makes the foreground
+	// operation wait for it; the per-station budget expires during that wait.
+	if err := manager.beginStationOperationKindContext(address, deviceOperationStatus, nil); err != nil {
+		t.Fatalf("failed to occupy the station slot: %v", err)
+	}
+	defer manager.endStationOperation(address)
+
+	_, err := manager.SetStationPower(address, "on")
+	if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, ErrStationOperationTimeout) {
+		t.Fatalf("SetStationPower() error = %v, want the station operation timeout sentinel", err)
+	}
+
+	manager.endStationOperation(address)
+	if _, err := manager.SetStationPower(address, "on"); err != nil {
+		t.Fatalf("operation lock was not released after timeout: %v", err)
+	}
+}
+
 func TestSetAllStationsPowerSkipsIneligibleStations(t *testing.T) {
 	manager := NewManager(config.NewConfig())
 	manager.bluetoothOps.fetchInitialPowerState = func(context.Context, *internalbluetooth.BaseStation) error {

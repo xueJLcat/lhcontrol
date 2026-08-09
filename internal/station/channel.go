@@ -39,7 +39,7 @@ func (m *Manager) SetStationChannel(
 	operationContext, cancelOperation := m.newStationOperationContext(m.lifecycleContext)
 	defer cancelOperation()
 	if err := m.beginForegroundStationOperationContext(operationContext, canonicalAddress); err != nil {
-		return result, err
+		return result, stationOperationContextError(err)
 	}
 	defer m.endStationOperation(canonicalAddress)
 	targetSnapshot := stationPtr.Snapshot()

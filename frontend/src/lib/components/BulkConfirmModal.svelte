@@ -48,7 +48,7 @@
 >
   <div class="drawer-head">
     <div><small>{t('Bulk power')}</small><h2>{t('Set all known stations to {target}', { target: targetLabel })}</h2></div>
-    <button type="button" class="icon-btn" title={t('Close')} aria-label={t('Close bulk power confirmation')} onclick={onCancel} disabled={busy}><X size={18} /></button>
+    <button type="button" class="icon-btn" title={t('Close')} aria-label={t('Close bulk power confirmation')} onclick={onCancel}><X size={18} /></button>
   </div>
   <p class="modal-note">
     <TriangleAlert size={14} aria-hidden="true" />
@@ -60,9 +60,14 @@
     {#if invisibleCount > 0}<dt>{t('Not seen in latest scan')}</dt><dd class="mono">{invisibleCount}</dd>{/if}
     <dt>{t('Actionable for {target}', { target: targetLabel })}</dt><dd class="mono">{actionableCount}</dd>
   </dl>
-  {#if busy}<p class="busy-note" role="status"><LoaderCircle class="spin" size={12} /> {t('Applying bulk power...')}</p>{/if}
+  <!-- The dialog itself never runs an operation: confirmBulkPower closes it
+       before the bulk starts, so busy here can only mean another Bluetooth
+       operation holds the backend. Confirming is blocked, but closing stays
+       allowed on every path (X, Cancel, scrim, Escape) so an external
+       operation can never trap the dialog. -->
+  {#if busy}<p class="busy-note" role="status"><LoaderCircle class="spin" size={12} /> {t('Bluetooth operation in progress')}</p>{/if}
   <div class="modal-actions">
-    <button class="btn" onclick={onCancel} disabled={busy}>{t('Cancel')}</button>
+    <button class="btn" onclick={onCancel}>{t('Cancel')}</button>
     <button class="btn primary" onclick={onConfirm} disabled={busy || actionableCount === 0}>{confirmLabel}</button>
   </div>
 </div>

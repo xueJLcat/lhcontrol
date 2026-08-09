@@ -408,6 +408,16 @@ describe('SettingsDrawer', () => {
     expect(props.onAPIListenAddressChange).toHaveBeenCalledTimes(1);
   });
 
+  it('shows the trimmed API listen address that was committed', async () => {
+    const props = defaultProps();
+    render(SettingsDrawer, { props });
+    const input = screen.getByLabelText('Listen address') as HTMLInputElement;
+    await fireEvent.input(input, { target: { value: '  127.0.0.1:8080  ' } });
+    await fireEvent.change(input);
+    expect(props.onAPIListenAddressChange).toHaveBeenCalledWith('127.0.0.1:8080');
+    expect(input.value).toBe('127.0.0.1:8080');
+  });
+
   it('clamps and commits the advanced timing inputs', async () => {
     const props = defaultProps();
     render(SettingsDrawer, { props });
@@ -530,6 +540,23 @@ describe('SettingsDrawer auto sleep', () => {
     const next = props.onAutoSleepChange.mock.calls[0][0] as autosleep.Settings;
     expect(next.delaySeconds).toBe(7200);
     expect(input.value).toBe('120');
+  });
+
+  it('keeps a hand-edited non-whole-minute delay until a different minute count is chosen', async () => {
+    const props = defaultProps({ autoSleep: autoSleep({ enabled: true, delaySeconds: 90 }) });
+    render(SettingsDrawer, { props });
+    const input = screen.getByLabelText('Wait before sleeping') as HTMLInputElement;
+    expect(input.value).toBe('2');
+
+    await fireEvent.change(input);
+    expect(props.onAutoSleepChange).not.toHaveBeenCalled();
+    expect(input.value).toBe('2');
+
+    await fireEvent.input(input, { target: { value: '3' } });
+    await fireEvent.change(input);
+    expect(props.onAutoSleepChange).toHaveBeenCalledTimes(1);
+    const next = props.onAutoSleepChange.mock.calls[0][0] as autosleep.Settings;
+    expect(next.delaySeconds).toBe(180);
   });
 
   it('locks the auto sleep controls while a change is being saved', () => {

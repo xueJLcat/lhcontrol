@@ -146,6 +146,14 @@ func TestScanInitialReadClassifiesPartialFailures(t *testing.T) {
 			wantRetry:       true,
 			wantUnavailable: true,
 		},
+		{
+			// A per-station read budget deadline (phase budget still alive) is
+			// not evidence the link is broken: no disconnect, only backoff.
+			name:           "per-station read budget deadline",
+			readErr:        context.DeadlineExceeded,
+			wantDisconnect: false,
+			wantRetry:      true,
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			manager := NewManager(config.NewConfig())
