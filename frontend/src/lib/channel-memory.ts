@@ -33,4 +33,22 @@ export class ChannelMemory {
     const cached = this.entries.get(station.address);
     return cached && Date.now() - cached.at <= this.ttlMs ? cached.channel : 0;
   }
+
+  // Drops expired entries and returns the milliseconds until the nearest
+  // remaining expiry (Infinity when nothing is cached). Derived views are only
+  // re-evaluated when their reactive inputs change, so an expiry alone would
+  // never re-render them; the caller schedules a tick at this delay to do so.
+  pruneExpired(): number {
+    const now = Date.now();
+    let nextExpiry = Number.POSITIVE_INFINITY;
+    for (const [address, entry] of [...this.entries]) {
+      const remaining = entry.at + this.ttlMs - now;
+      if (remaining <= 0) {
+        this.entries.delete(address);
+      } else if (remaining < nextExpiry) {
+        nextExpiry = remaining;
+      }
+    }
+    return nextExpiry;
+  }
 }

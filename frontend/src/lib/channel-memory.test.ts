@@ -52,4 +52,25 @@ describe('ChannelMemory', () => {
     expect(memory.displayChannel(withChannel(0, { address: 'AA' }))).toBe(2);
     expect(memory.displayChannel(withChannel(0, { address: 'BB' }))).toBe(9);
   });
+
+  it('pruneExpired drops expired entries and reports the nearest expiry', () => {
+    vi.useFakeTimers();
+    try {
+      const memory = new ChannelMemory(45_000);
+      expect(memory.pruneExpired()).toBe(Number.POSITIVE_INFINITY);
+
+      memory.refresh([withChannel(3, { address: 'AA' })]);
+      // Nothing has expired yet; the nearest expiry is a full TTL away.
+      let next = memory.pruneExpired();
+      expect(next).toBeGreaterThan(0);
+      expect(next).toBeLessThanOrEqual(45_000);
+      expect(memory.displayChannel(withChannel(0, { address: 'AA' }))).toBe(3);
+
+      vi.advanceTimersByTime(45_001);
+      expect(memory.pruneExpired()).toBe(Number.POSITIVE_INFINITY);
+      expect(memory.displayChannel(withChannel(0, { address: 'AA' }))).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

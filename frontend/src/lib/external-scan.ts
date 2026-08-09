@@ -169,7 +169,7 @@ export class ExternalScanCoordinator {
       state: 'failed', error: message, known: this.host.knownStationCount(),
       warnings: scanStatus?.warnings, external: true
     }));
-    this.host.notifyExternalScanFailure(`External scan failed: ${message}`);
+    this.host.notifyExternalScanFailure(t('External scan failed: {detail}', { detail: message }));
   }
 
   async handleCancelled(event: ExternalScanEvent): Promise<void> {

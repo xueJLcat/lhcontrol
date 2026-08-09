@@ -52,16 +52,40 @@ type scanControl struct {
 // A stop requested before Start is recorded as pendingStop and executed by
 // ScanWithStart right after Start succeeds: WinRT may accept a Stop on a
 // not-yet-started watcher as a no-op, and Scan would then run to completion
-// despite the stop request.
-func (control *scanControl) stopWatcher() error {
+// despite the stop request. The returned bool reports whether the stop was
+// deferred (pendingStop) instead of issued; a deferred stop carries no result
+// yet, so the caller must not deliver one.
+func (control *scanControl) stopWatcher() (stopErr error, deferred bool) {
 	control.mutex.Lock()
 	defer control.mutex.Unlock()
 	if !control.started {
 		control.pendingStop = true
-		return nil
+		return nil, true
 	}
 	if control.stopIssued {
+		return control.stopErr, false
+	}
+	control.stopIssued = true
+	control.stopErr = control.watcher.Stop()
+	return control.stopErr, false
+}
+
+// forceStop re-issues watcher.Stop() even though an earlier attempt already
+// ran. waitForScanStop calls it only on a retry tick after the initial Stop
+// failed; WinRT may reject a redundant Stop on a watcher merely draining
+// through Stopping, so this re-issues only when the prior attempt actually
+// failed (stopErr non-nil). Without this the dedupe in stopWatcher made the
+// retry a no-op and a failed Stop was never retried.
+func (control *scanControl) forceStop() error {
+	control.mutex.Lock()
+	defer control.mutex.Unlock()
+	if !control.started || control.terminal {
 		return control.stopErr
+	}
+	if control.stopErr == nil {
+		// A prior Stop was accepted; stacking another would risk a WinRT
+		// rejection while the watcher drains through Stopping.
+		return nil
 	}
 	control.stopIssued = true
 	control.stopErr = control.watcher.Stop()
@@ -435,8 +459,11 @@ func (a *Adapter) ScanWithStart(callback func(*Adapter, ScanResult), started fun
 	if pendingStop {
 		// StopScan landed in the setup window before Start. Its request was
 		// recorded instead of being sent to a not-yet-started watcher; issue
-		// the real stop now that Start has been accepted.
-		stopErr := control.stopWatcher()
+		// the real stop now that Start has been accepted. Deliver that real
+		// result here (the deferred StopScan did not deliver one) so
+		// waitForScanStop sees the actual stop outcome instead of a bare
+		// timeout when this deferred Stop fails.
+		stopErr, _ := control.stopWatcher()
 		control.stopOnce.Do(func() { control.stopRequests <- stopErr })
 	}
 	if started != nil {
@@ -446,7 +473,7 @@ func (a *Adapter) ScanWithStart(callback func(*Adapter, ScanResult), started fun
 	// Wait until advertisement has stopped, and finish. Once StopScan is
 	// requested, status polling and retries bound cleanup even if WinRT omits
 	// the Stopped event.
-	err = waitForScanStop(stoppingChan, control.stopRequests, control.stopWatcher, watcher.GetStatus)
+	err = waitForScanStop(stoppingChan, control.stopRequests, control.forceStop, watcher.GetStatus)
 	var stopTimeout *ScanStopTimeoutError
 	if !errors.As(err, &stopTimeout) {
 		control.markTerminal()
@@ -691,9 +718,13 @@ func (a *Adapter) StopScan() error {
 	}
 	// stopWatcher dedupes concurrent callers so at most one watcher.Stop()
 	// COM call is issued per scan; a stop before Start is recorded and
-	// executed right after Start instead of being lost.
-	err = control.stopWatcher()
-	control.stopOnce.Do(func() { control.stopRequests <- err })
+	// executed right after Start instead of being lost. A deferred stop has no
+	// result yet, so only a stop that was actually issued delivers one;
+	// ScanWithStart delivers the deferred stop's real result after Start.
+	err, deferred := control.stopWatcher()
+	if !deferred {
+		control.stopOnce.Do(func() { control.stopRequests <- err })
+	}
 	return err
 }
 

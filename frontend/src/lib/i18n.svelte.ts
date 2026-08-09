@@ -338,6 +338,7 @@ const zhCN = {
   'Scan stopped.': '扫描已停止。',
   'Scan failed.': '扫描失败。',
   'Scan failed: {heading}': '扫描失败：{heading}',
+  'External scan failed: {detail}': '外部扫描失败：{detail}',
   'Stopping scan...': '正在停止扫描…',
   'Unable to stop scan': '无法停止扫描',
   'Switching to {target}…': '正在切换到{target}…',

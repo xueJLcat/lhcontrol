@@ -512,6 +512,7 @@ export class StationStore {
     this.listRevisions.dispose();
     this.apiStatus.dispose();
     this.scanTimer.dispose();
+    this.fleet.stopChannelMemoryExpiry();
     if (this.statusCheckInterval) clearInterval(this.statusCheckInterval);
     this.powerFeedback.clearAll();
     this.cancelExternalScanListener?.();

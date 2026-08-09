@@ -11,12 +11,21 @@ import {
 export class FleetState {
   stations = $state<StationInfo[]>([]);
   private channelMemory = new ChannelMemory();
+  // Bumped when a cached display channel expires so the sorted list and any
+  // channelOf consumer re-evaluate even though the station list did not
+  // change. Derived views only recompute when a reactive input changes, and
+  // Date.now() alone is not one.
+  private channelMemoryTick = $state(0);
+  private channelMemoryTimer: ReturnType<typeof setTimeout> | null = null;
 
-  sortedStations = $derived([...this.stations].sort((a, b) => {
-    const ac = this.displayChannel(a) || Number.MAX_SAFE_INTEGER;
-    const bc = this.displayChannel(b) || Number.MAX_SAFE_INTEGER;
-    return ac - bc || a.name.localeCompare(b.name) || a.address.localeCompare(b.address);
-  }));
+  sortedStations = $derived.by(() => {
+    void this.channelMemoryTick;
+    return [...this.stations].sort((a, b) => {
+      const ac = this.displayChannel(a) || Number.MAX_SAFE_INTEGER;
+      const bc = this.displayChannel(b) || Number.MAX_SAFE_INTEGER;
+      return ac - bc || a.name.localeCompare(b.name) || a.address.localeCompare(b.address);
+    });
+  });
 
   private conflictStations = $derived(this.stations.filter((station) => station.channelConflict));
   conflictDetails = $derived((() => {
@@ -65,6 +74,31 @@ export class FleetState {
 
   syncChannelMemory() {
     this.channelMemory.refresh(this.stations);
+    this.scheduleChannelMemoryExpiry();
+  }
+
+  // Re-render derived views when the nearest cached channel expires. Views are
+  // only re-evaluated when a reactive input changes, so an expiry alone never
+  // re-renders them; bumping the tick (and pruning) at the nearest expiry does.
+  private scheduleChannelMemoryExpiry() {
+    if (this.channelMemoryTimer !== null) {
+      clearTimeout(this.channelMemoryTimer);
+      this.channelMemoryTimer = null;
+    }
+    const delay = this.channelMemory.pruneExpired();
+    if (delay === Number.POSITIVE_INFINITY) return;
+    this.channelMemoryTimer = setTimeout(() => {
+      this.channelMemoryTimer = null;
+      this.channelMemoryTick += 1;
+      this.scheduleChannelMemoryExpiry();
+    }, delay);
+  }
+
+  stopChannelMemoryExpiry() {
+    if (this.channelMemoryTimer !== null) {
+      clearTimeout(this.channelMemoryTimer);
+      this.channelMemoryTimer = null;
+    }
   }
 
   replace(stations: StationInfo[]) {
