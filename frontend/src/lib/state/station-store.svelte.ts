@@ -214,6 +214,8 @@ export class StationStore {
       this.statusMessage = t('Scanning for base stations...');
     } else if (this.externalScanning) {
       this.statusMessage = t('External scan in progress...');
+    } else if (this.externalOperationRunning) {
+      this.statusMessage = t('Bluetooth operation in progress');
     } else if (this.autoSleepRunning) {
       this.statusMessage = t('Auto sleep: scanning and putting all stations to sleep...');
     } else if (this.globalOperation === 'bulk-power' && this.bulkTarget) {

@@ -56,6 +56,11 @@ export class ExternalScanCoordinator {
   private pendingTerminal: ExternalScanEvent | null = null;
   private recoveryEpoch: number | null = null;
   private recoveryStatusEpoch: number | null = null;
+  // A local stop recovered the displayed scan before its terminal event was
+  // delivered (the common order for adopted scans, whose id is unknown). The
+  // next untracked terminal event belongs to that already-recovered scan and
+  // must be consumed instead of being remembered for a redundant recovery.
+  private stoppedScanTerminalPending = false;
 
   constructor(private readonly host: ExternalScanHost) {}
 
@@ -96,6 +101,10 @@ export class ExternalScanCoordinator {
     this.recoveryEpoch = null;
     this.recoveryStatusEpoch = null;
     this.pendingTerminal = null;
+    // A new scan supersedes any stop that is still owed its terminal event:
+    // backend ordering guarantees the old terminal is delivered before this
+    // new scan's own started event, so the debt cannot belong to this scan.
+    this.stoppedScanTerminalPending = false;
     this.scanID = id;
     this.host.setExternalScanning(true);
     this.host.setStoppingScan(false);
@@ -297,6 +306,10 @@ export class ExternalScanCoordinator {
       this.host.setStatusMessage(t('Stopping scan...'));
       return 'still-scanning';
     }
+    // The backend always delivers a terminal event for a stopped scan. Since
+    // this stop now owns the outcome, consume that event when it arrives
+    // untracked instead of letting it queue a redundant recovery.
+    this.stoppedScanTerminalPending = true;
     this.host.setExternalScanning(false);
     this.scanID = null;
     this.host.setStoppingScan(false);
@@ -355,6 +368,16 @@ export class ExternalScanCoordinator {
   // its id can never be adopted through a delayed start event.
   private rememberUntrackedTerminal(event: ExternalScanEvent) {
     if (this.host.externalScanning() || this.scanID !== null) return;
+    if (this.stoppedScanTerminalPending) {
+      // The local stop already recovered this scan's terminal outcome. The
+      // backend still delivers its terminal event; consume it instead of
+      // remembering it, so the next poll does not replay a full recovery
+      // (which would clear operation state and rewrite the status line).
+      // Still advance latestID so a delayed start with this id stays dropped.
+      this.stoppedScanTerminalPending = false;
+      if (event.id > this.latestID) this.latestID = event.id;
+      return;
+    }
     if (event.id <= this.latestID) return;
     this.pendingTerminal = event;
     this.latestID = event.id;

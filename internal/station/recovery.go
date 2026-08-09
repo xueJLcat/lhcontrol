@@ -107,26 +107,26 @@ func (m *Manager) CheckAllStationStatuses() ([]StationInfo, error) {
 							statusErrors[item.index] = fmt.Errorf("%s: status refresh deadline exceeded: %w", address, workerErr)
 							return
 						}
-					m.observeBluetoothError(workerErr)
-					var readErr *bluetooth.StatusReadError
-					if errors.As(workerErr, &readErr) {
-						// A per-station read-budget deadline is not evidence the link
-						// is broken, matching recoverOneStation and the bluetooth
-						// RequiresReconnect rule. Back off and let the next refresh
-						// retry instead of disconnecting a possibly-healthy station.
-						if readErr.Power != nil &&
-							errors.Is(readErr.Power, context.DeadlineExceeded) &&
-							!bluetooth.RequiresReconnect(readErr.Power) {
-							m.noteStatusFailure(address)
-							m.trackStatusRefreshPending(address)
-							statusErrors[item.index] = fmt.Errorf("%s: status read deadline exceeded: %w", address, workerErr)
-							return
+						m.observeBluetoothError(workerErr)
+						var readErr *bluetooth.StatusReadError
+						if errors.As(workerErr, &readErr) {
+							// A per-station read-budget deadline is not evidence the link
+							// is broken, matching recoverOneStation and the bluetooth
+							// RequiresReconnect rule. Back off and let the next refresh
+							// retry instead of disconnecting a possibly-healthy station.
+							if readErr.Power != nil &&
+								errors.Is(readErr.Power, context.DeadlineExceeded) &&
+								!bluetooth.RequiresReconnect(readErr.Power) {
+								m.noteStatusFailure(address)
+								m.trackStatusRefreshPending(address)
+								statusErrors[item.index] = fmt.Errorf("%s: status read deadline exceeded: %w", address, workerErr)
+								return
+							}
+							m.recordStructuredReadResult(ptr, address, readErr.Power, readErr.Channel)
+						} else {
+							m.recordUnstructuredStationFailure(ptr, address, workerErr)
 						}
-						m.recordStructuredReadResult(ptr, address, readErr.Power, readErr.Channel)
-					} else {
-						m.recordUnstructuredStationFailure(ptr, address, workerErr)
-					}
-					statusErrors[item.index] = fmt.Errorf("%s: %w", address, workerErr)
+						statusErrors[item.index] = fmt.Errorf("%s: %w", address, workerErr)
 					} else {
 						m.clearStatusFailureKind(
 							address,

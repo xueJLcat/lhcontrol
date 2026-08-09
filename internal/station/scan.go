@@ -459,6 +459,7 @@ func (m *Manager) addScanWarning(warning string) {
 	m.scanStatus.Warnings = append(m.scanStatus.Warnings, warning)
 	m.scanStatusMutex.Unlock()
 }
+
 // markScanFinished records only the terminal scan status. It intentionally
 // takes no station list: the snapshot is not used here, and building one
 // (GetStationInfo) inside the transition lock would needlessly block every

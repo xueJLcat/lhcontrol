@@ -94,6 +94,17 @@ describe('StationStore locale changes', () => {
     expect(store.channelError).toBe('');
     expect(store.powerFeedbackMap).toEqual({});
   });
+
+  it('rebuilds the status line for a running external operation', async () => {
+    const { store } = mountStore();
+    await vi.waitFor(() => expect(store.stations).toHaveLength(1));
+    store.externalOperationRunning = true;
+
+    setLanguagePreference('zh-CN');
+    store.onLocaleChanged();
+
+    expect(store.statusMessage).toBe('蓝牙操作正在进行');
+  });
 });
 
 afterEach(() => {

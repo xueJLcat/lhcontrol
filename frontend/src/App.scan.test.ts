@@ -536,6 +536,35 @@ describe('App asynchronous operations', () => {
     expect(screen.getByRole('button', { name: 'Scan' })).toBeEnabled();
   });
 
+  it('does not replay recovery for a stopped adopted scan when its delayed terminal arrives', async () => {
+    vi.useFakeTimers();
+    api.IsScanning.mockResolvedValueOnce(true).mockResolvedValue(false);
+    api.GetCurrentStationInfo.mockResolvedValue([createStation({ name: 'LHB-ADOPTED' })]);
+    api.GetScanStatus.mockResolvedValue({ state: 'cancelled', found: 0, warnings: [] });
+    api.CheckAllStationStatuses.mockResolvedValue([createStation({ name: 'LHB-ADOPTED' })]);
+    render(App);
+    await vi.waitFor(() => expect(screen.getByRole('button', { name: 'Stop' })).toBeEnabled());
+
+    await fireEvent.click(await screen.findByRole('button', { name: 'Stop' }));
+    expect(await screen.findByText('External scan stopped.')).toBeInTheDocument();
+
+    // The backend emits the stopped scan's terminal event after StopScan
+    // settles. The stop already applied the outcome, so the delayed event must
+    // be consumed: remembering it would make the next poll replay a full
+    // recovery (clearing in-flight operations and re-reading the fleet) over
+    // state that is already terminal.
+    api.GetCurrentStationInfo.mockClear();
+    api.GetScanStatus.mockClear();
+    runtime.handlers.get('external-scan-cancelled')?.(externalScanEvent(3));
+    await Promise.resolve();
+
+    await vi.advanceTimersByTimeAsync(15_000);
+    await vi.waitFor(() => expect(api.CheckAllStationStatuses).toHaveBeenCalledOnce());
+    expect(api.GetCurrentStationInfo).not.toHaveBeenCalled();
+    expect(screen.getByText('LHB-ADOPTED')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Scan' })).toBeEnabled();
+  });
+
   it('recovers immediately when an external stop has no terminal event', async () => {
     api.IsScanning.mockResolvedValueOnce(false).mockResolvedValue(false);
     api.StopScan.mockResolvedValue(undefined);

@@ -225,4 +225,49 @@ describe('ExternalScanCoordinator', () => {
     expect(outcome).toBe('aborted');
     expect(state.externalScanning).toBe(true);
   });
+
+  it('consumes the stopped adopted scan\'s delayed terminal instead of remembering it', async () => {
+    const { host, state } = createHost();
+    mockIsScanning(host, true);
+    const coordinator = new ExternalScanCoordinator(host);
+    // Adopted scans carry no id: only the polling observation knows them.
+    await coordinator.adoptUnknown();
+    expect(state.externalScanning).toBe(true);
+    mockIsScanning(host, false);
+
+    const outcome = await coordinator.finishStop(state.scanEpoch, () => true);
+    expect(outcome).toBe('recovered');
+    expect(coordinator.hasPendingTerminal()).toBe(false);
+
+    // The backend still emits the terminal event for the stopped scan. It
+    // must be consumed, not remembered: a remembered terminal would make the
+    // next poll replay a full recovery over already-applied state.
+    await coordinator.handleCancelled({ id: 8 });
+    expect(coordinator.hasPendingTerminal()).toBe(false);
+
+    // Consuming still advances the id gate, so a delayed start for the same
+    // scan cannot resurrect the dead scan.
+    coordinator.handleStarted({ id: 8 });
+    expect(state.externalScanning).toBe(false);
+  });
+
+  it('keeps remembering untracked terminals for scans begun after a recovered stop', async () => {
+    const { host, state } = createHost();
+    mockIsScanning(host, true);
+    const coordinator = new ExternalScanCoordinator(host);
+    await coordinator.adoptUnknown();
+    mockIsScanning(host, false);
+    await coordinator.finishStop(state.scanEpoch, () => true);
+
+    // A new external scan starts after the stop recovered; its own lifecycle
+    // must not be shadowed by the earlier stop's pending terminal consumption.
+    coordinator.handleStarted({ id: 9 });
+    expect(state.externalScanning).toBe(true);
+    await coordinator.handleCompleted({ id: 9, stations: [] });
+    expect(state.externalScanning).toBe(false);
+
+    // A genuinely untracked terminal afterwards is remembered as before.
+    await coordinator.handleFailed({ id: 11, error: 'radio failure' });
+    expect(coordinator.hasPendingTerminal()).toBe(true);
+  });
 });
