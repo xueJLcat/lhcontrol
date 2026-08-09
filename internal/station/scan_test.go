@@ -410,7 +410,6 @@ func TestScanCompletionCallbackUsesLatestAuthoritativeSnapshot(t *testing.T) {
 	close(lifecycle.startedDone)
 	var completed []StationInfo
 	deliver := manager.finishScan(
-		[]StationInfo{{Name: "LHB-STALE", Address: address}},
 		1,
 		nil,
 		ScanCallbacks{Completed: func(stations []StationInfo) { completed = stations }},

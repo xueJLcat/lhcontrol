@@ -24,14 +24,14 @@ func (m *Manager) ScanAndFetchStationsContext(ctx context.Context) ([]StationInf
 		return m.GetStationInfo(), err
 	}
 	scanCtx := m.currentScanContext()
-	stations, found, err := m.scanAndFetchStationsSafely(scanCtx)
+	_, found, err := m.scanAndFetchStationsSafely(scanCtx)
 	m.scanLifecycleMutex.Lock()
 	lifecycle := m.scanLifecycle
 	m.scanLifecycleMutex.Unlock()
 	if lifecycle != nil {
 		close(lifecycle.startedDone)
 	}
-	m.finishScan(stations, found, err, ScanCallbacks{})()
+	m.finishScan(found, err, ScanCallbacks{})()
 	// finishScan releases the global operation, so a queued read-only recovery
 	// may already have produced a newer snapshot than scanAndFetchStations.
 	return m.GetStationInfo(), err
@@ -137,9 +137,9 @@ func (m *Manager) abortScanStart(lifecycle *scanLifecycle, err error, cancelled,
 		m.endForegroundGlobalOperation()
 	}
 	if cancelled {
-		m.markScanFinished(m.GetStationInfo(), 0, bluetooth.ErrScanCancelled)
+		m.markScanFinished(0, bluetooth.ErrScanCancelled)
 	} else {
-		m.markScanFinished(m.GetStationInfo(), 0, err)
+		m.markScanFinished(0, err)
 	}
 	close(lifecycle.done)
 }
@@ -150,11 +150,11 @@ func (m *Manager) clearScanLifecycle(lifecycle *scanLifecycle) {
 	}
 	m.scanLifecycleMutex.Unlock()
 }
-func (m *Manager) finishScan(stations []StationInfo, found int, err error, callbacks ScanCallbacks) func() {
+func (m *Manager) finishScan(found int, err error, callbacks ScanCallbacks) func() {
 	m.scanTransitionMutex.Lock()
 	m.isScanning.Store(false)
 	m.endForegroundGlobalOperation()
-	m.markScanFinished(stations, found, err)
+	m.markScanFinished(found, err)
 	m.scanLifecycleMutex.Lock()
 	lifecycle := m.scanLifecycle
 	m.scanLifecycleMutex.Unlock()
@@ -459,7 +459,11 @@ func (m *Manager) addScanWarning(warning string) {
 	m.scanStatus.Warnings = append(m.scanStatus.Warnings, warning)
 	m.scanStatusMutex.Unlock()
 }
-func (m *Manager) markScanFinished(stations []StationInfo, found int, err error) {
+// markScanFinished records only the terminal scan status. It intentionally
+// takes no station list: the snapshot is not used here, and building one
+// (GetStationInfo) inside the transition lock would needlessly block every
+// scan transition and StopScan behind a full-fleet snapshot.
+func (m *Manager) markScanFinished(found int, err error) {
 	m.scanStatusMutex.Lock()
 	m.scanStatus.CompletedAt = time.Now().Format(time.RFC3339Nano)
 	m.scanStatus.Found = found
@@ -510,8 +514,8 @@ func (m *Manager) StartScan(callbacks ScanCallbacks) error {
 			return
 		}
 		ctx := lifecycle.ctx
-		stations, found, err := m.scanAndFetchStationsSafely(ctx)
-		deliverTerminal := m.finishScan(stations, found, err, callbacks)
+		_, found, err := m.scanAndFetchStationsSafely(ctx)
+		deliverTerminal := m.finishScan(found, err, callbacks)
 		m.asyncScanWg.Done()
 		defer m.scanCallbackWg.Done()
 		deliverTerminal()

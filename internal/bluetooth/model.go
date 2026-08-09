@@ -10,6 +10,18 @@ import (
 	"tinygo.org/x/bluetooth"
 )
 
+// CanonicalAddress normalizes a user-supplied MAC address string to the
+// canonical uppercase form (11:22:33:AA:BB:CC) used for station and config
+// keys. It returns ok=false when the input is not a valid MAC, so callers can
+// distinguish a malformed address from a valid one that simply is not known.
+func CanonicalAddress(address string) (string, bool) {
+	mac, err := bluetooth.ParseMAC(address)
+	if err != nil {
+		return "", false
+	}
+	return (bluetooth.Address{MACAddress: bluetooth.MACAddress{MAC: mac}}).String(), true
+}
+
 type BaseStation struct {
 	Name              string
 	Address           bluetooth.Address

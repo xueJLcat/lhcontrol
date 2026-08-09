@@ -391,7 +391,7 @@ func TestScanStatusLifecycleAndDefensiveCopy(t *testing.T) {
 		t.Fatalf("running scan status = %+v", running)
 	}
 
-	manager.markScanFinished([]StationInfo{{}, {}}, 2, nil)
+	manager.markScanFinished(2, nil)
 	completed := manager.GetScanStatus()
 	if completed.State != "completed" || completed.CompletedAt == "" ||
 		completed.Found != 2 || len(completed.Warnings) != 1 {

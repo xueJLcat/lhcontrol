@@ -107,14 +107,26 @@ func (m *Manager) CheckAllStationStatuses() ([]StationInfo, error) {
 							statusErrors[item.index] = fmt.Errorf("%s: status refresh deadline exceeded: %w", address, workerErr)
 							return
 						}
-						m.observeBluetoothError(workerErr)
-						var readErr *bluetooth.StatusReadError
-						if errors.As(workerErr, &readErr) {
-							m.recordStructuredReadResult(ptr, address, readErr.Power, readErr.Channel)
-						} else {
-							m.recordUnstructuredStationFailure(ptr, address, workerErr)
+					m.observeBluetoothError(workerErr)
+					var readErr *bluetooth.StatusReadError
+					if errors.As(workerErr, &readErr) {
+						// A per-station read-budget deadline is not evidence the link
+						// is broken, matching recoverOneStation and the bluetooth
+						// RequiresReconnect rule. Back off and let the next refresh
+						// retry instead of disconnecting a possibly-healthy station.
+						if readErr.Power != nil &&
+							errors.Is(readErr.Power, context.DeadlineExceeded) &&
+							!bluetooth.RequiresReconnect(readErr.Power) {
+							m.noteStatusFailure(address)
+							m.trackStatusRefreshPending(address)
+							statusErrors[item.index] = fmt.Errorf("%s: status read deadline exceeded: %w", address, workerErr)
+							return
 						}
-						statusErrors[item.index] = fmt.Errorf("%s: %w", address, workerErr)
+						m.recordStructuredReadResult(ptr, address, readErr.Power, readErr.Channel)
+					} else {
+						m.recordUnstructuredStationFailure(ptr, address, workerErr)
+					}
+					statusErrors[item.index] = fmt.Errorf("%s: %w", address, workerErr)
 					} else {
 						m.clearStatusFailureKind(
 							address,
@@ -442,6 +454,10 @@ func (m *Manager) recoverOneStation(
 	stationConnected := m.bluetoothOps.stationConnected(station)
 	metadataAttempted := retryKind == statusRetryMetadata ||
 		(!stationConnected && metadataTracked)
+	// Set when the metadata refresh phase succeeds, so a later unstructured
+	// status-read failure does not also count a metadata failure even though
+	// this round's refresh already read fresh metadata.
+	metadataRefreshSucceeded := false
 	if retryKind == statusRetryMetadata {
 		// The refresh phase gets its own budget so a slow capability discovery
 		// cannot starve the subsequent status read into a deadline failure,
@@ -475,6 +491,8 @@ func (m *Manager) recoverOneStation(
 			m.stopExhaustedAbsentRecovery(address, station)
 			return 0
 		}
+		// The refresh completed, so this round already read fresh metadata.
+		metadataRefreshSucceeded = true
 	}
 	readContext, cancelRead := context.WithTimeout(recoveryContext, m.initialReadTimeoutDuration())
 	defer cancelRead()
@@ -518,7 +536,16 @@ func (m *Manager) recoverOneStation(
 			m.recordUnstructuredStationFailure(station, address, err)
 		}
 		if metadataAttempted {
-			m.noteMetadataFailure(address)
+			if metadataRefreshSucceeded {
+				// The refresh already re-read metadata this round, so clear the
+				// metadata kind instead of counting a failure: a follow-up
+				// unstructured status-read error must neither double-count nor
+				// leave the stale schedule behind (which would re-schedule
+				// metadata with zero backoff in a tight recovery loop).
+				m.clearStatusFailureKind(address, statusRetryMetadata)
+			} else {
+				m.noteMetadataFailure(address)
+			}
 		}
 		m.stopExhaustedAbsentRecovery(address, station)
 		return 0

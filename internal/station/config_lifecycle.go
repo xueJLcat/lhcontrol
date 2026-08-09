@@ -35,7 +35,16 @@ func (m *Manager) RenameStationByAddress(address, newName string) error {
 	defer m.endForegroundSharedOperation()
 	station, err := m.stationByAddress(address)
 	if err != nil {
-		return err
+		// The station has not been discovered in this session (no successful
+		// scan yet, Bluetooth unavailable, or scan-on-startup disabled). Still
+		// allow renaming by address so callers can manage aliases for known
+		// devices. There is no scan-known original name to preserve, so no
+		// legacy per-name tombstone applies; a malformed address is rejected.
+		canonical, ok := bluetooth.CanonicalAddress(address)
+		if !ok {
+			return err
+		}
+		return m.config.SetRenamedStationByAddress(canonical, "", newName)
 	}
 	snapshot := station.Snapshot()
 	return m.config.SetRenamedStationByAddress(snapshot.Address, snapshot.Name, newName)

@@ -299,6 +299,12 @@ func statusRetryOrderAndKind(retry statusRetry) (statusRetryKind, int, time.Time
 			selectedLastAttempt = lastAttempt
 			selectedNextAt = nextAt
 		}
+		if nextAt.IsZero() {
+			// A zero schedule is due immediately; no later kind can be due
+			// sooner, so it must win rather than being overwritten by a kind
+			// scheduled in the future.
+			break
+		}
 	}
 	return selectedKind, selectedFailures, selectedLastAttempt, selectedNextAt
 }

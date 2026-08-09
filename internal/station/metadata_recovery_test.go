@@ -112,6 +112,59 @@ func TestMetadataRecoveryFailureKeepsIndependentBackoff(t *testing.T) {
 	}
 }
 
+func TestSuccessfulMetadataRefreshIsNotCountedAsFailureByLaterReadError(t *testing.T) {
+	// The refresh phase reads fresh metadata. When it succeeds but the
+	// subsequent status read fails with an unstructured error (for example a
+	// read-budget deadline or a transport error between reads), that failure
+	// must not count a metadata failure. The metadata kind is cleared instead:
+	// counting would exhaust the metadata retry limit even though metadata
+	// recovery is succeeding, and leaving the stale schedule behind would
+	// re-schedule metadata with zero backoff in a tight recovery loop.
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	address := "11:22:33:44:55:86"
+	manager.statusRetryBase = time.Hour
+	manager.statusRetryMax = 4 * time.Hour
+	manager.stations[address] = &internalbluetooth.BaseStation{
+		Name: "LHB-META-REFRESH", Address: mustAddress(t, address), Present: true,
+	}
+	manager.statusRetryMutex.Lock()
+	manager.statusRetries[address] = statusRetry{
+		kinds:            statusRetryMetadata,
+		metadataFailures: 1,
+		metadataNextAt:   time.Now().Add(-time.Second),
+	}
+	manager.statusRetryMutex.Unlock()
+	var refreshes atomic.Int32
+	manager.bluetoothOps.refreshCapabilities = func(context.Context, *internalbluetooth.BaseStation) (internalbluetooth.Capabilities, error) {
+		refreshes.Add(1)
+		return internalbluetooth.Capabilities{}, nil
+	}
+	// An unstructured (non-InitialReadError) failure, e.g. a transport error
+	// between the refresh and the status read.
+	manager.bluetoothOps.fetchInitialPowerState = func(context.Context, *internalbluetooth.BaseStation) error {
+		return errors.New("transport read failed after refresh")
+	}
+	manager.bluetoothOps.disconnectStation = func(*internalbluetooth.BaseStation) error {
+		return nil
+	}
+
+	manager.runStatusRecoveryRound()
+
+	if refreshes.Load() != 1 {
+		t.Fatalf("metadata refreshes = %d, want 1", refreshes.Load())
+	}
+	manager.statusRetryMutex.Lock()
+	retry, tracked := manager.statusRetries[address]
+	manager.statusRetryMutex.Unlock()
+	if effectiveStatusRetryKinds(retry)&statusRetryMetadata != 0 {
+		t.Fatalf("metadata kind still scheduled after successful refresh: %+v tracked=%v", retry, tracked)
+	}
+	if retry.metadataFailures != 0 {
+		t.Fatalf("metadata failures = %d, want cleared after successful refresh", retry.metadataFailures)
+	}
+}
+
 func TestMetadataRecoveryKeepsIndependentStatusReadBudget(t *testing.T) {
 	manager := NewManager(config.NewConfig())
 	defer manager.Shutdown()

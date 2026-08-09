@@ -216,9 +216,13 @@ func (m *Manager) endStationOperation(address string) {
 		return
 	}
 	delete(m.activeDeviceOperations, key)
+	// Release the slot token before waking waiters on active.done: a waiter
+	// woken by the close retries beginStationOperation immediately, and the
+	// slot must already be free by then or it gets a spurious Busy. Each map
+	// entry holds exactly one token, so the receive cannot block under the lock.
+	<-m.deviceOperationSlots
 	close(active.done)
 	m.deviceOperationMutex.Unlock()
-	<-m.deviceOperationSlots
 	m.operationMutex.RUnlock()
 	m.unregisterOperation()
 }
