@@ -19,6 +19,8 @@ import (
 const autoSleepStopLimit = 60 * time.Second
 
 type autoSleepEvent struct {
+	ID uint64 `json:"id,omitempty"`
+
 	Phase string `json:"phase"`
 
 	Success int `json:"success"`
@@ -985,7 +987,13 @@ func (a *App) runAutoSleep(ctx context.Context) {
 
 	}
 
-	a.emitAutoSleep(autoSleepEvent{Phase: "started"})
+	actionID := a.autoSleepActionID.Add(1)
+	emitTerminal := func(event autoSleepEvent) {
+		event.ID = actionID
+		a.emitTerminalAutoSleep(event)
+	}
+
+	a.emitAutoSleep(autoSleepEvent{ID: actionID, Phase: "started"})
 
 	log.Println("Auto-sleep: scanning for base stations")
 
@@ -1001,7 +1009,7 @@ func (a *App) runAutoSleep(ctx context.Context) {
 
 		if !a.shuttingDown.Load() {
 
-			a.emitTerminalAutoSleep(cancelledAutoSleepEvent(nil, "cancelled before power commands were sent"))
+			emitTerminal(cancelledAutoSleepEvent(nil, "cancelled before power commands were sent"))
 
 		}
 
@@ -1011,7 +1019,7 @@ func (a *App) runAutoSleep(ctx context.Context) {
 
 		log.Println("Auto-sleep skipped: another Bluetooth operation is in progress")
 
-		a.emitTerminalAutoSleep(autoSleepEvent{Phase: "skipped", Error: "another Bluetooth operation is in progress"})
+		emitTerminal(autoSleepEvent{Phase: "skipped", Error: "another Bluetooth operation is in progress"})
 
 		return
 
@@ -1037,7 +1045,7 @@ func (a *App) runAutoSleep(ctx context.Context) {
 
 	if ctx.Err() != nil {
 
-		a.emitTerminalAutoSleep(cancelledAutoSleepEvent(nil, "cancelled after scanning and before power commands were sent"))
+		emitTerminal(cancelledAutoSleepEvent(nil, "cancelled after scanning and before power commands were sent"))
 
 		return
 
@@ -1063,7 +1071,7 @@ func (a *App) runAutoSleep(ctx context.Context) {
 
 			// entire automatic-sleep action as if nothing happened.
 
-			a.emitTerminalAutoSleep(cancelledAutoSleepEvent(result.Results, "watched process restarted or automatic sleep was reconfigured"))
+			emitTerminal(cancelledAutoSleepEvent(result.Results, "watched process restarted or automatic sleep was reconfigured"))
 
 		}
 
@@ -1073,7 +1081,7 @@ func (a *App) runAutoSleep(ctx context.Context) {
 
 		log.Printf("Auto-sleep timed out with partial results: %v", err)
 
-		a.emitTerminalAutoSleep(timedOutAutoSleepEvent(result.Results, "bulk power timeout reached"))
+		emitTerminal(timedOutAutoSleepEvent(result.Results, "bulk power timeout reached"))
 
 		return
 
@@ -1081,7 +1089,7 @@ func (a *App) runAutoSleep(ctx context.Context) {
 
 		log.Println("Auto-sleep skipped: another Bluetooth operation is in progress")
 
-		a.emitTerminalAutoSleep(autoSleepEvent{Phase: "skipped", Error: "another Bluetooth operation is in progress"})
+		emitTerminal(autoSleepEvent{Phase: "skipped", Error: "another Bluetooth operation is in progress"})
 
 	case errors.Is(err, station.ErrShuttingDown):
 
@@ -1089,7 +1097,7 @@ func (a *App) runAutoSleep(ctx context.Context) {
 
 		log.Printf("Auto-sleep failed: %v", err)
 
-		a.emitTerminalAutoSleep(autoSleepEvent{Phase: "failed", Error: err.Error()})
+		emitTerminal(autoSleepEvent{Phase: "failed", Error: err.Error()})
 
 	default:
 
@@ -1097,7 +1105,7 @@ func (a *App) runAutoSleep(ctx context.Context) {
 
 		log.Printf("Auto-sleep completed: %d confirmed, %d unconfirmed, %d failed, %d skipped", success, unconfirmed, failed, skipped)
 
-		a.emitTerminalAutoSleep(autoSleepEvent{
+		emitTerminal(autoSleepEvent{
 
 			Phase: "completed", Success: success, Unconfirmed: unconfirmed, Failed: failed, Skipped: skipped,
 		})

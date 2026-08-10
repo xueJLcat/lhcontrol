@@ -3,6 +3,7 @@ import { pushToast } from '../toast';
 import { t } from '../i18n.svelte';
 
 export interface AutoSleepEvent {
+  id?: number;
   phase: 'started' | 'completed' | 'cancelled' | 'timed-out' | 'skipped' | 'failed';
   success?: number;
   unconfirmed?: number;
@@ -24,6 +25,9 @@ export interface AutoSleepEventDependencies {
 }
 
 export class AutoSleepEventCoordinator {
+  private readonly activeActionIds = new Set<number>();
+  private latestStatusId = 0;
+
   constructor(private dependencies: AutoSleepEventDependencies) {}
 
   handle(event: AutoSleepEvent) {
@@ -32,9 +36,25 @@ export class AutoSleepEventCoordinator {
       this.dependencies.applyStations(event.updateId ?? 0, event.stations);
     }
 
+    const id = Number(event.id ?? 0);
+    if (Number.isInteger(id) && id > 0) {
+      if (event.phase === 'started') this.activeActionIds.add(id);
+      else this.activeActionIds.delete(id);
+      // Keep controls locked while any superseded action is still draining,
+      // even if a newer replacement already finished or was skipped.
+      this.dependencies.setRunning(this.activeActionIds.size > 0);
+      // A terminal event from an older, cancelled watcher may arrive after a
+      // replacement action started. Its station snapshot is still useful and
+      // update-ID gated above, but its copy must not replace the newer status.
+      if (id < this.latestStatusId) return;
+      this.latestStatusId = id;
+    } else {
+      // Compatibility with unsequenced events from older backends and tests.
+      this.dependencies.setRunning(event.phase === 'started');
+    }
+
     switch (event.phase) {
       case 'started':
-        this.dependencies.setRunning(true);
         this.dependencies.beginStatusOperation();
         this.setMessage(t('Auto sleep: scanning and putting all stations to sleep...'));
         pushToast(t('Session ended — scanning and putting all stations to sleep.'), 'info');
@@ -49,13 +69,11 @@ export class AutoSleepEventCoordinator {
         this.handleTimedOut(event);
         break;
       case 'skipped':
-        this.dependencies.setRunning(false);
         this.dependencies.beginStatusOperation();
         this.setMessage(`${t('Auto sleep skipped')}: ${event.error || t('Bluetooth busy')}.`);
         pushToast(`${t('Auto sleep skipped')}: ${event.error || t('Bluetooth busy')}.`, 'info');
         break;
       case 'failed':
-        this.dependencies.setRunning(false);
         this.dependencies.beginStatusOperation();
         this.setMessage(`${t('Auto sleep failed')}: ${event.error || t('unknown error')}.`);
         pushToast(`${t('Auto sleep failed')}: ${event.error || t('unknown error')}.`);
@@ -64,7 +82,6 @@ export class AutoSleepEventCoordinator {
   }
 
   private handleCompleted(event: AutoSleepEvent) {
-    this.dependencies.setRunning(false);
     this.dependencies.beginStatusOperation();
     const success = event.success ?? 0;
     const unconfirmed = event.unconfirmed ?? 0;
@@ -82,7 +99,6 @@ export class AutoSleepEventCoordinator {
   }
 
   private handleCancelled(event: AutoSleepEvent) {
-    this.dependencies.setRunning(false);
     this.dependencies.beginStatusOperation();
     const success = event.success ?? 0;
     const unconfirmed = event.unconfirmed ?? 0;
@@ -97,7 +113,6 @@ export class AutoSleepEventCoordinator {
   }
 
   private handleTimedOut(event: AutoSleepEvent) {
-    this.dependencies.setRunning(false);
     this.dependencies.beginStatusOperation();
     const success = event.success ?? 0;
     const unconfirmed = event.unconfirmed ?? 0;

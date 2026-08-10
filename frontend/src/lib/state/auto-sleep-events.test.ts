@@ -37,4 +37,33 @@ describe('AutoSleepEventCoordinator', () => {
     expect(dependencies.setStatusMessage).toHaveBeenCalledWith(message);
     expect(pushToast).toHaveBeenCalledWith(message, 'warning');
   });
+
+  it('keeps an older draining action locked without letting its terminal event overwrite a replacement', () => {
+    const dependencies = {
+      isDisposed: vi.fn(() => false),
+      setRunning: vi.fn(),
+      beginStatusOperation: vi.fn(),
+      setStatusMessage: vi.fn(),
+      applyStations: vi.fn()
+    };
+    const coordinator = new AutoSleepEventCoordinator(dependencies);
+
+    coordinator.handle({ id: 1, phase: 'started' });
+    coordinator.handle({ id: 2, phase: 'started' });
+    vi.clearAllMocks();
+
+    coordinator.handle({ id: 1, phase: 'cancelled', error: 'superseded', updateId: 7, stations: [] });
+
+    expect(dependencies.applyStations).toHaveBeenCalledWith(7, []);
+    expect(dependencies.setRunning).toHaveBeenLastCalledWith(true);
+    expect(dependencies.setStatusMessage).not.toHaveBeenCalled();
+    expect(pushToast).not.toHaveBeenCalled();
+
+    coordinator.handle({ id: 2, phase: 'completed', success: 1, updateId: 8, stations: [] });
+
+    expect(dependencies.setRunning).toHaveBeenLastCalledWith(false);
+    expect(dependencies.setStatusMessage).toHaveBeenLastCalledWith(
+      'Auto sleep finished: 1 confirmed, 0 unconfirmed, 0 failed, 0 skipped.'
+    );
+  });
 });

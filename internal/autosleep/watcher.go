@@ -35,10 +35,13 @@ type Watcher struct {
 	// the replacement.
 	Monitor *Monitor
 
-	// mutex guards triggerOwed so a replacement watcher can snapshot the owed
-	// sleep while the poll loop updates it.
-	mutex       sync.Mutex
-	triggerOwed bool
+	// mutex guards the trigger debt so a replacement watcher can snapshot it
+	// while the poll loop and the action goroutine update it. The generation
+	// prevents an older action completion from clearing a newer trigger that
+	// became pending while that action was still draining.
+	mutex             sync.Mutex
+	triggerOwed       bool
+	triggerGeneration uint64
 }
 
 // OwesTrigger reports that a consumed trigger's sleep has not completed yet:
@@ -51,9 +54,24 @@ func (w *Watcher) OwesTrigger() bool {
 	return w.triggerOwed
 }
 
-func (w *Watcher) markTriggerOwed(owed bool) {
+func (w *Watcher) markTriggerOwed(owed bool) uint64 {
 	w.mutex.Lock()
+	w.triggerGeneration++
 	w.triggerOwed = owed
+	generation := w.triggerGeneration
+	w.mutex.Unlock()
+	return generation
+}
+
+// finishTrigger clears only the debt consumed by this action. A new session
+// can close while an older action is still stopping; its newer generation must
+// remain owed so the watcher runs it afterwards.
+func (w *Watcher) finishTrigger(generation uint64) {
+	w.mutex.Lock()
+	if w.triggerGeneration == generation {
+		w.triggerGeneration++
+		w.triggerOwed = false
+	}
 	w.mutex.Unlock()
 }
 
@@ -85,6 +103,7 @@ func (w *Watcher) Run(ctx context.Context) {
 	// while the previous action was still stopping, so the sleep runs as soon
 	// as the previous action finishes instead of being silently dropped.
 	pendingTrigger := false
+	var pendingTriggerGeneration uint64
 	stopTrigger := func() {
 		if triggerCancel == nil {
 			return
@@ -94,7 +113,7 @@ func (w *Watcher) Run(ctx context.Context) {
 		triggerCancel = nil
 		triggerDone = nil
 	}
-	fireTrigger := func() {
+	fireTrigger := func(generation uint64) {
 		log.Printf("Auto-sleep: %s stayed closed for %s; triggering", processName, w.Settings.Delay())
 		triggerContext, cancelTrigger := context.WithCancel(ctx)
 		done := make(chan struct{})
@@ -102,6 +121,10 @@ func (w *Watcher) Run(ctx context.Context) {
 		triggerDone = done
 		go func() {
 			defer close(done)
+			// Clear the consumed debt before publishing completion. A settings
+			// replacement can then observe the action as finished even if the
+			// watcher loop has not selected the closed done channel yet.
+			defer w.finishTrigger(generation)
 			w.Trigger(triggerContext)
 		}()
 	}
@@ -114,10 +137,6 @@ func (w *Watcher) Run(ctx context.Context) {
 			triggerCancel()
 			triggerCancel = nil
 			triggerDone = nil
-			// The finished action no longer owes a sleep unless the monitor
-			// fired again while it was draining; keep the owed flag so a
-			// replacement watcher can still re-arm the pending trigger.
-			w.markTriggerOwed(pendingTrigger)
 		case now := <-ticker.C:
 			if w.Now != nil {
 				now = w.Now()
@@ -135,11 +154,12 @@ func (w *Watcher) Run(ctx context.Context) {
 					triggerCancel()
 				}
 				pendingTrigger = false
+				pendingTriggerGeneration = 0
 				w.markTriggerOwed(false)
 			}
 			if monitor.Poll(running, now) == ActionTrigger {
 				pendingTrigger = true
-				w.markTriggerOwed(true)
+				pendingTriggerGeneration = w.markTriggerOwed(true)
 			}
 			// Fire when a trigger is owed and no action is currently running.
 			// If the previous action is still stopping, this stays pending and
@@ -147,7 +167,9 @@ func (w *Watcher) Run(ctx context.Context) {
 			// every tick guarantees a relaunched session is never slept.
 			if pendingTrigger && triggerDone == nil && !running {
 				pendingTrigger = false
-				fireTrigger()
+				generation := pendingTriggerGeneration
+				pendingTriggerGeneration = 0
+				fireTrigger(generation)
 			}
 		}
 	}

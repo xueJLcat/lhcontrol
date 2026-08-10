@@ -481,3 +481,24 @@ func TestWatcherOwesTriggerWhileActionInFlight(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 }
+
+func TestWatcherTriggerDebtUsesCompletionGeneration(t *testing.T) {
+	watcher := &Watcher{}
+
+	first := watcher.markTriggerOwed(true)
+	watcher.finishTrigger(first)
+	if watcher.OwesTrigger() {
+		t.Fatal("completed action remained owed before the watcher loop observed its done channel")
+	}
+
+	older := watcher.markTriggerOwed(true)
+	newer := watcher.markTriggerOwed(true)
+	watcher.finishTrigger(older)
+	if !watcher.OwesTrigger() {
+		t.Fatal("older action completion cleared a newer pending trigger")
+	}
+	watcher.finishTrigger(newer)
+	if watcher.OwesTrigger() {
+		t.Fatal("newest action completion did not clear its trigger debt")
+	}
+}

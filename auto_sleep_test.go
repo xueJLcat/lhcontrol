@@ -49,8 +49,38 @@ func TestRunAutoSleepEmitsTerminalCancellationBetweenScanAndPower(t *testing.T) 
 	if len(events) != 2 || events[0].Phase != "started" || events[1].Phase != "cancelled" {
 		t.Fatalf("auto-sleep events = %+v, want started then cancelled", events)
 	}
+	if events[0].ID == 0 || events[1].ID != events[0].ID {
+		t.Fatalf("auto-sleep lifecycle IDs = %d/%d, want one non-zero action ID", events[0].ID, events[1].ID)
+	}
 	if events[1].Error != "cancelled after scanning and before power commands were sent" {
 		t.Fatalf("cancellation reason = %q", events[1].Error)
+	}
+}
+
+func TestRunAutoSleepUsesDistinctLifecycleIDs(t *testing.T) {
+	app := NewApp()
+	var events []autoSleepEvent
+	app.autoSleepEventSink = func(event autoSleepEvent) {
+		events = append(events, event)
+	}
+	app.scanForAutoSleep = func(context.Context) ([]station.StationInfo, error) {
+		return nil, nil
+	}
+	app.setPowerForAutoSleep = func(context.Context, string) (station.BulkPowerResult, error) {
+		return station.BulkPowerResult{}, nil
+	}
+
+	app.runAutoSleep(context.Background())
+	app.runAutoSleep(context.Background())
+
+	if len(events) != 4 {
+		t.Fatalf("auto-sleep event count = %d, want two lifecycle pairs", len(events))
+	}
+	if events[0].ID == 0 || events[0].ID != events[1].ID {
+		t.Fatalf("first lifecycle IDs = %d/%d", events[0].ID, events[1].ID)
+	}
+	if events[2].ID <= events[0].ID || events[2].ID != events[3].ID {
+		t.Fatalf("second lifecycle IDs = %d/%d after %d", events[2].ID, events[3].ID, events[0].ID)
 	}
 }
 

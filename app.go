@@ -49,6 +49,7 @@ type App struct {
 	autoSleepWatcher          *autosleep.Watcher
 	autoSleepStopWait         time.Duration
 	autoSleepWG               sync.WaitGroup
+	autoSleepActionID         atomic.Uint64
 	scanForAutoSleep          func(context.Context) ([]station.StationInfo, error)
 	setPowerForAutoSleep      func(context.Context, string) (station.BulkPowerResult, error)
 	autoSleepEventSink        func(autoSleepEvent)
