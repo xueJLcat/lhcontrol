@@ -35,6 +35,7 @@ export interface StationActionHost {
   editingAddress: string | null;
   channelError: string;
   channelWarning: boolean;
+  channelSavingAddress: string | null;
   readonly bulkLocked: boolean;
   readonly stationLocked: boolean;
   readonly untrustedCount: number;
@@ -44,10 +45,11 @@ export interface StationActionHost {
   readonly powerFeedback: PowerFeedbackRegistry;
   readonly apiStatus: ApiStatusPoller;
   readonly ui: {
-    closeChannelEditor(): void;
+    forceCloseChannelEditor(): void;
     requestBulkConfirmation(target: PowerTarget): void;
   };
   stationBusy(address: string): boolean;
+  configBusy(address: string): boolean;
   gattLockedFor(address: string): boolean;
   setGattBusy(address: string, busy: boolean): void;
   setConfigBusy(address: string, busy: boolean): void;
@@ -285,6 +287,11 @@ export class StationActionController {
   }
 
   async saveRename(station: StationInfo, name: string) {
+    if (this.host.configBusy(station.address)) {
+      // This rename's own save is still settling; a repeated Enter or blur
+      // must not be reported as a conflict with itself.
+      return;
+    }
     if (this.host.stationBusy(station.address) || this.host.stationLocked) {
       // Keep the row open for a retry and explain why the submission did
       // nothing; a silent rejection leaves the user typing into a dead input.
@@ -294,8 +301,10 @@ export class StationActionController {
       pushToast(reason, 'warning');
       return;
     }
-    this.cancelRename();
-    if (name === station.name) return;
+    if (name === station.name) {
+      this.cancelRename();
+      return;
+    }
     this.host.setConfigBusy(station.address, true);
     const statusOperation = this.host.gates.beginStatusOperation();
     const operationEpoch = this.host.gates.currentScanEpoch;
@@ -309,6 +318,9 @@ export class StationActionController {
         ? this.host.withStationChanges(current, { name: name || current.originalName })
         : current);
       if (this.host.gates.canCommitStatus(statusOperation)) this.host.statusMessage = name ? t('Renamed to {name}.', { name }) : t('Reset name for {name}.', { name: station.originalName });
+      // Close the row only once the rename has landed: an async failure
+      // otherwise loses the draft and forces the user to retype it.
+      this.cancelRename();
     } catch (error) {
       if (!this.host.gates.canCommitStationOperation(operationEpoch, station.address, operationRevision)) return;
       if (this.host.gates.canCommitStatus(statusOperation)) {
@@ -406,6 +418,7 @@ export class StationActionController {
     const operationEpoch = this.host.gates.currentScanEpoch;
     const operationRevision = this.host.gates.beginStationOperationRevision(address);
     this.host.setGattBusy(address, true);
+    this.host.channelSavingAddress = address;
     this.host.channelError = '';
     this.host.channelWarning = false;
     try {
@@ -430,7 +443,7 @@ export class StationActionController {
           ? this.host.withStationChanges(item, { channel: result.channel })
           : item));
       }
-      this.host.ui.closeChannelEditor();
+      this.host.ui.forceCloseChannelEditor();
       if (this.host.gates.canCommitStatus(statusOperation)) this.host.statusMessage = result.commandSent
         ? t('Channel changed from {previous} to {channel}. {warnings}', { previous: result.previousChannel || t('unknown'), channel: result.channel, warnings: result.warnings.join(' ') })
         : t('Channel already set to {channel}; no command was sent. {warnings}', { channel: result.channel, warnings: result.warnings.join(' ') });
@@ -447,6 +460,7 @@ export class StationActionController {
     } finally {
       if (this.host.gates.canCleanupStationOperation(address, operationRevision)) {
         this.host.setGattBusy(address, false);
+        if (this.host.channelSavingAddress === address) this.host.channelSavingAddress = null;
       }
     }
   }

@@ -15,6 +15,7 @@
     error,
     warning = false,
     busy,
+    saving = false,
     locked,
     onClose,
     onSave,
@@ -26,6 +27,7 @@
     error: string;
     warning?: boolean;
     busy: boolean;
+    saving?: boolean;
     locked: boolean;
     onClose: () => void;
     onSave: (channel: number, allowUnknownConflictRisk: boolean) => void;
@@ -42,11 +44,20 @@
 
   // The modal remounts on every open, so the initial-value capture in the
   // state initializers below is intentional: targetChannel starts at the
-  // (possibly stale) current channel or the first free one and only changes
-  // through user selection.
+  // (possibly stale) current channel or the first free one. Until the user
+  // picks a channel the default follows the live value, so a background
+  // refresh while the modal is open cannot turn the default Confirm from a
+  // no-op into a real change.
   // svelte-ignore state_referenced_locally
   let targetChannel = $state(initialTargetChannel(station.channel, occupiedChannels));
+  let userTouched = $state(false);
   let confirmUnknownChannelRisk = $state(false);
+
+  $effect(() => {
+    if (!userTouched) {
+      targetChannel = initialTargetChannel(station.channel, occupiedChannels);
+    }
+  });
 
   const unchanged = $derived(station.isPresent && station.scanFresh && station.channelFresh &&
     station.channel > 0 && station.channel === targetChannel);
@@ -99,7 +110,7 @@
             : undefined}
           title={occupiedChannels.has(channel) ? t('Occupied by {names}', { names: occupiedChannels.get(channel)?.join(', ') ?? '' }) : t('Channel {channel}', { channel })}
           aria-pressed={targetChannel === channel}
-          onclick={() => { if (!occupiedChannels.has(channel)) targetChannel = channel; }}
+          onclick={() => { if (!occupiedChannels.has(channel)) { targetChannel = channel; userTouched = true; } }}
         >{channel}{#if station.channel > 0 && station.channel === channel}<span class="ch-dot" aria-hidden="true"></span>{/if}</button>
       {/each}
     </div>
@@ -111,7 +122,7 @@
   {#if blockedReason}<div class="alert warning" role="status">{blockedReason}</div>{/if}
   {#if error}<div class="alert" class:danger={!warning} class:warning role="status">{error}</div>{/if}
   {#if busy}
-    <p class="busy-note" role="status"><LoaderCircle class="spin" size={12} /> {t('Writing channel and verifying the readback...')}</p>
+    <p class="busy-note" role="status"><LoaderCircle class="spin" size={12} /> {saving ? t('Writing channel and verifying the readback...') : t('Bluetooth operation in progress')}</p>
   {/if}
   <p class="hint">{t('The value is only accepted after the base station reads back the requested channel. Failure will not trigger an automatic rollback.')}</p>
   <div class="modal-actions">

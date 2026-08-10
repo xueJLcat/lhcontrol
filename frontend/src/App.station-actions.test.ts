@@ -184,6 +184,56 @@ describe('App asynchronous operations', () => {
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Change channel' })).not.toBeInTheDocument());
   });
 
+  it('keeps the channel editor open when an external scan starts mid-save', async () => {
+    let resolveChannel!: (value: unknown) => void;
+    api.SetStationChannel.mockReturnValue(new Promise((resolve) => {
+      resolveChannel = resolve;
+    }));
+
+    render(App);
+    await screen.findByText('LHB-TEST');
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Scan' })).not.toBeDisabled());
+    await fireEvent.click(screen.getByRole('button', { name: 'Details for LHB-TEST' }));
+    await fireEvent.click(await screen.findByRole('button', { name: /Change Channel/ }));
+    await fireEvent.click(within(screen.getByRole('dialog', { name: 'Change channel' })).getByRole('button', { name: '4' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Confirm change' }));
+    await waitFor(() => expect(api.SetStationChannel).toHaveBeenCalledWith('11:22:33:44:55:66', 4, false));
+
+    // The external scan must not force-close the editor while the write is in
+    // flight; the unconfirmed/confirmed result has to stay visible.
+    runtime.handlers.get('external-scan-started')?.(externalScanEvent(1));
+    await waitFor(() => expect(screen.getByText('Preparing external scan...')).toBeInTheDocument());
+    // Outlast the modal's close transition so a forced close cannot hide
+    // behind an in-flight outro animation.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(screen.getByRole('dialog', { name: 'Change channel' })).toBeInTheDocument();
+
+    // The scan superseded the save's commit gates, so the result is dropped
+    // and the editor stays open — now idle and closable again.
+    resolveChannel({ previousChannel: 3, channel: 4, warnings: [] });
+    const dialog = screen.getByRole('dialog', { name: 'Change channel' });
+    await waitFor(() => expect(within(dialog).queryByText('Writing channel and verifying the readback...')).not.toBeInTheDocument());
+    await fireEvent.keyDown(window, { key: 'Escape' });
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Change channel' })).not.toBeInTheDocument());
+  });
+
+  it('keeps the rename draft editable when the save fails', async () => {
+    api.RenameStationByAddress.mockRejectedValue(new Error('config read-only'));
+    render(App);
+    await screen.findByText('LHB-TEST');
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Scan' })).not.toBeDisabled());
+    await fireEvent.click(screen.getByRole('button', { name: 'Rename LHB-TEST' }));
+    const input = screen.getByRole('textbox', { name: 'Station name' }) as HTMLInputElement;
+    await fireEvent.input(input, { target: { value: 'Draft name' } });
+    await fireEvent.click(screen.getByTitle('Save name'));
+    await waitFor(() => expect(api.RenameStationByAddress).toHaveBeenCalledWith('11:22:33:44:55:66', 'Draft name'));
+
+    // The failed save must not discard the draft: the row stays open with the
+    // typed name so the user can retry without retyping.
+    const keptInput = screen.getByRole('textbox', { name: 'Station name' }) as HTMLInputElement;
+    expect(keptInput.value).toBe('Draft name');
+  });
+
   it('keeps unrelated backend errors after a confirmed channel change', async () => {
     const initial = createStation({ lastError: 'metadata: firmware read failed' });
     const updated = createStation({

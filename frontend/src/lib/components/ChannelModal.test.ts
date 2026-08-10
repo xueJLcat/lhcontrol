@@ -137,4 +137,47 @@ describe('ChannelModal channel grid', () => {
     await view.rerender({ ...baseProps, station: station() });
     expect(screen.getByRole('button', { name: 'Confirm change' })).toBeEnabled();
   });
+
+  it('keeps the default selection a no-op when the live channel changes while open', async () => {
+    const onSave = vi.fn();
+    const baseProps = {
+      occupiedChannels: new Map<number, string[]>(),
+      hasUnknownVisibleChannel: false,
+      error: '',
+      warning: false,
+      busy: false,
+      locked: false,
+      onClose: vi.fn(),
+      onSave,
+      onIdentify: vi.fn()
+    };
+    const view = render(ChannelModal, {
+      props: { ...baseProps, station: station({ channel: 3, channelFresh: true }) }
+    });
+    expect(screen.getByRole('button', { name: 'Confirm change' })).toBeDisabled();
+
+    // A background refresh moves the live channel; the untouched default must
+    // follow it so Confirm stays a no-op instead of reverting the station.
+    await view.rerender({ ...baseProps, station: station({ channel: 5, channelFresh: true }) });
+    expect(screen.getByRole('button', { name: '5' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: 'Confirm change' })).toBeDisabled();
+
+    // An explicit user selection survives later live updates.
+    await fireEvent.click(screen.getByRole('button', { name: '7' }));
+    await view.rerender({ ...baseProps, station: station({ channel: 6, channelFresh: true }) });
+    expect(screen.getByRole('button', { name: '7' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: 'Confirm change' })).toBeEnabled();
+    await fireEvent.click(screen.getByRole('button', { name: 'Confirm change' }));
+    expect(onSave).toHaveBeenCalledWith(7, false);
+  });
+
+  it('describes the busy state by its actual operation', () => {
+    cleanup();
+    renderModal({ busy: true, saving: true });
+    expect(screen.getByText('Writing channel and verifying the readback...')).toBeInTheDocument();
+    cleanup();
+    renderModal({ busy: true, saving: false });
+    expect(screen.getByText('Bluetooth operation in progress')).toBeInTheDocument();
+    expect(screen.queryByText('Writing channel and verifying the readback...')).not.toBeInTheDocument();
+  });
 });

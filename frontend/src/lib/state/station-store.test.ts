@@ -43,6 +43,7 @@ import { setLanguagePreference } from '../i18n.svelte';
 function createUi(): StationStoreUi {
   return {
     closeChannelEditor: vi.fn(),
+    forceCloseChannelEditor: vi.fn(),
     clearBulkConfirmation: vi.fn(),
     requestBulkConfirmation: vi.fn()
   };
@@ -312,12 +313,14 @@ describe('StationStore channel editor', () => {
     });
     const { store, ui } = mountStore();
     await vi.waitFor(() => expect(store.stations).toHaveLength(1));
-    vi.mocked(ui.closeChannelEditor).mockClear();
+    vi.mocked(ui.forceCloseChannelEditor).mockClear();
 
     await store.saveChannel(store.stations[0], 4, false);
 
     expect(backend.SetStationChannel).toHaveBeenCalledWith('11:22:33:44:55:66', 4, false);
-    expect(ui.closeChannelEditor).toHaveBeenCalledOnce();
+    // The save's own completion force-closes even though the station is still
+    // busy until the finally block releases the flags.
+    expect(ui.forceCloseChannelEditor).toHaveBeenCalledOnce();
     expect(store.channelError).toBe('');
     expect(store.channelWarning).toBe(false);
     expect(store.statusMessage).toContain('Channel changed from 3 to 4.');

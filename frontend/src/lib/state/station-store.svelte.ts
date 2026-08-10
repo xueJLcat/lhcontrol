@@ -35,6 +35,7 @@ const MAX_STATUS_POLL_INTERVAL_SECONDS = 300;
 // operation must close or open a layer instead of reaching into UI state.
 export interface StationStoreUi {
   closeChannelEditor(): void;
+  forceCloseChannelEditor(): void;
   clearBulkConfirmation(): void;
   requestBulkConfirmation(target: PowerTarget): void;
 }
@@ -56,6 +57,7 @@ export class StationStore {
   editingAddress = $state<string | null>(null);
   channelError = $state('');
   channelWarning = $state(false);
+  channelSavingAddress = $state<string | null>(null);
   scanError = $state<ScanErrorInfo | null>(null);
   externalScanning = $state(false);
   externalOperationRunning = $state(false);
@@ -304,6 +306,10 @@ export class StationStore {
     return this.gattOperations.has(address) || this.configOperations.has(address);
   }
 
+  configBusy(address: string): boolean {
+    return this.configOperations.has(address);
+  }
+
   gattLockedFor(address: string): boolean {
     return this.stationLocked || (this.gattCapacityReached && !this.gattOperations.has(address));
   }
@@ -378,6 +384,7 @@ export class StationStore {
     if (clearOperations) {
       this.gattOperations = new Set();
       this.configOperations = new Set();
+      this.channelSavingAddress = null;
       this.gates.clearOperationTokens();
     }
     this.powerTargetByAddress = {};

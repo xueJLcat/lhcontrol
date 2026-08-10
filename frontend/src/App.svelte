@@ -22,6 +22,9 @@
 
   const store = new StationStore({
     closeChannelEditor: () => {
+      closeChannelEditor();
+    },
+    forceCloseChannelEditor: () => {
       channelEditorOpen = false;
     },
     clearBulkConfirmation: () => {
@@ -55,9 +58,14 @@
     const list = store.stations;
     const address = untrack(() => selectedAddress);
     if (address !== null && !list.some((station) => station.address === address)) {
-      selectedAddress = null;
-      channelEditorOpen = false;
-      store.clearChannelEditorFeedback();
+      // A pending station operation (for example a channel write) still owns
+      // the busy flags; keep the selection and editor alive so the result
+      // stays visible. The merge re-adds the station when the write settles.
+      if (!store.stationBusy(address)) {
+        selectedAddress = null;
+        channelEditorOpen = false;
+        store.clearChannelEditorFeedback();
+      }
     }
     const renaming = untrack(() => store.editingAddress);
     if (renaming !== null && !list.some((station) => station.address === renaming)) {
@@ -252,6 +260,7 @@
       error={store.channelError}
       warning={store.channelWarning}
       busy={store.gattOperations.has(selectedStation.address) || store.configOperations.has(selectedStation.address)}
+      saving={store.channelSavingAddress === selectedStation.address}
       locked={store.gattLockedByAddress.get(selectedStation.address) ?? false}
       onClose={closeChannelEditor}
       onSave={(channel, allowUnknownConflictRisk) => void store.saveChannel(selectedStation, channel, allowUnknownConflictRisk)}
