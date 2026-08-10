@@ -1,0 +1,162 @@
+.settings-drawer {
+    position: fixed;
+    z-index: 11;
+    right: 0; top: 0; bottom: 0;
+    width: min(390px, 92vw);
+    background:
+      linear-gradient(180deg,
+        color-mix(in srgb, var(--color-primary) 65%, transparent),
+        color-mix(in srgb, var(--color-on) 65%, transparent) 33%,
+        color-mix(in srgb, var(--color-standby) 65%, transparent) 66%,
+        color-mix(in srgb, var(--color-sleep) 65%, transparent))
+        0 12px / 2px calc(100% - 24px) no-repeat,
+      var(--bg-surface-solid);
+    border-left: 1px solid var(--color-border);
+    border-radius: var(--radius-lg) 0 0 var(--radius-lg);
+    padding: 1rem 1rem 1.25rem;
+    overflow: auto;
+    box-shadow: var(--shadow-lg);
+  }
+  .settings-drawer section {
+    border-top: 1px solid var(--color-border);
+    padding-top: 0.85rem;
+    margin-top: 0.85rem;
+    animation: rise var(--dur-3) var(--ease) backwards;
+    animation-delay: 60ms;
+  }
+  .settings-drawer h4 {
+    margin: 0 0 0.55rem;
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-size: var(--fs-micro);
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-muted);
+  }
+  .settings-drawer h4::before {
+    content: '';
+    width: 3px;
+    height: 11px;
+    border-radius: 2px;
+    background: linear-gradient(180deg, var(--color-primary), var(--color-sleep));
+  }
+  .settings-drawer .adapter-list { display: flex; flex-direction: column; gap: 0.4rem; }
+  .settings-drawer .adapter-option {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.55rem;
+    padding: 0.5rem 0.6rem;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    background: var(--bg-input);
+    cursor: default;
+    transition:
+      border-color var(--dur-1) var(--ease),
+      background-color var(--dur-1) var(--ease),
+      box-shadow var(--dur-1) var(--ease);
+  }
+  .settings-drawer .adapter-option.selected {
+    border-color: var(--color-primary);
+    background: color-mix(in srgb, var(--color-primary) 9%, var(--bg-input));
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-primary) 10%, transparent);
+  }
+  .settings-drawer .adapter-text { display: flex; flex-direction: column; gap: 0.1rem; min-width: 0; }
+  .settings-drawer .adapter-name {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    font-size: var(--fs-sm);
+    font-weight: 700;
+    color: var(--text-primary);
+  }
+  .settings-drawer .adapter-desc { font-size: var(--fs-micro); font-weight: 600; color: var(--text-muted); }
+  .settings-drawer .adapter-id {
+    font-family: var(--font-mono);
+    font-size: 0.65rem;
+    color: var(--text-muted);
+    overflow-wrap: anywhere;
+  }
+  .settings-drawer .drawer-actions { display: flex; flex-wrap: wrap; gap: 0.3rem; margin-top: 0.8rem; }
+  .settings-drawer .drawer-actions .btn {
+    flex: 0 0 auto;
+    min-height: 30px;
+    gap: 0.25rem;
+    padding: 0.35rem 0.55rem;
+    font-size: var(--fs-micro);
+    white-space: nowrap;
+  }
+  .settings-drawer .switch-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.6rem;
+    padding: 0.5rem 0.6rem;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    background: var(--bg-input);
+    cursor: pointer;
+  }
+  .settings-drawer .switch-row:has(input:disabled) { cursor: wait; }
+  .settings-drawer .hint + .switch-row, .drawer-actions + .switch-row { margin-top: 0.55rem; }
+  .settings-drawer .switch {
+    appearance: none;
+    position: relative;
+    flex-shrink: 0;
+    width: 36px;
+    height: 20px;
+    border-radius: var(--radius-pill);
+    border: 1px solid var(--color-border-strong);
+    background: var(--bg-inset);
+    cursor: pointer;
+    transition: background-color var(--dur-1) var(--ease), border-color var(--dur-1) var(--ease);
+  }
+  .settings-drawer .switch:checked {
+    background: var(--color-primary);
+    border-color: var(--color-primary);
+  }
+  .settings-drawer .switch::after {
+    content: '';
+    position: absolute;
+    top: 1px; left: 1px;
+    width: 16px; height: 16px;
+    border-radius: 50%;
+    background: #fff;
+    box-shadow: var(--shadow-sm);
+    transition: transform var(--dur-1) var(--ease);
+  }
+  .settings-drawer .switch:checked::after { transform: translateX(16px); }
+  .settings-drawer .switch:disabled { opacity: 0.5; cursor: not-allowed; }
+  .settings-drawer .delay-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.6rem;
+    margin-top: 0.55rem;
+    padding: 0.5rem 0.6rem;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    background: var(--bg-input);
+    font-size: var(--fs-sm);
+    font-weight: 700;
+    color: var(--text-primary);
+  }
+  .settings-drawer .delay-input {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-size: var(--fs-micro);
+    font-weight: 600;
+    color: var(--text-muted);
+  }
+  .settings-drawer .delay-input input { width: 4.2rem; text-align: right; }
+  .settings-drawer .delay-input.wide input { width: 11rem; text-align: left; }
+  .settings-drawer .hint {
+    margin: 0.6rem 0 0;
+    font-size: var(--fs-micro);
+    font-weight: 600;
+    color: var(--text-muted);
+    line-height: 1.5;
+  }
+  .settings-drawer .hint.loading { display: flex; align-items: center; gap: 0.4rem; }

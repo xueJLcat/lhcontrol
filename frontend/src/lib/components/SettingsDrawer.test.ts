@@ -36,7 +36,7 @@ function autoSleep(overrides: Record<string, unknown> = {}): autosleep.Settings 
 }
 
 function defaultProps(overrides: Record<string, unknown> = {}) {
-  return {
+  const flat = {
     adapters: [adapter('USB\\VID-1', 'Intel Wireless Bluetooth'), adapter('USB\\VID-2', 'CSR8510 Dongle')],
     loading: false,
     loadError: null,
@@ -176,6 +176,15 @@ function defaultProps(overrides: Record<string, unknown> = {}) {
     onBluetoothInitRetryChange: vi.fn(),
     onBluetoothInitRetryRetry: vi.fn(),
     ...overrides
+  };
+  return {
+    ...flat,
+    model: {
+      preferences: flat,
+      operations: flat,
+      advanced: flat,
+      diagnostics: flat
+    }
   };
 }
 
