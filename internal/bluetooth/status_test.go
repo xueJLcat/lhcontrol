@@ -261,11 +261,11 @@ func TestDecodePowerStateWithHistory(t *testing.T) {
 	const fallback = 10 * time.Second
 	setTestBootFallback(t, fallback)
 	now := time.Now()
-	if got := decodePowerStateWithHistory(0x01, PowerStateOn, time.Time{}, now); got != PowerStateOn {
-		t.Fatalf("booting raw 0x01 after On decoded as %v, want the compatibility On mask", got)
+	if got := decodePowerStateWithHistory(0x01, PowerStateOn, time.Time{}, now); got != PowerStateBooting {
+		t.Fatalf("fresh booting raw 0x01 after On decoded as %v, want Booting", got)
 	}
-	if got := decodePowerStateWithHistory(0x08, PowerStateOn, time.Time{}, now); got != PowerStateOn {
-		t.Fatalf("booting raw 0x08 after On decoded as %v, want the compatibility On mask", got)
+	if got := decodePowerStateWithHistory(0x08, PowerStateOn, time.Time{}, now); got != PowerStateBooting {
+		t.Fatalf("fresh booting raw 0x08 after On decoded as %v, want Booting", got)
 	}
 	if got := decodePowerStateWithHistory(0x01, PowerStateSleep, time.Time{}, now); got != PowerStateBooting {
 		t.Fatalf("booting raw 0x01 after Sleep decoded as %v, want Booting", got)
@@ -283,36 +283,37 @@ func TestDecodePowerStateWithHistory(t *testing.T) {
 		t.Fatalf("booting raw inside the fallback window decoded as %v, want Booting", got)
 	}
 }
-func TestPowerConfirmationFavorsCompatibilityFirmwareWhenAlreadyOn(t *testing.T) {
-	// Compatibility firmware keeps reporting booting raw values while the
-	// station is already awake. The decode mask keeps the previously-On state
-	// stable, so the confirmation read must accept it instead of polling until
-	// the whole budget is exhausted.
+func TestPowerConfirmationRejectsFreshBootRawWhenAlreadyOn(t *testing.T) {
+	// A power command re-arms boot observation. A boot-like read immediately
+	// afterwards must therefore remain transitional instead of being accepted
+	// solely because the cached state before the command was On.
 	power := &fakeCharacteristic{value: []byte{0x01}}
 	station := connectedFakeStation(power, nil, nil, Capabilities{PowerRead: true, PowerWrite: true})
 	station.PowerState = PowerStateOn
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 	result, err := SetPowerStateContext(ctx, station, PowerStateOn)
-	if err != nil || !result.Confirmed {
-		t.Fatalf("SetPowerState() result=%+v error=%v, want the compatibility On mask to confirm", result, err)
+	var confirmationErr *PowerConfirmationError
+	if !errors.As(err, &confirmationErr) || result.Confirmed {
+		t.Fatalf("SetPowerState() result=%+v error=%v, want an unconfirmed boot transition", result, err)
 	}
-	if station.PowerState != PowerStateOn || station.RawPowerState != 0x01 {
-		t.Fatalf("station state = %v raw %#x, want On retaining raw 0x01", station.PowerState, station.RawPowerState)
+	if station.PowerState != PowerStateBooting || station.RawPowerState != 0x01 {
+		t.Fatalf("station state = %v raw %#x, want Booting with raw 0x01", station.PowerState, station.RawPowerState)
 	}
 }
-func TestPowerConfirmationFavorsCompatibility0x08RawWhenAlreadyOn(t *testing.T) {
+func TestPowerConfirmationRejectsFresh0x08RawWhenAlreadyOn(t *testing.T) {
 	power := &fakeCharacteristic{value: []byte{0x08}, ignoreWrite: true}
 	station := connectedFakeStation(power, nil, nil, Capabilities{PowerRead: true, PowerWrite: true})
 	station.PowerState = PowerStateOn
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 	result, err := SetPowerStateContext(ctx, station, PowerStateOn)
-	if err != nil || !result.Confirmed {
-		t.Fatalf("SetPowerState() result=%+v error=%v, want the compatibility On mask to confirm", result, err)
+	var confirmationErr *PowerConfirmationError
+	if !errors.As(err, &confirmationErr) || result.Confirmed {
+		t.Fatalf("SetPowerState() result=%+v error=%v, want an unconfirmed boot transition", result, err)
 	}
-	if station.PowerState != PowerStateOn || station.RawPowerState != 0x08 {
-		t.Fatalf("station state = %v raw %#x, want On retaining raw 0x08", station.PowerState, station.RawPowerState)
+	if station.PowerState != PowerStateBooting || station.RawPowerState != 0x08 {
+		t.Fatalf("station state = %v raw %#x, want Booting with raw 0x08", station.PowerState, station.RawPowerState)
 	}
 }
 func TestPersistentBootRawFallbackIsStickyAndCompatibilityVerified(t *testing.T) {

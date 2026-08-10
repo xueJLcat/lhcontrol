@@ -185,6 +185,68 @@ func (m *Manager) channelScanFreshnessWindowDuration() time.Duration {
 func (m *Manager) initializeRetryCooldown() time.Duration {
 	return m.config.BluetoothInitRetry()
 }
+
+// ApplyRecoverySettings makes persisted recovery changes effective for work
+// that is already queued. Without rebasing these deadlines, changing a retry
+// delay only affected failures recorded after the setting changed, leaving an
+// existing station or adapter retry asleep on the previous schedule.
+func (m *Manager) ApplyRecoverySettings() {
+	absent := make(map[string]bool)
+	m.stationsMutex.RLock()
+	for _, station := range m.stations {
+		if station == nil {
+			continue
+		}
+		snapshot := station.Snapshot()
+		absent[snapshot.Address] = !snapshot.Present
+	}
+	m.stationsMutex.RUnlock()
+
+	retryLimit := m.absentStationRetryLimit()
+	m.statusRetryMutex.Lock()
+	for address, retry := range m.statusRetries {
+		// Canonicalize historical entries whose zero kind represented a
+		// connection retry before the schedules were split.
+		retry.kinds = effectiveStatusRetryKinds(retry)
+		if absent[address] {
+			retry, _ = pruneExhaustedAbsentRetry(retry, retryLimit)
+		}
+		if retry.kinds == 0 {
+			delete(m.statusRetries, address)
+			continue
+		}
+		if retry.kinds&statusRetryConnection != 0 && retry.failures > 0 && !retry.lastAttempt.IsZero() {
+			retry.nextAt = retry.lastAttempt.Add(m.statusRetryDelay(retry.failures))
+		}
+		if retry.kinds&statusRetryChannel != 0 {
+			if retry.channelFailures > 0 && !retry.channelLastAttempt.IsZero() {
+				retry.channelNextAt = retry.channelLastAttempt.Add(m.statusRetryDelay(retry.channelFailures))
+			} else if retry.kinds&statusRetryConnection == 0 && retry.failures > 0 && !retry.lastAttempt.IsZero() {
+				// Preserve the legacy channel-only representation used by old
+				// in-memory entries until another operation migrates its fields.
+				retry.nextAt = retry.lastAttempt.Add(m.statusRetryDelay(retry.failures))
+			}
+		}
+		if retry.kinds&statusRetryMetadata != 0 && retry.metadataFailures > 0 && !retry.metadataLastAttempt.IsZero() {
+			retry.metadataNextAt = retry.metadataLastAttempt.Add(m.statusRetryDelay(retry.metadataFailures))
+		}
+		m.statusRetries[address] = retry
+	}
+	hasStatusRetries := len(m.statusRetries) > 0
+	m.statusRetryMutex.Unlock()
+
+	m.initializeMutex.Lock()
+	if m.initializeErr != nil && !m.initializeFailedAt.IsZero() {
+		m.nextInitializeAt = m.initializeFailedAt.Add(m.initializeRetryCooldown())
+	}
+	m.initializeMutex.Unlock()
+
+	if hasStatusRetries {
+		m.scheduleStatusRecovery()
+	} else {
+		m.wakeStatusRecovery()
+	}
+}
 func (m *Manager) deferStatusRecovery(address string, delay time.Duration) {
 	m.statusRetryMutex.Lock()
 	retry, exists := m.statusRetries[address]
@@ -320,22 +382,7 @@ func (m *Manager) stopExhaustedAbsentRecovery(address string, station *bluetooth
 	retry, tracked := m.statusRetries[address]
 	changed := false
 	if tracked {
-		kinds := effectiveStatusRetryKinds(retry)
-		retryLimit := m.absentStationRetryLimit()
-		if kinds&statusRetryConnection != 0 && retry.failures >= retryLimit {
-			retry.kinds = kinds &^ statusRetryConnection
-			retry.failures = 0
-			retry.lastAttempt = time.Time{}
-			retry.nextAt = time.Time{}
-			changed = true
-		}
-		if kinds&statusRetryChannel != 0 && retry.channelFailures >= retryLimit {
-			retry.kinds &^= statusRetryChannel
-			retry.channelFailures = 0
-			retry.channelLastAttempt = time.Time{}
-			retry.channelNextAt = time.Time{}
-			changed = true
-		}
+		retry, changed = pruneExhaustedAbsentRetry(retry, m.absentStationRetryLimit())
 		if retry.kinds == 0 {
 			delete(m.statusRetries, address)
 		} else {
@@ -346,6 +393,27 @@ func (m *Manager) stopExhaustedAbsentRecovery(address string, station *bluetooth
 	if changed {
 		m.wakeStatusRecovery()
 	}
+}
+
+func pruneExhaustedAbsentRetry(retry statusRetry, retryLimit int) (statusRetry, bool) {
+	kinds := effectiveStatusRetryKinds(retry)
+	changed := false
+	if kinds&statusRetryConnection != 0 && retry.failures >= retryLimit {
+		kinds &^= statusRetryConnection
+		retry.failures = 0
+		retry.lastAttempt = time.Time{}
+		retry.nextAt = time.Time{}
+		changed = true
+	}
+	if kinds&statusRetryChannel != 0 && retry.channelFailures >= retryLimit {
+		kinds &^= statusRetryChannel
+		retry.channelFailures = 0
+		retry.channelLastAttempt = time.Time{}
+		retry.channelNextAt = time.Time{}
+		changed = true
+	}
+	retry.kinds = kinds
+	return retry, changed
 }
 
 // recordStructuredReadResult tracks power/connection recovery independently
@@ -411,8 +479,10 @@ func (m *Manager) Initialize() error {
 	}
 	m.initializeErr = m.initializeBluetooth()
 	if m.initializeErr != nil {
-		m.nextInitializeAt = time.Now().Add(m.initializeRetryCooldown())
+		m.initializeFailedAt = time.Now()
+		m.nextInitializeAt = m.initializeFailedAt.Add(m.initializeRetryCooldown())
 	} else {
+		m.initializeFailedAt = time.Time{}
 		m.nextInitializeAt = time.Time{}
 	}
 	return m.initializeErr
@@ -434,9 +504,11 @@ func (m *Manager) ensureReady() error {
 	}
 	m.initializeErr = m.initializeBluetooth()
 	if m.initializeErr != nil {
-		m.nextInitializeAt = time.Now().Add(m.initializeRetryCooldown())
+		m.initializeFailedAt = time.Now()
+		m.nextInitializeAt = m.initializeFailedAt.Add(m.initializeRetryCooldown())
 		return fmt.Errorf("Bluetooth is unavailable; turn on Bluetooth or check the adapter, then retry: %w", m.initializeErr)
 	}
+	m.initializeFailedAt = time.Time{}
 	m.nextInitializeAt = time.Time{}
 	if m.shuttingDown.Load() {
 		return ErrShuttingDown
@@ -449,7 +521,8 @@ func (m *Manager) markBluetoothUnavailable(err error) {
 	}
 	m.initializeMutex.Lock()
 	m.initializeErr = err
-	m.nextInitializeAt = time.Now().Add(m.initializeRetryCooldown())
+	m.initializeFailedAt = time.Now()
+	m.nextInitializeAt = m.initializeFailedAt.Add(m.initializeRetryCooldown())
 	m.initializeMutex.Unlock()
 	if cleanupErr := bluetooth.InvalidateAllConnections(); cleanupErr != nil {
 		log.Printf("Bluetooth cleanup after adapter loss is pending: %v", cleanupErr)

@@ -66,15 +66,6 @@ func decodePowerStateWithHistory(raw byte, previous PowerState, bootingSince, no
 	if state != PowerStateBooting {
 		return state
 	}
-	// Known limitation: when the previous state was On, booting raw values are
-	// masked back to On. This favors firmware that reports booting values while
-	// already awake, but it hides a genuine reboot that begins while the station
-	// is On (the transition is only visible once the firmware reports a stable
-	// value). This masking is deliberate and covered by tests; do not remove it
-	// without re-evaluating the awake-but-reporting-booting firmware behavior.
-	if previous == PowerStateOn {
-		return PowerStateOn
-	}
 	if previous == PowerStateBooting && !bootingSince.IsZero() && now.Sub(bootingSince) >= CurrentTiming().BootFallbackAfter {
 		return PowerStateOn
 	}

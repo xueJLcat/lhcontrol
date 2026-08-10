@@ -27,10 +27,17 @@ func (f *sleepFinalBlockingCharacteristic) WriteWithoutResponseContext(ctx conte
 	return 0, ctx.Err()
 }
 
-func TestSetPowerStateConfirmsCompatibilityFirmwareWithoutExhaustingBudget(t *testing.T) {
-	// Compatibility firmware that reports boot-like raw values while awake
-	// must confirm immediately through the decode mask instead of polling the
-	// whole confirmation budget and failing.
+func TestSetPowerStateConfirmsCompatibilityFirmwareAfterFreshFallbackWindow(t *testing.T) {
+	// A new command must get a fresh transition window even when this connection
+	// previously completed the compatibility fallback. Persistent boot-like raw
+	// values can still confirm after that bounded window instead of exhausting
+	// the entire power-on budget.
+	ConfigureTiming(TimingPolicy{
+		ConfirmAttemptsOn:   20,
+		ConfirmPollInterval: time.Millisecond,
+		BootFallbackAfter:   5 * time.Millisecond,
+	})
+	t.Cleanup(func() { ConfigureTiming(TimingPolicy{}) })
 	power := &fakeCharacteristic{value: []byte{0x01}, ignoreWrite: true}
 	station := connectedFakeStation(power, nil, nil, Capabilities{PowerRead: true, PowerWrite: true})
 	station.setPowerStateInternal(PowerStateOn, 0x01)
@@ -39,10 +46,13 @@ func TestSetPowerStateConfirmsCompatibilityFirmwareWithoutExhaustingBudget(t *te
 	start := time.Now()
 	result, err := SetPowerState(station, PowerStateOn)
 	if err != nil || !result.Confirmed || result.State != PowerStateOn {
-		t.Fatalf("SetPowerState() result=%+v error=%v, want immediate compatibility confirmation", result, err)
+		t.Fatalf("SetPowerState() result=%+v error=%v, want compatibility confirmation after fallback", result, err)
 	}
-	if elapsed := time.Since(start); elapsed > 2*time.Second {
-		t.Fatalf("compatibility confirmation took %v, want an immediate masked readback", elapsed)
+	if !station.bootRawTrustedOn {
+		t.Fatal("compatibility confirmation did not establish sticky trust after the fresh fallback window")
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("compatibility confirmation took %v, want it within the bounded test fallback", elapsed)
 	}
 	if len(power.writes) != 1 {
 		t.Fatalf("writes = %d, want a single power-on command", len(power.writes))

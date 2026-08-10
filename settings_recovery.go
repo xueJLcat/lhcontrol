@@ -11,6 +11,9 @@ func (a *App) SetRecoveryRetryBaseSeconds(baseSeconds int) error {
 	err := a.config.SetRecoveryRetryBaseSeconds(baseSeconds)
 
 	a.setConfigPersistenceStatus()
+	if err == nil {
+		a.stationManager.ApplyRecoverySettings()
+	}
 
 	return err
 
@@ -27,6 +30,9 @@ func (a *App) SetRecoveryRetryMaxSeconds(maxSeconds int) error {
 	err := a.config.SetRecoveryRetryMaxSeconds(maxSeconds)
 
 	a.setConfigPersistenceStatus()
+	if err == nil {
+		a.stationManager.ApplyRecoverySettings()
+	}
 
 	return err
 
@@ -43,6 +49,9 @@ func (a *App) SetAbsentStationRetryLimit(limit int) error {
 	err := a.config.SetAbsentStationRetryLimit(limit)
 
 	a.setConfigPersistenceStatus()
+	if err == nil {
+		a.stationManager.ApplyRecoverySettings()
+	}
 
 	return err
 
@@ -139,6 +148,9 @@ func (a *App) SetBluetoothInitRetrySeconds(retrySeconds int) error {
 	err := a.config.SetBluetoothInitRetrySeconds(retrySeconds)
 
 	a.setConfigPersistenceStatus()
+	if err == nil {
+		a.stationManager.ApplyRecoverySettings()
+	}
 
 	return err
 

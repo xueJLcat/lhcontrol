@@ -208,6 +208,7 @@ type Manager struct {
 	scanLifecycle           *scanLifecycle
 	initializeMutex         sync.Mutex
 	initializeErr           error
+	initializeFailedAt      time.Time
 	nextInitializeAt        time.Time
 	initializeBluetooth     func() error
 	asyncScanWg             sync.WaitGroup
