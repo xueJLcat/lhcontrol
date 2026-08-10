@@ -304,7 +304,12 @@ func (m *Manager) setAllStationsPowerDetailed(ctx context.Context, state string)
 					readErr := m.bluetoothOps.fetchInitialPowerState(readContext, s)
 					cancelRead()
 					if powerReadSucceeded(readErr) {
-						switch classifyCachedPower(s.Snapshot(), target, time.Now()) {
+						// Classify before recovery bookkeeping: a transport-level channel
+						// error may disconnect the station and intentionally clear freshness,
+						// but it cannot invalidate the power value read just beforehand.
+						verifiedDisposition := classifyCachedPower(s.Snapshot(), target, time.Now())
+						m.recordPartialPowerVerificationResult(s, stationResult.Address, readErr)
+						switch verifiedDisposition {
 						case cachedPowerBooting:
 							cachedSkip = true
 							stationResult.Skipped = true

@@ -31,6 +31,7 @@ const DEFAULT_STATUS_POLL_INTERVAL_SECONDS = 15;
 const MIN_STATUS_POLL_INTERVAL_SECONDS = 5;
 const MAX_STATUS_POLL_INTERVAL_SECONDS = 300;
 const PROJECTION_REFRESH_RETRY_MS = 250;
+const PROJECTION_REFRESH_MAX_RETRY_MS = 5000;
 
 // Overlay controls owned by App. The store calls back into them whenever an
 // operation must close or open a layer instead of reaching into UI state.
@@ -75,6 +76,7 @@ export class StationStore {
   private projectionRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   private projectionRefreshPending = false;
   private projectionRefreshInFlight = false;
+  private projectionRefreshFailures = 0;
   private statusPollIntervalSeconds = DEFAULT_STATUS_POLL_INTERVAL_SECONDS;
   private statusPollingEnabled = true;
   private apiStatusStarted = false;
@@ -416,14 +418,23 @@ export class StationStore {
 
   private scheduleProjectionRefresh() {
     if (this.disposed || this.projectionRefreshTimer !== null) return;
+    const retryMs = Math.min(
+      PROJECTION_REFRESH_MAX_RETRY_MS,
+      PROJECTION_REFRESH_RETRY_MS * (2 ** Math.min(Math.max(this.projectionRefreshFailures - 1, 0), 5))
+    );
     this.projectionRefreshTimer = setTimeout(() => {
       this.projectionRefreshTimer = null;
-      if (this.projectionRefreshPending) void this.refreshStationProjection();
-    }, PROJECTION_REFRESH_RETRY_MS);
+      if (this.projectionRefreshPending) void this.refreshStationProjection(false);
+    }, retryMs);
   }
 
-  async refreshStationProjection() {
+  async refreshStationProjection(resetFailureBackoff = true) {
     if (this.disposed) return;
+    if (resetFailureBackoff) {
+      this.projectionRefreshFailures = 0;
+      if (this.projectionRefreshTimer !== null) clearTimeout(this.projectionRefreshTimer);
+      this.projectionRefreshTimer = null;
+    }
     // A setting can be saved while a scan, command, or external operation is
     // active. Coalesce those requests and retry once the authoritative work
     // settles instead of dropping the projection update permanently.
@@ -440,6 +451,7 @@ export class StationStore {
     const capturedStationRevisions = this.gates.snapshotStationRevisions();
     try {
       const updated = await GetCurrentStationInfo();
+      this.projectionRefreshFailures = 0;
       if (this.projectionRefreshBlocked()) {
         this.projectionRefreshPending = true;
         return;
@@ -454,6 +466,10 @@ export class StationStore {
       // Projection refreshes follow a successfully saved setting and should
       // not replace the current operation status with a transient read error.
       console.error('Station projection refresh failed:', error);
+      if (!this.disposed) {
+        this.projectionRefreshFailures = Math.min(this.projectionRefreshFailures + 1, 6);
+        this.projectionRefreshPending = true;
+      }
     } finally {
       this.projectionRefreshInFlight = false;
       if (this.projectionRefreshPending) this.scheduleProjectionRefresh();
@@ -637,6 +653,7 @@ export class StationStore {
     if (this.projectionRefreshTimer !== null) clearTimeout(this.projectionRefreshTimer);
     this.projectionRefreshTimer = null;
     this.projectionRefreshPending = false;
+    this.projectionRefreshFailures = 0;
     this.powerFeedback.clearAll();
     this.cancelExternalScanListener?.();
     this.cancelExternalScanFailureListener?.();

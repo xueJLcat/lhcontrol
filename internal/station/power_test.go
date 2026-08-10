@@ -425,6 +425,109 @@ func TestSinglePowerReadsExpiredStateBeforeWriting(t *testing.T) {
 	}
 }
 
+func TestSinglePowerUsesConfirmedTargetReadWhenOptionalChannelExhaustsBudget(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	manager.stationOperationTimeout = 25 * time.Millisecond
+	address := "11:22:33:44:55:7C"
+	station := &internalbluetooth.BaseStation{
+		Name:              "LHB-TARGET-BEFORE-TIMEOUT",
+		Address:           mustAddress(t, address),
+		Present:           true,
+		Capabilities:      internalbluetooth.Capabilities{PowerRead: true, PowerWrite: true, ChannelRead: true},
+		CapabilitiesKnown: true,
+	}
+	manager.stations[address] = station
+	manager.bluetoothOps.fetchInitialPowerState = func(ctx context.Context, _ *internalbluetooth.BaseStation) error {
+		station.PowerState = internalbluetooth.PowerStateOn
+		station.RawPowerState = 0x0B
+		station.LastPowerReadAt = time.Now()
+		<-ctx.Done()
+		return &internalbluetooth.InitialReadError{Channel: ctx.Err()}
+	}
+	manager.bluetoothOps.setPowerState = func(context.Context, *internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
+		t.Fatal("power write was attempted after the target state was confirmed")
+		return internalbluetooth.PowerControlResult{}, nil
+	}
+
+	result, err := manager.SetStationPower(address, "on")
+	if err != nil {
+		t.Fatalf("SetStationPower() error = %v, want confirmed no-op", err)
+	}
+	if !result.Skipped || !result.Confirmed || result.CommandSent || result.Reason != ReasonAlreadyAtTarget {
+		t.Fatalf("power result = %+v, want confirmed no-op after optional channel timeout", result)
+	}
+}
+
+func TestSinglePowerSchedulesRecoveryForFailedVerificationChannel(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	manager.statusRecoveryStart.Do(func() {})
+	manager.statusRetryBase = time.Hour
+	address := "11:22:33:44:55:7F"
+	station := &internalbluetooth.BaseStation{
+		Name:              "LHB-PARTIAL-VERIFICATION",
+		Address:           mustAddress(t, address),
+		Present:           true,
+		Capabilities:      internalbluetooth.Capabilities{PowerRead: true, PowerWrite: true, ChannelRead: true},
+		CapabilitiesKnown: true,
+	}
+	manager.stations[address] = station
+	channelErr := errors.New("channel read unavailable")
+	manager.bluetoothOps.fetchInitialPowerState = func(context.Context, *internalbluetooth.BaseStation) error {
+		station.PowerState = internalbluetooth.PowerStateOn
+		station.RawPowerState = 0x0B
+		station.LastPowerReadAt = time.Now()
+		return &internalbluetooth.InitialReadError{Channel: channelErr}
+	}
+	manager.bluetoothOps.setPowerState = func(context.Context, *internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
+		t.Fatal("power write was attempted after the target state was confirmed")
+		return internalbluetooth.PowerControlResult{}, nil
+	}
+
+	result, err := manager.SetStationPower(address, "on")
+	if err != nil || !result.Skipped || !result.Confirmed {
+		t.Fatalf("SetStationPower() result = %+v, error = %v; want confirmed no-op", result, err)
+	}
+	manager.statusRetryMutex.Lock()
+	retry, tracked := manager.statusRetries[address]
+	manager.statusRetryMutex.Unlock()
+	if !tracked || effectiveStatusRetryKinds(retry) != statusRetryChannel || retry.channelFailures != 1 {
+		t.Fatalf("verification retry = %+v, tracked=%v; want one channel recovery", retry, tracked)
+	}
+}
+
+func TestSinglePowerDoesNotWriteNonTargetReadAfterBudgetExpires(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	manager.stationOperationTimeout = 25 * time.Millisecond
+	address := "11:22:33:44:55:7D"
+	station := &internalbluetooth.BaseStation{
+		Name:              "LHB-NONTARGET-BEFORE-TIMEOUT",
+		Address:           mustAddress(t, address),
+		Present:           true,
+		Capabilities:      internalbluetooth.Capabilities{PowerRead: true, PowerWrite: true, ChannelRead: true},
+		CapabilitiesKnown: true,
+	}
+	manager.stations[address] = station
+	manager.bluetoothOps.fetchInitialPowerState = func(ctx context.Context, _ *internalbluetooth.BaseStation) error {
+		station.PowerState = internalbluetooth.PowerStateSleep
+		station.RawPowerState = 0x00
+		station.LastPowerReadAt = time.Now()
+		<-ctx.Done()
+		return &internalbluetooth.InitialReadError{Channel: ctx.Err()}
+	}
+	manager.bluetoothOps.setPowerState = func(context.Context, *internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
+		t.Fatal("power write was attempted after the operation budget expired")
+		return internalbluetooth.PowerControlResult{}, nil
+	}
+
+	_, err := manager.SetStationPower(address, "on")
+	if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, ErrStationOperationTimeout) {
+		t.Fatalf("SetStationPower() error = %v, want station operation timeout", err)
+	}
+}
+
 func TestSinglePowerRejectsFreshBootingStation(t *testing.T) {
 	manager := NewManager(config.NewConfig())
 	manager.initializeErr = errors.New("adapter unavailable")

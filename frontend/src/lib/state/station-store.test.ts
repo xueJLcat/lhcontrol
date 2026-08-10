@@ -117,6 +117,30 @@ describe('StationStore projection settings', () => {
     expect(store.stations[0].scanFresh).toBe(false);
   });
 
+  it('retries a transient projection read failure while station polling is disabled', async () => {
+    vi.useFakeTimers();
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    store = new StationStore(createUi());
+    store.startupPending = false;
+    store.stations = [createStation({ isPresent: true, powerFresh: true })];
+    backend.GetCurrentStationInfo
+      .mockRejectedValueOnce(new Error('temporary projection failure'))
+      .mockResolvedValueOnce([createStation({ isPresent: false, powerFresh: false, statusFresh: false })]);
+
+    await store.refreshStationProjection();
+
+    expect(backend.GetCurrentStationInfo).toHaveBeenCalledOnce();
+    expect(store.stations[0].isPresent).toBe(true);
+    await vi.advanceTimersByTimeAsync(249);
+    expect(backend.GetCurrentStationInfo).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(backend.GetCurrentStationInfo).toHaveBeenCalledTimes(2);
+    expect(store.stations[0].isPresent).toBe(false);
+    expect(store.stations[0].powerFresh).toBe(false);
+    consoleError.mockRestore();
+  });
+
   it('refreshes station status immediately when automatic polling is re-enabled', async () => {
     store = new StationStore(createUi());
     store.startupPending = false;

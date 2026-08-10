@@ -55,13 +55,29 @@ func (m *Manager) SetStationPower(address, state string) (PowerActionResult, err
 			defer cancelRead()
 			return m.bluetoothOps.fetchInitialPowerState(readContext, stationPtr)
 		})
-		if err := operationContext.Err(); err != nil {
-			return PowerActionResult{}, stationOperationContextError(err)
-		}
 		if powerReadSucceeded(readErr) {
+			// A completed, authoritative power observation remains usable even if
+			// the independent optional channel read consumed the final operation
+			// budget. Resolve target/booting outcomes before rejecting the expired
+			// context, but never continue to discovery or a write after expiry.
 			if result, outcomeErr, handled := m.cachedPowerOutcome(stationPtr, target); handled {
+				m.recordPartialPowerVerificationResult(stationPtr, canonicalAddress, readErr)
+				if outcomeErr == nil {
+					// Recording a transport-level channel failure can disconnect the
+					// station. Return the post-recovery snapshot while retaining the
+					// already-established confirmed no-op outcome.
+					info, infoErr := m.stationInfoByAddress(address)
+					if infoErr != nil {
+						return PowerActionResult{}, infoErr
+					}
+					result.Station = info
+				}
 				return result, outcomeErr
 			}
+			m.recordPartialPowerVerificationResult(stationPtr, canonicalAddress, readErr)
+		}
+		if err := operationContext.Err(); err != nil {
+			return PowerActionResult{}, stationOperationContextError(err)
 		}
 		snapshot = stationPtr.Snapshot()
 	}

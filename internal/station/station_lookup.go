@@ -112,3 +112,20 @@ func powerReadSucceeded(err error) bool {
 	var initialErr *bluetooth.InitialReadError
 	return errors.As(err, &initialErr) && initialErr.Power == nil
 }
+
+// recordPartialPowerVerificationResult preserves the successful power read as
+// the operation's decision input while independently tracking a failed optional
+// channel read. Metadata errors are deliberately excluded because a connected
+// fetch can surface an old discovery error rather than a fresh metadata attempt.
+func (m *Manager) recordPartialPowerVerificationResult(
+	station *bluetooth.BaseStation,
+	address string,
+	err error,
+) {
+	var initialErr *bluetooth.InitialReadError
+	if !errors.As(err, &initialErr) || initialErr.Power != nil || initialErr.Channel == nil {
+		return
+	}
+	m.observeBluetoothError(initialErr.Channel)
+	m.recordStructuredReadResult(station, address, nil, initialErr.Channel)
+}

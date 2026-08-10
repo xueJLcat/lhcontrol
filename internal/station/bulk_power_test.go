@@ -154,6 +154,43 @@ func TestBulkPowerReadsExpiredStateBeforeWriting(t *testing.T) {
 	}
 }
 
+func TestBulkPowerSchedulesRecoveryForFailedVerificationChannel(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	manager.statusRecoveryStart.Do(func() {})
+	manager.statusRetryBase = time.Hour
+	address := "11:22:33:44:55:6B"
+	station := &internalbluetooth.BaseStation{
+		Name:              "LHB-BULK-PARTIAL-VERIFICATION",
+		Address:           mustAddress(t, address),
+		Present:           true,
+		Capabilities:      internalbluetooth.Capabilities{PowerRead: true, PowerWrite: true, ChannelRead: true},
+		CapabilitiesKnown: true,
+	}
+	manager.stations[address] = station
+	manager.bluetoothOps.fetchInitialPowerState = func(context.Context, *internalbluetooth.BaseStation) error {
+		station.PowerState = internalbluetooth.PowerStateOn
+		station.RawPowerState = 0x0B
+		station.LastPowerReadAt = time.Now()
+		return &internalbluetooth.InitialReadError{Channel: errors.New("channel read unavailable")}
+	}
+	manager.bluetoothOps.setPowerState = func(context.Context, *internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
+		t.Fatal("bulk power write was attempted after the target state was confirmed")
+		return internalbluetooth.PowerControlResult{}, nil
+	}
+
+	result, err := manager.SetAllStationsPowerDetailed("on")
+	if err != nil || len(result.Results) != 1 || !result.Results[0].Skipped || !result.Results[0].Confirmed {
+		t.Fatalf("SetAllStationsPowerDetailed() result = %+v, error = %v; want confirmed no-op", result, err)
+	}
+	manager.statusRetryMutex.Lock()
+	retry, tracked := manager.statusRetries[address]
+	manager.statusRetryMutex.Unlock()
+	if !tracked || effectiveStatusRetryKinds(retry) != statusRetryChannel || retry.channelFailures != 1 {
+		t.Fatalf("bulk verification retry = %+v, tracked=%v; want one channel recovery", retry, tracked)
+	}
+}
+
 func TestBulkPowerDoesNotStartQueuedWorkAfterShutdown(t *testing.T) {
 	manager := NewManager(config.NewConfig())
 	started := make(chan struct{}, 2)
