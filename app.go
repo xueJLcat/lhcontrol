@@ -24,7 +24,11 @@ type App struct {
 	ctx                       context.Context
 	config                    *config.Config
 	stationManager            *station.Manager
-	absentRetrySettingsMutex  sync.Mutex
+	apiSettingsMutex          sync.Mutex
+	autoSleepSettingsMutex    sync.Mutex
+	bluetoothTimingMutex      sync.Mutex
+	presenceSettingsMutex     sync.Mutex
+	recoverySettingsMutex     sync.Mutex
 	api                       *fiber.App
 	apiStatusMutex            sync.RWMutex
 	apiStatus                 APIStatus
@@ -37,6 +41,7 @@ type App struct {
 	listen                    func(string, string) (net.Listener, error)
 	serveListener             func(net.Listener) error
 	apiRetryDelay             time.Duration
+	apiShutdownWait           time.Duration
 	apiGeneration             uint64
 	externalScanID            atomic.Uint64
 	externalUpdateID          atomic.Uint64

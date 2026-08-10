@@ -8,6 +8,7 @@ export interface ExternalStationUpdateEvent {
 
 export interface ExternalStationUpdateDependencies {
   isDisposed(): boolean;
+  localListOperationOwnsSnapshot(): boolean;
   isStationBusy(address: string): boolean;
   invalidatePendingLists(): void;
   mergeStations(stations: StationInfo[]): void;
@@ -26,6 +27,11 @@ export class ExternalStationUpdateCoordinator {
   apply(id: number, stations: StationInfo[]) {
     if (id > 0 && id <= this.lastUpdateId) return;
     if (id > 0) this.lastUpdateId = id;
+
+    // An HTTP or automatic-sleep snapshot can already be queued when a local
+    // scan or bulk operation is accepted. Keep the event id monotonic while
+    // leaving that newer local result as the authoritative list owner.
+    if (this.dependencies.localListOperationOwnsSnapshot()) return;
 
     // Invalidate any list request that began before this event. A delayed
     // periodic response must not restore the snapshot from before an HTTP or

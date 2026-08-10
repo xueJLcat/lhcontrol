@@ -162,6 +162,8 @@ export class StationStore {
 
   private externalStationUpdates = new ExternalStationUpdateCoordinator({
     isDisposed: () => this.disposed,
+    localListOperationOwnsSnapshot: () =>
+      this.globalOperation === 'scanning' || this.globalOperation === 'bulk-power',
     isStationBusy: (address) => this.stationBusy(address),
     invalidatePendingLists: () => { this.listRevisions.next(); },
     mergeStations: (stations) => this.mergeStationUpdates(stations)

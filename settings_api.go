@@ -10,6 +10,8 @@ func (a *App) GetAPIListenAddress() string {
 // hot-restarts the listener loop so the change applies without app restart.
 
 func (a *App) SetAPIListenAddress(address string) error {
+	a.apiSettingsMutex.Lock()
+	defer a.apiSettingsMutex.Unlock()
 
 	err := a.config.SetAPIListenAddress(address)
 

@@ -61,6 +61,8 @@ func (a *App) SetAutoSleepSettings(settings autosleep.Settings) error {
 		return err
 
 	}
+	a.autoSleepSettingsMutex.Lock()
+	defer a.autoSleepSettingsMutex.Unlock()
 
 	log.Printf("Setting auto-sleep: enabled=%v target=%s delay=%ds", settings.Enabled, settings.Target, settings.DelaySeconds)
 

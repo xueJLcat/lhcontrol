@@ -161,6 +161,8 @@ func (a *App) GetPresenceMissThreshold() int {
 }
 
 func (a *App) SetPresenceMissThreshold(threshold int) error {
+	a.presenceSettingsMutex.Lock()
+	defer a.presenceSettingsMutex.Unlock()
 
 	err := a.config.SetPresenceMissThreshold(threshold)
 

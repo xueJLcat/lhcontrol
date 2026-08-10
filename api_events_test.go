@@ -15,6 +15,8 @@ import (
 )
 
 type fakeAPIStationManager struct {
+	stations []station.StationInfo
+
 	powerResult station.PowerActionResult
 
 	powerErr error
@@ -42,7 +44,7 @@ func (f *fakeAPIStationManager) PowerOffAllStations() error { return f.legacyErr
 
 func (f *fakeAPIStationManager) GetStationInfo() []station.StationInfo {
 
-	return []station.StationInfo{}
+	return append([]station.StationInfo(nil), f.stations...)
 
 }
 
@@ -347,6 +349,148 @@ func TestExternalOperationEventsBracketHTTPDeviceWork(t *testing.T) {
 		events[0].Phase != "started" || events[1].Phase != "finished" ||
 		events[0].Kind != "bulk-power" || events[1].Kind != "bulk-power" {
 		t.Fatalf("operation events = %+v", events)
+	}
+}
+
+func TestHTTPDeviceOperationsAlwaysEmitFinalSnapshotBeforeFinish(t *testing.T) {
+	failure := errors.New("device operation failed")
+	tests := []struct {
+		name       string
+		method     string
+		path       string
+		body       string
+		source     string
+		wantStatus int
+		configure  func(*fakeAPIStationManager)
+	}{
+		{
+			name:       "bulk power alias failure",
+			method:     http.MethodPost,
+			path:       "/allon",
+			source:     "http-power",
+			wantStatus: fiber.StatusInternalServerError,
+			configure:  func(manager *fakeAPIStationManager) { manager.bulkErr = failure },
+		},
+		{
+			name:       "bulk power failure",
+			method:     http.MethodPost,
+			path:       "/stations/power",
+			body:       `{"state":"sleep"}`,
+			source:     "http-power",
+			wantStatus: fiber.StatusInternalServerError,
+			configure:  func(manager *fakeAPIStationManager) { manager.bulkErr = failure },
+		},
+		{
+			name:       "single power pre-write failure",
+			method:     http.MethodPost,
+			path:       "/stations/AA/power",
+			body:       `{"state":"on"}`,
+			source:     "http-power",
+			wantStatus: fiber.StatusInternalServerError,
+			configure:  func(manager *fakeAPIStationManager) { manager.legacyErr = failure },
+		},
+		{
+			name:       "identify success",
+			method:     http.MethodPost,
+			path:       "/stations/AA/identify",
+			source:     "http-identify",
+			wantStatus: fiber.StatusNoContent,
+		},
+		{
+			name:       "identify failure",
+			method:     http.MethodPost,
+			path:       "/stations/AA/identify",
+			source:     "http-identify",
+			wantStatus: fiber.StatusInternalServerError,
+			configure:  func(manager *fakeAPIStationManager) { manager.legacyErr = failure },
+		},
+		{
+			name:       "refresh failure",
+			method:     http.MethodPost,
+			path:       "/stations/AA/refresh",
+			source:     "http-refresh",
+			wantStatus: fiber.StatusInternalServerError,
+			configure:  func(manager *fakeAPIStationManager) { manager.legacyErr = failure },
+		},
+		{
+			name:       "channel pre-write failure",
+			method:     http.MethodPut,
+			path:       "/stations/AA/channel",
+			body:       `{"channel":5}`,
+			source:     "http-channel",
+			wantStatus: fiber.StatusInternalServerError,
+			configure:  func(manager *fakeAPIStationManager) { manager.legacyErr = failure },
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			manager := &fakeAPIStationManager{stations: []station.StationInfo{{Address: "AA"}}}
+			if test.configure != nil {
+				test.configure(manager)
+			}
+			order := []string{}
+			api := fiber.New(fiber.Config{ErrorHandler: apiErrorHandler})
+			registerAPIRoutes(api, manager, scanEventCallbacks{
+				operation: func(event externalOperationEvent) {
+					order = append(order, "operation:"+event.Phase)
+				},
+				updated: func(event stationUpdateEvent) {
+					if event.Source != test.source || len(event.Stations) != 1 || event.Stations[0].Address != "AA" {
+						t.Fatalf("station update = %+v", event)
+					}
+					order = append(order, "update")
+				},
+			}, func() APIStatus { return APIStatus{} })
+
+			request := httptest.NewRequest(test.method, test.path, strings.NewReader(test.body))
+			request.Header.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSON)
+			response, err := api.Test(request)
+			if err != nil {
+				t.Fatalf("request failed: %v", err)
+			}
+			_ = response.Body.Close()
+			if response.StatusCode != test.wantStatus {
+				t.Fatalf("status = %d, want %d", response.StatusCode, test.wantStatus)
+			}
+			if got := strings.Join(order, ","); got != "operation:started,update,operation:finished" {
+				t.Fatalf("event order = %q", got)
+			}
+		})
+	}
+}
+
+func TestHTTPDevicePreflightRejectionsDoNotPublishSnapshots(t *testing.T) {
+	for _, rejection := range []error{
+		station.ErrInvalidArgument,
+		station.ErrNotFound,
+		station.ErrOperationInProgress,
+		station.ErrStationTransitioning,
+	} {
+		t.Run(rejection.Error(), func(t *testing.T) {
+			manager := &fakeAPIStationManager{
+				stations: []station.StationInfo{{Address: "AA"}},
+				bulkErr:  rejection,
+			}
+			order := []string{}
+			api := fiber.New(fiber.Config{ErrorHandler: apiErrorHandler})
+			registerAPIRoutes(api, manager, scanEventCallbacks{
+				operation: func(event externalOperationEvent) { order = append(order, event.Phase) },
+				updated:   func(stationUpdateEvent) { order = append(order, "update") },
+			}, func() APIStatus { return APIStatus{} })
+
+			response, err := api.Test(httptest.NewRequest(http.MethodPost, "/allon", nil))
+			if err != nil {
+				t.Fatalf("request failed: %v", err)
+			}
+			_ = response.Body.Close()
+			if response.StatusCode != apiStatusForError(rejection) {
+				t.Fatalf("status = %d, want %d", response.StatusCode, apiStatusForError(rejection))
+			}
+			if got := strings.Join(order, ","); got != "started,finished" {
+				t.Fatalf("event order = %q", got)
+			}
+		})
 	}
 }
 

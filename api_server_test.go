@@ -662,6 +662,67 @@ func TestSetAPIListenAddressRejectsInvalidValues(t *testing.T) {
 
 }
 
+func TestSetAPIListenAddressSerializesPersistenceWithRestart(t *testing.T) {
+	t.Setenv("AppData", t.TempDir())
+	app := NewApp()
+	firstAddress := "127.0.0.1:8001"
+	secondAddress := "127.0.0.1:8002"
+
+	// Hold the lifecycle gate so the first call pauses after persisting and
+	// publishing its address. A second call must not persist a newer value
+	// until that first persistence+restart transaction has completed.
+	app.apiLifecycleGate.Lock()
+	gateHeld := true
+	releaseGate := func() {
+		if !gateHeld {
+			return
+		}
+		app.shuttingDown.Store(true)
+		app.apiLifecycleGate.Unlock()
+		gateHeld = false
+	}
+	defer releaseGate()
+
+	firstResult := make(chan error, 1)
+	go func() { firstResult <- app.SetAPIListenAddress(firstAddress) }()
+	deadline := time.Now().Add(time.Second)
+	for app.GetAPIStatus().Address != firstAddress && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := app.GetAPIStatus().Address; got != firstAddress {
+		releaseGate()
+		t.Fatalf("first API address was not published before restart: %q", got)
+	}
+
+	secondStarted := make(chan struct{})
+	secondResult := make(chan error, 1)
+	go func() {
+		close(secondStarted)
+		secondResult <- app.SetAPIListenAddress(secondAddress)
+	}()
+	<-secondStarted
+	time.Sleep(50 * time.Millisecond)
+	if got := app.GetAPIListenAddress(); got != firstAddress {
+		releaseGate()
+		t.Fatalf("second API setting persisted before the first restart completed: %q", got)
+	}
+
+	releaseGate()
+	for name, result := range map[string]<-chan error{"first": firstResult, "second": secondResult} {
+		select {
+		case err := <-result:
+			if err != nil {
+				t.Fatalf("%s SetAPIListenAddress() error = %v", name, err)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("%s SetAPIListenAddress() did not finish", name)
+		}
+	}
+	if configured, published := app.GetAPIListenAddress(), app.GetAPIStatus().Address; configured != secondAddress || published != secondAddress {
+		t.Fatalf("final API address configured=%q published=%q, want %q", configured, published, secondAddress)
+	}
+}
+
 func TestSetAPIListenAddressHotRestartsServer(t *testing.T) {
 
 	t.Setenv("AppData", t.TempDir())

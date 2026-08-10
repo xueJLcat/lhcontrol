@@ -182,6 +182,35 @@ func emitStationUpdate(events scanEventCallbacks, source string, snapshot func()
 	events.updated(stationUpdateEvent{ID: id, Source: source, Stations: stations})
 }
 
+func shouldEmitExternalStationSnapshot(err error) bool {
+	// These outcomes are decided before Bluetooth work starts. Besides being a
+	// redundant snapshot, an event for a request rejected as busy could arrive
+	// after the accepted local scan and overwrite its newer result.
+	return err == nil || !(errors.Is(err, station.ErrInvalidArgument) ||
+		errors.Is(err, station.ErrNotFound) ||
+		errors.Is(err, station.ErrOperationInProgress) ||
+		errors.Is(err, station.ErrStationTransitioning))
+}
+
+// beginExternalStationOperation publishes executed work's final cached state
+// before the matching finished event. Failed Bluetooth work can still change
+// connection/error metadata, so its snapshot is just as important as a
+// successful operation's snapshot.
+func beginExternalStationOperation(
+	events scanEventCallbacks,
+	kind, source string,
+	snapshot func() []station.StationInfo,
+	operationErr *error,
+) func() {
+	finish := beginExternalOperation(events, kind)
+	return func() {
+		defer finish()
+		if operationErr == nil || shouldEmitExternalStationSnapshot(*operationErr) {
+			emitStationUpdate(events, source, snapshot)
+		}
+	}
+}
+
 func registerAPIRoutes(api *fiber.App, manager apiStationManager, events scanEventCallbacks, status func() APIStatus) {
 	api.Use(func(c *fiber.Ctx) error {
 		if len(c.Body()) > apiBodyLimit {
@@ -190,23 +219,25 @@ func registerAPIRoutes(api *fiber.App, manager apiStationManager, events scanEve
 		return c.Next()
 	})
 	api.Post("/allon", func(c *fiber.Ctx) error {
-		finish := beginExternalOperation(events, "bulk-power")
+		var operationErr error
+		finish := beginExternalStationOperation(events, "bulk-power", "http-power", manager.GetStationInfo, &operationErr)
 		defer finish()
 		result, err := manager.SetAllStationsPowerDetailed("on")
+		operationErr = err
 		if err != nil {
 			return sendAPIError(c, err)
 		}
-		emitStationUpdate(events, "http-power", manager.GetStationInfo)
 		return c.JSON(result)
 	})
 	api.Post("/alloff", func(c *fiber.Ctx) error {
-		finish := beginExternalOperation(events, "bulk-power")
+		var operationErr error
+		finish := beginExternalStationOperation(events, "bulk-power", "http-power", manager.GetStationInfo, &operationErr)
 		defer finish()
 		result, err := manager.SetAllStationsPowerDetailed("sleep")
+		operationErr = err
 		if err != nil {
 			return sendAPIError(c, err)
 		}
-		emitStationUpdate(events, "http-power", manager.GetStationInfo)
 		return c.JSON(result)
 	})
 	api.Get("/status", func(c *fiber.Ctx) error {
@@ -266,13 +297,14 @@ func registerAPIRoutes(api *fiber.App, manager apiStationManager, events scanEve
 		if err := c.BodyParser(&request); err != nil {
 			return sendAPIError(c, fmt.Errorf("%w: invalid JSON body", station.ErrInvalidArgument))
 		}
-		finish := beginExternalOperation(events, "bulk-power")
+		var operationErr error
+		finish := beginExternalStationOperation(events, "bulk-power", "http-power", manager.GetStationInfo, &operationErr)
 		defer finish()
 		result, err := manager.SetAllStationsPowerDetailed(request.State)
+		operationErr = err
 		if err != nil {
 			return sendAPIError(c, err)
 		}
-		emitStationUpdate(events, "http-power", manager.GetStationInfo)
 		return c.JSON(result)
 	})
 	api.Post("/stations/:address/power", func(c *fiber.Ctx) error {
@@ -282,30 +314,32 @@ func registerAPIRoutes(api *fiber.App, manager apiStationManager, events scanEve
 		if err := c.BodyParser(&request); err != nil {
 			return sendAPIError(c, fmt.Errorf("%w: invalid JSON body", station.ErrInvalidArgument))
 		}
-		finish := beginExternalOperation(events, "power")
+		var operationErr error
+		finish := beginExternalStationOperation(events, "power", "http-power", manager.GetStationInfo, &operationErr)
 		defer finish()
 		result, err := manager.SetStationPower(c.Params("address"), request.State)
-		if err == nil || result.CommandSent {
-			emitStationUpdate(events, "http-power", manager.GetStationInfo)
-		}
+		operationErr = err
 		return sendPowerActionResponse(c, result, err)
 	})
 	api.Post("/stations/:address/identify", func(c *fiber.Ctx) error {
-		finish := beginExternalOperation(events, "identify")
+		var operationErr error
+		finish := beginExternalStationOperation(events, "identify", "http-identify", manager.GetStationInfo, &operationErr)
 		defer finish()
-		if err := manager.IdentifyStation(c.Params("address")); err != nil {
-			return sendAPIError(c, err)
+		operationErr = manager.IdentifyStation(c.Params("address"))
+		if operationErr != nil {
+			return sendAPIError(c, operationErr)
 		}
 		return c.SendStatus(fiber.StatusNoContent)
 	})
 	api.Post("/stations/:address/refresh", func(c *fiber.Ctx) error {
-		finish := beginExternalOperation(events, "refresh")
+		var operationErr error
+		finish := beginExternalStationOperation(events, "refresh", "http-refresh", manager.GetStationInfo, &operationErr)
 		defer finish()
 		result, err := manager.RefreshStationCapabilities(c.Params("address"))
+		operationErr = err
 		if err != nil {
 			return sendAPIError(c, err)
 		}
-		emitStationUpdate(events, "http-refresh", manager.GetStationInfo)
 		return c.JSON(result)
 	})
 	api.Put("/stations/:address/channel", func(c *fiber.Ctx) error {
@@ -316,12 +350,11 @@ func registerAPIRoutes(api *fiber.App, manager apiStationManager, events scanEve
 		if err := c.BodyParser(&request); err != nil {
 			return sendAPIError(c, fmt.Errorf("%w: invalid JSON body", station.ErrInvalidArgument))
 		}
-		finish := beginExternalOperation(events, "channel")
+		var operationErr error
+		finish := beginExternalStationOperation(events, "channel", "http-channel", manager.GetStationInfo, &operationErr)
 		defer finish()
 		result, err := manager.SetStationChannel(c.Params("address"), request.Channel, request.AllowUnknownConflictRisk)
-		if err == nil || result.CommandSent {
-			emitStationUpdate(events, "http-channel", manager.GetStationInfo)
-		}
+		operationErr = err
 		return sendChannelActionResponse(c, result, request.Channel, err)
 	})
 }

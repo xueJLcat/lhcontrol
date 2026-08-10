@@ -648,7 +648,7 @@ describe('StationStore external HTTP operation events', () => {
     expect(store.globalOperation).toBe('idle');
   });
 
-  it('does not discard an accepted local scan when an HTTP operation is rejected as busy', async () => {
+  it('does not discard an accepted local scan when a delayed HTTP snapshot arrives', async () => {
     let resolveScan!: (stations: ReturnType<typeof createStation>[]) => void;
     backend.ScanAndFetchStations.mockReturnValueOnce(new Promise((resolve) => { resolveScan = resolve; }));
     const { store } = mountStore();
@@ -660,6 +660,11 @@ describe('StationStore external HTTP operation events', () => {
     (store as unknown as { projectionRefreshInFlight: boolean }).projectionRefreshInFlight = true;
 
     runtime.handlers.get('external-operation')?.({ id: 23, phase: 'started', kind: 'power', revision: 2 });
+    runtime.handlers.get('external-stations-updated')?.({
+      id: 23,
+      source: 'http-power',
+      stations: [createStation({ name: 'LHB-DELAYED-HTTP-SNAPSHOT' })]
+    });
     runtime.handlers.get('external-operation')?.({ id: 23, phase: 'finished', kind: 'power', revision: 3 });
     (store as unknown as { projectionRefreshInFlight: boolean }).projectionRefreshInFlight = false;
     resolveScan([createStation({ name: 'LHB-SCAN-RESULT' })]);

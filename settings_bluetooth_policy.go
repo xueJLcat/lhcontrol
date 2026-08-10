@@ -3,6 +3,11 @@ package main
 import "lhcontrol/internal/bluetooth"
 
 func (a *App) applyBluetoothTiming() {
+	// Separate settings controls can persist concurrently. Serialize the full
+	// config snapshot and replacement so an older partial read cannot become
+	// the final active Bluetooth policy.
+	a.bluetoothTimingMutex.Lock()
+	defer a.bluetoothTimingMutex.Unlock()
 
 	bluetooth.ConfigureTiming(bluetooth.TimingPolicy{
 		ConfirmAttemptsOn:         a.config.GetPowerConfirmAttemptsOn(),

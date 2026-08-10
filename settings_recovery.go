@@ -7,6 +7,8 @@ func (a *App) GetRecoveryRetryBaseSeconds() int {
 }
 
 func (a *App) SetRecoveryRetryBaseSeconds(baseSeconds int) error {
+	a.recoverySettingsMutex.Lock()
+	defer a.recoverySettingsMutex.Unlock()
 
 	err := a.config.SetRecoveryRetryBaseSeconds(baseSeconds)
 
@@ -26,6 +28,8 @@ func (a *App) GetRecoveryRetryMaxSeconds() int {
 }
 
 func (a *App) SetRecoveryRetryMaxSeconds(maxSeconds int) error {
+	a.recoverySettingsMutex.Lock()
+	defer a.recoverySettingsMutex.Unlock()
 
 	err := a.config.SetRecoveryRetryMaxSeconds(maxSeconds)
 
@@ -45,8 +49,8 @@ func (a *App) GetAbsentStationRetryLimit() int {
 }
 
 func (a *App) SetAbsentStationRetryLimit(limit int) error {
-	a.absentRetrySettingsMutex.Lock()
-	defer a.absentRetrySettingsMutex.Unlock()
+	a.recoverySettingsMutex.Lock()
+	defer a.recoverySettingsMutex.Unlock()
 
 	previousLimit := a.config.GetAbsentStationRetryLimit()
 
@@ -151,6 +155,8 @@ func (a *App) GetBluetoothInitRetrySeconds() int {
 }
 
 func (a *App) SetBluetoothInitRetrySeconds(retrySeconds int) error {
+	a.recoverySettingsMutex.Lock()
+	defer a.recoverySettingsMutex.Unlock()
 
 	err := a.config.SetBluetoothInitRetrySeconds(retrySeconds)
 

@@ -6,11 +6,51 @@ import (
 	"time"
 )
 
-// apiShutdownTimeout bounds fiber's graceful shutdown. An in-flight handler
-// stuck in a Bluetooth call that ignores cancellation would otherwise block
-// Shutdown forever and hang the whole exit sequence. The API listener loop
-// exits on its own once its context is cancelled, so giving up here is safe.
+// apiShutdownTimeout bounds the whole API shutdown, including Fiber's
+// graceful shutdown and the listener loop. An in-flight handler stuck in a
+// Bluetooth call that ignores cancellation must not hang the exit sequence.
 const apiShutdownTimeout = 10 * time.Second
+
+func (a *App) waitForAPIShutdown() {
+	limit := a.apiShutdownWait
+	if limit <= 0 {
+		limit = apiShutdownTimeout
+	}
+
+	var fiberDone <-chan error
+	if a.api != nil {
+		log.Println("Shutting down API server...")
+		result := make(chan error, 1)
+		fiberDone = result
+		go func() {
+			result <- a.api.Shutdown()
+		}()
+	}
+
+	listenerResult := make(chan struct{})
+	var listenerDone <-chan struct{} = listenerResult
+	go func() {
+		a.apiWG.Wait()
+		close(listenerResult)
+	}()
+
+	timer := time.NewTimer(limit)
+	defer timer.Stop()
+	for fiberDone != nil || listenerDone != nil {
+		select {
+		case err := <-fiberDone:
+			fiberDone = nil
+			if err != nil {
+				log.Printf("Error shutting down API server: %v", err)
+			}
+		case <-listenerDone:
+			listenerDone = nil
+		case <-timer.C:
+			log.Printf("API server shutdown timed out after %s; continuing", limit)
+			return
+		}
+	}
+}
 
 func (a *App) shutdown(ctx context.Context) {
 
@@ -25,7 +65,7 @@ func (a *App) shutdown(ctx context.Context) {
 	// The gate interlocks with restartAPIServer: a restart either completed
 	// before this point (its listener is torn down below) or it observes
 	// shuttingDown and does not start a new loop. Holding the gate across
-	// apiWG.Wait also keeps WaitGroup Add calls from racing the Wait here.
+	// waiting for apiWG also keeps WaitGroup Add calls from racing the Wait.
 
 	a.apiLifecycleGate.Lock()
 
@@ -43,37 +83,7 @@ func (a *App) shutdown(ctx context.Context) {
 
 	}
 
-	if a.api != nil {
-
-		log.Println("Shutting down API server...")
-
-		shutdownErr := make(chan error, 1)
-
-		go func() {
-
-			shutdownErr <- a.api.Shutdown()
-
-		}()
-
-		select {
-
-		case err := <-shutdownErr:
-
-			if err != nil {
-
-				log.Printf("Error shutting down API server: %v", err)
-
-			}
-
-		case <-time.After(apiShutdownTimeout):
-
-			log.Printf("API server shutdown timed out after %s; continuing", apiShutdownTimeout)
-
-		}
-
-	}
-
-	a.apiWG.Wait()
+	a.waitForAPIShutdown()
 
 	a.apiLifecycleGate.Unlock()
 

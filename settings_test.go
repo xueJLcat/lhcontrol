@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"lhcontrol/internal/autosleep"
 	"lhcontrol/internal/bluetooth"
 	"lhcontrol/internal/config"
 )
@@ -108,6 +109,65 @@ func TestAutoSleepSettingsBindings(t *testing.T) {
 
 	}
 
+}
+
+func TestAutoSleepSettingsSerializePersistenceWithWatcherReplacement(t *testing.T) {
+	t.Setenv("AppData", t.TempDir())
+	app := NewApp()
+	first := autosleep.Settings{Enabled: false, Target: "steam", DelaySeconds: 60}
+	second := autosleep.Settings{Enabled: false, Target: "steamvr", DelaySeconds: 120}
+
+	// Pause the first call at watcher application. The second call must not
+	// persist a value whose watcher cannot yet be installed, otherwise the
+	// eventual application order can diverge from the saved configuration.
+	app.autoSleepMutex.Lock()
+	watcherLockHeld := true
+	releaseWatcherLock := func() {
+		if watcherLockHeld {
+			app.autoSleepMutex.Unlock()
+			watcherLockHeld = false
+		}
+	}
+	defer releaseWatcherLock()
+
+	firstResult := make(chan error, 1)
+	go func() { firstResult <- app.SetAutoSleepSettings(first) }()
+	deadline := time.Now().Add(time.Second)
+	for app.GetAutoSleepSettings() != first && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := app.GetAutoSleepSettings(); got != first {
+		releaseWatcherLock()
+		t.Fatalf("first auto-sleep settings were not persisted: %+v", got)
+	}
+
+	secondStarted := make(chan struct{})
+	secondResult := make(chan error, 1)
+	go func() {
+		close(secondStarted)
+		secondResult <- app.SetAutoSleepSettings(second)
+	}()
+	<-secondStarted
+	time.Sleep(50 * time.Millisecond)
+	if got := app.GetAutoSleepSettings(); got != first {
+		releaseWatcherLock()
+		t.Fatalf("second auto-sleep settings persisted before the first watcher application completed: %+v", got)
+	}
+
+	releaseWatcherLock()
+	for name, result := range map[string]<-chan error{"first": firstResult, "second": secondResult} {
+		select {
+		case err := <-result:
+			if err != nil {
+				t.Fatalf("%s SetAutoSleepSettings() error = %v", name, err)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("%s SetAutoSleepSettings() did not finish", name)
+		}
+	}
+	if got := app.GetAutoSleepSettings(); got != second {
+		t.Fatalf("final auto-sleep settings = %+v, want %+v", got, second)
+	}
 }
 
 func TestLanguageBindingsPersistAndValidate(t *testing.T) {
