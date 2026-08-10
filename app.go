@@ -149,10 +149,7 @@ func (a *App) startup(ctx context.Context) {
 			}
 		},
 		operation: func(event externalOperationEvent) {
-			event = a.recordExternalOperation(event)
-			if a.ctx != nil && !a.shuttingDown.Load() {
-				runtime.EventsEmit(a.ctx, "external-operation", event)
-			}
+			a.emitTrackedOperation(event)
 		},
 	}, a.GetAPIStatus)
 	a.startAPIServer()
@@ -264,6 +261,29 @@ func (a *App) recordExternalOperation(event externalOperationEvent) externalOper
 		delete(a.activeExternalOperations, event.ID)
 	}
 	return event
+}
+
+func (a *App) emitTrackedOperation(event externalOperationEvent) {
+	event = a.recordExternalOperation(event)
+	if a.ctx != nil && !a.shuttingDown.Load() {
+		runtime.EventsEmit(a.ctx, "external-operation", event)
+	}
+}
+
+// beginTrackedOperation makes non-HTTP background work visible through the
+// same health snapshot used to recover HTTP operations that started before
+// the desktop event listeners mounted. In particular, this prevents a UI
+// reload from mistaking an automatic-sleep scan for a user-stoppable external
+// scan when its earlier auto-sleep "started" event was missed.
+func (a *App) beginTrackedOperation(kind string) func() {
+	id := a.externalOperationID.Add(1)
+	a.emitTrackedOperation(externalOperationEvent{ID: id, Phase: "started", Kind: kind})
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			a.emitTrackedOperation(externalOperationEvent{ID: id, Phase: "finished", Kind: kind})
+		})
+	}
 }
 
 func (a *App) externalOperationSnapshot() ([]OperationStatus, uint64) {

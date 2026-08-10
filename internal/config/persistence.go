@@ -110,6 +110,16 @@ func (c *Config) saveLocked() error {
 	snapshot.ChannelScanFreshnessSeconds = &channelScanFreshnessSeconds
 	bluetoothInitRetrySeconds := sanitizeRangedInt(&c.BluetoothInitRetrySeconds, MinBluetoothInitRetrySeconds, MaxBluetoothInitRetrySeconds, DefaultBluetoothInitRetrySeconds)
 	snapshot.BluetoothInitRetrySeconds = &bluetoothInitRetrySeconds
+	repairCrossItemValues(
+		&bulkPowerTimeoutSeconds,
+		&stationOperationTimeoutSeconds,
+		&initialReadTimeoutSeconds,
+		&scanReadPhaseTimeoutSeconds,
+		&statusReadTimeoutSeconds,
+		&statusRefreshTimeoutSeconds,
+		&recoveryRetryBaseSeconds,
+		&recoveryRetryMaxSeconds,
+	)
 	if c.AutoSleep != (autosleep.Settings{}) {
 		autoSleep := sanitizeAutoSleep(&c.AutoSleep)
 		snapshot.AutoSleep = &autoSleep

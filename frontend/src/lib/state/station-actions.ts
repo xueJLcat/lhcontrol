@@ -236,7 +236,7 @@ export class StationActionController {
             : 'success';
       const toastMessage = result.timedOut || result.cancelled
         ? this.host.statusMessage
-        : `Bulk ${targetLabel}: ${summaryText}`;
+        : t('Bulk {target}: {summary}', { target: targetLabel, summary: summaryText });
       pushToast(toastMessage, toastKind);
     } catch (error) {
       if (!this.host.gates.canCommitOperation(operationEpoch)) return;

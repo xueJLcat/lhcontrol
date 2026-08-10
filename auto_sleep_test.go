@@ -84,6 +84,48 @@ func TestRunAutoSleepUsesDistinctLifecycleIDs(t *testing.T) {
 	}
 }
 
+func TestRunAutoSleepIsVisibleInOperationHealthUntilItFinishes(t *testing.T) {
+	app := NewApp()
+	scanStarted := make(chan struct{})
+	releaseScan := make(chan struct{})
+	actionDone := make(chan struct{})
+	app.scanForAutoSleep = func(context.Context) ([]station.StationInfo, error) {
+		close(scanStarted)
+		<-releaseScan
+		return nil, nil
+	}
+	app.setPowerForAutoSleep = func(context.Context, string) (station.BulkPowerResult, error) {
+		return station.BulkPowerResult{}, nil
+	}
+
+	go func() {
+		defer close(actionDone)
+		app.runAutoSleep(context.Background())
+	}()
+	select {
+	case <-scanStarted:
+	case <-time.After(time.Second):
+		t.Fatal("automatic sleep scan did not start")
+	}
+
+	status := app.GetAPIStatus()
+	if status.OperationRevision != 1 || len(status.ActiveOperations) != 1 ||
+		status.ActiveOperations[0].Kind != "auto-sleep" {
+		t.Fatalf("active operation status = %+v", status)
+	}
+
+	close(releaseScan)
+	select {
+	case <-actionDone:
+	case <-time.After(time.Second):
+		t.Fatal("automatic sleep action did not finish")
+	}
+	status = app.GetAPIStatus()
+	if status.OperationRevision != 2 || len(status.ActiveOperations) != 0 {
+		t.Fatalf("finished operation status = %+v", status)
+	}
+}
+
 func TestRunAutoSleepPreservesPartialResultsWhenBulkPowerTimesOut(t *testing.T) {
 	app := NewApp()
 	var events []autoSleepEvent

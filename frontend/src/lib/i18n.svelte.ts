@@ -121,6 +121,7 @@ const zhCN = {
   'Stopping bulk power...': '正在停止批量电源操作…',
   'Bulk {target} cancelled': '批量{target}操作已停止',
   'Bulk {target} timed out': '批量{target}操作已超时',
+  'Bulk {target}: {summary}': '批量{target}：{summary}',
   'Auto sleep timed out: {success} confirmed, {unconfirmed} unconfirmed, {failed} failed, {timedOutSkipped} skipped due to timeout.': '自动休眠超时：已确认 {success} 个、未确认 {unconfirmed} 个、失败 {failed} 个、因超时跳过 {timedOutSkipped} 个。',
   'SteamVR base stations': 'SteamVR 基站',
   'Fleet power summary': '全部基站电源状态摘要',

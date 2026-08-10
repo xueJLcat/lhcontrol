@@ -19,15 +19,16 @@ export class ApiStatusPoller {
 
   constructor(private readonly host: ApiStatusPollerHost) {}
 
-  start(intervalMs = 15000) {
+  start(intervalMs = 15000): Promise<void> {
     if (this.interval) clearInterval(this.interval);
-    this.refresh();
+    const initialRefresh = this.refresh();
     this.interval = setInterval(() => this.refresh(), intervalMs);
+    return initialRefresh;
   }
 
-  refresh() {
+  refresh(): Promise<void> {
     const revision = this.revisions.next();
-    GetAPIStatus().then((status) => {
+    return GetAPIStatus().then((status) => {
       if (this.host.isDisposed() || !this.revisions.isCurrent(revision)) return;
       this.host.commitStatus(status);
       const current = new Set(status.warnings ?? []);

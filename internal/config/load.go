@@ -209,20 +209,42 @@ func (c *Config) Load() error {
 // hand-edited or future-version file cannot leave the runtime in a state where
 // budgets contradict each other. Callers must hold c.mutex.
 func (c *Config) repairCrossItemInvariants() {
-	if c.BulkPowerTimeoutSeconds < c.StationOperationTimeoutSeconds {
-		c.BulkPowerTimeoutSeconds = c.StationOperationTimeoutSeconds
+	repairCrossItemValues(
+		&c.BulkPowerTimeoutSeconds,
+		&c.StationOperationTimeoutSeconds,
+		&c.InitialReadTimeoutSeconds,
+		&c.ScanReadPhaseTimeoutSeconds,
+		&c.StatusReadTimeoutSeconds,
+		&c.StatusRefreshTimeoutSeconds,
+		&c.RecoveryRetryBaseSeconds,
+		&c.RecoveryRetryMaxSeconds,
+	)
+}
+
+func repairCrossItemValues(
+	bulkPowerTimeoutSeconds *int,
+	stationOperationTimeoutSeconds *int,
+	initialReadTimeoutSeconds *int,
+	scanReadPhaseTimeoutSeconds *int,
+	statusReadTimeoutSeconds *int,
+	statusRefreshTimeoutSeconds *int,
+	recoveryRetryBaseSeconds *int,
+	recoveryRetryMaxSeconds *int,
+) {
+	if *bulkPowerTimeoutSeconds < *stationOperationTimeoutSeconds {
+		*bulkPowerTimeoutSeconds = *stationOperationTimeoutSeconds
 	}
-	if c.InitialReadTimeoutSeconds > c.StationOperationTimeoutSeconds {
-		c.InitialReadTimeoutSeconds = c.StationOperationTimeoutSeconds
+	if *initialReadTimeoutSeconds > *stationOperationTimeoutSeconds {
+		*initialReadTimeoutSeconds = *stationOperationTimeoutSeconds
 	}
-	if c.ScanReadPhaseTimeoutSeconds < c.InitialReadTimeoutSeconds {
-		c.ScanReadPhaseTimeoutSeconds = c.InitialReadTimeoutSeconds
+	if *scanReadPhaseTimeoutSeconds < *initialReadTimeoutSeconds {
+		*scanReadPhaseTimeoutSeconds = *initialReadTimeoutSeconds
 	}
-	if c.StatusRefreshTimeoutSeconds < c.StatusReadTimeoutSeconds {
-		c.StatusRefreshTimeoutSeconds = c.StatusReadTimeoutSeconds
+	if *statusRefreshTimeoutSeconds < *statusReadTimeoutSeconds {
+		*statusRefreshTimeoutSeconds = *statusReadTimeoutSeconds
 	}
-	if c.RecoveryRetryBaseSeconds > c.RecoveryRetryMaxSeconds {
-		c.RecoveryRetryBaseSeconds = c.RecoveryRetryMaxSeconds
+	if *recoveryRetryBaseSeconds > *recoveryRetryMaxSeconds {
+		*recoveryRetryBaseSeconds = *recoveryRetryMaxSeconds
 	}
 }
 

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -690,6 +691,47 @@ func TestSaveSanitizesDirectlyAssignedFields(t *testing.T) {
 	} {
 		if !strings.Contains(written, want) {
 			t.Fatalf("persisted config = %s, want it to contain %s", written, want)
+		}
+	}
+}
+
+func TestSaveRepairsCrossItemInvariantsBeforeWriting(t *testing.T) {
+	configDirectory := useTemporaryConfigDirectory(t)
+	cfg := NewConfig()
+	// Each value is individually valid, but the pairs contradict the runtime
+	// budgeting rules. Save must not write a file whose meaning changes on the
+	// next Load.
+	cfg.BulkPowerTimeoutSeconds = 30
+	cfg.StationOperationTimeoutSeconds = 60
+	cfg.InitialReadTimeoutSeconds = 60
+	cfg.ScanReadPhaseTimeoutSeconds = 45
+	cfg.StatusReadTimeoutSeconds = 60
+	cfg.StatusRefreshTimeoutSeconds = 30
+	cfg.RecoveryRetryBaseSeconds = 120
+	cfg.RecoveryRetryMaxSeconds = 60
+
+	if err := cfg.Save(); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+	content, err := os.ReadFile(filepath.Join(configDirectory, "config.json"))
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	var written persistedConfig
+	if err := json.Unmarshal(content, &written); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	for name, check := range map[string]struct {
+		value *int
+		want  int
+	}{
+		"bulk power timeout":      {written.BulkPowerTimeoutSeconds, 60},
+		"scan read phase timeout": {written.ScanReadPhaseTimeoutSeconds, 60},
+		"status refresh timeout":  {written.StatusRefreshTimeoutSeconds, 60},
+		"recovery retry base":     {written.RecoveryRetryBaseSeconds, 60},
+	} {
+		if check.value == nil || *check.value != check.want {
+			t.Errorf("persisted %s = %v, want %d", name, check.value, check.want)
 		}
 	}
 }

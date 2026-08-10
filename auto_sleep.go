@@ -313,6 +313,9 @@ func (a *App) runAutoSleep(ctx context.Context) {
 
 	}
 
+	finishOperation := a.beginTrackedOperation("auto-sleep")
+	defer finishOperation()
+
 	actionID := a.autoSleepActionID.Add(1)
 	emitTerminal := func(event autoSleepEvent) {
 		event.ID = actionID

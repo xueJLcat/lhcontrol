@@ -74,6 +74,7 @@ export class StationStore {
   private statusPollIntervalSeconds = DEFAULT_STATUS_POLL_INTERVAL_SECONDS;
   private statusPollingEnabled = true;
   private apiStatusStarted = false;
+  private startupAPIStatusReady: Promise<void> = Promise.resolve();
   private cancelExternalScanListener: (() => void) | null = null;
   private cancelExternalScanFailureListener: (() => void) | null = null;
   private cancelExternalScanStartedListener: (() => void) | null = null;
@@ -423,7 +424,7 @@ export class StationStore {
     if (this.statusCheckInterval) clearInterval(this.statusCheckInterval);
     this.statusCheckInterval = null;
     const intervalMs = next * 1000;
-    this.apiStatus.start(intervalMs);
+    this.startupAPIStatusReady = this.apiStatus.start(intervalMs);
     if (this.statusPollingEnabled) {
       this.statusCheckInterval = setInterval(() => {
         void this.periodicStatusCheck();
@@ -483,6 +484,7 @@ export class StationStore {
     // Register operation listeners before the first asynchronous health poll
     // so a newly started HTTP action cannot slip through the mount window.
     this.setStatusPollIntervalSeconds(DEFAULT_STATUS_POLL_INTERVAL_SECONDS);
+    const startupAPIStatusReady = this.startupAPIStatusReady;
     void GetStatusPollIntervalSeconds()
       .then((intervalSeconds) => this.setStatusPollIntervalSeconds(intervalSeconds))
       .catch(() => {
@@ -499,7 +501,12 @@ export class StationStore {
         // Fail closed: when the persisted preference is unreadable, skipping
         // the scan honors a disabled setting instead of triggering a scan the
         // user explicitly turned off.
-        GetScanOnStartup().catch(() => false)
+        GetScanOnStartup().catch(() => false),
+        // Wait for the operation-health snapshot started above. It recovers
+        // automatic sleep (and HTTP work) that began before event listeners
+        // mounted, closing the only window where an internal scan could be
+        // misidentified as a user-stoppable external scan.
+        startupAPIStatusReady
       ]);
       // Do not allow the first polling tick to acquire the backend operation
       // lock before the initial external-scan check can start the local scan.
@@ -510,7 +517,9 @@ export class StationStore {
       if (startupScanning) {
         // An auto-sleep scan is internal; adopting it would expose Stop for
         // it. Skip adoption and let the periodic check take over afterwards.
-        if (!this.autoSleepRunning) await this.externalScan.adoptUnknown();
+        if (!this.autoSleepRunning && !this.externalOperationRunning) {
+          await this.externalScan.adoptUnknown();
+        }
       } else if (scanOnStartup) {
         await this.startScan();
       }

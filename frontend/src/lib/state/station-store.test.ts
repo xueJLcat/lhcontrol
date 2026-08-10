@@ -167,6 +167,26 @@ describe('StationStore startup', () => {
     expect(backend.ScanAndFetchStations).not.toHaveBeenCalled();
   });
 
+  it('does not adopt an automatic-sleep scan whose start event was missed', async () => {
+    backend.IsScanning.mockResolvedValue(true);
+    backend.GetAPIStatus.mockResolvedValue({
+      running: true,
+      address: '127.0.0.1:7575',
+      error: '',
+      warnings: [],
+      configWritable: true,
+      activeOperations: [{ id: 41, kind: 'auto-sleep' }],
+      operationRevision: 1
+    });
+
+    const { store } = mountStore();
+    await vi.waitFor(() => expect(store.externalOperationRunning).toBe(true));
+    await vi.waitFor(() => expect(backend.IsScanning).toHaveBeenCalled());
+
+    expect(store.externalScanning).toBe(false);
+    expect(backend.ScanAndFetchStations).not.toHaveBeenCalled();
+  });
+
   it('classifies a failed scan into a recovery error without a duplicate toast', async () => {
     backend.ScanAndFetchStations.mockRejectedValue(new Error('Bluetooth is unavailable; turn on Bluetooth and retry'));
     backend.GetCurrentStationInfo.mockResolvedValue([]);
