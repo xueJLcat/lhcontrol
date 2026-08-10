@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 	tinybluetooth "tinygo.org/x/bluetooth"
@@ -351,6 +352,63 @@ func TestPowerConfirmationKeepsPollingDuringGenuineBoot(t *testing.T) {
 	}
 	if station.PowerState != PowerStateBooting {
 		t.Fatalf("station state = %v, want Booting while raw 0x01 is transitional", station.PowerState)
+	}
+}
+
+// reconnectCountingAdapter makes Connect fail while counting attempts, so the
+// confirmation reconnect path can be exercised deterministically.
+type reconnectCountingAdapter struct {
+	connectErr   error
+	connectCalls atomic.Int32
+}
+
+func (a *reconnectCountingAdapter) Enable() error { return nil }
+func (a *reconnectCountingAdapter) Connect(addr tinybluetooth.Address, params tinybluetooth.ConnectionParams) (tinybluetooth.Device, error) {
+	a.connectCalls.Add(1)
+	return tinybluetooth.Device{}, a.connectErr
+}
+func (a *reconnectCountingAdapter) Scan(cb func(*tinybluetooth.Adapter, tinybluetooth.ScanResult)) error {
+	return nil
+}
+func (a *reconnectCountingAdapter) SetConnectHandler(func(tinybluetooth.Device, bool)) {}
+func (a *reconnectCountingAdapter) StopScan() error                                    { return nil }
+
+// TestPowerConfirmationKeepsBudgetAfterReconnectFailure verifies that a failed
+// confirmation reconnect does not abandon the remaining confirmation attempts.
+// A station that is rebooting is unreachable precisely while this polling
+// exists for it, so giving up after the first reconnect failure would misreport
+// a legitimate boot as an unconfirmed command.
+func TestPowerConfirmationKeepsBudgetAfterReconnectFailure(t *testing.T) {
+	ConfigureTiming(TimingPolicy{
+		ConfirmAttemptsOff:        3,
+		ConfirmPollInterval:       time.Millisecond,
+		ConfirmReconnectThreshold: 1,
+		ConfirmReconnectDelay:     time.Millisecond,
+	})
+	t.Cleanup(func() { ConfigureTiming(TimingPolicy{}) })
+
+	originalAdapter := adapter
+	counting := &reconnectCountingAdapter{connectErr: errors.New("station unreachable during boot")}
+	adapter = counting
+	t.Cleanup(func() { adapter = originalAdapter })
+
+	power := &fakeCharacteristic{readErr: errors.New("radio restarting")}
+	station := connectedFakeStation(power, nil, nil, Capabilities{PowerRead: true, PowerWrite: true})
+	station.PowerState = PowerStateSleep
+
+	station.mutex.Lock()
+	err := confirmPowerStateInternalContext(context.Background(), station, PowerStateSleep)
+	station.mutex.Unlock()
+
+	if err == nil {
+		t.Fatal("confirmation unexpectedly succeeded against an unreachable station")
+	}
+	// With 3 attempts and a reconnect threshold of 1, reconnects fire on
+	// attempts 0 and 1 (attempt < attempts-1). Giving up after the first
+	// failed reconnect would leave exactly 1 attempt; continuing the budget
+	// performs 2.
+	if got, want := counting.connectCalls.Load(), int32(2); got != want {
+		t.Fatalf("confirmation reconnect attempts = %d, want %d (the full remaining budget)", got, want)
 	}
 }
 func TestSnapshotStaysResponsiveDuringPowerConfirmationPolling(t *testing.T) {

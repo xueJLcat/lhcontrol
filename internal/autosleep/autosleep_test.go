@@ -186,6 +186,42 @@ func TestMonitorCountdownContinuesAcrossReplacement(t *testing.T) {
 	}
 }
 
+// TestMonitorRetainsClosedAtAfterFiring verifies that once the monitor fires it
+// still reports the session's close time. applyAutoSleep relies on that to
+// carry an owed sleep (a consumed trigger whose action is still running) over
+// to a replacement watcher instead of silently dropping it.
+func TestMonitorRetainsClosedAtAfterFiring(t *testing.T) {
+	base := time.Now()
+	monitor := NewMonitor(time.Minute)
+	monitor.Poll(true, base)
+	monitor.Poll(false, base.Add(30*time.Second))
+	if got := monitor.Poll(false, base.Add(2*time.Minute)); got != ActionTrigger {
+		t.Fatalf("poll at elapsed delay = %v, want ActionTrigger", got)
+	}
+
+	active, closedAt := monitor.Countdown()
+	if active {
+		t.Fatal("Countdown() reported an active countdown after the trigger fired")
+	}
+	if want := base.Add(30 * time.Second); !closedAt.Equal(want) {
+		t.Fatalf("Countdown() closedAt = %v, want %v retained after firing", closedAt, want)
+	}
+
+	// Continuation from that close time is already due, so the replacement
+	// watcher re-fires the owed sleep without waiting a fresh delay.
+	replacement := NewMonitorContinuing(time.Minute, closedAt)
+	if got := replacement.Poll(false, base.Add(2*time.Minute)); got != ActionTrigger {
+		t.Fatalf("carried replacement poll = %v, want ActionTrigger (owed sleep re-fires)", got)
+	}
+
+	// A relaunched session still cancels the carried countdown, so a station is
+	// never slept for a session that started again.
+	restarted := NewMonitorContinuing(time.Minute, closedAt)
+	if got := restarted.Poll(true, base.Add(2*time.Minute)); got != ActionNone {
+		t.Fatalf("relaunch during carried countdown = %v, want ActionNone", got)
+	}
+}
+
 // TestWatcherContinuesCarriedCountdown verifies that a replacement watcher
 // built with a carried monitor fires the pending sleep without observing a
 // fresh running->closed session, as after a settings change mid-countdown.
@@ -372,5 +408,76 @@ func TestWatcherDefersTriggerUntilPreviousActionStops(t *testing.T) {
 	}
 	if got := calls.Load(); got != 2 {
 		t.Fatalf("trigger calls after the deferred trigger = %d, want 2", got)
+	}
+}
+
+// TestWatcherOwesTriggerWhileActionInFlight verifies that the watcher reports an
+// owed trigger while its sleep action is still running, and clears it once the
+// action drains. A settings change (applyAutoSleep) relies on this to re-arm the
+// owed sleep instead of losing it when the running action is cancelled.
+func TestWatcherOwesTriggerWhileActionInFlight(t *testing.T) {
+	var running atomic.Bool
+	running.Store(true)
+	var ticks atomic.Int64
+	base := time.Now()
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseAction := func() { releaseOnce.Do(func() { close(release) }) }
+	triggerStarted := make(chan struct{})
+	var startOnce sync.Once
+
+	watcher := &Watcher{
+		Settings:  Settings{Enabled: true, Target: string(TargetSteamVR), DelaySeconds: 60},
+		Interval:  time.Millisecond,
+		IsRunning: func(string) (bool, error) { return running.Load(), nil },
+		Now:       func() time.Time { return base.Add(time.Duration(ticks.Add(1)) * time.Minute) },
+		Monitor:   NewMonitor(time.Minute),
+		Trigger: func(ctx context.Context) {
+			startOnce.Do(func() { close(triggerStarted) })
+			select {
+			case <-release:
+			case <-ctx.Done():
+			}
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		watcher.Run(ctx)
+	}()
+	defer func() {
+		releaseAction()
+		cancel()
+		<-done
+	}()
+
+	// Let the watcher observe a running session, then its close.
+	time.Sleep(20 * time.Millisecond)
+	running.Store(false)
+	select {
+	case <-triggerStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("watcher did not start the automatic-sleep action")
+	}
+
+	// While the action is in flight the owed flag must be set even though the
+	// monitor has already consumed its countdown.
+	if active, _ := watcher.Monitor.Countdown(); active {
+		t.Fatal("countdown still active after the trigger fired")
+	}
+	if !watcher.OwesTrigger() {
+		t.Fatal("OwesTrigger() = false while the sleep action is running")
+	}
+
+	// Complete the action; the owed flag must clear once it drains.
+	releaseAction()
+	deadline := time.Now().Add(2 * time.Second)
+	for watcher.OwesTrigger() {
+		if time.Now().After(deadline) {
+			t.Fatal("OwesTrigger() stayed true after the action completed")
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }

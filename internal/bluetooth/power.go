@@ -275,7 +275,9 @@ func confirmPowerStateInternalContext(ctx context.Context, station *BaseStation,
 				}
 				if reconnectErr := connectAndDiscoverInternalContext(ctx, station); reconnectErr != nil {
 					lastErr = errors.Join(lastErr, fmt.Errorf("confirmation reconnect failed: %w", reconnectErr))
-					break
+					// A failed reconnect must not discard the remaining budget:
+					// a rebooting station is unreachable exactly while this polling
+					// exists for, and a later attempt can still confirm the state.
 				}
 				consecutiveReadErrors = 0
 			}

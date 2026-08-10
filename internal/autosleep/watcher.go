@@ -3,6 +3,7 @@ package autosleep
 import (
 	"context"
 	"log"
+	"sync"
 	"time"
 )
 
@@ -33,6 +34,27 @@ type Watcher struct {
 	// a monitor carrying the previous countdown so a pending sleep survives
 	// the replacement.
 	Monitor *Monitor
+
+	// mutex guards triggerOwed so a replacement watcher can snapshot the owed
+	// sleep while the poll loop updates it.
+	mutex       sync.Mutex
+	triggerOwed bool
+}
+
+// OwesTrigger reports that a consumed trigger's sleep has not completed yet:
+// the action is running or waits for a previous action to finish. A
+// replacement watcher uses it to re-arm its countdown instead of silently
+// dropping the owed sleep when the in-flight action is cancelled.
+func (w *Watcher) OwesTrigger() bool {
+	w.mutex.Lock()
+	defer w.mutex.Unlock()
+	return w.triggerOwed
+}
+
+func (w *Watcher) markTriggerOwed(owed bool) {
+	w.mutex.Lock()
+	w.triggerOwed = owed
+	w.mutex.Unlock()
 }
 
 // Run blocks until ctx is cancelled. It is meant to execute in its own
@@ -92,6 +114,10 @@ func (w *Watcher) Run(ctx context.Context) {
 			triggerCancel()
 			triggerCancel = nil
 			triggerDone = nil
+			// The finished action no longer owes a sleep unless the monitor
+			// fired again while it was draining; keep the owed flag so a
+			// replacement watcher can still re-arm the pending trigger.
+			w.markTriggerOwed(pendingTrigger)
 		case now := <-ticker.C:
 			if w.Now != nil {
 				now = w.Now()
@@ -109,9 +135,11 @@ func (w *Watcher) Run(ctx context.Context) {
 					triggerCancel()
 				}
 				pendingTrigger = false
+				w.markTriggerOwed(false)
 			}
 			if monitor.Poll(running, now) == ActionTrigger {
 				pendingTrigger = true
+				w.markTriggerOwed(true)
 			}
 			// Fire when a trigger is owed and no action is currently running.
 			// If the previous action is still stopping, this stays pending and

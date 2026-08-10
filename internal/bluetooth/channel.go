@@ -179,7 +179,8 @@ func SetChannelContext(ctx context.Context, station *BaseStation, channel int) (
 				}
 				if reconnectErr := connectAndDiscoverInternalContext(ctx, station); reconnectErr != nil {
 					confirmationErr = errors.Join(confirmationErr, fmt.Errorf("channel confirmation reconnect failed: %w", reconnectErr))
-					break
+					// A failed reconnect must not discard the remaining readback
+					// budget; a later attempt can still confirm the write.
 				}
 				consecutiveReadErrors = 0
 			}

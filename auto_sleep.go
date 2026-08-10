@@ -765,9 +765,12 @@ func (a *App) applyAutoSleep(settings autosleep.Settings) {
 	if previous := a.autoSleepWatcher; previous != nil {
 		if previous.Settings.Target == settings.Target {
 			// A settings change for the same watched target must not silently
-			// drop a pending sleep: carry the in-flight countdown over to the
-			// replacement watcher.
-			if active, closedAt := previous.Monitor.Countdown(); active {
+			// drop a pending sleep. Carry over an in-flight countdown, or —
+			// when the trigger has already fired and its action is still
+			// running or queued — the session close that fired it. Either way
+			// the replacement watcher re-fires the owed sleep instead of
+			// losing it to the cancelled action.
+			if active, closedAt := previous.Monitor.Countdown(); active || previous.OwesTrigger() {
 				monitor = autosleep.NewMonitorContinuing(settings.Delay(), closedAt)
 			}
 		}
