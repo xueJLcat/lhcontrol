@@ -170,6 +170,52 @@ func TestAutoSleepSettingsSerializePersistenceWithWatcherReplacement(t *testing.
 	}
 }
 
+func TestAutoSleepSettingsNoOpDoesNotCancelRunningWatcher(t *testing.T) {
+	t.Setenv("AppData", t.TempDir())
+	app := NewApp()
+	settings := autosleep.Settings{Enabled: true, Target: "steamvr", DelaySeconds: 60}
+	if err := app.config.SetAutoSleep(settings); err != nil {
+		t.Fatalf("config.SetAutoSleep() error = %v", err)
+	}
+	monitor := autosleep.NewMonitor(time.Minute)
+	monitor.Poll(true, time.Now())
+	cancelled := false
+	app.autoSleepWatcher = &autosleep.Watcher{Settings: settings, Monitor: monitor}
+	app.autoSleepCancel = func() { cancelled = true }
+
+	if err := app.SetAutoSleepSettings(settings); err != nil {
+		t.Fatalf("SetAutoSleepSettings() error = %v", err)
+	}
+	if cancelled {
+		t.Fatal("saving unchanged settings cancelled the active watcher")
+	}
+	// Clear the synthetic watcher without invoking its sentinel cancel function.
+	app.autoSleepMutex.Lock()
+	app.autoSleepWatcher = nil
+	app.autoSleepCancel = nil
+	app.autoSleepMutex.Unlock()
+}
+
+func TestAutoSleepSettingsNoOpRepairsMissingWatcher(t *testing.T) {
+	t.Setenv("AppData", t.TempDir())
+	app := NewApp()
+	settings := autosleep.Settings{Enabled: true, Target: "steamvr", DelaySeconds: 60}
+	if err := app.config.SetAutoSleep(settings); err != nil {
+		t.Fatalf("config.SetAutoSleep() error = %v", err)
+	}
+
+	if err := app.SetAutoSleepSettings(settings); err != nil {
+		t.Fatalf("SetAutoSleepSettings() error = %v", err)
+	}
+	defer app.stopAutoSleep()
+	app.autoSleepMutex.Lock()
+	watcher, cancel := app.autoSleepWatcher, app.autoSleepCancel
+	app.autoSleepMutex.Unlock()
+	if watcher == nil || cancel == nil || watcher.Settings != settings {
+		t.Fatalf("missing runtime watcher was not repaired: watcher=%+v cancel=%v", watcher, cancel != nil)
+	}
+}
+
 func TestLanguageBindingsPersistAndValidate(t *testing.T) {
 
 	t.Setenv("AppData", t.TempDir())

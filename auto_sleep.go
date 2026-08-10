@@ -63,6 +63,7 @@ func (a *App) SetAutoSleepSettings(settings autosleep.Settings) error {
 	}
 	a.autoSleepSettingsMutex.Lock()
 	defer a.autoSleepSettingsMutex.Unlock()
+	previousSettings := a.config.GetAutoSleep()
 
 	log.Printf("Setting auto-sleep: enabled=%v target=%s delay=%ds", settings.Enabled, settings.Target, settings.DelaySeconds)
 
@@ -76,10 +77,26 @@ func (a *App) SetAutoSleepSettings(settings autosleep.Settings) error {
 
 	}
 
-	a.applyAutoSleep(settings)
+	// Re-saving the same valid value can recover a previous persistence error,
+	// but it must not cancel an automatic-sleep action that is already running.
+	// If runtime state is missing or out of sync, repair it even though the
+	// persisted value itself did not change.
+	if previousSettings != settings || !a.autoSleepMatches(settings) {
+		a.applyAutoSleep(settings)
+	}
 
 	return nil
 
+}
+
+func (a *App) autoSleepMatches(settings autosleep.Settings) bool {
+	a.autoSleepMutex.Lock()
+	defer a.autoSleepMutex.Unlock()
+	if !settings.Enabled || a.shuttingDown.Load() {
+		return a.autoSleepWatcher == nil && a.autoSleepCancel == nil
+	}
+	return a.autoSleepWatcher != nil && a.autoSleepCancel != nil &&
+		a.autoSleepWatcher.Settings == settings
 }
 
 // GetLanguage returns the persisted UI language. An empty string tells the
@@ -94,17 +111,16 @@ func (a *App) applyAutoSleep(settings autosleep.Settings) {
 
 	var monitor *autosleep.Monitor
 	if previous := a.autoSleepWatcher; previous != nil {
-		if previous.Settings.Target == settings.Target {
-			// A settings change for the same watched target must not silently
-			// drop a pending sleep. Carry over an in-flight countdown, or 鈥?			// when the trigger has already fired and its action is still
-			// running or queued 鈥?the session close that fired it. Either way
-			// the replacement watcher re-fires the owed sleep instead of
-			// losing it to the cancelled action.
-			if active, closedAt := previous.Monitor.Countdown(); active || previous.OwesTrigger() {
-				monitor = autosleep.NewMonitorContinuing(settings.Delay(), closedAt)
-			}
-		}
+		// Cancel before taking the replacement snapshot. Watcher polls perform
+		// their final cancellation check under the same lifecycle lock used by
+		// ReplacementMonitor, so an old observation cannot land just after the
+		// snapshot and silently disappear.
 		a.autoSleepCancel()
+		if previous.Settings.Target == settings.Target {
+			// Preserve idle/running/countdown state, and re-arm a consumed
+			// trigger whose action is still running or queued.
+			monitor = previous.ReplacementMonitor(settings.Delay())
+		}
 		a.autoSleepCancel = nil
 		a.autoSleepWatcher = nil
 		// The cancelled watcher exits on its own; if it is still finishing a

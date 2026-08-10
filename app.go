@@ -214,27 +214,32 @@ func (a *App) setAPIAddress(address string) {
 func (a *App) setConfigLoadStatus(err error) {
 	a.apiStatusMutex.Lock()
 	defer a.apiStatusMutex.Unlock()
+	persistenceErr := a.config.PersistenceError()
 	if err == nil {
 		a.configLoadWarning = ""
 	} else {
 		a.configLoadWarning = fmt.Sprintf("Configuration could not be loaded: %v", err)
 	}
-	a.refreshConfigStatusLocked()
+	a.refreshConfigStatusLocked(persistenceErr)
 }
 
 func (a *App) setConfigPersistenceStatus() {
 	a.apiStatusMutex.Lock()
 	defer a.apiStatusMutex.Unlock()
-	if err := a.config.PersistenceError(); err != nil {
-		a.configSaveWarning = fmt.Sprintf("Configuration changes could not be saved: %v", err)
+	persistenceErr := a.config.PersistenceError()
+	if persistenceErr != nil {
+		a.configSaveWarning = fmt.Sprintf("Configuration changes could not be saved: %v", persistenceErr)
 	} else {
 		a.configSaveWarning = ""
 	}
-	a.refreshConfigStatusLocked()
+	a.refreshConfigStatusLocked(persistenceErr)
 }
 
-func (a *App) refreshConfigStatusLocked() {
-	a.apiStatus.ConfigWritable = a.config.PersistenceError() == nil
+func (a *App) refreshConfigStatusLocked(persistenceErr error) {
+	// Warning text and writability must describe the same persistence snapshot.
+	// A concurrent successful save cannot otherwise clear one between two
+	// independent reads and briefly publish a contradictory API status.
+	a.apiStatus.ConfigWritable = persistenceErr == nil
 	a.apiStatus.Warnings = make([]string, 0, 2)
 	if a.configLoadWarning != "" {
 		a.apiStatus.Warnings = append(a.apiStatus.Warnings, a.configLoadWarning)

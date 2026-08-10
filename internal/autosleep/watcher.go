@@ -40,9 +40,29 @@ type Watcher struct {
 	// while the poll loop and the action goroutine update it. The generation
 	// prevents an older action completion from clearing a newer trigger that
 	// became pending while that action was still draining.
+	lifecycleMutex    sync.Mutex
 	mutex             sync.Mutex
 	triggerOwed       bool
 	triggerGeneration uint64
+}
+
+// ReplacementMonitor snapshots the complete watched-session state for a new
+// watcher with a different delay. Callers cancel this watcher first. The poll
+// loop checks that cancellation while holding lifecycleMutex, so a process
+// observation cannot be committed after this snapshot and then disappear
+// between the old and new watchers.
+func (w *Watcher) ReplacementMonitor(delay time.Duration) *Monitor {
+	w.lifecycleMutex.Lock()
+	defer w.lifecycleMutex.Unlock()
+	monitor := w.Monitor
+	if monitor == nil {
+		monitor = NewMonitor(w.Settings.Delay())
+		w.Monitor = monitor
+	}
+	w.mutex.Lock()
+	triggerOwed := w.triggerOwed
+	w.mutex.Unlock()
+	return monitor.replacement(delay, triggerOwed)
 }
 
 // OwesTrigger reports that a consumed trigger's sleep has not completed yet:
@@ -89,10 +109,13 @@ func (w *Watcher) Run(ctx context.Context) {
 		log.Printf("Auto-sleep watcher not started: %v", err)
 		return
 	}
+	w.lifecycleMutex.Lock()
 	monitor := w.Monitor
 	if monitor == nil {
 		monitor = NewMonitor(w.Settings.Delay())
+		w.Monitor = monitor
 	}
+	w.lifecycleMutex.Unlock()
 	log.Printf("Auto-sleep watcher started: watching %s, delay %s", processName, w.Settings.Delay())
 	defer log.Println("Auto-sleep watcher stopped")
 
@@ -130,6 +153,65 @@ func (w *Watcher) Run(ctx context.Context) {
 			w.Trigger(triggerContext, closedAt)
 		}()
 	}
+	poll := func(now time.Time) bool {
+		running, checkErr := w.IsRunning(processName)
+		if checkErr != nil {
+			log.Printf("Auto-sleep process check failed: %v", checkErr)
+			return true
+		}
+
+		w.lifecycleMutex.Lock()
+		if ctx.Err() != nil {
+			w.lifecycleMutex.Unlock()
+			return false
+		}
+		// Keep monitoring while the Bluetooth action runs. A new session
+		// invalidates the old session's pending sleep immediately, including
+		// work that is already scanning or waiting for a GATT slot.
+		if running {
+			if triggerCancel != nil {
+				triggerCancel()
+			}
+			pendingTrigger = false
+			pendingTriggerGeneration = 0
+			pendingTriggerClosedAt = time.Time{}
+			w.markTriggerOwed(false)
+		}
+		if monitor.Poll(running, now) == ActionTrigger {
+			pendingTrigger = true
+			pendingTriggerGeneration = w.markTriggerOwed(true)
+			_, pendingTriggerClosedAt = monitor.Countdown()
+		}
+		// Fire when a trigger is owed and no action is currently running.
+		// If the previous action is still stopping, this stays pending and
+		// fires on a later tick once it completes; the running re-check on
+		// every tick guarantees a relaunched session is never slept.
+		shouldFire := pendingTrigger && triggerDone == nil && !running
+		generation := pendingTriggerGeneration
+		closedAt := pendingTriggerClosedAt
+		if shouldFire {
+			pendingTrigger = false
+			pendingTriggerGeneration = 0
+			pendingTriggerClosedAt = time.Time{}
+		}
+		w.lifecycleMutex.Unlock()
+
+		if shouldFire {
+			fireTrigger(generation, closedAt)
+		}
+		return true
+	}
+	// Establish the running-session baseline immediately. Waiting for the first
+	// ticker interval could miss a process that exits just after the watcher is
+	// enabled or replaced.
+	initialNow := time.Now()
+	if w.Now != nil {
+		initialNow = w.Now()
+	}
+	if !poll(initialNow) {
+		stopTrigger()
+		return
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -143,39 +225,9 @@ func (w *Watcher) Run(ctx context.Context) {
 			if w.Now != nil {
 				now = w.Now()
 			}
-			running, checkErr := w.IsRunning(processName)
-			if checkErr != nil {
-				log.Printf("Auto-sleep process check failed: %v", checkErr)
-				continue
-			}
-			// Keep monitoring while the Bluetooth action runs. A new session
-			// invalidates the old session's pending sleep immediately, including
-			// work that is already scanning or waiting for a GATT slot.
-			if running {
-				if triggerCancel != nil {
-					triggerCancel()
-				}
-				pendingTrigger = false
-				pendingTriggerGeneration = 0
-				pendingTriggerClosedAt = time.Time{}
-				w.markTriggerOwed(false)
-			}
-			if monitor.Poll(running, now) == ActionTrigger {
-				pendingTrigger = true
-				pendingTriggerGeneration = w.markTriggerOwed(true)
-				_, pendingTriggerClosedAt = monitor.Countdown()
-			}
-			// Fire when a trigger is owed and no action is currently running.
-			// If the previous action is still stopping, this stays pending and
-			// fires on a later tick once it completes; the running re-check on
-			// every tick guarantees a relaunched session is never slept.
-			if pendingTrigger && triggerDone == nil && !running {
-				pendingTrigger = false
-				generation := pendingTriggerGeneration
-				closedAt := pendingTriggerClosedAt
-				pendingTriggerGeneration = 0
-				pendingTriggerClosedAt = time.Time{}
-				fireTrigger(generation, closedAt)
+			if !poll(now) {
+				stopTrigger()
+				return
 			}
 		}
 	}

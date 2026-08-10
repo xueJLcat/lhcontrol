@@ -264,6 +264,80 @@ func TestWatcherContinuesCarriedCountdown(t *testing.T) {
 	}
 }
 
+func TestWatcherReplacementPreservesRunningSessionAcrossCancelledPoll(t *testing.T) {
+	base := time.Now()
+	monitor := NewMonitor(time.Minute)
+	monitor.Poll(true, base)
+	checkStarted := make(chan struct{})
+	releaseCheck := make(chan struct{})
+	var startedOnce sync.Once
+	watcher := &Watcher{
+		Settings: Settings{Enabled: true, Target: string(TargetSteamVR), DelaySeconds: 60},
+		// The process check must happen immediately; this deliberately gives the
+		// periodic ticker no chance to run during the test.
+		Interval: time.Hour,
+		Monitor:  monitor,
+		IsRunning: func(string) (bool, error) {
+			startedOnce.Do(func() { close(checkStarted) })
+			<-releaseCheck
+			return false, nil
+		},
+		Trigger: func(context.Context, time.Time) {},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		watcher.Run(ctx)
+	}()
+	select {
+	case <-checkStarted:
+	case <-time.After(time.Second):
+		cancel()
+		close(releaseCheck)
+		<-done
+		t.Fatal("watcher did not sample the process immediately")
+	}
+
+	// Reconfigure while the old process check is in flight. The replacement
+	// must retain stateRunning; otherwise its first false observation would be
+	// treated as idle and this whole session close would be lost.
+	cancel()
+	replacement := watcher.ReplacementMonitor(2 * time.Minute)
+	close(releaseCheck)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("cancelled watcher did not stop")
+	}
+	closedAt := base.Add(10 * time.Second)
+	if got := replacement.Poll(false, closedAt); got != ActionNone {
+		t.Fatalf("replacement close poll = %v, want countdown start", got)
+	}
+	active, gotClosedAt := replacement.Countdown()
+	if !active || !gotClosedAt.Equal(closedAt) {
+		t.Fatalf("replacement countdown = active %v closedAt %v, want active at %v", active, gotClosedAt, closedAt)
+	}
+}
+
+func TestWatcherReplacementRearmsOwedTrigger(t *testing.T) {
+	base := time.Now()
+	monitor := NewMonitor(time.Minute)
+	monitor.Poll(true, base)
+	monitor.Poll(false, base.Add(time.Second))
+	if got := monitor.Poll(false, base.Add(2*time.Minute)); got != ActionTrigger {
+		t.Fatalf("source monitor = %v, want ActionTrigger", got)
+	}
+	watcher := &Watcher{Settings: Settings{Target: string(TargetSteamVR), DelaySeconds: 60}, Monitor: monitor}
+	watcher.markTriggerOwed(true)
+	replacement := watcher.ReplacementMonitor(3 * time.Minute)
+	active, closedAt := replacement.Countdown()
+	if !active || !closedAt.Equal(base.Add(time.Second)) {
+		t.Fatalf("owed replacement = active %v closedAt %v", active, closedAt)
+	}
+}
+
 func TestWatcherCancelsActiveTriggerWhenProcessRelaunches(t *testing.T) {
 	var running atomic.Bool
 	running.Store(true)

@@ -381,6 +381,60 @@ func finishCancelledInitialRead(station *BaseStation, contextErr error) error {
 	return contextErr
 }
 
+func finishInitialReadResult(
+	station *BaseStation,
+	powerReadErr error,
+	channelReadErr error,
+	metadataReadErr error,
+) error {
+	if powerReadErr != nil || channelReadErr != nil || metadataReadErr != nil {
+		readErr := &InitialReadError{
+			Power:    powerReadErr,
+			Channel:  channelReadErr,
+			Metadata: metadataReadErr,
+		}
+		station.setPowerErrorInternal(powerReadErr)
+		station.setChannelErrorInternal(channelReadErr)
+		return readErr
+	}
+	station.setConnectionErrorInternal(nil)
+	station.setPowerErrorInternal(nil)
+	station.setChannelErrorInternal(nil)
+	return nil
+}
+
+func finishInterruptedInitialRead(
+	station *BaseStation,
+	contextErr error,
+	powerReadCompleted bool,
+	channelReadCompleted bool,
+	powerReadErr error,
+	channelReadErr error,
+	metadataReadErr error,
+) error {
+	// A cancelled GATT read still needs the same connection cleanup as a
+	// cancelled discovery. Preserve timestamps for fields that completed first:
+	// those observations remain authoritative even though their connection was
+	// closed, and callers can use them to avoid duplicate commands.
+	powerReadAt := station.LastPowerReadAt
+	channelReadAt := station.LastChannelReadAt
+	if cleanupErr := disconnectInternal(station); cleanupErr != nil {
+		contextErr = errors.Join(contextErr, transportError("cleanup cancelled initial read", cleanupErr))
+	}
+	if powerReadCompleted {
+		station.LastPowerReadAt = powerReadAt
+	}
+	if channelReadCompleted {
+		station.LastChannelReadAt = channelReadAt
+	}
+	if channelReadErr == nil && !channelReadCompleted {
+		channelReadErr = contextErr
+	} else if channelReadErr != nil {
+		channelReadErr = errors.Join(channelReadErr, contextErr)
+	}
+	return finishInitialReadResult(station, powerReadErr, channelReadErr, metadataReadErr)
+}
+
 // FetchInitialPowerStateContext performs the full initial GATT read using one
 // context so a stopped scan can cancel connection, discovery, and reads.
 func FetchInitialPowerStateContext(ctx context.Context, station *BaseStation) error {
@@ -405,23 +459,41 @@ func FetchInitialPowerStateContext(ctx context.Context, station *BaseStation) er
 	var powerReadErr error
 	var channelReadErr error
 	metadataReadErr := station.metadataReadError
+	powerReadCompleted := false
 	if station.Capabilities.PowerRead {
 		log.Printf("Bluetooth: FetchInitialPowerState proceeding to read state for %s.", station.Name)
 		if powerReadErr = readPowerStateInternalContext(ctx, station); powerReadErr != nil {
 			log.Printf("Bluetooth: Failed to read state in FetchInitialPowerState for %s: %v", station.Name, powerReadErr)
+		} else {
+			powerReadCompleted = true
 		}
 	} else {
 		station.clearPowerStateInternal()
 	}
 	if contextErr := ctx.Err(); contextErr != nil {
+		if powerReadCompleted {
+			// Cancellation landed after a complete power observation, between
+			// independent fields. Preserve that authoritative read so a caller
+			// can avoid sending a duplicate power command. Only the unread
+			// channel is incomplete; no GATT call remains in flight to clean up.
+			if station.Capabilities.ChannelRead {
+				channelReadErr = contextErr
+			}
+			return finishInitialReadResult(station, powerReadErr, channelReadErr, metadataReadErr)
+		}
 		return finishCancelledInitialRead(station, contextErr)
 	}
+	channelReadAttempted := false
+	channelReadCompleted := false
 	if station.Capabilities.ChannelRead {
+		channelReadAttempted = true
 		channelReadErr = readChannelInternalContext(ctx, station)
 		if channelReadErr != nil {
 			// Channel support is optional so power control remains usable on
 			// firmware that does not expose a readable mode characteristic.
 			log.Printf("Bluetooth: Failed to read channel in FetchInitialPowerState for %s: %v", station.Name, channelReadErr)
+		} else {
+			channelReadCompleted = true
 		}
 	} else {
 		station.Channel = ChannelUnknown
@@ -429,21 +501,28 @@ func FetchInitialPowerStateContext(ctx context.Context, station *BaseStation) er
 	}
 
 	if contextErr := ctx.Err(); contextErr != nil {
+		if channelReadAttempted && !channelReadCompleted {
+			return finishInterruptedInitialRead(
+				station,
+				contextErr,
+				powerReadCompleted,
+				channelReadCompleted,
+				powerReadErr,
+				channelReadErr,
+				metadataReadErr,
+			)
+		}
+		if powerReadCompleted || channelReadCompleted {
+			// At least one field completed before cancellation. The context-aware
+			// read has already completed, so retain successful observations and
+			// report only any field that actually failed.
+			return finishInitialReadResult(station, powerReadErr, channelReadErr, metadataReadErr)
+		}
 		return finishCancelledInitialRead(station, contextErr)
 	}
-	if powerReadErr != nil || channelReadErr != nil || metadataReadErr != nil {
-		readErr := &InitialReadError{
-			Power:    powerReadErr,
-			Channel:  channelReadErr,
-			Metadata: metadataReadErr,
-		}
-		station.setPowerErrorInternal(powerReadErr)
-		station.setChannelErrorInternal(channelReadErr)
-		return readErr
+	if err := finishInitialReadResult(station, powerReadErr, channelReadErr, metadataReadErr); err != nil {
+		return err
 	}
-	station.setConnectionErrorInternal(nil)
-	station.setPowerErrorInternal(nil)
-	station.setChannelErrorInternal(nil)
 	log.Printf("Bluetooth: FetchInitialPowerState successful for %s. State: %d, channel: %d", station.Name, station.PowerState, station.Channel)
 	return nil
 }

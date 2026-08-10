@@ -371,7 +371,9 @@ export class StationActionController {
     try {
       const updated = await RefreshStationCapabilities(station.address);
       if (!this.host.gates.canCommitStationOperation(operationEpoch, station.address, operationRevision)) return;
-      this.host.stations = this.host.stations.map((current) => current.address === station.address ? updated : current);
+      // Use the same commit path as every other device read so a newer power
+      // observation also retires settled feedback from an older command.
+      this.host.mergeStationUpdates([updated]);
       if (this.host.gates.canCommitStatus(statusOperation)) {
         const message = updated.lastError
           ? `${t('Capabilities refreshed for {name}, but some values are unavailable', { name: station.name })}: ${updated.lastError}`

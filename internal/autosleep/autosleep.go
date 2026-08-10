@@ -135,6 +135,23 @@ func NewMonitorContinuing(delay time.Duration, closedAt time.Time) *Monitor {
 	return monitor
 }
 
+// replacement returns the same observed process-session state with a new
+// delay. Carrying stateRunning as well as an active countdown closes the small
+// replacement window where a process could exit before the new watcher had
+// observed it running. triggerOwed turns a consumed countdown back into a
+// closed countdown so the replacement can retry its cancelled action.
+func (m *Monitor) replacement(delay time.Duration, triggerOwed bool) *Monitor {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+	replacement := NewMonitor(delay)
+	replacement.state = m.state
+	replacement.closedAt = m.closedAt
+	if triggerOwed && !m.closedAt.IsZero() {
+		replacement.state = stateClosed
+	}
+	return replacement
+}
+
 // Countdown reports an in-flight "session closed" countdown, if any, so a
 // replacement watcher can continue it instead of restarting from idle.
 func (m *Monitor) Countdown() (active bool, closedAt time.Time) {

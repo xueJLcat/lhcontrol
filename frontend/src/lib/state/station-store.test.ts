@@ -157,6 +157,18 @@ describe('StationStore locale changes', () => {
 
     expect(store.statusMessage).toBe('蓝牙操作正在进行');
   });
+
+  it('keeps the specific auto-sleep status while its tracked operation is active', async () => {
+    const { store } = mountStore();
+    await vi.waitFor(() => expect(store.stations).toHaveLength(1));
+    store.externalOperationRunning = true;
+    store.autoSleepRunning = true;
+
+    setLanguagePreference('en');
+    store.onLocaleChanged();
+
+    expect(store.statusMessage).toBe('Auto sleep: scanning and putting all stations to sleep...');
+  });
 });
 
 afterEach(() => {
@@ -360,6 +372,23 @@ describe('StationStore power operations', () => {
 
     expect(backend.SetStationPower).toHaveBeenCalledOnce();
     resolvePower({ station: createStation(), commandSent: true, confirmed: true, confirmationError: '' });
+  });
+
+  it('retires settled power feedback after a capability refresh returns a newer read', async () => {
+    const { store } = mountStore();
+    await vi.waitFor(() => expect(store.stations).toHaveLength(1));
+    const oldRead = '2026-08-11T00:00:00Z';
+    const newRead = '2026-08-11T00:00:01Z';
+    store.powerFeedback.set(store.stations[0].address, {
+      kind: 'success', text: 'Sleep confirmed', target: 'sleep', readAt: oldRead
+    });
+    backend.RefreshStationCapabilities.mockResolvedValue(
+      createStation({ lastPowerReadAt: newRead })
+    );
+
+    await store.refreshCapabilities(store.stations[0]);
+
+    expect(store.powerFeedbackMap[store.stations[0].address]).toBeUndefined();
   });
 });
 

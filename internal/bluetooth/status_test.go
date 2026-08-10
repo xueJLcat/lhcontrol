@@ -10,6 +10,17 @@ import (
 	tinybluetooth "tinygo.org/x/bluetooth"
 )
 
+type cancelAfterSuccessfulRead struct {
+	*fakeCharacteristic
+	cancel context.CancelFunc
+}
+
+func (f *cancelAfterSuccessfulRead) ReadContext(_ context.Context, destination []byte) (int, error) {
+	n, err := f.fakeCharacteristic.Read(destination)
+	f.cancel()
+	return n, err
+}
+
 func TestReadMetadataValueFailureIsIsolated(t *testing.T) {
 	good := &fakeCharacteristic{value: []byte(" Valve Corp. \x00\r\n")}
 	value, err := readMetadataValue(good)
@@ -120,6 +131,72 @@ func TestFetchInitialPowerStateContextCancelsReadAndCleansUpConnection(t *testin
 		t.Fatalf("cancelled read cleanup: disconnects=%d connected=%v", device.disconnects, station.Snapshot().Connected)
 	}
 }
+
+func TestFetchInitialPowerStateContextPreservesPowerReadWhenCancelledBetweenFields(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	power := &cancelAfterSuccessfulRead{
+		fakeCharacteristic: &fakeCharacteristic{value: []byte{0x0B}},
+		cancel:             cancel,
+	}
+	station := connectedFakeStation(
+		power,
+		&fakeCharacteristic{value: []byte{3}},
+		nil,
+		Capabilities{PowerRead: true, ChannelRead: true},
+	)
+	device := &trackingConnectedDevice{}
+	station.device = device
+
+	err := FetchInitialPowerStateContext(ctx, station)
+	var initialErr *InitialReadError
+	if !errors.As(err, &initialErr) || initialErr.Power != nil || !errors.Is(initialErr.Channel, context.Canceled) {
+		t.Fatalf("FetchInitialPowerStateContext() error = %#v, want channel-only cancellation", err)
+	}
+	snapshot := station.Snapshot()
+	if snapshot.PowerState != PowerStateOn || snapshot.RawPowerState != 0x0B || snapshot.LastPowerReadAt.IsZero() {
+		t.Fatalf("completed power read was discarded: %+v", snapshot)
+	}
+	if !snapshot.Connected || device.disconnects != 0 {
+		t.Fatalf("between-field cancellation disconnected a completed read: connected=%v disconnects=%d", snapshot.Connected, device.disconnects)
+	}
+}
+
+func TestFetchInitialPowerStateContextCleansUpCancelledChannelAndPreservesPower(t *testing.T) {
+	channel := &blockingContextCharacteristic{
+		fakeCharacteristic: &fakeCharacteristic{},
+		started:            make(chan struct{}),
+	}
+	station := connectedFakeStation(
+		&fakeCharacteristic{value: []byte{0x0B}},
+		channel,
+		nil,
+		Capabilities{PowerRead: true, ChannelRead: true},
+	)
+	device := &trackingConnectedDevice{}
+	station.device = device
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() { result <- FetchInitialPowerStateContext(ctx, station) }()
+	select {
+	case <-channel.started:
+	case <-time.After(time.Second):
+		t.Fatal("context-aware channel read did not start")
+	}
+	cancel()
+	err := <-result
+	var initialErr *InitialReadError
+	if !errors.As(err, &initialErr) || initialErr.Power != nil || !errors.Is(initialErr.Channel, context.Canceled) {
+		t.Fatalf("FetchInitialPowerStateContext() error = %#v, want channel-only cancellation", err)
+	}
+	snapshot := station.Snapshot()
+	if snapshot.PowerState != PowerStateOn || snapshot.RawPowerState != 0x0B || snapshot.LastPowerReadAt.IsZero() {
+		t.Fatalf("completed power read was discarded during cleanup: %+v", snapshot)
+	}
+	if snapshot.Connected || device.disconnects != 1 {
+		t.Fatalf("cancelled channel read cleanup: connected=%v disconnects=%d", snapshot.Connected, device.disconnects)
+	}
+}
+
 func TestReadPowerStateContextCancelsBlockingRead(t *testing.T) {
 	power := &blockingContextCharacteristic{
 		fakeCharacteristic: &fakeCharacteristic{},
