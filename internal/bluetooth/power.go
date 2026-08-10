@@ -523,7 +523,7 @@ func SetPowerStateContext(ctx context.Context, station *BaseStation, target Powe
 		return PowerControlResult{}, fmt.Errorf("failed to write %s command after %d retries: %w", target, maxRetries, err)
 	}
 	if !station.Capabilities.PowerRead {
-		station.setPowerStateInternal(PowerStateUnknown, RawPowerStateUnknown)
+		station.clearPowerStateInternal()
 		station.setPowerErrorInternal(nil)
 		station.setOperationErrorInternal(nil)
 		return PowerControlResult{State: target, Confirmed: false}, nil

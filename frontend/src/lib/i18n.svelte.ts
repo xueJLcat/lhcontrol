@@ -20,6 +20,7 @@ const zhCN = {
   'Scan duration could not be saved': '无法保存扫描时长',
   'Automatic station refresh setting could not be loaded': '无法加载自动基站刷新设置',
   'Automatic station refresh setting could not be saved': '无法保存自动基站刷新设置',
+  'Setting was saved, but the current view could not apply it immediately': '设置已保存，但当前界面无法立即应用该更改',
   'Status polling interval': '状态轮询间隔',
   'Status polling interval could not be loaded': '无法加载状态轮询间隔',
   'Status polling interval could not be saved': '无法保存状态轮询间隔',

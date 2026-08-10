@@ -226,6 +226,12 @@ func connectAndDiscoverInternalContext(ctx context.Context, station *BaseStation
 			station.identifyCharacteristic = identifyCharacteristic
 			station.Capabilities = capabilities
 			station.CapabilitiesKnown = true
+			if !capabilities.PowerRead {
+				// Capability discovery is authoritative for this connection. Do
+				// not retain a power value and freshness timestamp read through an
+				// older GATT database that exposed a readable characteristic.
+				station.clearPowerStateInternal()
+			}
 			if !capabilities.ChannelRead {
 				// Do not retain a channel obtained from an older discovery when
 				// the current firmware/session no longer exposes a readable Mode

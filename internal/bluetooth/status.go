@@ -21,7 +21,7 @@ func readPowerStateInternalContext(ctx context.Context, station *BaseStation) er
 		station.LastPowerReadAt = time.Time{}
 		if IsCapabilityUnsupported(err) {
 			station.Capabilities.PowerRead = false
-			station.setPowerStateInternal(PowerStateUnknown, RawPowerStateUnknown)
+			station.clearPowerStateInternal()
 			return unsupportedCapability("power read", err)
 		}
 		return transportError("read power characteristic", fmt.Errorf("%s: %w", station.Name, err))
@@ -145,7 +145,7 @@ func ReadPowerStateContext(ctx context.Context, station *BaseStation) error {
 			powerReadErr = readPowerStateInternalContext(ctx, station)
 		}
 	} else {
-		station.setPowerStateInternal(PowerStateUnknown, RawPowerStateUnknown)
+		station.clearPowerStateInternal()
 	}
 	if err := ctx.Err(); err != nil {
 		if powerReadErr != nil {
@@ -411,7 +411,7 @@ func FetchInitialPowerStateContext(ctx context.Context, station *BaseStation) er
 			log.Printf("Bluetooth: Failed to read state in FetchInitialPowerState for %s: %v", station.Name, powerReadErr)
 		}
 	} else {
-		station.setPowerStateInternal(PowerStateUnknown, RawPowerStateUnknown)
+		station.clearPowerStateInternal()
 	}
 	if contextErr := ctx.Err(); contextErr != nil {
 		return finishCancelledInitialRead(station, contextErr)

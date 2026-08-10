@@ -387,6 +387,24 @@ describe('SettingsPanel', () => {
     expect(onStatusPollIntervalChanged).toHaveBeenCalledWith(45);
   });
 
+  it('keeps a persisted value when its immediate UI follow-up fails', async () => {
+    const onStatusPollIntervalChanged = vi.fn(() => {
+      throw new Error('poller unavailable');
+    });
+    render(SettingsPanel, { props: { onClose: vi.fn(), onStatusPollIntervalChanged } });
+    const input = await screen.findByLabelText('Status polling interval');
+    await fireEvent.input(input, { target: { value: '45' } });
+    await fireEvent.change(input);
+
+    await waitFor(() => expect(backend.SetStatusPollIntervalSeconds).toHaveBeenCalledWith(45));
+    await waitFor(() => expect(input).toHaveValue(45));
+    expect(onStatusPollIntervalChanged).toHaveBeenCalledWith(45);
+    expect(pushToast).toHaveBeenCalledWith(
+      'Setting was saved, but the current view could not apply it immediately: Error: poller unavailable',
+      'warning'
+    );
+  });
+
   it('refreshes station projection after projection-affecting settings are saved', async () => {
     const onStationProjectionChanged = vi.fn();
     render(SettingsPanel, { props: { onClose: vi.fn(), onStationProjectionChanged } });

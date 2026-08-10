@@ -468,15 +468,15 @@ describe('SettingsDrawer', () => {
 
   it('does not round-trip a non-whole-minute delay when the input is cleared', async () => {
     // A hand-edited config can store a delay that is not a whole number of
-    // minutes (90s). Clearing the field must restore the displayed value
-    // without committing it, which would otherwise rewrite 90s as 120s.
+    // minutes (90s). Clearing the field must restore the exact displayed
+    // value without issuing a redundant save.
     const props = defaultProps({ autoSleep: autoSleep({ enabled: true, delaySeconds: 90 }) });
     render(SettingsDrawer, { props });
     const input = screen.getByLabelText('Wait before sleeping') as HTMLInputElement;
-    expect(input.value).toBe('2');
+    expect(input.value).toBe('1.5');
     await fireEvent.input(input, { target: { value: '' } });
     await fireEvent.change(input);
-    expect(input.value).toBe('2');
+    expect(input.value).toBe('1.5');
     expect(props.onAutoSleepChange).not.toHaveBeenCalled();
   });
 });
@@ -551,21 +551,21 @@ describe('SettingsDrawer auto sleep', () => {
     expect(input.value).toBe('120');
   });
 
-  it('keeps a hand-edited non-whole-minute delay until a different minute count is chosen', async () => {
+  it('shows and preserves a hand-edited non-whole-minute delay exactly', async () => {
     const props = defaultProps({ autoSleep: autoSleep({ enabled: true, delaySeconds: 90 }) });
     render(SettingsDrawer, { props });
     const input = screen.getByLabelText('Wait before sleeping') as HTMLInputElement;
-    expect(input.value).toBe('2');
+    expect(input.value).toBe('1.5');
 
     await fireEvent.change(input);
     expect(props.onAutoSleepChange).not.toHaveBeenCalled();
-    expect(input.value).toBe('2');
+    expect(input.value).toBe('1.5');
 
-    await fireEvent.input(input, { target: { value: '3' } });
+    await fireEvent.input(input, { target: { value: '1.75' } });
     await fireEvent.change(input);
     expect(props.onAutoSleepChange).toHaveBeenCalledTimes(1);
     const next = props.onAutoSleepChange.mock.calls[0][0] as autosleep.Settings;
-    expect(next.delaySeconds).toBe(180);
+    expect(next.delaySeconds).toBe(105);
   });
 
   it('locks the auto sleep controls while a change is being saved', () => {

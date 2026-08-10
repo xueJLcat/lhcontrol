@@ -122,6 +122,14 @@ func (m *Manager) CheckAllStationStatuses() ([]StationInfo, error) {
 								return
 							}
 							m.recordStructuredReadResult(ptr, address, readErr.Power, readErr.Channel)
+						} else if errors.Is(workerErr, context.DeadlineExceeded) &&
+							!bluetooth.RequiresReconnect(workerErr) {
+							// The context can expire just before ReadPowerStateContext
+							// starts, in which case it returns a bare deadline rather than
+							// a structured read error. Treat it like the structured power
+							// timeout above instead of disconnecting a healthy station.
+							m.noteStatusFailure(address)
+							m.trackStatusRefreshPending(address)
 						} else {
 							m.recordUnstructuredStationFailure(ptr, address, workerErr)
 						}

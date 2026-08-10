@@ -35,11 +35,22 @@ export class AsyncSetting<T> {
     this.value = next;
     this.busy = true;
     try {
-      await this.options.setter(next);
-      await this.options.afterSave?.(next);
-    } catch (error) {
-      this.value = previous;
-      pushToast(withDetail(this.options.saveMessage, error));
+      try {
+        await this.options.setter(next);
+      } catch (error) {
+        this.value = previous;
+        pushToast(withDetail(this.options.saveMessage, error));
+        return;
+      }
+
+      try {
+        await this.options.afterSave?.(next);
+      } catch (error) {
+        // Persistence already succeeded. Keep the saved value visible and
+        // report only the local follow-up failure; rolling back here would
+        // make the UI disagree with the backend and the next application run.
+        pushToast(withDetail('Setting was saved, but the current view could not apply it immediately', error), 'warning');
+      }
     } finally {
       this.busy = false;
     }

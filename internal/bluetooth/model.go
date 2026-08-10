@@ -146,6 +146,16 @@ func (bs *BaseStation) setPowerStateInternal(state PowerState, raw int) {
 	bs.LastStateUpdate = time.Now()
 }
 
+// clearPowerStateInternal removes a cached power observation when the current
+// GATT session cannot read power. Leaving the old read timestamp in place
+// would make a value from an earlier capability set look current.
+// Assumes the caller holds bs.mutex for writing.
+func (bs *BaseStation) clearPowerStateInternal() {
+	bs.setPowerStateInternal(PowerStateUnknown, RawPowerStateUnknown)
+	bs.LastPowerReadAt = time.Time{}
+	bs.bootRawTrustedOn = false
+}
+
 func (bs *BaseStation) updateLastReadInternal(readAt time.Time) {
 	if readAt.After(bs.LastReadAt) {
 		bs.LastReadAt = readAt

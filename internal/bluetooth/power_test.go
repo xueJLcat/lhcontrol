@@ -109,14 +109,18 @@ func TestSetPowerStateWithoutReadReportsUnconfirmed(t *testing.T) {
 	power := &fakeCharacteristic{value: []byte{0x00}, powerSemantics: true}
 	station := connectedFakeStation(power, nil, nil, Capabilities{PowerWrite: true})
 	lastChannelRead := time.Now().Add(-time.Minute)
+	station.PowerState = PowerStateSleep
+	station.RawPowerState = 0x00
+	station.LastPowerReadAt = time.Now()
 	station.LastChannelReadAt = lastChannelRead
 	station.LastReadAt = lastChannelRead
 	result, err := SetPowerState(station, PowerStateOn)
 	if err != nil {
 		t.Fatalf("SetPowerState() error = %v", err)
 	}
-	if result.Confirmed || station.PowerState != PowerStateUnknown {
-		t.Fatalf("result = %+v, cached state = %v", result, station.PowerState)
+	if result.Confirmed || station.PowerState != PowerStateUnknown ||
+		station.RawPowerState != RawPowerStateUnknown || !station.LastPowerReadAt.IsZero() {
+		t.Fatalf("result = %+v, cached state = %+v", result, station.Snapshot())
 	}
 	if !station.LastReadAt.Equal(lastChannelRead) {
 		t.Fatalf("unconfirmed power write discarded last successful status read: %v", station.LastReadAt)

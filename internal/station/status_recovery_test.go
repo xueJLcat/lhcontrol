@@ -473,6 +473,50 @@ func TestRecoveryReadDeadlineDoesNotDisconnectStation(t *testing.T) {
 	}
 }
 
+func TestStatusRefreshBareDeadlineDoesNotDisconnectStation(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	address := "11:22:33:44:55:7B"
+	manager.stations[address] = &internalbluetooth.BaseStation{
+		Name: "LHB-SLOW-STATUS", Address: mustAddress(t, address), Present: true,
+	}
+	manager.bluetoothOps.stationConnected = func(*internalbluetooth.BaseStation) bool { return true }
+	manager.bluetoothOps.readPowerStateContext = func(context.Context, *internalbluetooth.BaseStation) error {
+		// ReadPowerStateContext can return this bare error when its context
+		// expires before the function begins its structured reads.
+		return context.DeadlineExceeded
+	}
+	var disconnects atomic.Int32
+	manager.bluetoothOps.disconnectStation = func(*internalbluetooth.BaseStation) error {
+		disconnects.Add(1)
+		return nil
+	}
+	releaseRecovery := make(chan struct{})
+	manager.bluetoothOps.fetchInitialPowerState = func(ctx context.Context, _ *internalbluetooth.BaseStation) error {
+		select {
+		case <-releaseRecovery:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	defer manager.Shutdown()
+	defer close(releaseRecovery)
+
+	_, err := manager.CheckAllStationStatuses()
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("CheckAllStationStatuses() error = %v, want context deadline", err)
+	}
+	if got := disconnects.Load(); got != 0 {
+		t.Fatalf("disconnect calls after a bare status deadline = %d, want 0", got)
+	}
+	manager.statusRetryMutex.Lock()
+	retry, tracked := manager.statusRetries[address]
+	manager.statusRetryMutex.Unlock()
+	if !tracked || retry.failures == 0 || effectiveStatusRetryKinds(retry)&statusRetryRefresh == 0 {
+		t.Fatalf("status deadline retry = %+v, tracked=%v; want backoff plus pending refresh", retry, tracked)
+	}
+}
+
 func TestStatusFailureSchedulesRecoveryWithoutStatusPolling(t *testing.T) {
 	manager := NewManager(config.NewConfig())
 	defer manager.Shutdown()

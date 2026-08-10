@@ -120,11 +120,21 @@ func SetChannelContext(ctx context.Context, station *BaseStation, channel int) (
 		// Once the transport reports an ambiguous write, a failed readback
 		// cannot turn it back into a definitely-unsent command.
 		result.CommandSent = IsPossiblySent(writeErr)
+		possiblySent, sendClassified := possiblySentClassification(writeErr)
+		definitelyNotSent := isDefiniteWriteRejection(writeErr) || (sendClassified && !possiblySent)
 		if readErr := readChannelInternalContext(ctx, station); readErr == nil {
 			result.Channel = station.Channel
 			if station.Channel == channel {
-				result.CommandSent = true
-				result.WriteWarning = fmt.Sprintf("the write call reported an error, but channel %d was confirmed by readback: %v", channel, writeErr)
+				if definitelyNotSent {
+					// The requested outcome was reached independently after the
+					// initial read. Report success, but do not claim this operation
+					// sent a command the transport explicitly rejected.
+					result.CommandSent = false
+					result.WriteWarning = fmt.Sprintf("the write was reported as not sent, but channel %d was observed by readback: %v", channel, writeErr)
+				} else {
+					result.CommandSent = true
+					result.WriteWarning = fmt.Sprintf("the write call reported an error, but channel %d was confirmed by readback: %v", channel, writeErr)
+				}
 				station.LastReadAt = time.Now()
 				station.setChannelErrorInternal(nil)
 				station.setOperationErrorInternal(nil)

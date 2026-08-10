@@ -23,11 +23,19 @@
 
   let delayDraft = $state<string | number | null>('');
   let knownDelaySeconds: number | null = null;
+
+  // Two decimal places in minutes are enough to round-trip every whole
+  // second (0.01 minute is 0.6 seconds) while keeping hand-edited values such
+  // as 90 seconds readable as 1.5 minutes instead of misreporting 2 minutes.
+  function formatDelayMinutes(delaySeconds: number): string {
+    return (delaySeconds / 60).toFixed(2).replace(/\.?0+$/, '');
+  }
+
   $effect(() => {
     const current = settings.autoSleep ? settings.autoSleep.delaySeconds : null;
     if (current === null || current === knownDelaySeconds) return;
-    if (knownDelaySeconds === null || String(delayDraft ?? '') === String(Math.round(knownDelaySeconds / 60))) {
-      delayDraft = String(Math.round(current / 60));
+    if (knownDelaySeconds === null || String(delayDraft ?? '') === formatDelayMinutes(knownDelaySeconds)) {
+      delayDraft = formatDelayMinutes(current);
     }
     knownDelaySeconds = current;
   });
@@ -38,13 +46,13 @@
     const text = String(delayDraft ?? '').trim();
     const parsed = Number(text);
     if (text === '' || !Number.isFinite(parsed)) {
-      delayDraft = String(Math.round(autoSleep.delaySeconds / 60));
+      delayDraft = formatDelayMinutes(autoSleep.delaySeconds);
       return;
     }
-    const minutes = Math.min(R.MAX_DELAY_MINUTES, Math.max(R.MIN_DELAY_MINUTES, Math.round(parsed)));
-    delayDraft = String(minutes);
-    const delaySeconds = minutes * 60;
-    if (delaySeconds !== autoSleep.delaySeconds && minutes !== Math.round(autoSleep.delaySeconds / 60)) {
+    const minutes = Math.min(R.MAX_DELAY_MINUTES, Math.max(R.MIN_DELAY_MINUTES, parsed));
+    const delaySeconds = Math.round(minutes * 60);
+    delayDraft = formatDelayMinutes(delaySeconds);
+    if (delaySeconds !== autoSleep.delaySeconds) {
       settings.onAutoSleepChange(autosleep.Settings.createFrom({ ...autoSleep, delaySeconds }));
     }
   }
@@ -184,7 +192,7 @@
               type="number"
               min={R.MIN_DELAY_MINUTES}
               max={R.MAX_DELAY_MINUTES}
-              step="1"
+              step="0.01"
               bind:value={delayDraft}
               onchange={commitDelay}
               disabled={settings.autoSleepBusy}

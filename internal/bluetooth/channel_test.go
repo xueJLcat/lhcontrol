@@ -34,6 +34,19 @@ func TestStatusReadClearsChannelWhenCapabilityIsUnavailable(t *testing.T) {
 		t.Fatalf("status read without readable values updated LastReadAt: %v", station.LastReadAt)
 	}
 }
+func TestStatusReadClearsPowerWhenCapabilityIsUnavailable(t *testing.T) {
+	station := connectedFakeStation(&fakeCharacteristic{}, nil, nil, Capabilities{})
+	station.PowerState = PowerStateOn
+	station.RawPowerState = 0x0B
+	station.LastPowerReadAt = time.Now()
+	if err := ReadPowerState(station); err != nil {
+		t.Fatalf("ReadPowerState() error = %v", err)
+	}
+	if station.PowerState != PowerStateUnknown || station.RawPowerState != RawPowerStateUnknown ||
+		!station.LastPowerReadAt.IsZero() {
+		t.Fatalf("stale power state was retained: %+v", station.Snapshot())
+	}
+}
 func TestInitialReadClearsChannelWhenCapabilityIsUnavailable(t *testing.T) {
 	station := connectedFakeStation(&fakeCharacteristic{}, nil, nil, Capabilities{})
 	station.Channel = 7
@@ -43,6 +56,19 @@ func TestInitialReadClearsChannelWhenCapabilityIsUnavailable(t *testing.T) {
 	}
 	if station.Channel != ChannelUnknown || !station.LastChannelReadAt.IsZero() {
 		t.Fatalf("stale channel was retained: %+v", station.Snapshot())
+	}
+}
+func TestInitialReadClearsPowerWhenCapabilityIsUnavailable(t *testing.T) {
+	station := connectedFakeStation(&fakeCharacteristic{}, nil, nil, Capabilities{})
+	station.PowerState = PowerStateOn
+	station.RawPowerState = 0x0B
+	station.LastPowerReadAt = time.Now()
+	if err := FetchInitialPowerState(station); err != nil {
+		t.Fatalf("FetchInitialPowerState() error = %v", err)
+	}
+	if station.PowerState != PowerStateUnknown || station.RawPowerState != RawPowerStateUnknown ||
+		!station.LastPowerReadAt.IsZero() {
+		t.Fatalf("initial read retained stale power state: %+v", station.Snapshot())
 	}
 }
 func TestSetChannelConfirmsReadback(t *testing.T) {
@@ -281,6 +307,27 @@ func TestSetChannelAcceptsConfirmedReadbackAfterWriteError(t *testing.T) {
 	}
 	if !result.CommandSent {
 		t.Fatalf("result = %+v, want command sent", result)
+	}
+}
+func TestSetChannelDoesNotClaimDefinitelyRejectedWriteWasSent(t *testing.T) {
+	for name, writeErr := range map[string]error{
+		"transport classification": &classifiedWriteError{possiblySent: false},
+		"ATT rejection":            tinybluetooth.ErrAttInvalidHandle,
+	} {
+		t.Run(name, func(t *testing.T) {
+			mode := &fakeCharacteristic{
+				readValues: [][]byte{{0x03}, {0x05}},
+				writeErr:   writeErr,
+			}
+			station := connectedFakeStation(&fakeCharacteristic{}, mode, nil, Capabilities{ChannelRead: true, ChannelWrite: true})
+			result, err := SetChannel(station, 5)
+			if err != nil {
+				t.Fatalf("SetChannel() error = %v", err)
+			}
+			if result.Channel != 5 || result.CommandSent || result.WriteWarning == "" {
+				t.Fatalf("result = %+v, want independently reached channel without a sent command", result)
+			}
+		})
 	}
 }
 func TestSetChannelReportsMismatchedFinalReadback(t *testing.T) {
