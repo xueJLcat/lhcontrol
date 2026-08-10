@@ -748,25 +748,31 @@ func (a *App) applyBluetoothTiming() {
 }
 
 // applyAutoSleep (re)starts the auto-sleep watcher goroutine to match the
-
 // given settings. Calling it repeatedly is safe: the previous watcher is
-
-// cancelled and joined first.
-
+// cancelled (and joined at shutdown), never torn down mid-trigger.
 func (a *App) applyAutoSleep(settings autosleep.Settings) {
 
 	a.autoSleepMutex.Lock()
 
 	defer a.autoSleepMutex.Unlock()
 
-	if a.autoSleepCancel != nil {
-
+	var monitor *autosleep.Monitor
+	if previous := a.autoSleepWatcher; previous != nil {
+		if previous.Settings.Target == settings.Target {
+			// A settings change for the same watched target must not silently
+			// drop a pending sleep: carry the in-flight countdown over to the
+			// replacement watcher.
+			if active, closedAt := previous.Monitor.Countdown(); active {
+				monitor = autosleep.NewMonitorContinuing(settings.Delay(), closedAt)
+			}
+		}
 		a.autoSleepCancel()
-
-		a.autoSleepWG.Wait()
-
 		a.autoSleepCancel = nil
-
+		a.autoSleepWatcher = nil
+		// The cancelled watcher exits on its own; if it is still finishing a
+		// running sleep action, joining it here would block the settings
+		// caller behind a possibly minute-long Bluetooth operation. Shutdown
+		// joins every watcher through the shared wait group instead.
 	}
 
 	if !settings.Enabled || a.shuttingDown.Load() {
@@ -775,28 +781,29 @@ func (a *App) applyAutoSleep(settings autosleep.Settings) {
 
 	}
 
+	if monitor == nil {
+		monitor = autosleep.NewMonitor(settings.Delay())
+	}
+
+	watcher := &autosleep.Watcher{
+		Settings: settings,
+		Monitor:  monitor,
+		IsRunning: func(name string) (bool, error) {
+			return platform.IsProcessRunning(name)
+		},
+		Trigger: a.runAutoSleep,
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 
 	a.autoSleepCancel = cancel
+	a.autoSleepWatcher = watcher
 
 	a.autoSleepWG.Add(1)
 
 	go func() {
 
 		defer a.autoSleepWG.Done()
-
-		watcher := &autosleep.Watcher{
-
-			Settings: settings,
-
-			IsRunning: func(name string) (bool, error) {
-
-				return platform.IsProcessRunning(name)
-
-			},
-
-			Trigger: a.runAutoSleep,
-		}
 
 		watcher.Run(ctx)
 
@@ -806,7 +813,11 @@ func (a *App) applyAutoSleep(settings autosleep.Settings) {
 
 // stopAutoSleep terminates the auto-sleep watcher and waits for it,
 
-// including a trigger action that may still be running.
+// including a trigger action that may still be running. It also joins
+
+// superseded watchers whose sleep action was still draining when settings
+
+// replaced them.
 
 func (a *App) stopAutoSleep() {
 
@@ -818,11 +829,13 @@ func (a *App) stopAutoSleep() {
 
 		a.autoSleepCancel()
 
-		a.autoSleepWG.Wait()
-
 		a.autoSleepCancel = nil
 
+		a.autoSleepWatcher = nil
+
 	}
+
+	a.autoSleepWG.Wait()
 
 }
 

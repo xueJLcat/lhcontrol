@@ -1,5 +1,5 @@
 import type { station } from '../../wailsjs/go/models';
-import { formatTerminalScanResult } from './result-format';
+import { formatTerminalScanResult, isTerminalScanState } from './result-format';
 import { t } from './i18n.svelte';
 import type { StationInfo } from './types';
 
@@ -129,7 +129,12 @@ export class ExternalScanCoordinator {
     this.host.setStoppingScan(false);
     this.host.maybeEndScanTimer();
     const capturedStationRevisions = this.host.snapshotStationRevisions();
-    const scanStatus = await this.host.getScanStatus().catch(() => null);
+    // A non-terminal status belongs to a scan that started after this one
+    // finished; discarding it leaves the recovery epochs pending so the
+    // periodic check retries with the correct outcome instead of rendering
+    // the new scan's starting state as this scan's completion.
+    const completedScanStatus = await this.host.getScanStatus().catch(() => null);
+    const scanStatus = completedScanStatus && isTerminalScanState(completedScanStatus.state) ? completedScanStatus : null;
     if (this.host.isDisposed() || !this.host.isListRevisionCurrent(revision)) return;
     if (scanStatus) {
       this.recoveryEpoch = null;
@@ -167,7 +172,8 @@ export class ExternalScanCoordinator {
     if (updated) {
       this.host.applyStationList(updated, revision, capturedStationRevisions);
     }
-    const scanStatus = await this.host.getScanStatus().catch(() => null);
+    const failedScanStatus = await this.host.getScanStatus().catch(() => null);
+    const scanStatus = failedScanStatus && isTerminalScanState(failedScanStatus.state) ? failedScanStatus : null;
     if (this.host.isDisposed() || !this.host.isListRevisionCurrent(revision)) return;
     if (updated && scanStatus) {
       this.recoveryEpoch = null;
@@ -229,11 +235,17 @@ export class ExternalScanCoordinator {
     }
     const scanStatus = await this.host.getScanStatus().catch(() => null);
     if (this.host.isDisposed() || !this.host.isListRevisionCurrent(revision)) return;
-    if (updated && scanStatus) {
+    if (updated && scanStatus && isTerminalScanState(scanStatus.state)) {
       this.recoveryEpoch = null;
       this.recoveryStatusEpoch = null;
     }
     if (!this.host.canCommitStatus(statusOperation)) return;
+    if (!scanStatus || !isTerminalScanState(scanStatus.state)) {
+      // A non-terminal status belongs to a scan that started after the
+      // untracked one ended. Leave the recovery epochs pending so the next
+      // poll retries instead of rendering the wrong scan's state.
+      return;
+    }
     const found = scanStatus?.found ?? this.host.seenInLatestScanCount();
     this.host.setStatusMessage(formatTerminalScanResult({
       state: scanStatus?.state ?? 'completed',
@@ -278,7 +290,9 @@ export class ExternalScanCoordinator {
     if (this.host.isDisposed() || !this.host.isListRevisionCurrent(revision)) {
       return;
     }
-    if (!scanStatus) {
+    // A non-terminal status belongs to a newer scan; keep the recovery
+    // epochs pending for a retry instead of rendering its state.
+    if (!scanStatus || !isTerminalScanState(scanStatus.state)) {
       return;
     }
     this.recoveryEpoch = null;
@@ -321,7 +335,9 @@ export class ExternalScanCoordinator {
     if (!updated || !this.host.applyStationList(updated, revision, capturedStationRevisions)) return 'aborted';
     const scanStatus = await this.host.getScanStatus().catch(() => null);
     if (!this.host.canCommitOperation(operationEpoch) || !this.host.isListRevisionCurrent(revision)) return 'aborted';
-    if (!scanStatus) return 'aborted';
+    // A non-terminal status belongs to a scan that started after the stop;
+    // aborting keeps the recovery epochs pending for the periodic check.
+    if (!scanStatus || !isTerminalScanState(scanStatus.state)) return 'aborted';
     this.recoveryEpoch = null;
     const canWriteTerminalStatus = this.recoveryStatusEpoch === this.host.statusEpoch();
     this.recoveryStatusEpoch = null;

@@ -8,7 +8,7 @@ import {
 } from '../backend';
 import type { StationInfo } from '../types';
 import { classifyScanError, scanErrorCopy, type ScanErrorInfo } from '../scan-error';
-import { formatTerminalScanResult } from '../result-format';
+import { formatTerminalScanResult, isTerminalScanState } from '../result-format';
 import { pushToast } from '../toast';
 import type { GlobalOperation } from '../operation-state';
 import { ExternalScanCoordinator } from '../external-scan';
@@ -62,6 +62,10 @@ export class StationScanController {
     try {
       const scanning = await IsScanning();
       if (this.host.disposed || !this.host.listRevisions.isCurrent(revision)) return;
+      // Auto-sleep runs its own scan. Adopting it as an external scan would
+      // offer Stop for an internal operation (cancelling the pending sleep)
+      // and replay a bogus recovery once it ends; skip this tick entirely.
+      if (this.host.autoSleepRunning) return;
       const wasExternalScanning = this.host.externalScanning;
       if (scanning && !this.host.isLoading && !this.host.externalScanning) {
         await this.host.externalScan.adoptUnknown();
@@ -134,6 +138,10 @@ export class StationScanController {
       if (!this.host.applyStationList(await ScanAndFetchStations(), revision)) return;
       const scanStatus = await GetScanStatus().catch(() => null);
       if (!this.host.gates.canCommitOperation(operationEpoch) || !this.host.listRevisions.isCurrent(revision) || !this.host.gates.canCommitStatus(statusOperation)) return;
+      this.host.scanError = null;
+      // A non-terminal status means another scan started while this read was
+      // in flight; its own events own the status line from here on.
+      if (scanStatus && !isTerminalScanState(scanStatus.state)) return;
       const found = scanStatus?.found ?? this.host.stations.filter((station) => station.seenInLatestScan).length;
       this.host.statusMessage = formatTerminalScanResult({
         state: scanStatus?.state ?? 'completed',
@@ -141,7 +149,6 @@ export class StationScanController {
         error: scanStatus?.error,
         warnings: scanStatus?.warnings
       });
-      this.host.scanError = null;
     } catch (error) {
       if (!this.host.gates.canCommitOperation(operationEpoch) || !this.host.listRevisions.isCurrent(revision) || !this.host.gates.canCommitStatus(statusOperation)) return;
       const updated = await GetCurrentStationInfo().catch(() => null);
@@ -149,7 +156,10 @@ export class StationScanController {
       if (updated) this.host.applyStationList(updated, revision);
       const scanStatus = await GetScanStatus().catch(() => null);
       if (!this.host.gates.canCommitOperation(operationEpoch) || !this.host.listRevisions.isCurrent(revision) || !this.host.gates.canCommitStatus(statusOperation)) return;
-      if (this.host.stoppingScan || scanStatus?.state === 'cancelled') {
+      // A scan that ended while a newer scan is already running was stopped
+      // (superseded); only a terminal status can tell failed from stopped.
+      const supersededByNewScan = scanStatus !== null && !isTerminalScanState(scanStatus.state);
+      if (this.host.stoppingScan || supersededByNewScan || scanStatus?.state === 'cancelled') {
         if (!this.host.stopRequestPending) this.host.stoppingScan = false;
         this.host.statusMessage = t('Scan stopped.');
         this.host.scanError = null;

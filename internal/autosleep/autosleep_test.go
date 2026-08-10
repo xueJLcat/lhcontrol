@@ -149,6 +149,82 @@ func TestMonitorRejectsNonPositiveDelay(t *testing.T) {
 	}
 }
 
+func TestMonitorCountdownContinuesAcrossReplacement(t *testing.T) {
+	base := time.Now()
+	original := NewMonitor(5 * time.Minute)
+
+	active, _ := original.Countdown()
+	if active {
+		t.Fatal("fresh monitor reported an active countdown")
+	}
+
+	original.Poll(true, base)
+	original.Poll(false, base.Add(time.Minute))
+	active, closedAt := original.Countdown()
+	if !active || !closedAt.Equal(base.Add(time.Minute)) {
+		t.Fatalf("Countdown() = (%v, %v), want an active countdown from %v", active, closedAt, base.Add(time.Minute))
+	}
+
+	// A replacement watcher for the same target keeps the pending sleep: the
+	// carried countdown fires on the new delay schedule without a fresh
+	// running->closed observation.
+	replacement := NewMonitorContinuing(2*time.Minute, closedAt)
+	if got := replacement.Poll(false, base.Add(2*time.Minute)); got != ActionNone {
+		t.Fatalf("poll before the carried delay elapsed = %v, want ActionNone", got)
+	}
+	if got := replacement.Poll(false, base.Add(3*time.Minute+time.Second)); got != ActionTrigger {
+		t.Fatalf("poll after the carried delay elapsed = %v, want ActionTrigger", got)
+	}
+
+	// A relaunch still aborts the carried countdown like a fresh one.
+	relaunched := NewMonitorContinuing(2*time.Minute, closedAt)
+	if got := relaunched.Poll(true, base.Add(90*time.Second)); got != ActionNone {
+		t.Fatalf("relaunch during carried countdown = %v, want ActionNone", got)
+	}
+	if got := relaunched.Poll(false, base.Add(10*time.Minute)); got != ActionNone {
+		t.Fatalf("late close after relaunch = %v, want ActionNone", got)
+	}
+}
+
+// TestWatcherContinuesCarriedCountdown verifies that a replacement watcher
+// built with a carried monitor fires the pending sleep without observing a
+// fresh running->closed session, as after a settings change mid-countdown.
+func TestWatcherContinuesCarriedCountdown(t *testing.T) {
+	base := time.Now()
+	monitor := NewMonitorContinuing(time.Minute, base)
+	triggered := make(chan struct{})
+	watcher := &Watcher{
+		Settings:  Settings{Enabled: true, Target: string(TargetSteamVR), DelaySeconds: 60},
+		Interval:  time.Millisecond,
+		IsRunning: func(string) (bool, error) { return false, nil },
+		Monitor:   monitor,
+		Now:       func() time.Time { return base.Add(2 * time.Minute) },
+		Trigger: func(context.Context) {
+			select {
+			case triggered <- struct{}{}:
+			default:
+			}
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		watcher.Run(ctx)
+	}()
+	defer func() {
+		cancel()
+		<-done
+	}()
+
+	select {
+	case <-triggered:
+	case <-time.After(time.Second):
+		t.Fatal("replacement watcher did not continue the carried countdown")
+	}
+}
+
 func TestWatcherCancelsActiveTriggerWhenProcessRelaunches(t *testing.T) {
 	var running atomic.Bool
 	running.Store(true)

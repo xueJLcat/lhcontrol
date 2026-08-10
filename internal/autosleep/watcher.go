@@ -28,6 +28,11 @@ type Watcher struct {
 	// Now is injectable for deterministic lifecycle tests. Production uses
 	// time.Now when it is nil.
 	Now func() time.Time
+	// Monitor optionally supplies the session state machine. When nil, Run
+	// creates a fresh one from Settings. Callers that replace a watcher pass
+	// a monitor carrying the previous countdown so a pending sleep survives
+	// the replacement.
+	Monitor *Monitor
 }
 
 // Run blocks until ctx is cancelled. It is meant to execute in its own
@@ -43,7 +48,10 @@ func (w *Watcher) Run(ctx context.Context) {
 		log.Printf("Auto-sleep watcher not started: %v", err)
 		return
 	}
-	monitor := NewMonitor(w.Settings.Delay())
+	monitor := w.Monitor
+	if monitor == nil {
+		monitor = NewMonitor(w.Settings.Delay())
+	}
 	log.Printf("Auto-sleep watcher started: watching %s, delay %s", processName, w.Settings.Delay())
 	defer log.Println("Auto-sleep watcher stopped")
 

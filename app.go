@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"lhcontrol/internal/autosleep"
 	"lhcontrol/internal/bluetooth"
 	"lhcontrol/internal/config"
 	"lhcontrol/internal/station"
@@ -45,6 +46,7 @@ type App struct {
 	shuttingDown              atomic.Bool
 	autoSleepMutex            sync.Mutex
 	autoSleepCancel           context.CancelFunc
+	autoSleepWatcher          *autosleep.Watcher
 	autoSleepWG               sync.WaitGroup
 	scanForAutoSleep          func(context.Context) ([]station.StationInfo, error)
 	setPowerForAutoSleep      func(context.Context, string) (station.BulkPowerResult, error)

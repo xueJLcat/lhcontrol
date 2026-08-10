@@ -501,7 +501,9 @@ export class StationStore {
       // pending. Do not let its older result overwrite the newer event state.
       if (this.disposed || startupScanEpoch !== this.gates.currentScanEpoch) return;
       if (startupScanning) {
-        await this.externalScan.adoptUnknown();
+        // An auto-sleep scan is internal; adopting it would expose Stop for
+        // it. Skip adoption and let the periodic check take over afterwards.
+        if (!this.autoSleepRunning) await this.externalScan.adoptUnknown();
       } else if (scanOnStartup) {
         await this.startScan();
       }

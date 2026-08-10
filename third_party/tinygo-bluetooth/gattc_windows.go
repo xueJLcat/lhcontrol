@@ -167,6 +167,10 @@ func (d Device) DiscoverServicesContext(ctx context.Context, filterUUIDs []UUID)
 				}
 			}
 			if !matched {
+				// GattDeviceService is IClosable; an unfiltered discovery must
+				// close foreign services as well as release them, matching the
+				// error paths above, or every discovery leaks one service.
+				_ = srv.Close()
 				srv.Release()
 			}
 		} else {

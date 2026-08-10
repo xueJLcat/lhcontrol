@@ -2,6 +2,7 @@ package autosleep
 
 import (
 	"fmt"
+	"sync"
 	"time"
 )
 
@@ -104,8 +105,11 @@ const (
 
 // Monitor is a small deterministic state machine driven by periodic polls.
 // It is intentionally free of time sources and process checks so it can be
-// unit tested without the OS.
+// unit tested without the OS. The mutex only protects the concurrent
+// Countdown snapshot taken when a watcher is replaced; a single watcher polls
+// sequentially.
 type Monitor struct {
+	mutex    sync.Mutex
 	delay    time.Duration
 	state    monitorState
 	closedAt time.Time
@@ -120,9 +124,30 @@ func NewMonitor(delay time.Duration) *Monitor {
 	return &Monitor{delay: delay}
 }
 
+// NewMonitorContinuing behaves like NewMonitor but starts already counting
+// down a session close that happened at closedAt. A replacement watcher for
+// the same watched target uses it so a settings change cannot silently drop
+// a pending sleep.
+func NewMonitorContinuing(delay time.Duration, closedAt time.Time) *Monitor {
+	monitor := NewMonitor(delay)
+	monitor.state = stateClosed
+	monitor.closedAt = closedAt
+	return monitor
+}
+
+// Countdown reports an in-flight "session closed" countdown, if any, so a
+// replacement watcher can continue it instead of restarting from idle.
+func (m *Monitor) Countdown() (active bool, closedAt time.Time) {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+	return m.state == stateClosed, m.closedAt
+}
+
 // Poll advances the state machine with a fresh observation. running reports
 // whether the watched process is alive; now is the poll timestamp.
 func (m *Monitor) Poll(running bool, now time.Time) Action {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
 	switch m.state {
 	case stateIdle:
 		if running {

@@ -10,6 +10,13 @@ export interface TerminalScanResult {
   external?: boolean;
 }
 
+// Only terminal states describe a finished scan. GetScanStatus reads racing a
+// newly started scan can return its starting/running state; consumers must
+// skip treating such a snapshot as the finished scan's outcome.
+export function isTerminalScanState(state: string | null | undefined): boolean {
+  return state === 'completed' || state === 'failed' || state === 'cancelled';
+}
+
 export function formatTerminalScanResult(result: TerminalScanResult): string {
   const prefix = t(result.external ? 'External scan' : 'Scan');
   const warnings = result.warnings?.filter(Boolean).join(' ') ?? '';

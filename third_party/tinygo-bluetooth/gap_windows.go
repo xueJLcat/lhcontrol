@@ -58,6 +58,12 @@ type scanControl struct {
 func (control *scanControl) stopWatcher() (stopErr error, deferred bool) {
 	control.mutex.Lock()
 	defer control.mutex.Unlock()
+	if control.terminal {
+		// The watcher already reached Stopped/Aborted on its own; issuing
+		// another Stop can be rejected by WinRT and turn a clean finish into
+		// a spurious stop failure. Report the recorded result instead.
+		return control.stopErr, false
+	}
 	if !control.started {
 		control.pendingStop = true
 		return nil, true
@@ -71,18 +77,20 @@ func (control *scanControl) stopWatcher() (stopErr error, deferred bool) {
 }
 
 // forceStop re-issues watcher.Stop() even though an earlier attempt already
-// ran. waitForScanStop calls it only on a retry tick after the initial Stop
-// failed; WinRT may reject a redundant Stop on a watcher merely draining
-// through Stopping, so this re-issues only when the prior attempt actually
-// failed (stopErr non-nil). Without this the dedupe in stopWatcher made the
-// retry a no-op and a failed Stop was never retried.
+// ran. waitForScanStop calls it only on a retry tick after the initial stop
+// request produced an error; WinRT may reject a redundant Stop on a watcher
+// merely draining through Stopping, so this re-issues only when the prior
+// attempt actually failed (stopErr non-nil) or was never issued at all
+// (for example when StopScan could not enter its WinRT thread). Without this
+// the dedupe in stopWatcher made the retry a no-op and a failed or missing
+// Stop was never retried.
 func (control *scanControl) forceStop() error {
 	control.mutex.Lock()
 	defer control.mutex.Unlock()
 	if !control.started || control.terminal {
 		return control.stopErr
 	}
-	if control.stopErr == nil {
+	if control.stopIssued && control.stopErr == nil {
 		// A prior Stop was accepted; stacking another would risk a WinRT
 		// rejection while the watcher drains through Stopping.
 		return nil
@@ -594,6 +602,10 @@ func getScanResultFromArgs(args *advertisement.BluetoothLEAdvertisementReceivedE
 			var data []byte
 			if companyErr == nil && bufferErr == nil && buffer != nil {
 				data = bufferToSliceSafe(buffer)
+			} else if buffer != nil {
+				// A partial read failure must not leak the IBuffer;
+				// bufferToSliceSafe (which releases it) was skipped.
+				buffer.Release()
 			}
 			manData.Release()
 			if companyErr != nil || bufferErr != nil || buffer == nil {
@@ -1000,6 +1012,11 @@ func (a *Adapter) ConnectContext(ctx context.Context, address Address, params Co
 	)
 
 	handler := foundation.NewTypedEventHandler(ole.NewGUID(connectionStatusChangedGUID), func(instance *foundation.TypedEventHandler, sender, arg unsafe.Pointer) {
+		// WinRT can hand this callback a broken COM state (for example a radio
+		// removed mid-callback); never let a wrapper panic cross the WinRT
+		// trampoline and take down the host process, matching the scan and
+		// ValueChanged handlers.
+		defer func() { _ = recover() }()
 		allowed := state.beginCallback()
 		defer state.endCallback()
 		if !allowed {
@@ -1009,8 +1026,11 @@ func (a *Adapter) ConnectContext(ctx context.Context, address Address, params Co
 		if operationErr != nil {
 			return
 		}
+		// The operation lock and WinRT thread must be released on every path,
+		// including a panic after beginOperation; otherwise a panicked status
+		// read would strand the lock and hang every later device operation.
+		defer device.endOperation()
 		status, statusErr := operationState.device.GetConnectionStatus()
-		device.endOperation()
 		if statusErr != nil {
 			return
 		}

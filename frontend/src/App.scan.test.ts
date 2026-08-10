@@ -114,6 +114,48 @@ describe('App asynchronous operations', () => {
     expect(await screen.findByText('LHB-TEST')).toBeInTheDocument();
   });
 
+  it('does not adopt an auto-sleep scan as an external scan', async () => {
+    vi.useFakeTimers();
+    let resolveStartupScan!: (scanning: boolean) => void;
+    api.IsScanning.mockImplementation(() => new Promise((resolve) => {
+      resolveStartupScan = resolve;
+    }));
+    render(App);
+
+    // The auto-sleep trigger starts between the poll's IsScanning request and
+    // its continuation; its internal scan must not be adopted as external.
+    runtime.handlers.get('auto-sleep')?.({ phase: 'started' });
+    resolveStartupScan(true);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(screen.queryByText('Preparing external scan...')).not.toBeInTheDocument();
+    expect(screen.queryByText('External scan in progress...')).not.toBeInTheDocument();
+
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(screen.queryByText('Preparing external scan...')).not.toBeInTheDocument();
+    expect(screen.queryByText('External scan in progress...')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Stop' })).not.toBeInTheDocument();
+    expect(screen.getByText('Auto sleep: scanning and putting all stations to sleep...')).toBeInTheDocument();
+  });
+
+  it('keeps the status line when the terminal scan status read hits a new scan', async () => {
+    vi.useFakeTimers();
+    api.GetScanStatus.mockResolvedValue({ state: 'running', found: 0, warnings: [] });
+    render(App);
+    await vi.waitFor(() => expect(api.ScanAndFetchStations).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(api.GetScanStatus).toHaveBeenCalled());
+    expect(await screen.findByText('LHB-TEST')).toBeInTheDocument();
+    expect(screen.queryByText(/no stations found/i)).not.toBeInTheDocument();
+    expect(screen.getByRole('status')).toHaveTextContent('Scanning for base stations...');
+  });
+
+  it('treats a failed scan superseded by a running scan as stopped', async () => {
+    api.ScanAndFetchStations.mockRejectedValue(new Error('bluetooth scan cancelled'));
+    api.GetScanStatus.mockResolvedValue({ state: 'running', found: 0, warnings: [] });
+    render(App);
+    expect(await screen.findByText('Scan stopped.')).toBeInTheDocument();
+    expect(screen.queryByText(/Scan failed/)).not.toBeInTheDocument();
+  });
+
   it('does not overwrite an external scan started during the initial scan check', async () => {
     let resolveStartupScan!: (scanning: boolean) => void;
     api.IsScanning.mockReturnValueOnce(new Promise((resolve) => {

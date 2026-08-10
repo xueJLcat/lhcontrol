@@ -251,6 +251,39 @@ describe('ExternalScanCoordinator', () => {
     expect(state.externalScanning).toBe(false);
   });
 
+  it('keeps recovery pending when a completed event reads a non-terminal scan status', async () => {
+    const { host, state } = createHost();
+    const coordinator = new ExternalScanCoordinator(host);
+    coordinator.handleStarted({ id: 3 });
+    (host.getScanStatus as ReturnType<typeof vi.fn>).mockResolvedValue({
+      state: 'running', found: 0, warnings: []
+    });
+
+    await coordinator.handleCompleted({ id: 3, stations: [] });
+
+    // The running status belongs to a scan that started after this one
+    // finished; the terminal recovery must stay pending for a retry instead
+    // of clearing its epochs on the wrong scan's status.
+    expect(coordinator.hasPendingRecovery()).toBe(true);
+    expect(state.externalScanning).toBe(false);
+  });
+
+  it('retries untracked recovery while the scan status is non-terminal', async () => {
+    const { host, state } = createHost();
+    (host.getScanStatus as ReturnType<typeof vi.fn>).mockResolvedValue({
+      state: 'starting', found: 0, warnings: []
+    });
+    const coordinator = new ExternalScanCoordinator(host);
+    await coordinator.handleFailed({ id: 9, error: 'boom' });
+    expect(coordinator.hasPendingTerminal()).toBe(true);
+
+    await coordinator.adoptUnknown();
+
+    expect(coordinator.hasPendingTerminal()).toBe(false);
+    expect(coordinator.hasPendingRecovery()).toBe(true);
+    expect(state.statusMessages.filter((message) => message.includes('External scan failed'))).toEqual([]);
+  });
+
   it('keeps remembering untracked terminals for scans begun after a recovered stop', async () => {
     const { host, state } = createHost();
     mockIsScanning(host, true);
