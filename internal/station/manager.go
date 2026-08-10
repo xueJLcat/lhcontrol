@@ -191,16 +191,19 @@ func (m *Manager) initializeRetryCooldown() time.Duration {
 // delay only affected failures recorded after the setting changed, leaving an
 // existing station or adapter retry asleep on the previous schedule.
 func (m *Manager) ApplyRecoverySettings() {
-	absent := make(map[string]bool)
 	m.stationsMutex.RLock()
+	stationPtrs := make([]*bluetooth.BaseStation, 0, len(m.stations))
 	for _, station := range m.stations {
-		if station == nil {
-			continue
+		if station != nil {
+			stationPtrs = append(stationPtrs, station)
 		}
+	}
+	m.stationsMutex.RUnlock()
+	absent := make(map[string]bool, len(stationPtrs))
+	for _, station := range stationPtrs {
 		snapshot := station.Snapshot()
 		absent[snapshot.Address] = !snapshot.Present
 	}
-	m.stationsMutex.RUnlock()
 
 	retryLimit := m.absentStationRetryLimit()
 	m.statusRetryMutex.Lock()
@@ -247,6 +250,60 @@ func (m *Manager) ApplyRecoverySettings() {
 		m.wakeStatusRecovery()
 	}
 }
+
+// ReviveAbsentStationRecovery gives known absent stations a fresh limited
+// recovery budget after the configured retry limit is raised. Entries that
+// still have connection or channel recovery keep their failures and backoff;
+// only work that was previously exhausted (and therefore removed) is restarted
+// immediately. Both limited kinds are restored because an exhausted entry no
+// longer records whether its last failure was transport- or channel-specific.
+func (m *Manager) ReviveAbsentStationRecovery() {
+	m.stationsMutex.RLock()
+	stationPtrs := make([]*bluetooth.BaseStation, 0, len(m.stations))
+	for _, station := range m.stations {
+		if station != nil {
+			stationPtrs = append(stationPtrs, station)
+		}
+	}
+	m.stationsMutex.RUnlock()
+
+	absentStations := make([]string, 0, len(stationPtrs))
+	for _, station := range stationPtrs {
+		snapshot := station.Snapshot()
+		if !snapshot.Present {
+			absentStations = append(absentStations, snapshot.Address)
+		}
+	}
+
+	now := time.Now()
+	changed := false
+	m.statusRetryMutex.Lock()
+	for _, address := range absentStations {
+		retry, tracked := m.statusRetries[address]
+		kinds := retry.kinds
+		if tracked {
+			kinds = effectiveStatusRetryKinds(retry)
+			if kinds&(statusRetryConnection|statusRetryChannel) != 0 {
+				continue
+			}
+		}
+		retry.kinds = kinds | statusRetryConnection | statusRetryChannel
+		retry.failures = 0
+		retry.lastAttempt = time.Time{}
+		retry.nextAt = now
+		retry.channelFailures = 0
+		retry.channelLastAttempt = time.Time{}
+		retry.channelNextAt = now
+		m.statusRetries[address] = retry
+		changed = true
+	}
+	m.statusRetryMutex.Unlock()
+
+	if changed {
+		m.scheduleStatusRecovery()
+	}
+}
+
 func (m *Manager) deferStatusRecovery(address string, delay time.Duration) {
 	m.statusRetryMutex.Lock()
 	retry, exists := m.statusRetries[address]

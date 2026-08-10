@@ -82,14 +82,14 @@
     onLanguageChanged = () => {},
     onStatusPollIntervalChanged = () => {},
     onStatusPollingEnabledChanged = () => {},
-    onPresenceMissThresholdChanged = () => {}
+    onStationProjectionChanged = () => {}
   }: {
     inactive?: boolean;
     onClose: () => void;
     onLanguageChanged?: () => void;
     onStatusPollIntervalChanged?: (intervalSeconds: number) => void;
     onStatusPollingEnabledChanged?: (enabled: boolean) => void;
-    onPresenceMissThresholdChanged?: () => void;
+    onStationProjectionChanged?: () => void;
   } = $props();
 
   let adapters = $state<bluetoothModels.AdapterInfo[]>([]);
@@ -188,13 +188,17 @@
   const presenceMissThreshold = new AsyncSetting({
     getter: GetPresenceMissThreshold, setter: SetPresenceMissThreshold,
     loadMessage: channelPresenceLoad, saveMessage: channelPresenceSave,
-    afterSave: () => onPresenceMissThresholdChanged()
+    afterSave: () => onStationProjectionChanged()
   });
   const initialReadTimeout = new AsyncSetting({ getter: GetInitialReadTimeoutSeconds, setter: SetInitialReadTimeoutSeconds, loadMessage: readBudgetLoad, saveMessage: readBudgetSave });
   const scanReadPhaseTimeout = new AsyncSetting({ getter: GetScanReadPhaseTimeoutSeconds, setter: SetScanReadPhaseTimeoutSeconds, loadMessage: readBudgetLoad, saveMessage: readBudgetSave });
   const statusReadTimeout = new AsyncSetting({ getter: GetStatusReadTimeoutSeconds, setter: SetStatusReadTimeoutSeconds, loadMessage: readBudgetLoad, saveMessage: readBudgetSave });
   const statusRefreshTimeout = new AsyncSetting({ getter: GetStatusRefreshTimeoutSeconds, setter: SetStatusRefreshTimeoutSeconds, loadMessage: readBudgetLoad, saveMessage: readBudgetSave });
-  const channelScanFreshness = new AsyncSetting({ getter: GetChannelScanFreshnessSeconds, setter: SetChannelScanFreshnessSeconds, loadMessage: readBudgetLoad, saveMessage: readBudgetSave });
+  const channelScanFreshness = new AsyncSetting({
+    getter: GetChannelScanFreshnessSeconds, setter: SetChannelScanFreshnessSeconds,
+    loadMessage: readBudgetLoad, saveMessage: readBudgetSave,
+    afterSave: () => onStationProjectionChanged()
+  });
   const recoveryRetryBase = new AsyncSetting({ getter: GetRecoveryRetryBaseSeconds, setter: SetRecoveryRetryBaseSeconds, loadMessage: recoveryLoad, saveMessage: recoverySave });
   const recoveryRetryMax = new AsyncSetting({ getter: GetRecoveryRetryMaxSeconds, setter: SetRecoveryRetryMaxSeconds, loadMessage: recoveryLoad, saveMessage: recoverySave });
   const absentStationRetryLimit = new AsyncSetting({ getter: GetAbsentStationRetryLimit, setter: SetAbsentStationRetryLimit, loadMessage: recoveryLoad, saveMessage: recoverySave });

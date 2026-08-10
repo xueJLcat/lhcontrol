@@ -387,14 +387,20 @@ describe('SettingsPanel', () => {
     expect(onStatusPollIntervalChanged).toHaveBeenCalledWith(45);
   });
 
-  it('refreshes station projection after the presence threshold is saved', async () => {
-    const onPresenceMissThresholdChanged = vi.fn();
-    render(SettingsPanel, { props: { onClose: vi.fn(), onPresenceMissThresholdChanged } });
+  it('refreshes station projection after projection-affecting settings are saved', async () => {
+    const onStationProjectionChanged = vi.fn();
+    render(SettingsPanel, { props: { onClose: vi.fn(), onStationProjectionChanged } });
     const input = await screen.findByLabelText('Absence miss threshold');
     await fireEvent.input(input, { target: { value: '4' } });
     await fireEvent.change(input);
     await waitFor(() => expect(backend.SetPresenceMissThreshold).toHaveBeenCalledWith(4));
-    expect(onPresenceMissThresholdChanged).toHaveBeenCalledOnce();
+    expect(onStationProjectionChanged).toHaveBeenCalledOnce();
+
+    const freshness = screen.getByLabelText('Channel scan freshness');
+    await fireEvent.input(freshness, { target: { value: '180' } });
+    await fireEvent.change(freshness);
+    await waitFor(() => expect(backend.SetChannelScanFreshnessSeconds).toHaveBeenCalledWith(180));
+    expect(onStationProjectionChanged).toHaveBeenCalledTimes(2);
   });
 
   it('rolls the status polling interval back when saving fails', async () => {

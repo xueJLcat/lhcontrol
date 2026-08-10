@@ -95,14 +95,37 @@ describe('StationStore projection settings', () => {
     expect(store.stations[0].powerFresh).toBe(false);
   });
 
-  it('leaves an in-flight authoritative operation to apply the new projection', async () => {
+  it('defers a projection refresh until an authoritative operation settles', async () => {
+    vi.useFakeTimers();
     store = new StationStore(createUi());
     store.startupPending = false;
     store.globalOperation = 'scanning';
+    backend.GetCurrentStationInfo.mockResolvedValue([
+      createStation({ isPresent: false, scanFresh: false })
+    ]);
 
     await store.refreshStationProjection();
 
     expect(backend.GetCurrentStationInfo).not.toHaveBeenCalled();
+    store.globalOperation = 'idle';
+    await vi.advanceTimersByTimeAsync(249);
+    expect(backend.GetCurrentStationInfo).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(backend.GetCurrentStationInfo).toHaveBeenCalledOnce();
+    expect(store.stations[0].isPresent).toBe(false);
+    expect(store.stations[0].scanFresh).toBe(false);
+  });
+
+  it('refreshes station status immediately when automatic polling is re-enabled', async () => {
+    store = new StationStore(createUi());
+    store.startupPending = false;
+    store.setStatusPollingEnabled(false);
+    backend.CheckAllStationStatuses.mockClear();
+
+    store.setStatusPollingEnabled(true);
+
+    await vi.waitFor(() => expect(backend.CheckAllStationStatuses).toHaveBeenCalledOnce());
   });
 });
 
@@ -174,18 +197,21 @@ describe('StationStore startup', () => {
     expect(backend.ScanAndFetchStations).not.toHaveBeenCalled();
   });
 
-  it('keeps API health polling but disables automatic station refresh', async () => {
+  it('keeps cached freshness current without automatic Bluetooth station reads', async () => {
     vi.useFakeTimers();
     backend.GetStatusPollingEnabled.mockResolvedValue(false);
+    backend.GetScanOnStartup.mockResolvedValue(false);
     mountStore();
     await vi.advanceTimersByTimeAsync(0);
     backend.CheckAllStationStatuses.mockClear();
     backend.GetAPIStatus.mockClear();
+    backend.GetCurrentStationInfo.mockClear();
 
     await vi.advanceTimersByTimeAsync(30_000);
 
     expect(backend.CheckAllStationStatuses).not.toHaveBeenCalled();
     expect(backend.GetAPIStatus).toHaveBeenCalled();
+    expect(backend.GetCurrentStationInfo).toHaveBeenCalled();
   });
 
   it('adopts a running backend scan instead of starting a local scan', async () => {
@@ -628,8 +654,14 @@ describe('StationStore external HTTP operation events', () => {
     const { store } = mountStore();
     await vi.waitFor(() => expect(backend.ScanAndFetchStations).toHaveBeenCalledOnce());
 
+    // A cached projection read may have started just before the scan. The
+    // rejected HTTP request must not use that older read as a reason to
+    // invalidate the scan revision that now owns the authoritative result.
+    (store as unknown as { projectionRefreshInFlight: boolean }).projectionRefreshInFlight = true;
+
     runtime.handlers.get('external-operation')?.({ id: 23, phase: 'started', kind: 'power', revision: 2 });
     runtime.handlers.get('external-operation')?.({ id: 23, phase: 'finished', kind: 'power', revision: 3 });
+    (store as unknown as { projectionRefreshInFlight: boolean }).projectionRefreshInFlight = false;
     resolveScan([createStation({ name: 'LHB-SCAN-RESULT' })]);
 
     await vi.waitFor(() => expect(store.globalOperation).toBe('idle'));

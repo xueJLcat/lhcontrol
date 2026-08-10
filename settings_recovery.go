@@ -45,12 +45,19 @@ func (a *App) GetAbsentStationRetryLimit() int {
 }
 
 func (a *App) SetAbsentStationRetryLimit(limit int) error {
+	a.absentRetrySettingsMutex.Lock()
+	defer a.absentRetrySettingsMutex.Unlock()
+
+	previousLimit := a.config.GetAbsentStationRetryLimit()
 
 	err := a.config.SetAbsentStationRetryLimit(limit)
 
 	a.setConfigPersistenceStatus()
 	if err == nil {
 		a.stationManager.ApplyRecoverySettings()
+		if a.config.GetAbsentStationRetryLimit() > previousLimit {
+			a.stationManager.ReviveAbsentStationRecovery()
+		}
 	}
 
 	return err

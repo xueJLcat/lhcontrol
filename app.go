@@ -24,6 +24,7 @@ type App struct {
 	ctx                       context.Context
 	config                    *config.Config
 	stationManager            *station.Manager
+	absentRetrySettingsMutex  sync.Mutex
 	api                       *fiber.App
 	apiStatusMutex            sync.RWMutex
 	apiStatus                 APIStatus

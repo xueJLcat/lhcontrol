@@ -30,6 +30,7 @@ import { StationScanController } from './station-scan-controller';
 const DEFAULT_STATUS_POLL_INTERVAL_SECONDS = 15;
 const MIN_STATUS_POLL_INTERVAL_SECONDS = 5;
 const MAX_STATUS_POLL_INTERVAL_SECONDS = 300;
+const PROJECTION_REFRESH_RETRY_MS = 250;
 
 // Overlay controls owned by App. The store calls back into them whenever an
 // operation must close or open a layer instead of reaching into UI state.
@@ -71,6 +72,9 @@ export class StationStore {
   configWritable = $state(true);
 
   private statusCheckInterval: ReturnType<typeof setInterval> | null = null;
+  private projectionRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+  private projectionRefreshPending = false;
+  private projectionRefreshInFlight = false;
   private statusPollIntervalSeconds = DEFAULT_STATUS_POLL_INTERVAL_SECONDS;
   private statusPollingEnabled = true;
   private apiStatusStarted = false;
@@ -144,6 +148,10 @@ export class StationStore {
       if (Array.isArray(status.activeOperations)) {
         this.reconcileExternalOperations(status.activeOperations, status.operationRevision ?? 0);
       }
+      // Disabling automatic station polling must not freeze time-derived
+      // freshness flags forever. Re-project the cached snapshots alongside
+      // the lightweight API-health poll without performing any Bluetooth I/O.
+      if (!this.statusPollingEnabled) void this.refreshStationProjection();
     },
     commitFailure: (error) => {
       this.apiRunning = false;
@@ -398,22 +406,55 @@ export class StationStore {
     this.powerFeedback.reconcile(this.stations);
   }
 
-  async refreshStationProjection() {
-    // An in-flight scan or command will return a newer projection using the
-    // saved setting. Do not invalidate that authoritative result just to
-    // refresh the currently cached derived flags.
-    if (this.disposed || this.startupPending || this.globalOperation !== 'idle' ||
+  private projectionRefreshBlocked() {
+    return this.startupPending || this.globalOperation !== 'idle' ||
       this.externalScanning || this.autoSleepRunning || this.externalOperationRunning ||
-      this.anyDeviceOperation) return;
+      this.anyDeviceOperation;
+  }
+
+  private scheduleProjectionRefresh() {
+    if (this.disposed || this.projectionRefreshTimer !== null) return;
+    this.projectionRefreshTimer = setTimeout(() => {
+      this.projectionRefreshTimer = null;
+      if (this.projectionRefreshPending) void this.refreshStationProjection();
+    }, PROJECTION_REFRESH_RETRY_MS);
+  }
+
+  async refreshStationProjection() {
+    if (this.disposed) return;
+    // A setting can be saved while a scan, command, or external operation is
+    // active. Coalesce those requests and retry once the authoritative work
+    // settles instead of dropping the projection update permanently.
+    this.projectionRefreshPending = true;
+    if (this.projectionRefreshInFlight || this.projectionRefreshBlocked()) {
+      this.scheduleProjectionRefresh();
+      return;
+    }
+    if (this.projectionRefreshTimer !== null) clearTimeout(this.projectionRefreshTimer);
+    this.projectionRefreshTimer = null;
+    this.projectionRefreshPending = false;
+    this.projectionRefreshInFlight = true;
     const revision = this.listRevisions.next();
     const capturedStationRevisions = this.gates.snapshotStationRevisions();
     try {
       const updated = await GetCurrentStationInfo();
-      this.applyStationList(updated, revision, capturedStationRevisions);
+      if (this.projectionRefreshBlocked()) {
+        this.projectionRefreshPending = true;
+        return;
+      }
+      if (!this.applyStationList(updated, revision, capturedStationRevisions) && !this.disposed) {
+        // Another authoritative result invalidated this read while it was in
+        // flight. One final cached read makes the saved projection setting
+        // observable even when that operation did not return station data.
+        this.projectionRefreshPending = true;
+      }
     } catch (error) {
       // Projection refreshes follow a successfully saved setting and should
       // not replace the current operation status with a transient read error.
       console.error('Station projection refresh failed:', error);
+    } finally {
+      this.projectionRefreshInFlight = false;
+      if (this.projectionRefreshPending) this.scheduleProjectionRefresh();
     }
   }
 
@@ -438,9 +479,17 @@ export class StationStore {
     // Do not invalidate a local scan or command: an HTTP request announced
     // during an exclusive operation will normally be rejected as busy, and
     // must not discard the already accepted local result.
-    if (this.globalOperation !== 'status-refresh') return;
-    this.gates.beginStatusOperation();
+    const statusRefreshInFlight = this.globalOperation === 'status-refresh';
+    const projectionOwnsCurrentRevision = this.projectionRefreshInFlight &&
+      this.globalOperation === 'idle' && !this.anyDeviceOperation &&
+      !this.externalScanning && !this.autoSleepRunning && !this.externalOperationRunning;
+    if (!statusRefreshInFlight && !projectionOwnsCurrentRevision) return;
+    if (statusRefreshInFlight) this.gates.beginStatusOperation();
     this.listRevisions.next();
+    if (this.projectionRefreshInFlight) {
+      this.projectionRefreshPending = true;
+      this.scheduleProjectionRefresh();
+    }
   }
 
   setStatusPollIntervalSeconds(intervalSeconds: number) {
@@ -477,6 +526,13 @@ export class StationStore {
       this.statusCheckInterval = setInterval(() => {
         void this.periodicStatusCheck();
       }, intervalMs);
+      // Re-enabling polling is an explicit request for live station state, so
+      // do not make the user wait for the next interval tick.
+      void this.periodicStatusCheck();
+    } else {
+      // Recompute cached age-based fields immediately, then API-health polls
+      // keep them current without reading the Bluetooth devices.
+      void this.refreshStationProjection();
     }
   }
 
@@ -576,6 +632,9 @@ export class StationStore {
     this.scanTimer.dispose();
     this.fleet.stopChannelMemoryExpiry();
     if (this.statusCheckInterval) clearInterval(this.statusCheckInterval);
+    if (this.projectionRefreshTimer !== null) clearTimeout(this.projectionRefreshTimer);
+    this.projectionRefreshTimer = null;
+    this.projectionRefreshPending = false;
     this.powerFeedback.clearAll();
     this.cancelExternalScanListener?.();
     this.cancelExternalScanFailureListener?.();

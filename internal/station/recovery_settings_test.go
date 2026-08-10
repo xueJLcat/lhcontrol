@@ -82,6 +82,73 @@ func TestApplyRecoverySettingsPrunesNewlyExhaustedAbsentKinds(t *testing.T) {
 	}
 }
 
+func TestReviveAbsentStationRecoveryRestartsOnlyExhaustedAbsentStations(t *testing.T) {
+	cfg := config.NewConfig()
+	cfg.AbsentStationRetryLimit = 3
+	manager := NewManager(cfg)
+	manager.shuttingDown.Store(true) // Keep the scheduler dormant while inspecting its queue.
+	t.Cleanup(manager.Shutdown)
+
+	disconnectedAddress := "AA:BB:CC:DD:EE:03"
+	presentAddress := "AA:BB:CC:DD:EE:04"
+	activeAddress := "AA:BB:CC:DD:EE:05"
+	manager.stations[disconnectedAddress] = &bluetooth.BaseStation{
+		Address: mustAddress(t, disconnectedAddress),
+		Present: false,
+	}
+	manager.stations[presentAddress] = &bluetooth.BaseStation{
+		Address: mustAddress(t, presentAddress),
+		Present: true,
+	}
+	manager.stations[activeAddress] = &bluetooth.BaseStation{
+		Address: mustAddress(t, activeAddress),
+		Present: false,
+	}
+	lastAttempt := time.Now().Add(-time.Second)
+	manager.statusRetries[disconnectedAddress] = statusRetry{
+		kinds:       statusRetryConnection,
+		failures:    3,
+		lastAttempt: lastAttempt,
+		nextAt:      lastAttempt.Add(time.Minute),
+	}
+	activeNextAt := lastAttempt.Add(2 * time.Minute)
+	manager.statusRetries[activeAddress] = statusRetry{
+		kinds:       statusRetryConnection,
+		failures:    2,
+		lastAttempt: lastAttempt,
+		nextAt:      activeNextAt,
+	}
+
+	manager.ApplyRecoverySettings()
+	if _, tracked := manager.statusRetries[disconnectedAddress]; tracked {
+		t.Fatal("exhausted absent retry remained tracked at the old limit")
+	}
+	rebasedActiveNextAt := manager.statusRetries[activeAddress].nextAt
+
+	cfg.AbsentStationRetryLimit = 5
+	manager.ReviveAbsentStationRecovery()
+
+	retry, tracked := manager.statusRetries[disconnectedAddress]
+	wantKinds := statusRetryConnection | statusRetryChannel
+	if !tracked || effectiveStatusRetryKinds(retry)&wantKinds != wantKinds {
+		t.Fatalf("absent retry = %+v tracked=%v, want revived connection and channel recovery", retry, tracked)
+	}
+	if retry.failures != 0 || retry.channelFailures != 0 ||
+		retry.nextAt.IsZero() || retry.channelNextAt.IsZero() ||
+		retry.nextAt.After(time.Now()) || retry.channelNextAt.After(time.Now()) {
+		t.Fatalf("revived recovery schedule = %+v, want fresh immediate budgets", retry)
+	}
+	if _, tracked := manager.statusRetries[presentAddress]; tracked {
+		t.Fatal("present station unexpectedly received absent-station recovery")
+	}
+	activeRetry := manager.statusRetries[activeAddress]
+	if effectiveStatusRetryKinds(activeRetry) != statusRetryConnection ||
+		activeRetry.failures != 2 || !activeRetry.nextAt.Equal(rebasedActiveNextAt) ||
+		!activeRetry.channelNextAt.IsZero() {
+		t.Fatalf("active recovery budget was reset: %+v", activeRetry)
+	}
+}
+
 func TestApplyRecoverySettingsRebasesAdapterInitializationCooldown(t *testing.T) {
 	cfg := config.NewConfig()
 	cfg.BluetoothInitRetrySeconds = 3

@@ -246,7 +246,7 @@
       void store.refreshStationProjection();
     }}
     onStatusPollingEnabledChanged={(enabled) => store.setStatusPollingEnabled(enabled)}
-    onPresenceMissThresholdChanged={() => void store.refreshStationProjection()}
+    onStationProjectionChanged={() => void store.refreshStationProjection()}
   />
 {/if}
 
