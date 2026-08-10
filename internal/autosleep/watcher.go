@@ -15,9 +15,10 @@ const DefaultPollInterval = 3 * time.Second
 // IsRunningFunc reports whether the named process is currently running.
 type IsRunningFunc func(processName string) (bool, error)
 
-// TriggerFunc runs the configured action when the monitor fires. It receives
-// the watcher lifetime context so a long action can abort during shutdown.
-type TriggerFunc func(ctx context.Context)
+// TriggerFunc runs the configured action when the monitor fires. closedAt
+// identifies the watched process session that ended, allowing replacement
+// watchers to serialize and de-duplicate the same owed action.
+type TriggerFunc func(ctx context.Context, closedAt time.Time)
 
 // Watcher polls the target process on an interval and fires Trigger once a
 // session (running, then closed) stays closed for the configured delay.
@@ -104,6 +105,7 @@ func (w *Watcher) Run(ctx context.Context) {
 	// as the previous action finishes instead of being silently dropped.
 	pendingTrigger := false
 	var pendingTriggerGeneration uint64
+	var pendingTriggerClosedAt time.Time
 	stopTrigger := func() {
 		if triggerCancel == nil {
 			return
@@ -113,7 +115,7 @@ func (w *Watcher) Run(ctx context.Context) {
 		triggerCancel = nil
 		triggerDone = nil
 	}
-	fireTrigger := func(generation uint64) {
+	fireTrigger := func(generation uint64, closedAt time.Time) {
 		log.Printf("Auto-sleep: %s stayed closed for %s; triggering", processName, w.Settings.Delay())
 		triggerContext, cancelTrigger := context.WithCancel(ctx)
 		done := make(chan struct{})
@@ -125,7 +127,7 @@ func (w *Watcher) Run(ctx context.Context) {
 			// replacement can then observe the action as finished even if the
 			// watcher loop has not selected the closed done channel yet.
 			defer w.finishTrigger(generation)
-			w.Trigger(triggerContext)
+			w.Trigger(triggerContext, closedAt)
 		}()
 	}
 	for {
@@ -155,11 +157,13 @@ func (w *Watcher) Run(ctx context.Context) {
 				}
 				pendingTrigger = false
 				pendingTriggerGeneration = 0
+				pendingTriggerClosedAt = time.Time{}
 				w.markTriggerOwed(false)
 			}
 			if monitor.Poll(running, now) == ActionTrigger {
 				pendingTrigger = true
 				pendingTriggerGeneration = w.markTriggerOwed(true)
+				_, pendingTriggerClosedAt = monitor.Countdown()
 			}
 			// Fire when a trigger is owed and no action is currently running.
 			// If the previous action is still stopping, this stays pending and
@@ -168,8 +172,10 @@ func (w *Watcher) Run(ctx context.Context) {
 			if pendingTrigger && triggerDone == nil && !running {
 				pendingTrigger = false
 				generation := pendingTriggerGeneration
+				closedAt := pendingTriggerClosedAt
 				pendingTriggerGeneration = 0
-				fireTrigger(generation)
+				pendingTriggerClosedAt = time.Time{}
+				fireTrigger(generation, closedAt)
 			}
 		}
 	}

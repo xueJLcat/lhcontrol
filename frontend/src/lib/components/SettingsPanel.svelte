@@ -81,13 +81,15 @@
     onClose,
     onLanguageChanged = () => {},
     onStatusPollIntervalChanged = () => {},
-    onStatusPollingEnabledChanged = () => {}
+    onStatusPollingEnabledChanged = () => {},
+    onPresenceMissThresholdChanged = () => {}
   }: {
     inactive?: boolean;
     onClose: () => void;
     onLanguageChanged?: () => void;
     onStatusPollIntervalChanged?: (intervalSeconds: number) => void;
     onStatusPollingEnabledChanged?: (enabled: boolean) => void;
+    onPresenceMissThresholdChanged?: () => void;
   } = $props();
 
   let adapters = $state<bluetoothModels.AdapterInfo[]>([]);
@@ -183,7 +185,11 @@
   const confirmReconnectDelay = new AsyncSetting({ getter: GetConfirmReconnectDelayMs, setter: SetConfirmReconnectDelayMs, loadMessage: connectionTimingLoad, saveMessage: connectionTimingSave });
   const channelConfirmAttempts = new AsyncSetting({ getter: GetChannelConfirmAttempts, setter: SetChannelConfirmAttempts, loadMessage: channelPresenceLoad, saveMessage: channelPresenceSave });
   const channelConfirmInterval = new AsyncSetting({ getter: GetChannelConfirmIntervalMs, setter: SetChannelConfirmIntervalMs, loadMessage: channelPresenceLoad, saveMessage: channelPresenceSave });
-  const presenceMissThreshold = new AsyncSetting({ getter: GetPresenceMissThreshold, setter: SetPresenceMissThreshold, loadMessage: channelPresenceLoad, saveMessage: channelPresenceSave });
+  const presenceMissThreshold = new AsyncSetting({
+    getter: GetPresenceMissThreshold, setter: SetPresenceMissThreshold,
+    loadMessage: channelPresenceLoad, saveMessage: channelPresenceSave,
+    afterSave: () => onPresenceMissThresholdChanged()
+  });
   const initialReadTimeout = new AsyncSetting({ getter: GetInitialReadTimeoutSeconds, setter: SetInitialReadTimeoutSeconds, loadMessage: readBudgetLoad, saveMessage: readBudgetSave });
   const scanReadPhaseTimeout = new AsyncSetting({ getter: GetScanReadPhaseTimeoutSeconds, setter: SetScanReadPhaseTimeoutSeconds, loadMessage: readBudgetLoad, saveMessage: readBudgetSave });
   const statusReadTimeout = new AsyncSetting({ getter: GetStatusReadTimeoutSeconds, setter: SetStatusReadTimeoutSeconds, loadMessage: readBudgetLoad, saveMessage: readBudgetSave });

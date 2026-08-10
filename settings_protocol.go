@@ -170,6 +170,8 @@ func (a *App) SetPresenceMissThreshold(threshold int) error {
 
 		a.applyBluetoothTiming()
 
+		a.stationManager.ApplyPresenceMissThreshold()
+
 	}
 
 	return err

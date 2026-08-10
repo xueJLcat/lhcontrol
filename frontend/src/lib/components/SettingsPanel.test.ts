@@ -387,6 +387,16 @@ describe('SettingsPanel', () => {
     expect(onStatusPollIntervalChanged).toHaveBeenCalledWith(45);
   });
 
+  it('refreshes station projection after the presence threshold is saved', async () => {
+    const onPresenceMissThresholdChanged = vi.fn();
+    render(SettingsPanel, { props: { onClose: vi.fn(), onPresenceMissThresholdChanged } });
+    const input = await screen.findByLabelText('Absence miss threshold');
+    await fireEvent.input(input, { target: { value: '4' } });
+    await fireEvent.change(input);
+    await waitFor(() => expect(backend.SetPresenceMissThreshold).toHaveBeenCalledWith(4));
+    expect(onPresenceMissThresholdChanged).toHaveBeenCalledOnce();
+  });
+
   it('rolls the status polling interval back when saving fails', async () => {
     backend.SetStatusPollIntervalSeconds.mockRejectedValue(new Error('config locked'));
     const onStatusPollIntervalChanged = vi.fn();

@@ -228,16 +228,16 @@ func TestMonitorRetainsClosedAtAfterFiring(t *testing.T) {
 func TestWatcherContinuesCarriedCountdown(t *testing.T) {
 	base := time.Now()
 	monitor := NewMonitorContinuing(time.Minute, base)
-	triggered := make(chan struct{})
+	triggered := make(chan time.Time, 1)
 	watcher := &Watcher{
 		Settings:  Settings{Enabled: true, Target: string(TargetSteamVR), DelaySeconds: 60},
 		Interval:  time.Millisecond,
 		IsRunning: func(string) (bool, error) { return false, nil },
 		Monitor:   monitor,
 		Now:       func() time.Time { return base.Add(2 * time.Minute) },
-		Trigger: func(context.Context) {
+		Trigger: func(_ context.Context, closedAt time.Time) {
 			select {
-			case triggered <- struct{}{}:
+			case triggered <- closedAt:
 			default:
 			}
 		},
@@ -255,7 +255,10 @@ func TestWatcherContinuesCarriedCountdown(t *testing.T) {
 	}()
 
 	select {
-	case <-triggered:
+	case closedAt := <-triggered:
+		if !closedAt.Equal(base) {
+			t.Fatalf("trigger session closedAt = %v, want carried time %v", closedAt, base)
+		}
 	case <-time.After(time.Second):
 		t.Fatal("replacement watcher did not continue the carried countdown")
 	}
@@ -283,7 +286,7 @@ func TestWatcherCancelsActiveTriggerWhenProcessRelaunches(t *testing.T) {
 		Now: func() time.Time {
 			return base.Add(time.Duration(ticks.Add(1)) * time.Minute)
 		},
-		Trigger: func(ctx context.Context) {
+		Trigger: func(ctx context.Context, _ time.Time) {
 			close(triggerStarted)
 			<-ctx.Done()
 			close(triggerCancelled)
@@ -349,7 +352,7 @@ func TestWatcherDefersTriggerUntilPreviousActionStops(t *testing.T) {
 		Now: func() time.Time {
 			return base.Add(time.Duration(step.Load()) * time.Minute)
 		},
-		Trigger: func(ctx context.Context) {
+		Trigger: func(ctx context.Context, _ time.Time) {
 			n := calls.Add(1)
 			if n == 1 {
 				firstOnce.Do(func() { close(firstStarted) })
@@ -432,7 +435,7 @@ func TestWatcherOwesTriggerWhileActionInFlight(t *testing.T) {
 		IsRunning: func(string) (bool, error) { return running.Load(), nil },
 		Now:       func() time.Time { return base.Add(time.Duration(ticks.Add(1)) * time.Minute) },
 		Monitor:   NewMonitor(time.Minute),
-		Trigger: func(ctx context.Context) {
+		Trigger: func(ctx context.Context, _ time.Time) {
 			startOnce.Do(func() { close(triggerStarted) })
 			select {
 			case <-release:

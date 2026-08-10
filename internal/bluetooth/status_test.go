@@ -468,6 +468,50 @@ func TestMarkMissedRequiresTwoConsecutiveScans(t *testing.T) {
 		t.Fatalf("seen station did not recover: %+v", recovered)
 	}
 }
+func TestMarkMissedUsesRaisedPresenceThresholdForExistingHistory(t *testing.T) {
+	original := CurrentTiming()
+	t.Cleanup(func() { ConfigureTiming(original) })
+	policy := original
+	policy.PresenceMissThreshold = 2
+	ConfigureTiming(policy)
+
+	station := &BaseStation{Present: true}
+	station.MarkSeen(time.Now())
+	station.MarkMissed()
+	station.MarkMissed()
+	if snapshot := station.Snapshot(); snapshot.Present {
+		t.Fatalf("station remained present at the original threshold: %+v", snapshot)
+	}
+
+	policy.PresenceMissThreshold = 4
+	ConfigureTiming(policy)
+	station.MarkMissed()
+	snapshot := station.Snapshot()
+	if !snapshot.Present || snapshot.MissedScans != 3 {
+		t.Fatalf("raised threshold did not reclassify the next reliable miss: %+v", snapshot)
+	}
+}
+func TestApplyPresenceMissThresholdReclassifiesCachedMisses(t *testing.T) {
+	station := &BaseStation{Present: false, MissedScans: 2}
+	if changed := station.ApplyPresenceMissThreshold(4); !changed {
+		t.Fatal("raising the threshold did not report a presence change")
+	}
+	if snapshot := station.Snapshot(); !snapshot.Present || snapshot.MissedScans != 2 {
+		t.Fatalf("raising the threshold did not revive cached presence: %+v", snapshot)
+	}
+	if changed := station.ApplyPresenceMissThreshold(2); !changed {
+		t.Fatal("lowering the threshold did not report an absence change")
+	}
+	if snapshot := station.Snapshot(); snapshot.Present || snapshot.MissedScans != 2 {
+		t.Fatalf("lowering the threshold did not mark cached presence absent: %+v", snapshot)
+	}
+
+	unknown := &BaseStation{}
+	unknown.MarkMissed()
+	if snapshot := unknown.Snapshot(); snapshot.Present {
+		t.Fatalf("a miss incorrectly created presence without prior seen history: %+v", snapshot)
+	}
+}
 func TestUncertainPresenceDoesNotCountAsMiss(t *testing.T) {
 	now := time.Now()
 	station := &BaseStation{Present: true}

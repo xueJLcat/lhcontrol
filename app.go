@@ -50,6 +50,8 @@ type App struct {
 	autoSleepStopWait         time.Duration
 	autoSleepWG               sync.WaitGroup
 	autoSleepActionID         atomic.Uint64
+	autoSleepActionSlot       chan struct{}
+	autoSleepSettledSession   time.Time
 	scanForAutoSleep          func(context.Context) ([]station.StationInfo, error)
 	setPowerForAutoSleep      func(context.Context, string) (station.BulkPowerResult, error)
 	autoSleepEventSink        func(autoSleepEvent)
@@ -58,6 +60,8 @@ type App struct {
 func NewApp() *App {
 	cfg := config.NewConfig()
 	mgr := station.NewManager(cfg)
+	autoSleepActionSlot := make(chan struct{}, 1)
+	autoSleepActionSlot <- struct{}{}
 	api := fiber.New(fiber.Config{
 		ReadTimeout:  5 * time.Second,
 		WriteTimeout: 0,
@@ -70,6 +74,7 @@ func NewApp() *App {
 		stationManager:           mgr,
 		api:                      api,
 		activeExternalOperations: make(map[uint64]string),
+		autoSleepActionSlot:      autoSleepActionSlot,
 		apiStatus: APIStatus{
 			Address:        "127.0.0.1:7575",
 			Warnings:       []string{},

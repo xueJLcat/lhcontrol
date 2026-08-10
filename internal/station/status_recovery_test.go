@@ -37,6 +37,38 @@ func TestIsRecentRejectsFutureTimestamps(t *testing.T) {
 	}
 }
 
+func TestApplyPresenceMissThresholdReclassifiesAndRevivesRecovery(t *testing.T) {
+	cfg := config.NewConfig()
+	cfg.PresenceMissThreshold = 4
+	manager := NewManager(cfg)
+	// Keep the test deterministic while still verifying that a newly present
+	// disconnected station is put back into the recovery registry.
+	manager.shuttingDown.Store(true)
+	address := "11:22:33:44:55:64"
+	station := &internalbluetooth.BaseStation{
+		Address: mustAddress(t, address), Present: false, MissedScans: 2,
+	}
+	manager.stations[address] = station
+
+	manager.ApplyPresenceMissThreshold()
+	snapshot := station.Snapshot()
+	if !snapshot.Present || snapshot.MissedScans != 2 {
+		t.Fatalf("raised threshold did not revive station: %+v", snapshot)
+	}
+	manager.statusRetryMutex.Lock()
+	retry, tracked := manager.statusRetries[snapshot.Address]
+	manager.statusRetryMutex.Unlock()
+	if !tracked || effectiveStatusRetryKinds(retry)&statusRetryConnection == 0 {
+		t.Fatalf("revived disconnected station recovery = %+v tracked=%v", retry, tracked)
+	}
+
+	cfg.PresenceMissThreshold = 2
+	manager.ApplyPresenceMissThreshold()
+	if snapshot := station.Snapshot(); snapshot.Present {
+		t.Fatalf("lowered threshold did not mark station absent: %+v", snapshot)
+	}
+}
+
 func TestAbsentRecoveryStopsExhaustedKindsIndependently(t *testing.T) {
 	// Drive the limit through the config (a non-default value) so a wiring
 	// regression that hardcodes the old constant would fail this test.

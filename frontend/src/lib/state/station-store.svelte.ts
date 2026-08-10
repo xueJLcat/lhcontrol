@@ -398,6 +398,25 @@ export class StationStore {
     this.powerFeedback.reconcile(this.stations);
   }
 
+  async refreshStationProjection() {
+    // An in-flight scan or command will return a newer projection using the
+    // saved setting. Do not invalidate that authoritative result just to
+    // refresh the currently cached derived flags.
+    if (this.disposed || this.startupPending || this.globalOperation !== 'idle' ||
+      this.externalScanning || this.autoSleepRunning || this.externalOperationRunning ||
+      this.anyDeviceOperation) return;
+    const revision = this.listRevisions.next();
+    const capturedStationRevisions = this.gates.snapshotStationRevisions();
+    try {
+      const updated = await GetCurrentStationInfo();
+      this.applyStationList(updated, revision, capturedStationRevisions);
+    } catch (error) {
+      // Projection refreshes follow a successfully saved setting and should
+      // not replace the current operation status with a transient read error.
+      console.error('Station projection refresh failed:', error);
+    }
+  }
+
   private reconcileExternalOperations(operations: Array<{ id: number; kind?: string }>, revision: number) {
     if (revision <= 0 && this.externalOperationRevision > 0) return;
     if (revision > 0 && revision < this.externalOperationRevision) return;

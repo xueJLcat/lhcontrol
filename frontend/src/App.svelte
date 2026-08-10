@@ -241,8 +241,12 @@
     inactive={channelEditorOpen || Boolean(bulkConfirmTarget)}
     onClose={closeSettings}
     onLanguageChanged={handleLanguageChanged}
-    onStatusPollIntervalChanged={(intervalSeconds) => store.setStatusPollIntervalSeconds(intervalSeconds)}
+    onStatusPollIntervalChanged={(intervalSeconds) => {
+      store.setStatusPollIntervalSeconds(intervalSeconds);
+      void store.refreshStationProjection();
+    }}
     onStatusPollingEnabledChanged={(enabled) => store.setStatusPollingEnabled(enabled)}
+    onPresenceMissThresholdChanged={() => void store.refreshStationProjection()}
   />
 {/if}
 

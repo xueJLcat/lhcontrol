@@ -272,13 +272,33 @@ func (bs *BaseStation) MarkSeen(now time.Time) {
 // Windows BLE scan can miss a station while its GATT session is still being
 // released).
 func (bs *BaseStation) MarkMissed() {
+	threshold := CurrentTiming().PresenceMissThreshold
 	bs.mutex.Lock()
 	bs.presenceUncertain = false
+	hasPresenceHistory := bs.Present || bs.MissedScans > 0
 	bs.MissedScans++
-	if bs.MissedScans >= CurrentTiming().PresenceMissThreshold {
-		bs.Present = false
+	if hasPresenceHistory {
+		bs.Present = bs.MissedScans < threshold
 	}
 	bs.mutex.Unlock()
+}
+
+// ApplyPresenceMissThreshold immediately reclassifies a station with reliable
+// missed-scan history after the user changes the threshold. A station with no
+// misses keeps its current state because there is no scan evidence to revise.
+func (bs *BaseStation) ApplyPresenceMissThreshold(threshold int) bool {
+	if threshold <= 0 {
+		threshold = CurrentTiming().PresenceMissThreshold
+	}
+	bs.mutex.Lock()
+	defer bs.mutex.Unlock()
+	if bs.MissedScans == 0 {
+		return false
+	}
+	present := bs.MissedScans < threshold
+	changed := bs.Present != present
+	bs.Present = present
+	return changed
 }
 
 // MarkPresenceUncertain records that a completed scan could not reliably

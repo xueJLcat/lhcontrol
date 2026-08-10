@@ -127,7 +127,7 @@ func (a *App) applyAutoSleep(settings autosleep.Settings) {
 		IsRunning: func(name string) (bool, error) {
 			return platform.IsProcessRunning(name)
 		},
-		Trigger: a.runAutoSleep,
+		Trigger: a.runAutoSleepSession,
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -299,15 +299,66 @@ func timedOutAutoSleepEvent(results []station.BulkPowerStationResult, reason str
 
 }
 
-// runAutoSleep is the watcher trigger: rescan for base stations, then put
+// runAutoSleep invokes an unkeyed action for direct callers and tests.
+
+func (a *App) runAutoSleep(ctx context.Context) {
+
+	a.runAutoSleepSession(ctx, time.Time{})
+
+}
+
+// runAutoSleepSession is the watcher trigger: rescan for base stations, then put
 
 // every known station to sleep. When the user is running a Bluetooth
 
 // operation this cycle is skipped without a retry, as configured.
 
-func (a *App) runAutoSleep(ctx context.Context) {
+func (a *App) runAutoSleepSession(ctx context.Context, closedAt time.Time) {
 
 	if a.shuttingDown.Load() || ctx.Err() != nil {
+
+		return
+
+	}
+
+	// A replacement watcher can start before the cancelled watcher's adapter
+	// call has drained. Serialize those actions outside the station manager so
+	// the replacement waits instead of being rejected as globally busy. The
+	// wait remains cancellable when the watched process starts again.
+	select {
+
+	case <-ctx.Done():
+
+		return
+
+	case <-a.autoSleepActionSlot:
+
+	}
+
+	settled := false
+	defer func() {
+
+		if settled && !closedAt.IsZero() {
+
+			a.autoSleepSettledSession = closedAt
+
+		}
+
+		a.autoSleepActionSlot <- struct{}{}
+
+	}()
+
+	if a.shuttingDown.Load() || ctx.Err() != nil {
+
+		return
+
+	}
+
+	// The old action may have completed normally between applyAutoSleep taking
+	// its owed-trigger snapshot and cancelling the watcher. In that case the
+	// carried replacement represents the same closed process session and must
+	// not run a duplicate scan/power lifecycle.
+	if !closedAt.IsZero() && a.autoSleepSettledSession.Equal(closedAt) {
 
 		return
 
@@ -318,6 +369,9 @@ func (a *App) runAutoSleep(ctx context.Context) {
 
 	actionID := a.autoSleepActionID.Add(1)
 	emitTerminal := func(event autoSleepEvent) {
+		if event.Phase != "cancelled" {
+			settled = true
+		}
 		event.ID = actionID
 		a.emitTerminalAutoSleep(event)
 	}

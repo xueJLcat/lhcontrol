@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -81,6 +82,123 @@ func TestRunAutoSleepUsesDistinctLifecycleIDs(t *testing.T) {
 	}
 	if events[2].ID <= events[0].ID || events[2].ID != events[3].ID {
 		t.Fatalf("second lifecycle IDs = %d/%d after %d", events[2].ID, events[3].ID, events[0].ID)
+	}
+}
+
+func TestRunAutoSleepReplacementWaitsForCancelledSessionToDrain(t *testing.T) {
+	app := NewApp()
+	closedAt := time.Now()
+	firstStarted := make(chan struct{})
+	secondStarted := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	firstDone := make(chan struct{})
+	secondDone := make(chan struct{})
+	var scanCalls atomic.Int32
+	var powerCalls atomic.Int32
+	app.scanForAutoSleep = func(ctx context.Context) ([]station.StationInfo, error) {
+		switch scanCalls.Add(1) {
+		case 1:
+			close(firstStarted)
+			<-releaseFirst
+			return nil, ctx.Err()
+		case 2:
+			close(secondStarted)
+			return nil, nil
+		default:
+			return nil, nil
+		}
+	}
+	app.setPowerForAutoSleep = func(context.Context, string) (station.BulkPowerResult, error) {
+		powerCalls.Add(1)
+		return station.BulkPowerResult{}, nil
+	}
+
+	firstCtx, cancelFirst := context.WithCancel(context.Background())
+	go func() {
+		defer close(firstDone)
+		app.runAutoSleepSession(firstCtx, closedAt)
+	}()
+	select {
+	case <-firstStarted:
+	case <-time.After(time.Second):
+		t.Fatal("first automatic-sleep action did not start")
+	}
+
+	cancelFirst()
+	go func() {
+		defer close(secondDone)
+		app.runAutoSleepSession(context.Background(), closedAt)
+	}()
+	select {
+	case <-secondStarted:
+		t.Error("replacement automatic-sleep scan overlapped the draining action")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(releaseFirst)
+	for name, done := range map[string]<-chan struct{}{"cancelled action": firstDone, "replacement action": secondDone} {
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatalf("%s did not finish", name)
+		}
+	}
+
+	if got := scanCalls.Load(); got != 2 {
+		t.Fatalf("scan calls = %d, want cancelled action plus replacement", got)
+	}
+	if got := powerCalls.Load(); got != 1 {
+		t.Fatalf("power calls = %d, want only the replacement action", got)
+	}
+}
+
+func TestRunAutoSleepReplacementDeduplicatesSettledSession(t *testing.T) {
+	app := NewApp()
+	closedAt := time.Now()
+	firstStarted := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	firstDone := make(chan struct{})
+	replacementDone := make(chan struct{})
+	var scanCalls atomic.Int32
+	var powerCalls atomic.Int32
+	app.scanForAutoSleep = func(context.Context) ([]station.StationInfo, error) {
+		if scanCalls.Add(1) == 1 {
+			close(firstStarted)
+			<-releaseFirst
+		}
+		return nil, nil
+	}
+	app.setPowerForAutoSleep = func(context.Context, string) (station.BulkPowerResult, error) {
+		powerCalls.Add(1)
+		return station.BulkPowerResult{}, nil
+	}
+
+	go func() {
+		defer close(firstDone)
+		app.runAutoSleepSession(context.Background(), closedAt)
+	}()
+	select {
+	case <-firstStarted:
+	case <-time.After(time.Second):
+		t.Fatal("first automatic-sleep action did not start")
+	}
+	go func() {
+		defer close(replacementDone)
+		app.runAutoSleepSession(context.Background(), closedAt)
+	}()
+	close(releaseFirst)
+	for name, done := range map[string]<-chan struct{}{"first action": firstDone, "replacement action": replacementDone} {
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatalf("%s did not finish", name)
+		}
+	}
+
+	if got := scanCalls.Load(); got != 1 {
+		t.Fatalf("scan calls = %d, want one lifecycle for the shared process session", got)
+	}
+	if got := powerCalls.Load(); got != 1 {
+		t.Fatalf("power calls = %d, want one lifecycle for the shared process session", got)
 	}
 }
 

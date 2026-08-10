@@ -78,6 +78,34 @@ beforeEach(() => {
   });
 });
 
+describe('StationStore projection settings', () => {
+  it('refreshes derived station fields without performing a Bluetooth status read', async () => {
+    store = new StationStore(createUi());
+    store.startupPending = false;
+    store.stations = [createStation({ isPresent: true, powerFresh: true })];
+    backend.GetCurrentStationInfo.mockResolvedValue([
+      createStation({ isPresent: false, powerFresh: false, statusFresh: false })
+    ]);
+
+    await store.refreshStationProjection();
+
+    expect(backend.GetCurrentStationInfo).toHaveBeenCalledOnce();
+    expect(backend.CheckAllStationStatuses).not.toHaveBeenCalled();
+    expect(store.stations[0].isPresent).toBe(false);
+    expect(store.stations[0].powerFresh).toBe(false);
+  });
+
+  it('leaves an in-flight authoritative operation to apply the new projection', async () => {
+    store = new StationStore(createUi());
+    store.startupPending = false;
+    store.globalOperation = 'scanning';
+
+    await store.refreshStationProjection();
+
+    expect(backend.GetCurrentStationInfo).not.toHaveBeenCalled();
+  });
+});
+
 describe('StationStore locale changes', () => {
   it('rebuilds transient messages and clears old-language feedback', async () => {
     const { store } = mountStore();
