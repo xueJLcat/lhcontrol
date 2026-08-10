@@ -49,12 +49,12 @@ func (m *Manager) beginForegroundGlobalOperationContext(ctx context.Context) err
 		ctx = context.Background()
 	}
 	for {
-		if err := ctx.Err(); err != nil {
+		if err := m.foregroundContextError(ctx); err != nil {
 			return err
 		}
 		err := m.beginOperation()
 		if err == nil {
-			if contextErr := ctx.Err(); contextErr != nil {
+			if contextErr := m.foregroundContextError(ctx); contextErr != nil {
 				m.endOperation()
 				return contextErr
 			}
@@ -91,7 +91,7 @@ func (m *Manager) beginForegroundGlobalOperationContext(ctx context.Context) err
 		select {
 		case <-backgroundDone:
 		case <-ctx.Done():
-			return ctx.Err()
+			return m.foregroundContextError(ctx)
 		case <-m.shutdownCh:
 			return ErrShuttingDown
 		}
@@ -286,7 +286,7 @@ func (m *Manager) beginForegroundStationOperationContext(ctx context.Context, ad
 	}
 	m.scanTransitionMutex.Lock()
 	defer m.scanTransitionMutex.Unlock()
-	if err := ctx.Err(); err != nil {
+	if err := m.foregroundContextError(ctx); err != nil {
 		return err
 	}
 	if m.isScanning.Load() {
@@ -311,7 +311,7 @@ func (m *Manager) beginForegroundStationOperationContext(ctx context.Context, ad
 			case <-deviceBusy.backgroundDone:
 				continue
 			case <-ctx.Done():
-				return ctx.Err()
+				return m.foregroundContextError(ctx)
 			case <-m.shutdownCh:
 				return ErrShuttingDown
 			}
@@ -333,11 +333,24 @@ func (m *Manager) beginForegroundStationOperationContext(ctx context.Context, ad
 		select {
 		case <-done:
 		case <-ctx.Done():
-			return ctx.Err()
+			return m.foregroundContextError(ctx)
 		case <-m.shutdownCh:
 			return ErrShuttingDown
 		}
 	}
+}
+
+// foregroundContextError keeps caller cancellation and deadlines intact, but
+// normalizes the lifecycle cancellation triggered by BeginShutdown to the
+// manager's public shutdown sentinel. This closes the race where shutdown can
+// begin after a public action's early guard but before the coordinator reads
+// its context.
+func (m *Manager) foregroundContextError(ctx context.Context) error {
+	err := ctx.Err()
+	if errors.Is(err, context.Canceled) && m.shuttingDown.Load() {
+		return ErrShuttingDown
+	}
+	return err
 }
 func (m *Manager) beginBulkGlobalOperation() error {
 	return m.beginBulkGlobalOperationContext(context.Background())

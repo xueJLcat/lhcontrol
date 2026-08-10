@@ -543,6 +543,38 @@ func TestForegroundWaitingForRecoveryReturnsOnShutdown(t *testing.T) {
 	manager.Shutdown()
 }
 
+func TestForegroundCoordinatorNormalizesLifecycleCancellation(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	manager.BeginShutdown()
+
+	for name, begin := range map[string]func() error{
+		"global": func() error {
+			return manager.beginForegroundGlobalOperationContext(manager.lifecycleContext)
+		},
+		"station": func() error {
+			return manager.beginForegroundStationOperationContext(manager.lifecycleContext, "AA")
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := begin(); !errors.Is(err, ErrShuttingDown) {
+				t.Fatalf("foreground coordinator error = %v, want ErrShuttingDown", err)
+			}
+		})
+	}
+}
+
+func TestForegroundCoordinatorPreservesCallerCancellation(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := manager.beginForegroundStationOperationContext(ctx, "AA")
+	if !errors.Is(err, context.Canceled) || errors.Is(err, ErrShuttingDown) {
+		t.Fatalf("foreground coordinator error = %v, want caller context cancellation", err)
+	}
+}
+
 func TestForegroundCancelsReadOnlyRecoveryToAcquireSlot(t *testing.T) {
 	manager := NewManager(config.NewConfig())
 	defer manager.Shutdown()

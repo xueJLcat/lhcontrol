@@ -12,6 +12,9 @@ func (m *Manager) IdentifyStation(address string) error {
 	if err != nil {
 		return err
 	}
+	if m.shuttingDown.Load() {
+		return ErrShuttingDown
+	}
 	canonicalAddress := stationPtr.Snapshot().Address
 	operationContext, cancelOperation := m.newStationOperationContext(m.lifecycleContext)
 	defer cancelOperation()
@@ -43,12 +46,14 @@ func (m *Manager) IdentifyStation(address string) error {
 		}
 	}
 	if !capabilities.Identify {
+		m.clearStatusFailureKind(canonicalAddress, statusRetryConnection)
 		return fmt.Errorf("%w: identify is unavailable", ErrUnsupported)
 	}
 	err = runSafely("identify operation", func() error {
 		return m.bluetoothOps.identify(operationContext, stationPtr)
 	})
 	if bluetooth.IsUnsupportedCapabilityError(err) {
+		m.observeStationBluetoothError(stationPtr, canonicalAddress, err)
 		return fmt.Errorf("%w: %v", ErrUnsupported, err)
 	}
 	if err != nil {
@@ -65,6 +70,9 @@ func (m *Manager) RefreshStationCapabilities(address string) (StationInfo, error
 	stationPtr, err := m.stationByAddress(address)
 	if err != nil {
 		return StationInfo{}, err
+	}
+	if m.shuttingDown.Load() {
+		return StationInfo{}, ErrShuttingDown
 	}
 	canonicalAddress := stationPtr.Snapshot().Address
 	operationContext, cancelOperation := m.newStationOperationContext(m.lifecycleContext)
