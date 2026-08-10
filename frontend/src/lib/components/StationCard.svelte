@@ -156,12 +156,15 @@
       wipeStartedAt = Date.now();
     }
   });
+  // Schedule the expiry precisely at the remaining window so the chip drops
+  // the last known channel together with the fleet channel map (ChannelMemory
+  // expires at exactly CHANNEL_MEMORY_MS); a coarse poll could keep showing it
+  // for up to one interval after the map already released the channel.
   $effect(() => {
-    if (station.channel > 0 || lastKnownChannel <= 0) return;
-    const timer = setInterval(() => {
-      if (wipeStartedAt !== null && Date.now() - wipeStartedAt > CHANNEL_MEMORY_MS) lastKnownChannel = 0;
-    }, 15_000);
-    return () => clearInterval(timer);
+    if (station.channel > 0 || lastKnownChannel <= 0 || wipeStartedAt === null) return;
+    const remaining = CHANNEL_MEMORY_MS - (Date.now() - wipeStartedAt);
+    const timer = setTimeout(() => { lastKnownChannel = 0; }, Math.max(0, remaining));
+    return () => clearTimeout(timer);
   });
   const shownChannel = $derived(station.channel > 0 ? station.channel : lastKnownChannel);
   const channelLastKnown = $derived(station.channel <= 0 && shownChannel > 0);
@@ -171,6 +174,10 @@
   }
 
   function handleRenameKeydown(event: KeyboardEvent) {
+    // Enter/Escape during an IME composition belong to the candidate window:
+    // committing on the candidate-confirm Enter would submit the unfinished
+    // composition text (the zh-CN input flow), and Escape would discard it.
+    if (event.isComposing) return;
     if (event.key === 'Enter') {
       event.stopPropagation();
       commitRename();

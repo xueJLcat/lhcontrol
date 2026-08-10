@@ -1,5 +1,6 @@
 import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
+import { tick } from 'svelte';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { StationInfo } from '../types';
 import { createOnStation } from '../../test/fixtures';
@@ -137,5 +138,43 @@ describe('StationCard rename submission', () => {
     fireEvent.blur(nextInput);
     expect(onSaveRename).toHaveBeenCalledOnce();
     expect(onSaveRename.mock.calls[0][1]).toBe('Second draft');
+  });
+
+  it('ignores Enter and Escape while an IME composition is active', async () => {
+    const onSaveRename = vi.fn();
+    const onCancelRename = vi.fn();
+    render(StationCard, { props: cardProps({ onSaveRename, onCancelRename }) });
+    const input = screen.getByRole('textbox', { name: 'Station name' });
+    await fireEvent.input(input, { target: { value: '候' } });
+    await fireEvent.keyDown(input, { key: 'Enter', isComposing: true });
+    await fireEvent.keyDown(input, { key: 'Escape', isComposing: true });
+    expect(onSaveRename).not.toHaveBeenCalled();
+    expect(onCancelRename).not.toHaveBeenCalled();
+    await fireEvent.keyDown(input, { key: 'Enter' });
+    expect(onSaveRename).toHaveBeenCalledOnce();
+    expect(onSaveRename.mock.calls[0][1]).toBe('候');
+  });
+});
+
+describe('StationCard channel memory', () => {
+  it('drops the last known channel exactly when the memory window elapses', async () => {
+    vi.useFakeTimers();
+    try {
+      const wiped = station();
+      wiped.channel = 0;
+      wiped.channelFresh = false;
+      render(StationCard, { props: { ...cardProps({}), renaming: false, station: wiped, channelDisplay: 5 } });
+      expect(screen.getByText('CH 05')).toBeInTheDocument();
+
+      await vi.advanceTimersByTimeAsync(44_999);
+      await tick();
+      expect(screen.getByText('CH 05')).toBeInTheDocument();
+
+      await vi.advanceTimersByTimeAsync(1);
+      await tick();
+      expect(screen.getByText('CH --')).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

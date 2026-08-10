@@ -29,8 +29,10 @@ describe('i18n', () => {
     setLocale('zh-CN');
     expect(t('Settings')).toBe('设置');
     expect(t('Channel {channel}', { channel: 8 })).toBe('频道 8');
+    expect(t('raw {value}', { value: '0x0B' })).toBe('原始值 0x0B');
     expect(document.documentElement.lang).toBe('zh-CN');
     setLocale('en');
     expect(t('Settings')).toBe('Settings');
+    expect(t('raw {value}', { value: '0x0B' })).toBe('raw 0x0B');
   });
 });

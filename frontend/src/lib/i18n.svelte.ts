@@ -165,6 +165,7 @@ const zhCN = {
   'confirmed': '已确认',
   'unverified': '未验证',
   'last known, stale': '上次已知，已过期',
+  'raw {value}': '原始值 {value}',
   'fresh': '最新',
   'stale or unavailable': '已过期或不可用',
   'never': '从未',

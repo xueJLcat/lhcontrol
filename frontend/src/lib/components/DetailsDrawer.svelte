@@ -96,7 +96,7 @@
   <section>
     <h4>{t('Status')}</h4>
     <dl class="def-list">
-      <dt>{t('Power')}</dt><dd><span class="state-text state-text-{stateClass(station)}">{stateLabel(station)}</span> · {t(station.powerFresh ? station.powerStateConfirmed ? 'confirmed' : 'unverified' : 'last known, stale')} (raw {rawPowerLabel})</dd>
+      <dt>{t('Power')}</dt><dd><span class="state-text state-text-{stateClass(station)}">{stateLabel(station)}</span> · {t(station.powerFresh ? station.powerStateConfirmed ? 'confirmed' : 'unverified' : 'last known, stale')} ({t('raw {value}', { value: rawPowerLabel })})</dd>
       <dt>{t('Channel')}</dt><dd class="mono">{station.channel || t('Unable to verify')}</dd>
       <dt>{t('Connection')}</dt><dd>{station.connectionState === 'connected' ? t('connected') : station.connectionState === 'disconnected' ? t('disconnected') : station.connectionState}</dd>
       <dt>{t('Last seen')}</dt><dd title={station.lastSeenAt || undefined}>{relativeTime(station.lastSeenAt, now) || '—'}</dd>
