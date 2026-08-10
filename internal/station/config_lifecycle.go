@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"lhcontrol/internal/bluetooth"
 	"log"
+	"time"
 )
 
 func (m *Manager) RenameStation(originalName string, newName string) error {
@@ -74,23 +75,44 @@ func (m *Manager) BeginShutdown() {
 		lifecycle.cancel()
 	}
 }
+
+// shutdownDrainLimit bounds the exit drain. Adapter calls without context
+// support (device disconnect and its cleanup retries among them) can block
+// far longer than a closing window should wait; after the limit the process
+// exits and the OS reclaims the handles. This matches the bounded waits the
+// codebase already applies to CancelBulkPower and the API shutdown.
+const shutdownDrainLimit = 60 * time.Second
+
 func (m *Manager) Shutdown() {
 	m.BeginShutdown()
-	if err := m.StopScan(); err != nil {
-		log.Printf("Bluetooth scan cancellation was incomplete: %v", err)
+	drained := make(chan struct{})
+	go func() {
+		defer close(drained)
+		if err := m.StopScan(); err != nil {
+			log.Printf("Bluetooth scan cancellation was incomplete: %v", err)
+		}
+		m.statusRecoveryWg.Wait()
+		m.lifecycleMutex.Lock()
+		for m.activeOperations > 0 {
+			m.lifecycleCond.Wait()
+		}
+		m.lifecycleMutex.Unlock()
+		m.asyncScanWg.Wait()
+		// scanCallbackWg is intentionally not awaited: shutdown may itself be
+		// invoked from a scan callback, so waiting for callbacks would
+		// self-deadlock. Event emissions are guarded by the caller's shutdown
+		// flag instead.
+		if err := bluetooth.DisconnectAllStations(); err != nil {
+			log.Printf("Bluetooth shutdown cleanup was incomplete: %v", err)
+		}
+	}()
+	limit := m.shutdownDrainTimeout
+	if limit <= 0 {
+		limit = shutdownDrainLimit
 	}
-	m.statusRecoveryWg.Wait()
-	m.lifecycleMutex.Lock()
-	for m.activeOperations > 0 {
-		m.lifecycleCond.Wait()
-	}
-	m.lifecycleMutex.Unlock()
-	m.asyncScanWg.Wait()
-	// scanCallbackWg is intentionally not awaited: shutdown may itself be
-	// invoked from a scan callback, so waiting for callbacks would
-	// self-deadlock. Event emissions are guarded by the caller's shutdown
-	// flag instead.
-	if err := bluetooth.DisconnectAllStations(); err != nil {
-		log.Printf("Bluetooth shutdown cleanup was incomplete: %v", err)
+	select {
+	case <-drained:
+	case <-time.After(limit):
+		log.Printf("Bluetooth shutdown drain exceeded %s; exiting without complete cleanup", limit)
 	}
 }

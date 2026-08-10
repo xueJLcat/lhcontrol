@@ -3,9 +3,30 @@ package main
 import (
 	"context"
 	"testing"
+	"time"
 
 	"lhcontrol/internal/station"
 )
+
+func TestStopAutoSleepBoundedWhenTheRunningActionIsStuck(t *testing.T) {
+	app := NewApp()
+	app.autoSleepStopWait = 30 * time.Millisecond
+	app.autoSleepCancel = func() {}
+	// Simulate a sleep action stuck in an adapter call that ignores
+	// cancellation; the shutdown join must give up after the limit instead of
+	// keeping the window open.
+	app.autoSleepWG.Add(1)
+
+	start := time.Now()
+	app.stopAutoSleep()
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("stopAutoSleep() took %v, want the bounded wait", elapsed)
+	}
+	if app.autoSleepCancel != nil {
+		t.Fatal("stopAutoSleep() did not clear the watcher cancel")
+	}
+	app.autoSleepWG.Done() // release the stranded wait goroutine
+}
 
 func TestRunAutoSleepEmitsTerminalCancellationBetweenScanAndPower(t *testing.T) {
 	app := NewApp()

@@ -98,6 +98,24 @@ func TestShutdownWaitsForSharedConfigurationOperation(t *testing.T) {
 		t.Fatalf("beginSharedOperation() after shutdown = %v, want ErrShuttingDown", err)
 	}
 }
+func TestShutdownBoundedWhenAnOperationCannotDrain(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	manager.shutdownDrainTimeout = 30 * time.Millisecond
+	// Simulate an operation stuck in an adapter call that ignores lifecycle
+	// cancellation; without the drain limit the exit wait would block on it
+	// forever and the window could never close.
+	if err := manager.beginOperation(); err != nil {
+		t.Fatalf("beginOperation() error = %v", err)
+	}
+
+	start := time.Now()
+	manager.Shutdown()
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("Shutdown() took %v, want the bounded drain", elapsed)
+	}
+	manager.endOperation()
+}
+
 func TestShutdownWaitsForInitializationAndPreventsLateScan(t *testing.T) {
 	manager := NewManager(config.NewConfig())
 	manager.initializeErr = errors.New("radio unavailable")

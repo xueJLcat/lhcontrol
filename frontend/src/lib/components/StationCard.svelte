@@ -176,7 +176,9 @@
       commitRename();
     } else if (event.key === 'Escape') {
       event.stopPropagation();
-      discardRename();
+      // The save already runs; discarding now would only hide a rename that
+      // still lands on the backend.
+      if (!configBusy) discardRename();
     }
   }
 </script>
@@ -207,8 +209,8 @@
         onblur={handleRenameBlur}
         onclick={(event) => event.stopPropagation()}
       />
-      <button type="button" class="icon-btn" title={t('Save name')} aria-label={t('Save name')} onmousedown={(event) => event.preventDefault()} onclick={(event) => { event.stopPropagation(); commitRename(); }}><Check size={16} /></button>
-      <button type="button" class="icon-btn" title={t('Cancel')} aria-label={t('Cancel rename')} onmousedown={(event) => event.preventDefault()} onclick={(event) => { event.stopPropagation(); discardRename(); }}><X size={16} /></button>
+      <button type="button" class="icon-btn" title={t('Save name')} aria-label={t('Save name')} onmousedown={(event) => event.preventDefault()} onclick={(event) => { event.stopPropagation(); commitRename(); }} disabled={configBusy}><Check size={16} /></button>
+      <button type="button" class="icon-btn" title={t('Cancel')} aria-label={t('Cancel rename')} onmousedown={(event) => event.preventDefault()} onclick={(event) => { event.stopPropagation(); discardRename(); }} disabled={configBusy}><X size={16} /></button>
       <span class="sr-only" id={`rename-hint-${station.address}`}>{t('Saving an empty name restores the original name: {name}.', { name: station.originalName })}</span>
     </div>
   {:else}

@@ -318,9 +318,9 @@ export class StationActionController {
         ? this.host.withStationChanges(current, { name: name || current.originalName })
         : current);
       if (this.host.gates.canCommitStatus(statusOperation)) this.host.statusMessage = name ? t('Renamed to {name}.', { name }) : t('Reset name for {name}.', { name: station.originalName });
-      // Close the row only once the rename has landed: an async failure
-      // otherwise loses the draft and forces the user to retype it.
-      this.cancelRename();
+      // Close only the row this save owns: while this save was in flight the
+      // user can open another station's rename, and its draft must survive.
+      if (this.host.editingAddress === station.address) this.cancelRename();
     } catch (error) {
       if (!this.host.gates.canCommitStationOperation(operationEpoch, station.address, operationRevision)) return;
       if (this.host.gates.canCommitStatus(statusOperation)) {

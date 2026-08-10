@@ -226,6 +226,7 @@ type Manager struct {
 	statusReadTimeout       time.Duration
 	statusRefreshTimeout    time.Duration
 	stationOperationTimeout time.Duration
+	shutdownDrainTimeout    time.Duration
 	shuttingDown            atomic.Bool
 	shutdownOnce            sync.Once
 	shutdownCh              chan struct{}

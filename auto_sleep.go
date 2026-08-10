@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"time"
 
 	"lhcontrol/internal/autosleep"
 	"lhcontrol/internal/bluetooth"
@@ -12,6 +13,10 @@ import (
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
+
+// autoSleepStopLimit mirrors station.shutdownDrainLimit so a stuck sleep
+// action cannot keep the window from closing on shutdown.
+const autoSleepStopLimit = 60 * time.Second
 
 type autoSleepEvent struct {
 	Phase string `json:"phase"`
@@ -817,7 +822,11 @@ func (a *App) applyAutoSleep(settings autosleep.Settings) {
 
 // superseded watchers whose sleep action was still draining when settings
 
-// replaced them.
+// replaced them. The wait is bounded: a sleep action stuck in an adapter
+
+// call that ignores cancellation must not keep the window from closing;
+
+// the process exits after the limit and the OS reclaims the handles.
 
 func (a *App) stopAutoSleep() {
 
@@ -835,7 +844,30 @@ func (a *App) stopAutoSleep() {
 
 	}
 
-	a.autoSleepWG.Wait()
+	waited := make(chan struct{})
+
+	go func() {
+
+		defer close(waited)
+
+		a.autoSleepWG.Wait()
+
+	}()
+
+	limit := a.autoSleepStopWait
+	if limit <= 0 {
+		limit = autoSleepStopLimit
+	}
+
+	select {
+
+	case <-waited:
+
+	case <-time.After(limit):
+
+		log.Printf("Auto-sleep shutdown wait exceeded %s; exiting without the running action", limit)
+
+	}
 
 }
 

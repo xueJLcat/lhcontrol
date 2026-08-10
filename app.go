@@ -47,6 +47,7 @@ type App struct {
 	autoSleepMutex            sync.Mutex
 	autoSleepCancel           context.CancelFunc
 	autoSleepWatcher          *autosleep.Watcher
+	autoSleepStopWait         time.Duration
 	autoSleepWG               sync.WaitGroup
 	scanForAutoSleep          func(context.Context) ([]station.StationInfo, error)
 	setPowerForAutoSleep      func(context.Context, string) (station.BulkPowerResult, error)

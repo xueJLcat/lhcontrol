@@ -486,4 +486,61 @@ describe('App asynchronous operations', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: 'Scan' })).not.toBeDisabled());
   });
 
+  it('keeps a second station rename draft when the first save settles', async () => {
+    const stationA = createStation({ name: 'LHB-A', address: 'AA' });
+    const stationB = createStation({ name: 'LHB-B', address: 'BB' });
+    api.ScanAndFetchStations.mockResolvedValue([stationA, stationB]);
+    let resolveRename!: () => void;
+    api.RenameStationByAddress.mockReturnValue(new Promise<void>((resolve) => {
+      resolveRename = resolve;
+    }));
+
+    render(App);
+    await screen.findByText('LHB-B');
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Scan' })).not.toBeDisabled());
+    await fireEvent.click(screen.getByRole('button', { name: 'Rename LHB-A' }));
+    const inputA = screen.getByRole('textbox', { name: 'Station name' });
+    await fireEvent.input(inputA, { target: { value: 'Renamed A' } });
+    await fireEvent.keyDown(inputA, { key: 'Enter' });
+    await waitFor(() => expect(api.RenameStationByAddress).toHaveBeenCalledWith('AA', 'Renamed A'));
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Rename LHB-B' }));
+    const inputB = screen.getByRole('textbox', { name: 'Station name' });
+    await fireEvent.input(inputB, { target: { value: 'B draft' } });
+
+    api.GetCurrentStationInfo.mockResolvedValue([{ ...stationA, name: 'Renamed A' }, stationB]);
+    resolveRename();
+    await waitFor(() => expect(screen.getByText('Renamed A')).toBeInTheDocument());
+
+    // A's success must only close A's row; B's draft survives.
+    const keptInput = screen.getByRole('textbox', { name: 'Station name' }) as HTMLInputElement;
+    expect(keptInput.value).toBe('B draft');
+  });
+
+  it('locks the rename row while its own save is settling', async () => {
+    let resolveRename!: () => void;
+    api.RenameStationByAddress.mockReturnValue(new Promise<void>((resolve) => {
+      resolveRename = resolve;
+    }));
+
+    render(App);
+    await screen.findByText('LHB-TEST');
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Scan' })).not.toBeDisabled());
+    await fireEvent.click(screen.getByRole('button', { name: 'Rename LHB-TEST' }));
+    const input = screen.getByRole('textbox', { name: 'Station name' });
+    await fireEvent.input(input, { target: { value: 'Settling name' } });
+    await fireEvent.keyDown(input, { key: 'Enter' });
+    await waitFor(() => expect(api.RenameStationByAddress).toHaveBeenCalledWith('11:22:33:44:55:66', 'Settling name'));
+
+    // Cancel/Escape while the save runs would only hide a rename that still
+    // lands on the backend; the row stays until the result is in.
+    expect(screen.getByTitle('Cancel')).toBeDisabled();
+    expect(screen.getByTitle('Save name')).toBeDisabled();
+    await fireEvent.keyDown(input, { key: 'Escape' });
+    expect(screen.getByRole('textbox', { name: 'Station name' })).toBeInTheDocument();
+
+    resolveRename();
+    await waitFor(() => expect(screen.getByText('Settling name')).toBeInTheDocument());
+  });
+
 });
