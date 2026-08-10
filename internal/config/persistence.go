@@ -120,8 +120,8 @@ func (c *Config) saveLocked() error {
 		&recoveryRetryBaseSeconds,
 		&recoveryRetryMaxSeconds,
 	)
+	autoSleep := sanitizeAutoSleep(&c.AutoSleep)
 	if c.AutoSleep != (autosleep.Settings{}) {
-		autoSleep := sanitizeAutoSleep(&c.AutoSleep)
 		snapshot.AutoSleep = &autoSleep
 	}
 	for originalName, renamedName := range c.RenamedStations {
@@ -145,6 +145,44 @@ func (c *Config) saveLocked() error {
 		c.lastPersistenceErr = saveErr
 		return saveErr
 	}
+	// Save is also a normalization boundary for callers that populated the
+	// exported fields directly. Once the atomic write succeeds, keep runtime
+	// getters and the just-written file on the same repaired values instead of
+	// changing behavior only after the next process restart.
+	c.AutoSleep = autoSleep
+	c.Language = snapshot.Language
+	c.ScanOnStartup = scanOnStartup
+	c.ScanDurationSeconds = scanDurationSeconds
+	c.StatusPollingEnabled = statusPollingEnabled
+	c.BulkPowerTimeoutSeconds = bulkPowerTimeoutSeconds
+	c.StatusPollIntervalSeconds = statusPollIntervalSeconds
+	c.StationOperationTimeoutSeconds = stationOperationTimeoutSeconds
+	c.PowerConfirmAttemptsOn = powerConfirmAttemptsOn
+	c.PowerConfirmAttemptsOff = powerConfirmAttemptsOff
+	c.PowerConfirmPollIntervalMs = powerConfirmPollIntervalMs
+	c.BootFallbackSeconds = bootFallbackSeconds
+	c.SleepFinalWriteTimeoutSeconds = sleepFinalWriteTimeoutSeconds
+	c.SleepPrepareGapMs = sleepPrepareGapMs
+	c.DiscoveryAttempts = discoveryAttempts
+	c.DiscoveryRetryDelayMs = discoveryRetryDelayMs
+	c.APIListenAddress = snapshot.APIListenAddress
+	c.PowerWriteAttempts = powerWriteAttempts
+	c.OperationRetryDelayMs = operationRetryDelayMs
+	c.ChannelConfirmAttempts = channelConfirmAttempts
+	c.ChannelConfirmIntervalMs = channelConfirmIntervalMs
+	c.ConfirmReconnectThreshold = confirmReconnectThreshold
+	c.ConfirmReconnectDelayMs = confirmReconnectDelayMs
+	c.IdentifyAttempts = identifyAttempts
+	c.PresenceMissThreshold = presenceMissThreshold
+	c.RecoveryRetryBaseSeconds = recoveryRetryBaseSeconds
+	c.RecoveryRetryMaxSeconds = recoveryRetryMaxSeconds
+	c.AbsentStationRetryLimit = absentStationRetryLimit
+	c.InitialReadTimeoutSeconds = initialReadTimeoutSeconds
+	c.ScanReadPhaseTimeoutSeconds = scanReadPhaseTimeoutSeconds
+	c.StatusReadTimeoutSeconds = statusReadTimeoutSeconds
+	c.StatusRefreshTimeoutSeconds = statusRefreshTimeoutSeconds
+	c.ChannelScanFreshnessSeconds = channelScanFreshnessSeconds
+	c.BluetoothInitRetrySeconds = bluetoothInitRetrySeconds
 	c.lastPersistenceErr = nil
 	return nil
 }

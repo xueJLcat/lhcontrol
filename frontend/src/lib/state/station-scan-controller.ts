@@ -65,7 +65,11 @@ export class StationScanController {
       // Auto-sleep runs its own scan. Adopting it as an external scan would
       // offer Stop for an internal operation (cancelling the pending sleep)
       // and replay a bogus recovery once it ends; skip this tick entirely.
-      if (this.host.autoSleepRunning) return;
+      // Recheck every foreground owner after the asynchronous IsScanning call:
+      // one can start while that query is pending even though the entry guard
+      // observed an idle host.
+      if (this.host.autoSleepRunning || this.host.externalOperationRunning ||
+        this.host.isLoading || this.host.isBulkLoading || this.host.anyDeviceOperation) return;
       const wasExternalScanning = this.host.externalScanning;
       if (scanning && !this.host.isLoading && !this.host.externalScanning) {
         await this.host.externalScan.adoptUnknown();

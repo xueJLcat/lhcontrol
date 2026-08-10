@@ -402,10 +402,26 @@ export class StationStore {
     if (revision <= 0 && this.externalOperationRevision > 0) return;
     if (revision > 0 && revision < this.externalOperationRevision) return;
     if (revision > 0) this.externalOperationRevision = revision;
-    this.externalOperationIds = new Set(
+    const nextIds = new Set(
       operations.map((operation) => Number(operation.id)).filter((id) => Number.isFinite(id))
     );
+    if ([...nextIds].some((id) => !this.externalOperationIds.has(id))) {
+      this.invalidateForExternalOperation();
+    }
+    this.externalOperationIds = nextIds;
     this.externalOperationRunning = this.externalOperationIds.size > 0;
+  }
+
+  private invalidateForExternalOperation() {
+    // HTTP work can start while a status/list read is awaiting the backend.
+    // Its eventual station-update event owns the next authoritative snapshot,
+    // so prevent the older read and status message from committing meanwhile.
+    // Do not invalidate a local scan or command: an HTTP request announced
+    // during an exclusive operation will normally be rejected as busy, and
+    // must not discard the already accepted local result.
+    if (this.globalOperation !== 'status-refresh') return;
+    this.gates.beginStatusOperation();
+    this.listRevisions.next();
   }
 
   setStatusPollIntervalSeconds(intervalSeconds: number) {
@@ -476,25 +492,31 @@ export class StationStore {
       const revision = Number(event.revision ?? 0);
       if (revision > 0 && revision <= this.externalOperationRevision) return;
       if (revision > 0) this.externalOperationRevision = revision;
-      if (event.phase === 'started') this.externalOperationIds.add(id);
-      else if (event.phase === 'finished') this.externalOperationIds.delete(id);
+      if (event.phase === 'started') {
+        const newlyStarted = !this.externalOperationIds.has(id);
+        this.externalOperationIds.add(id);
+        if (newlyStarted) this.invalidateForExternalOperation();
+      } else if (event.phase === 'finished') this.externalOperationIds.delete(id);
       else return;
       this.externalOperationRunning = this.externalOperationIds.size > 0;
     });
     // Register operation listeners before the first asynchronous health poll
     // so a newly started HTTP action cannot slip through the mount window.
     this.setStatusPollIntervalSeconds(DEFAULT_STATUS_POLL_INTERVAL_SECONDS);
-    const startupAPIStatusReady = this.startupAPIStatusReady;
-    void GetStatusPollIntervalSeconds()
+    const statusPollIntervalReady = GetStatusPollIntervalSeconds()
       .then((intervalSeconds) => this.setStatusPollIntervalSeconds(intervalSeconds))
       .catch(() => {
         // Keep the default interval when the persisted preference cannot be read.
       });
-    void GetStatusPollingEnabled()
+    const statusPollingPreferenceReady = GetStatusPollingEnabled()
       .then((enabled) => this.setStatusPollingEnabled(enabled))
       .catch(() => {
         // Keep automatic station refresh enabled when the preference is unreadable.
       });
+    // A non-default persisted interval restarts ApiStatusPoller and revision-
+    // gates its first request. Read the promise only after that restart has
+    // happened so startup waits for the response that can actually commit.
+    const startupAPIStatusReady = statusPollIntervalReady.then(() => this.startupAPIStatusReady);
     void (async () => {
       const [startupScanning, scanOnStartup] = await Promise.all([
         IsScanning().catch(() => false),
@@ -506,7 +528,8 @@ export class StationStore {
         // automatic sleep (and HTTP work) that began before event listeners
         // mounted, closing the only window where an internal scan could be
         // misidentified as a user-stoppable external scan.
-        startupAPIStatusReady
+        startupAPIStatusReady,
+        statusPollingPreferenceReady
       ]);
       // Do not allow the first polling tick to acquire the backend operation
       // lock before the initial external-scan check can start the local scan.

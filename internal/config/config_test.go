@@ -734,6 +734,19 @@ func TestSaveRepairsCrossItemInvariantsBeforeWriting(t *testing.T) {
 			t.Errorf("persisted %s = %v, want %d", name, check.value, check.want)
 		}
 	}
+	for name, check := range map[string]struct {
+		value int
+		want  int
+	}{
+		"runtime bulk power timeout":      {cfg.GetBulkPowerTimeoutSeconds(), 60},
+		"runtime scan read phase timeout": {cfg.GetScanReadPhaseTimeoutSeconds(), 60},
+		"runtime status refresh timeout":  {cfg.GetStatusRefreshTimeoutSeconds(), 60},
+		"runtime recovery retry base":     {cfg.GetRecoveryRetryBaseSeconds(), 60},
+	} {
+		if check.value != check.want {
+			t.Errorf("%s = %d, want %d after Save", name, check.value, check.want)
+		}
+	}
 }
 
 func TestStatusDisplayFreshnessWindowHasSafeMinimum(t *testing.T) {

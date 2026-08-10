@@ -187,6 +187,48 @@ describe('StationStore startup', () => {
     expect(backend.ScanAndFetchStations).not.toHaveBeenCalled();
   });
 
+  it('waits for the restarted health poll before classifying a startup scan', async () => {
+    backend.IsScanning.mockResolvedValue(true);
+    backend.GetStatusPollIntervalSeconds.mockResolvedValue(30);
+    let resolveFirstStatus!: (value: Record<string, unknown>) => void;
+    let resolveFinalStatus!: (value: Record<string, unknown>) => void;
+    backend.GetAPIStatus
+      .mockReturnValueOnce(new Promise((resolve) => { resolveFirstStatus = resolve; }))
+      .mockReturnValueOnce(new Promise((resolve) => { resolveFinalStatus = resolve; }));
+
+    const { store } = mountStore();
+    await vi.waitFor(() => expect(backend.GetAPIStatus).toHaveBeenCalledTimes(2));
+
+    // Changing the persisted interval restarts the health poll. Its older
+    // response is revision-gated, so startup must not use that completion as
+    // proof that no internal operation is active.
+    resolveFirstStatus({
+      running: true,
+      address: '127.0.0.1:7575',
+      error: '',
+      warnings: [],
+      configWritable: true,
+      activeOperations: [],
+      operationRevision: 0
+    });
+    await Promise.resolve();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(store.externalScanning).toBe(false);
+
+    resolveFinalStatus({
+      running: true,
+      address: '127.0.0.1:7575',
+      error: '',
+      warnings: [],
+      configWritable: true,
+      activeOperations: [{ id: 42, kind: 'auto-sleep' }],
+      operationRevision: 1
+    });
+    await vi.waitFor(() => expect(store.externalOperationRunning).toBe(true));
+    expect(store.externalScanning).toBe(false);
+    expect(backend.ScanAndFetchStations).not.toHaveBeenCalled();
+  });
+
   it('classifies a failed scan into a recovery error without a duplicate toast', async () => {
     backend.ScanAndFetchStations.mockRejectedValue(new Error('Bluetooth is unavailable; turn on Bluetooth and retry'));
     backend.GetCurrentStationInfo.mockResolvedValue([]);
@@ -532,6 +574,39 @@ describe('StationStore external HTTP operation events', () => {
     await vi.waitFor(() => expect(store.externalOperationRunning).toBe(false));
     await (store as unknown as { periodicStatusCheck(): Promise<void> }).periodicStatusCheck();
     expect(backend.CheckAllStationStatuses).toHaveBeenCalled();
+  });
+
+  it('abandons a periodic status check when an external operation starts mid-check', async () => {
+    const { store } = mountStore();
+    await vi.waitFor(() => expect(runtime.handlers.has('external-operation')).toBe(true));
+    await vi.waitFor(() => expect(store.stations).toHaveLength(1));
+    let resolveScanning!: (scanning: boolean) => void;
+    backend.IsScanning.mockReturnValueOnce(new Promise((resolve) => { resolveScanning = resolve; }));
+    backend.CheckAllStationStatuses.mockClear();
+
+    const pending = (store as unknown as { periodicStatusCheck(): Promise<void> }).periodicStatusCheck();
+    await vi.waitFor(() => expect(backend.IsScanning).toHaveBeenCalled());
+    runtime.handlers.get('external-operation')?.({ id: 22, phase: 'started', kind: 'power', revision: 2 });
+    resolveScanning(false);
+    await pending;
+
+    expect(backend.CheckAllStationStatuses).not.toHaveBeenCalled();
+    expect(store.globalOperation).toBe('idle');
+  });
+
+  it('does not discard an accepted local scan when an HTTP operation is rejected as busy', async () => {
+    let resolveScan!: (stations: ReturnType<typeof createStation>[]) => void;
+    backend.ScanAndFetchStations.mockReturnValueOnce(new Promise((resolve) => { resolveScan = resolve; }));
+    const { store } = mountStore();
+    await vi.waitFor(() => expect(backend.ScanAndFetchStations).toHaveBeenCalledOnce());
+
+    runtime.handlers.get('external-operation')?.({ id: 23, phase: 'started', kind: 'power', revision: 2 });
+    runtime.handlers.get('external-operation')?.({ id: 23, phase: 'finished', kind: 'power', revision: 3 });
+    resolveScan([createStation({ name: 'LHB-SCAN-RESULT' })]);
+
+    await vi.waitFor(() => expect(store.globalOperation).toBe('idle'));
+    expect(store.stations).toHaveLength(1);
+    expect(store.stations[0].name).toBe('LHB-SCAN-RESULT');
   });
 });
 
