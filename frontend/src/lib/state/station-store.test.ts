@@ -257,6 +257,16 @@ describe('StationStore startup', () => {
     expect(backend.ScanAndFetchStations).not.toHaveBeenCalled();
   });
 
+  it('does not adopt a backend scan that ends during startup classification', async () => {
+    backend.IsScanning.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+
+    const { store } = mountStore();
+    await vi.waitFor(() => expect(backend.IsScanning).toHaveBeenCalledTimes(2));
+
+    expect(store.externalScanning).toBe(false);
+    expect(backend.ScanAndFetchStations).not.toHaveBeenCalled();
+  });
+
   it('does not adopt an automatic-sleep scan whose start event was missed', async () => {
     backend.IsScanning.mockResolvedValue(true);
     backend.GetAPIStatus.mockResolvedValue({

@@ -111,6 +111,8 @@ export class StationStore {
   readonly externalScan = new ExternalScanCoordinator({
     isDisposed: () => this.disposed,
     localScanRunning: () => this.globalOperation === 'scanning',
+    canAdoptUnknownScan: () => !this.autoSleepRunning && !this.externalOperationRunning &&
+      !this.isLoading && !this.isBulkLoading && !this.anyDeviceOperation,
     externalScanning: () => this.externalScanning,
     setExternalScanning: (value) => this.externalScanning = value,
     scanEpoch: () => this.gates.currentScanEpoch,

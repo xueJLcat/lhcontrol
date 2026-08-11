@@ -15,6 +15,10 @@ export interface ExternalScanHost {
   isDisposed(): boolean;
   // True while the component's own local scan is running.
   localScanRunning(): boolean;
+  // Re-check non-scan owners after the asynchronous backend probe. An
+  // automatic sleep or another operation can start while that probe is in
+  // flight, and its internal scan must never be exposed as user-stoppable.
+  canAdoptUnknownScan(): boolean;
   externalScanning(): boolean;
   setExternalScanning(value: boolean): void;
   scanEpoch(): number;
@@ -266,6 +270,22 @@ export class ExternalScanCoordinator {
       await this.recoverUntracked();
       return;
     }
+    // IsScanning results are only a point-in-time observation. Revalidate at
+    // the adoption boundary so a scan that ended after the caller's poll does
+    // not leave the UI in a phantom external-scanning state until the next
+    // interval. Capture the epoch as well: a local or event-tracked scan that
+    // starts during this read owns the state instead.
+    const operationEpoch = this.host.scanEpoch();
+    const scanning = await this.host.isScanning().catch(() => false);
+    if (this.host.isDisposed() || this.host.scanEpoch() !== operationEpoch ||
+      !this.host.canAdoptUnknownScan()) return;
+    // A terminal event can land while the confirmation read is pending. Its
+    // authoritative outcome wins over the older positive scan observation.
+    if (this.pendingTerminal) {
+      await this.recoverUntracked();
+      return;
+    }
+    if (!scanning) return;
     this.begin(null);
   }
 

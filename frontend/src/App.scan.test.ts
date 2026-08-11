@@ -277,7 +277,7 @@ describe('App asynchronous operations', () => {
   });
 
   it('ignores a terminal event for an unknown external scan until the backend scan ends', async () => {
-    api.IsScanning.mockResolvedValueOnce(true).mockResolvedValue(false);
+    api.IsScanning.mockResolvedValueOnce(true).mockResolvedValueOnce(true).mockResolvedValue(false);
     render(App);
     await screen.findByRole('button', { name: 'Stop' });
 
@@ -367,7 +367,7 @@ describe('App asynchronous operations', () => {
     render(App);
     await screen.findByText('LHB-TEST');
 
-    api.IsScanning.mockResolvedValueOnce(true);
+    api.IsScanning.mockResolvedValueOnce(true).mockResolvedValueOnce(true);
     await vi.advanceTimersByTimeAsync(15_000);
 
     expect(screen.getByText('Preparing external scan...')).toBeInTheDocument();
@@ -482,7 +482,7 @@ describe('App asynchronous operations', () => {
 
   it('self-recovers when polling observes an external scan has ended without an event', async () => {
     vi.useFakeTimers();
-    api.IsScanning.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+    api.IsScanning.mockResolvedValueOnce(true).mockResolvedValueOnce(true).mockResolvedValueOnce(false);
     api.GetCurrentStationInfo.mockResolvedValue([createStation({ name: 'LHB-RECOVERED' })]);
     api.GetScanStatus.mockResolvedValue({ state: 'completed', found: 1, warnings: ['partial metadata'] });
     render(App);
@@ -497,7 +497,7 @@ describe('App asynchronous operations', () => {
 
   it('self-recovers a cancelled external scan without reporting completion', async () => {
     vi.useFakeTimers();
-    api.IsScanning.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+    api.IsScanning.mockResolvedValueOnce(true).mockResolvedValueOnce(true).mockResolvedValueOnce(false);
     api.GetScanStatus.mockResolvedValue({ state: 'cancelled', found: 0, warnings: [] });
     render(App);
     await vi.waitFor(() => expect(screen.getByRole('button', { name: 'Stop' })).toBeEnabled());
@@ -580,7 +580,7 @@ describe('App asynchronous operations', () => {
 
   it('does not replay recovery for a stopped adopted scan when its delayed terminal arrives', async () => {
     vi.useFakeTimers();
-    api.IsScanning.mockResolvedValueOnce(true).mockResolvedValue(false);
+    api.IsScanning.mockResolvedValueOnce(true).mockResolvedValueOnce(true).mockResolvedValue(false);
     api.GetCurrentStationInfo.mockResolvedValue([createStation({ name: 'LHB-ADOPTED' })]);
     api.GetScanStatus.mockResolvedValue({ state: 'cancelled', found: 0, warnings: [] });
     api.CheckAllStationStatuses.mockResolvedValue([createStation({ name: 'LHB-ADOPTED' })]);
@@ -625,7 +625,7 @@ describe('App asynchronous operations', () => {
 
   it('claims only one terminal event for an adopted external scan', async () => {
     const terminalChecks: Array<(scanning: boolean) => void> = [];
-    api.IsScanning.mockResolvedValueOnce(true).mockImplementation(() => new Promise((resolve) => {
+    api.IsScanning.mockResolvedValueOnce(true).mockResolvedValueOnce(true).mockImplementation(() => new Promise((resolve) => {
       terminalChecks.push(resolve);
     }));
     render(App);
@@ -644,7 +644,8 @@ describe('App asynchronous operations', () => {
 
   it('ignores an older terminal event while recovering an adopted external scan', async () => {
     vi.useFakeTimers();
-    api.IsScanning.mockResolvedValueOnce(false).mockResolvedValueOnce(true).mockResolvedValue(false);
+    api.IsScanning.mockResolvedValueOnce(false).mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(true).mockResolvedValue(false);
     api.GetCurrentStationInfo.mockResolvedValue([createStation({ name: 'LHB-RECOVERED-NEW' })]);
     api.GetScanStatus.mockResolvedValue({ state: 'completed', found: 1, warnings: [] });
     render(App);
@@ -753,7 +754,7 @@ describe('App asynchronous operations', () => {
 
   it('stops an active scan and handles its cancellation event', async () => {
     let resolveStop!: () => void;
-    api.IsScanning.mockResolvedValueOnce(true).mockResolvedValue(false);
+    api.IsScanning.mockResolvedValueOnce(true).mockResolvedValueOnce(true).mockResolvedValue(false);
     api.StopScan.mockReturnValue(new Promise<void>((resolve) => {
       resolveStop = resolve;
     }));
@@ -770,7 +771,7 @@ describe('App asynchronous operations', () => {
 
   it('does not let the stop promise overwrite a cancellation event', async () => {
     let resolveStop!: () => void;
-    api.IsScanning.mockResolvedValueOnce(true).mockResolvedValue(false);
+    api.IsScanning.mockResolvedValueOnce(true).mockResolvedValueOnce(true).mockResolvedValue(false);
     api.StopScan.mockReturnValue(new Promise<void>((resolve) => {
       resolveStop = resolve;
     }));
@@ -789,7 +790,7 @@ describe('App asynchronous operations', () => {
 
   it('does not let a late stop rejection overwrite a cancellation event', async () => {
     let rejectStop!: (error: Error) => void;
-    api.IsScanning.mockResolvedValueOnce(true).mockResolvedValue(false);
+    api.IsScanning.mockResolvedValueOnce(true).mockResolvedValueOnce(true).mockResolvedValue(false);
     api.StopScan.mockReturnValue(new Promise<void>((_, reject) => {
       rejectStop = reject;
     }));

@@ -22,6 +22,7 @@ function createHost(overrides: Partial<ExternalScanHost> = {}): { host: External
   const host: ExternalScanHost = {
     isDisposed: () => state.disposed,
     localScanRunning: () => false,
+    canAdoptUnknownScan: () => true,
     externalScanning: () => state.externalScanning,
     setExternalScanning: (value) => state.externalScanning = value,
     scanEpoch: () => state.scanEpoch,
@@ -181,6 +182,36 @@ describe('ExternalScanCoordinator', () => {
     // A newer scan epoch invalidates the pending recovery.
     state.scanEpoch += 1;
     expect(coordinator.hasPendingRecovery()).toBe(false);
+  });
+
+  it('does not adopt a scan that ended before the adoption check', async () => {
+    const { host, state } = createHost();
+    mockIsScanning(host, false);
+    const coordinator = new ExternalScanCoordinator(host);
+
+    await coordinator.adoptUnknown();
+
+    expect(host.isScanning).toHaveBeenCalledOnce();
+    expect(state.externalScanning).toBe(false);
+    expect(host.beginScanTimer).not.toHaveBeenCalled();
+  });
+
+  it('does not adopt an internal scan whose owner starts during the adoption check', async () => {
+    let resolveScanning!: (value: boolean) => void;
+    let canAdopt = true;
+    const { host, state } = createHost({
+      canAdoptUnknownScan: () => canAdopt,
+      isScanning: vi.fn(() => new Promise<boolean>((resolve) => { resolveScanning = resolve; }))
+    });
+    const coordinator = new ExternalScanCoordinator(host);
+
+    const adoption = coordinator.adoptUnknown();
+    canAdopt = false;
+    resolveScanning(true);
+    await adoption;
+
+    expect(state.externalScanning).toBe(false);
+    expect(host.beginScanTimer).not.toHaveBeenCalled();
   });
 
   it('keeps a tracked terminal recovery pending when the station list read rejects', async () => {
