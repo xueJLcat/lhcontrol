@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import { flip } from 'svelte/animate';
   import { cubicOut } from 'svelte/easing';
   import { fade } from 'svelte/transition';
@@ -56,6 +57,18 @@
     onSaveRename: (station: StationInfo, name: string) => void;
     onCancelRename: () => void;
   } = $props();
+
+  // One shared clock keeps every card's relative-time copy current without
+  // creating one interval per station. Station snapshots can stay referentially
+  // unchanged for long periods, so their timestamps alone cannot trigger a
+  // render when "1m ago" should become "2m ago".
+  let now = $state(Date.now());
+  onMount(() => {
+    const timer = setInterval(() => {
+      now = Date.now();
+    }, 30_000);
+    return () => clearInterval(timer);
+  });
 </script>
 
 {#if conflictDetails}
@@ -78,6 +91,7 @@
       >
         <StationCard
           {station}
+          {now}
           channelDisplay={channelOf(station)}
           renaming={editingAddress === station.address}
           feedback={feedbackByAddress[station.address]}

@@ -122,6 +122,18 @@ describe('StationCard rename submission', () => {
     expect(onSaveRename.mock.calls[0][1]).toBe('Held draft');
   });
 
+  it('locks the rename input while its save is in progress', async () => {
+    const props = cardProps({});
+    const view = render(StationCard, { props });
+    const input = screen.getByRole('textbox', { name: 'Station name' });
+    await fireEvent.input(input, { target: { value: 'Pending name' } });
+
+    await view.rerender({ ...props, configBusy: true });
+
+    expect(input).toBeDisabled();
+    expect(input).toHaveValue('Pending name');
+  });
+
   it('rearms blur saving for a new rename session after a cancel', async () => {
     const onSaveRename = vi.fn();
     const props = cardProps({ onSaveRename });

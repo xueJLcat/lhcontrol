@@ -1,11 +1,15 @@
 import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
+import { tick } from 'svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { StationInfo } from '../types';
 import { createStation } from '../../test/fixtures';
 import FleetView from './FleetView.svelte';
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+});
 
 beforeEach(() => {
   Object.defineProperty(Element.prototype, 'animate', {
@@ -107,5 +111,25 @@ describe('FleetView', () => {
     render(FleetView, { props: defaultProps({ conflictDetails: 'CH 3: LHB-A + LHB-B' }) });
     const banner = screen.getByText('Channel conflict: CH 3: LHB-A + LHB-B');
     expect(banner.parentElement).toHaveAttribute('title', 'CH 3: LHB-A + LHB-B');
+  });
+
+  it('keeps the stale power-read age moving without a new station snapshot', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-11T12:00:00Z'));
+    const stale = createStation();
+    stale.powerFresh = false;
+    stale.lastPowerReadAt = '2026-08-11T11:58:30Z';
+
+    render(FleetView, { props: defaultProps({ stations: [stale] }) });
+    expect(screen.getByRole('img', {
+      name: 'Last known state; last successful read 1m ago'
+    })).toBeInTheDocument();
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    await tick();
+
+    expect(screen.getByRole('img', {
+      name: 'Last known state; last successful read 2m ago'
+    })).toBeInTheDocument();
   });
 });

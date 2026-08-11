@@ -16,6 +16,7 @@
 
   let {
     station,
+    now = Date.now(),
     channelDisplay = undefined,
     renaming,
     feedback = undefined,
@@ -31,6 +32,7 @@
     onCancelRename
   }: {
     station: StationInfo;
+    now?: number;
     // Display-only fallback for the channel chip, bridging transient backend
     // channel wipes. All interaction logic keeps using the live station data.
     channelDisplay?: number | undefined;
@@ -212,6 +214,7 @@
         title={t('Save an empty name to restore the original name')}
         aria-label={t('Station name')}
         aria-describedby={`rename-hint-${station.address}`}
+        disabled={configBusy}
         onkeydown={handleRenameKeydown}
         onblur={handleRenameBlur}
         onclick={(event) => event.stopPropagation()}
@@ -248,7 +251,7 @@
     <span class="mono addr">{station.address}</span>
     <StateBadge label={stateLabel(station)} state={stateClass(station)} {unverified} stale={stalePower} booting={station.powerFresh && station.powerState === 3} />
     {#if stalePower}
-      <span class="fresh-icon stale" role="img" title={t('Last known state; last successful read {time}', { time: relativeTime(station.lastPowerReadAt) || t('unknown') })} aria-label={t('Last known state; last successful read {time}', { time: relativeTime(station.lastPowerReadAt) || t('unknown') })}><History size={11} aria-hidden="true" /></span>
+      <span class="fresh-icon stale" role="img" title={t('Last known state; last successful read {time}', { time: relativeTime(station.lastPowerReadAt, now) || t('unknown') })} aria-label={t('Last known state; last successful read {time}', { time: relativeTime(station.lastPowerReadAt, now) || t('unknown') })}><History size={11} aria-hidden="true" /></span>
     {:else if unverified}
       <span class="fresh-icon unverified" role="img" title={t('State reported by the station but not confirmed by readback')} aria-label={t('State reported by the station but not confirmed by readback')}><CircleHelp size={11} aria-hidden="true" /></span>
     {/if}

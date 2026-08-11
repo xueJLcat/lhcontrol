@@ -278,6 +278,24 @@ describe('App settings drawer', () => {
     await waitFor(() => expect(apiStatus).toHaveAttribute('title', 'HTTP API 127.0.0.1:8080'));
   });
 
+  it('dismisses the API detail before the settings drawer opens', async () => {
+    render(App);
+    await screen.findByText('LHB-TEST');
+    await fireEvent.click(await screen.findByRole('button', { name: 'API ready' }));
+    expect(screen.getByText('HTTP API 127.0.0.1:7575')).toBeInTheDocument();
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Open settings' }));
+    await screen.findByRole('dialog', { name: 'Settings' });
+
+    expect(screen.queryByText('HTTP API 127.0.0.1:7575')).not.toBeInTheDocument();
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Close settings' }));
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Settings' })).not.toBeInTheDocument());
+    expect(screen.queryByText('HTTP API 127.0.0.1:7575')).not.toBeInTheDocument();
+    await fireEvent.click(screen.getByRole('button', { name: 'API ready' }));
+    expect(screen.getByText('HTTP API 127.0.0.1:7575')).toBeInTheDocument();
+  });
+
   it('closes the settings drawer with Escape', async () => {
     render(App);
     await screen.findByText('LHB-TEST');

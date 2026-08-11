@@ -10,7 +10,8 @@
     apiError,
     apiAddress = '',
     configWarnings = [],
-    configWritable = true
+    configWritable = true,
+    inactive = false
   }: {
     statusMessage: string;
     apiRunning: boolean;
@@ -18,6 +19,7 @@
     apiAddress?: string;
     configWarnings?: string[];
     configWritable?: boolean;
+    inactive?: boolean;
   } = $props();
 
   let detail = $state<'config' | 'api' | null>(null);
@@ -25,12 +27,12 @@
   const apiTitle = $derived(apiError || (apiAddress ? `HTTP API ${apiAddress}` : t('HTTP API unavailable')));
   const configTitle = $derived(configWarnings.join('\n') || t('Configuration changes cannot be saved'));
 
-  // When the config panel's visibility condition disappears (warnings cleared
-  // or API offline) the panel hides, but without this reset detail would stay
-  // 'config' and the first click on the reappearing pill would toggle it to
-  // null instead of opening the panel.
+  // Forget hidden detail state while an overlay owns the UI, and when the
+  // config pill's own visibility condition disappears. Otherwise a panel can
+  // reappear after the overlay closes, or the next pill click can close stale
+  // state instead of opening the requested detail.
   $effect(() => {
-    if (detail === 'config' && !(apiRunning && (configWarnings.length > 0 || !configWritable))) {
+    if (inactive || (detail === 'config' && !(apiRunning && (configWarnings.length > 0 || !configWritable)))) {
       detail = null;
     }
   });
@@ -55,7 +57,7 @@
       type="button"
       class="config-status pill-btn"
       title={configTitle}
-      aria-expanded={detail === 'config'}
+      aria-expanded={!inactive && detail === 'config'}
       onclick={() => toggle('config')}
     >
       {configWritable ? t('Config warning') : t('Config read-only')}
@@ -66,21 +68,20 @@
     class="api-status pill-btn"
     class:ok={apiRunning}
     title={apiTitle}
-    aria-expanded={detail === 'api'}
+    aria-expanded={!inactive && detail === 'api'}
     onclick={() => toggle('api')}
   >
     <span class="api-dot" aria-hidden="true"></span>
     {apiRunning ? t('API ready') : t('API offline')}
   </button>
-  <!-- The config detail panel shares the pill's visibility condition: when
-       the pill disappears (API offline or warnings cleared) a leftover panel
-       would keep showing stale warnings. -->
-  {#if detail === 'config' && apiRunning && (configWarnings.length > 0 || !configWritable)}
+  <!-- Detail panels also follow the footer's active state so their elevated
+       layer cannot remain visible above a drawer or modal. -->
+  {#if !inactive && detail === 'config' && apiRunning && (configWarnings.length > 0 || !configWritable)}
     <div class="footer-detail" transition:fade={dur({ duration: 140 })}>
       {#each configWarnings as warning}<p>{warning}</p>{/each}
       {#if !configWritable}<p>{t('Configuration changes cannot be saved.')}</p>{/if}
     </div>
-  {:else if detail === 'api'}
+  {:else if !inactive && detail === 'api'}
     <div class="footer-detail" transition:fade={dur({ duration: 140 })}>
       <p>{apiTitle}</p>
     </div>

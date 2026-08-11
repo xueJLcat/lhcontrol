@@ -36,6 +36,7 @@
   });
 
   const selectedStation = $derived(store.stations.find((station) => station.address === selectedAddress) ?? null);
+  const overlayOpen = $derived(selectedStation !== null || settingsOpen || bulkConfirmTarget !== null);
   const occupiedChannels = $derived(store.occupiedChannelsExcluding(selectedAddress));
   const hasUnknownVisibleChannel = $derived(store.hasUnknownVisibleChannelExcluding(selectedAddress));
 
@@ -147,7 +148,7 @@
 
 <svelte:window onkeydown={handleGlobalKeydown} />
 
-<div class="app-container" inert={selectedStation !== null || settingsOpen || bulkConfirmTarget !== null}>
+<div class="app-container" inert={overlayOpen}>
   <AppHeader
     scanning={store.scanRunning}
     isBulkLoading={store.isBulkLoading}
@@ -208,6 +209,7 @@
     apiAddress={store.apiAddress}
     configWarnings={store.configWarnings}
     configWritable={store.configWritable}
+    inactive={overlayOpen}
   />
 </div>
 
