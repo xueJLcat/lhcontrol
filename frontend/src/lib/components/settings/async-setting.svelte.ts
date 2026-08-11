@@ -18,6 +18,8 @@ export class AsyncSetting<T> {
   constructor(private readonly options: AsyncSettingOptions<T>) {}
 
   load = async (): Promise<void> => {
+    if (this.busy) return;
+    this.busy = true;
     this.error = null;
     try {
       const value = await this.options.getter();
@@ -26,6 +28,8 @@ export class AsyncSetting<T> {
       this.value = null;
       this.error = String(error);
       pushToast(withDetail(this.options.loadMessage, error));
+    } finally {
+      this.busy = false;
     }
   };
 

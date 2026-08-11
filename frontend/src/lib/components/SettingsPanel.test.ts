@@ -222,6 +222,27 @@ describe('SettingsPanel', () => {
     expect(screen.getByLabelText('Bluetooth scan duration')).toHaveValue(5);
   });
 
+  it('coalesces repeated adapter retries while enumeration is pending', async () => {
+    backend.ListBluetoothAdapters.mockRejectedValueOnce(new Error('adapter unavailable'));
+    render(SettingsPanel, { props: { onClose: vi.fn() } });
+    expect(await screen.findByText('Error: adapter unavailable')).toBeInTheDocument();
+
+    let resolveAdapters!: (value: Array<{ deviceId: string; name: string }>) => void;
+    const pending = new Promise<Array<{ deviceId: string; name: string }>>((resolve) => {
+      resolveAdapters = resolve;
+    });
+    backend.ListBluetoothAdapters.mockImplementation(() => pending);
+
+    const retry = screen.getByRole('button', { name: /Retry/ });
+    retry.click();
+    retry.click();
+
+    expect(backend.ListBluetoothAdapters).toHaveBeenCalledTimes(2);
+
+    resolveAdapters([{ deviceId: 'BT-3', name: 'Recovered adapter' }]);
+    expect(await screen.findByText('Recovered adapter')).toBeInTheDocument();
+  });
+
   it('persists the bulk power timeout', async () => {
     render(SettingsPanel, { props: { onClose: vi.fn() } });
     const input = await screen.findByLabelText('Bulk power timeout');

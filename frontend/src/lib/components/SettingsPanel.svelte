@@ -222,6 +222,7 @@
   });
 
   async function loadAdapterSettings() {
+    if (loading) return;
     loading = true;
     loadError = null;
     try {
