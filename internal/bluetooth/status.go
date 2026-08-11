@@ -118,6 +118,16 @@ func ReadPowerState(station *BaseStation) error {
 	return ReadPowerStateContext(context.Background(), station)
 }
 
+func finishStatusReadResult(station *BaseStation, powerErr, channelErr error) error {
+	station.setPowerErrorInternal(powerErr)
+	station.setChannelErrorInternal(channelErr)
+	if powerErr != nil || channelErr != nil {
+		return &StatusReadError{Power: powerErr, Channel: channelErr}
+	}
+	station.setConnectionErrorInternal(nil)
+	return nil
+}
+
 // ReadPowerStateContext reads the current state of an already connected
 // station and allows read-only GATT work to be cancelled.
 func ReadPowerStateContext(ctx context.Context, station *BaseStation) error {
@@ -147,11 +157,17 @@ func ReadPowerStateContext(ctx context.Context, station *BaseStation) error {
 	} else {
 		station.clearPowerStateInternal()
 	}
-	if err := ctx.Err(); err != nil {
+	if contextErr := ctx.Err(); contextErr != nil {
 		if powerReadErr != nil {
-			return &StatusReadError{Power: errors.Join(powerReadErr, err)}
+			powerReadErr = errors.Join(powerReadErr, contextErr)
+			return finishStatusReadResult(station, powerReadErr, nil)
 		}
-		return &StatusReadError{Channel: err}
+		if station.Capabilities.ChannelRead {
+			return finishStatusReadResult(station, nil, contextErr)
+		}
+		// Cancellation landed after the last supported field completed. The
+		// observation is authoritative, matching the initial-read path.
+		return finishStatusReadResult(station, nil, nil)
 	}
 	if station.Capabilities.ChannelRead {
 		channelReadErr = readChannelInternalContext(ctx, station)
@@ -159,23 +175,12 @@ func ReadPowerStateContext(ctx context.Context, station *BaseStation) error {
 		station.Channel = ChannelUnknown
 		station.LastChannelReadAt = time.Time{}
 	}
-	if err := ctx.Err(); err != nil {
-		if channelReadErr == nil {
-			channelReadErr = err
-		} else {
-			channelReadErr = errors.Join(channelReadErr, err)
-		}
+	if contextErr := ctx.Err(); contextErr != nil && channelReadErr != nil {
+		channelReadErr = errors.Join(channelReadErr, contextErr)
 	}
-	if powerReadErr != nil || channelReadErr != nil {
-		readErr := &StatusReadError{Power: powerReadErr, Channel: channelReadErr}
-		station.setPowerErrorInternal(powerReadErr)
-		station.setChannelErrorInternal(channelReadErr)
-		return readErr
-	}
-	station.setConnectionErrorInternal(nil)
-	station.setPowerErrorInternal(nil)
-	station.setChannelErrorInternal(nil)
-	return nil
+	// A channel read that returned successfully remains complete even if the
+	// caller cancelled concurrently just before this post-read check.
+	return finishStatusReadResult(station, powerReadErr, channelReadErr)
 }
 
 // InvalidateAllConnections synchronously invalidates every cached connection.

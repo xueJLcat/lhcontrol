@@ -230,6 +230,9 @@ func TestReadPowerStateContextPreservesCancellationWhenTransportReturnsTerminalE
 		terminalErr:        errors.New("WinRT operation ended with canceled status"),
 	}
 	station := connectedFakeStation(power, nil, nil, Capabilities{PowerRead: true})
+	station.mutex.Lock()
+	station.setChannelErrorInternal(errors.New("stale channel error"))
+	station.mutex.Unlock()
 	ctx, cancel := context.WithCancel(context.Background())
 	result := make(chan error, 1)
 	go func() {
@@ -244,7 +247,85 @@ func TestReadPowerStateContextPreservesCancellationWhenTransportReturnsTerminalE
 	if !strings.Contains(err.Error(), power.terminalErr.Error()) {
 		t.Fatalf("ReadPowerStateContext() error = %v, want terminal transport detail", err)
 	}
+	if snapshot := station.Snapshot(); strings.Contains(snapshot.LastError, "stale channel error") {
+		t.Fatalf("cancelled power read retained an unrelated channel error: %q", snapshot.LastError)
+	}
 }
+
+func TestReadPowerStateContextAcceptsCancellationAfterLastPowerRead(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	power := &cancelAfterSuccessfulRead{
+		fakeCharacteristic: &fakeCharacteristic{value: []byte{0x0B}},
+		cancel:             cancel,
+	}
+	station := connectedFakeStation(power, nil, nil, Capabilities{PowerRead: true})
+	station.mutex.Lock()
+	station.setPowerErrorInternal(errors.New("stale power error"))
+	station.setChannelErrorInternal(errors.New("stale channel error"))
+	station.mutex.Unlock()
+
+	if err := ReadPowerStateContext(ctx, station); err != nil {
+		t.Fatalf("ReadPowerStateContext() error = %v, want completed status read", err)
+	}
+	snapshot := station.Snapshot()
+	if snapshot.PowerState != PowerStateOn || snapshot.RawPowerState != 0x0B || snapshot.LastPowerReadAt.IsZero() {
+		t.Fatalf("completed power read was discarded: %+v", snapshot)
+	}
+	if snapshot.LastError != "" {
+		t.Fatalf("completed status read retained stale errors: %q", snapshot.LastError)
+	}
+}
+
+func TestReadPowerStateContextAcceptsCancellationAfterCompletedChannelRead(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	channel := &cancelAfterSuccessfulRead{
+		fakeCharacteristic: &fakeCharacteristic{value: []byte{0x03}},
+		cancel:             cancel,
+	}
+	station := connectedFakeStation(
+		&fakeCharacteristic{value: []byte{0x0B}},
+		channel,
+		nil,
+		Capabilities{PowerRead: true, ChannelRead: true},
+	)
+
+	if err := ReadPowerStateContext(ctx, station); err != nil {
+		t.Fatalf("ReadPowerStateContext() error = %v, want completed status read", err)
+	}
+	snapshot := station.Snapshot()
+	if snapshot.PowerState != PowerStateOn || snapshot.Channel != 3 ||
+		snapshot.LastPowerReadAt.IsZero() || snapshot.LastChannelReadAt.IsZero() {
+		t.Fatalf("completed power/channel read was discarded: %+v", snapshot)
+	}
+}
+
+func TestReadPowerStateContextReplacesStalePowerErrorWhenCancelledBetweenFields(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	power := &cancelAfterSuccessfulRead{
+		fakeCharacteristic: &fakeCharacteristic{value: []byte{0x0B}},
+		cancel:             cancel,
+	}
+	station := connectedFakeStation(
+		power,
+		&fakeCharacteristic{value: []byte{0x03}},
+		nil,
+		Capabilities{PowerRead: true, ChannelRead: true},
+	)
+	station.mutex.Lock()
+	station.setPowerErrorInternal(errors.New("stale power error"))
+	station.mutex.Unlock()
+
+	err := ReadPowerStateContext(ctx, station)
+	var readErr *StatusReadError
+	if !errors.As(err, &readErr) || readErr.Power != nil || !errors.Is(readErr.Channel, context.Canceled) {
+		t.Fatalf("ReadPowerStateContext() error = %#v, want channel-only cancellation", err)
+	}
+	snapshot := station.Snapshot()
+	if strings.Contains(snapshot.LastError, "stale power error") || !strings.Contains(snapshot.LastError, "channel: context canceled") {
+		t.Fatalf("status errors after completed power read = %q, want current channel cancellation only", snapshot.LastError)
+	}
+}
+
 func TestEnsureCapabilitiesUsesConnectedDiscovery(t *testing.T) {
 	station := connectedFakeStation(
 		&fakeCharacteristic{},
