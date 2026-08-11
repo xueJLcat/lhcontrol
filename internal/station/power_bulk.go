@@ -341,18 +341,27 @@ func (m *Manager) setAllStationsPowerDetailed(ctx context.Context, state string)
 				} else if !snapshot.CapabilitiesKnown {
 					capabilities, err = m.bluetoothOps.ensureCapabilities(discoveryContext, s)
 				}
-				if err == nil && !capabilities.PowerWrite {
+				if err != nil {
+					return err
+				}
+				// The station may enter a boot transition while capability
+				// discovery is in flight. Re-evaluate at the final write boundary
+				// instead of acting on the worker's earlier snapshot.
+				if isFreshBootingPower(s.Snapshot(), time.Now()) {
+					cachedSkip = true
+					stationResult.Skipped = true
+					stationResult.Reason = ReasonStationBooting
+					return nil
+				}
+				if !capabilities.PowerWrite {
 					stationResult.Skipped = true
 					stationResult.Reason = ReasonUnsupportedCapability
 					return nil
 				}
-				if err == nil && target == bluetooth.PowerStateStandby && !capabilities.Standby {
+				if target == bluetooth.PowerStateStandby && !capabilities.Standby {
 					stationResult.Skipped = true
 					stationResult.Reason = ReasonUnsupportedStandby
 					return nil
-				}
-				if err != nil {
-					return err
 				}
 				var controlResult bluetooth.PowerControlResult
 				controlResult, err = m.bluetoothOps.setPowerState(operationContext, s, target)

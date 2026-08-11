@@ -93,6 +93,15 @@ func (m *Manager) SetStationChannel(
 			return result, err
 		}
 	}
+	targetSnapshot = stationPtr.Snapshot()
+	// Capability refresh is an awaited Bluetooth phase; a notification can
+	// make the original non-booting snapshot obsolete before the channel write.
+	if isFreshBootingPower(targetSnapshot, time.Now()) {
+		return result, fmt.Errorf(
+			"station is booting; retry channel change after transition: %w",
+			ErrStationTransitioning,
+		)
+	}
 	if !capabilities.ChannelRead || !capabilities.ChannelWrite {
 		return result, fmt.Errorf("%w: safe channel changes require read and write support", ErrUnsupported)
 	}

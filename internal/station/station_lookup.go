@@ -87,16 +87,21 @@ const (
 	cachedPowerAtTarget
 )
 
+func isFreshBootingPower(snapshot bluetooth.BaseStationSnapshot, now time.Time) bool {
+	return snapshot.PowerState == bluetooth.PowerStateBooting &&
+		isOperationallyFresh(snapshot.LastPowerReadAt, now)
+}
+
 func classifyCachedPower(
 	snapshot bluetooth.BaseStationSnapshot,
 	target bluetooth.PowerState,
 	now time.Time,
 ) cachedPowerDisposition {
+	if isFreshBootingPower(snapshot, now) {
+		return cachedPowerBooting
+	}
 	if !isOperationallyFresh(snapshot.LastPowerReadAt, now) {
 		return cachedPowerActionable
-	}
-	if snapshot.PowerState == bluetooth.PowerStateBooting {
-		return cachedPowerBooting
 	}
 	if snapshot.PowerState == target &&
 		bluetooth.IsPowerStateVerified(snapshot.PowerState, snapshot.RawPowerState) {

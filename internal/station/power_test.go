@@ -676,6 +676,39 @@ func TestSinglePowerRejectsFreshBootingStation(t *testing.T) {
 	}
 }
 
+func TestSinglePowerRechecksBootingStateAfterCapabilityDiscovery(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	address := "11:22:33:44:55:91"
+	station := &internalbluetooth.BaseStation{
+		Name:            "LHB-BOOT-DURING-POWER",
+		Address:         mustAddress(t, address),
+		Present:         true,
+		PowerState:      internalbluetooth.PowerStateSleep,
+		RawPowerState:   0x00,
+		LastPowerReadAt: time.Now(),
+	}
+	manager.stations[address] = station
+	manager.bluetoothOps.ensureCapabilities = func(context.Context, *internalbluetooth.BaseStation) (internalbluetooth.Capabilities, error) {
+		station.PowerState = internalbluetooth.PowerStateBooting
+		station.RawPowerState = 0x01
+		station.LastPowerReadAt = time.Now()
+		return internalbluetooth.Capabilities{PowerWrite: true}, nil
+	}
+	var writes atomic.Int32
+	manager.bluetoothOps.setPowerState = func(context.Context, *internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
+		writes.Add(1)
+		return internalbluetooth.PowerControlResult{State: internalbluetooth.PowerStateOn, Confirmed: true}, nil
+	}
+
+	_, err := manager.SetStationPower(address, "on")
+	if !errors.Is(err, ErrStationTransitioning) {
+		t.Fatalf("SetStationPower() error = %v, want ErrStationTransitioning", err)
+	}
+	if writes.Load() != 0 {
+		t.Fatalf("power writes after station entered booting during discovery = %d, want 0", writes.Load())
+	}
+}
+
 func TestSinglePowerRejectsBootingStateReachedWhileWaitingToBegin(t *testing.T) {
 	// The pre-begin check sees a healthy snapshot, but a background read that
 	// drains during the slot wait can flip the station into a fresh boot. The

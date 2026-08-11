@@ -298,6 +298,45 @@ func TestSetStationChannelRejectsFreshBootingStation(t *testing.T) {
 	}
 }
 
+func TestSetStationChannelRechecksBootingStateAfterCapabilityRefresh(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	address := "AA:BB:CC:DD:EE:11"
+	now := time.Now()
+	station := &internalbluetooth.BaseStation{
+		Address:           mustAddress(t, address),
+		Name:              "LHB-BOOT-DURING-CHANNEL",
+		Channel:           3,
+		Present:           true,
+		LastSeenAt:        now,
+		LastChannelReadAt: now,
+		PowerState:        internalbluetooth.PowerStateOn,
+		RawPowerState:     0x0B,
+		LastPowerReadAt:   now,
+	}
+	manager.stations[address] = station
+	manager.bluetoothOps.refreshCapabilities = func(context.Context, *internalbluetooth.BaseStation) (internalbluetooth.Capabilities, error) {
+		// Model a notification landing while capability discovery owns the
+		// operation: the earlier power precondition is no longer authoritative.
+		station.PowerState = internalbluetooth.PowerStateBooting
+		station.RawPowerState = 0x01
+		station.LastPowerReadAt = time.Now()
+		return internalbluetooth.Capabilities{ChannelRead: true, ChannelWrite: true}, nil
+	}
+	var writes atomic.Int32
+	manager.bluetoothOps.setChannel = func(context.Context, *internalbluetooth.BaseStation, int) (internalbluetooth.ChannelWriteResult, error) {
+		writes.Add(1)
+		return internalbluetooth.ChannelWriteResult{PreviousChannel: 3, Channel: 5, CommandSent: true}, nil
+	}
+
+	result, err := manager.SetStationChannel(address, 5, false)
+	if !errors.Is(err, ErrStationTransitioning) {
+		t.Fatalf("SetStationChannel() error = %v, want ErrStationTransitioning", err)
+	}
+	if writes.Load() != 0 || result.CommandSent {
+		t.Fatalf("boot-after-refresh result = %+v, writes = %d; want no command", result, writes.Load())
+	}
+}
+
 func TestSetStationChannelMapsPreWriteUnsupportedCapability(t *testing.T) {
 	manager := NewManager(config.NewConfig())
 	now := time.Now()

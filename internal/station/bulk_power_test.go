@@ -583,6 +583,43 @@ func TestStaleBootingStationIsNotSkippedByBulkSelection(t *testing.T) {
 	}
 }
 
+func TestBulkPowerRechecksBootingStateAfterCapabilityDiscovery(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	address := "11:22:33:44:55:92"
+	station := &internalbluetooth.BaseStation{
+		Name:            "LHB-BOOT-DURING-BULK",
+		Address:         mustAddress(t, address),
+		Present:         true,
+		PowerState:      internalbluetooth.PowerStateSleep,
+		RawPowerState:   0x00,
+		LastPowerReadAt: time.Now(),
+	}
+	manager.stations[address] = station
+	manager.bluetoothOps.ensureCapabilities = func(context.Context, *internalbluetooth.BaseStation) (internalbluetooth.Capabilities, error) {
+		station.PowerState = internalbluetooth.PowerStateBooting
+		station.RawPowerState = 0x01
+		station.LastPowerReadAt = time.Now()
+		return internalbluetooth.Capabilities{PowerWrite: true}, nil
+	}
+	var writes atomic.Int32
+	manager.bluetoothOps.setPowerState = func(context.Context, *internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
+		writes.Add(1)
+		return internalbluetooth.PowerControlResult{State: internalbluetooth.PowerStateOn, Confirmed: true}, nil
+	}
+
+	result, err := manager.SetAllStationsPowerDetailed("on")
+	if err != nil {
+		t.Fatalf("SetAllStationsPowerDetailed() error = %v", err)
+	}
+	if len(result.Results) != 1 || !result.Results[0].Skipped ||
+		result.Results[0].Reason != ReasonStationBooting || result.Results[0].CommandSent {
+		t.Fatalf("boot-after-discovery result = %+v, want a booting skip", result.Results)
+	}
+	if writes.Load() != 0 {
+		t.Fatalf("bulk writes after station entered booting during discovery = %d, want 0", writes.Load())
+	}
+}
+
 func TestBulkPowerRechecksQueuedStationStateBeforeWrite(t *testing.T) {
 	for _, test := range []struct {
 		name          string

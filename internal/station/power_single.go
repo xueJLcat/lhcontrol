@@ -104,6 +104,13 @@ func (m *Manager) SetStationPower(address, state string) (PowerActionResult, err
 			return PowerActionResult{}, err
 		}
 	}
+	// Capability discovery can take long enough for a power notification to
+	// move the station into a boot transition. The earlier snapshot no longer
+	// authorizes a write, so enforce the same transition guard at the final
+	// manager-controlled boundary before power control begins.
+	if isFreshBootingPower(stationPtr.Snapshot(), time.Now()) {
+		return PowerActionResult{}, fmt.Errorf("station is booting; retry after transition: %w", ErrStationTransitioning)
+	}
 	if !capabilities.PowerWrite {
 		return PowerActionResult{}, fmt.Errorf("%w: power write is unavailable", ErrUnsupported)
 	}
