@@ -7,18 +7,18 @@
     stations,
     onSelect,
     selectedAddress = null,
-    channelOf = (station: StationInfo) => station.channel
+    channelDisplayByAddress = new Map<string, number>()
   }: {
     stations: StationInfo[];
     onSelect: (address: string) => void;
     // Address of the station whose details drawer is open, so its channel
     // cell can stay highlighted while the user inspects the station.
     selectedAddress?: string | null;
-    // Display-only channel resolver. The parent injects a short-lived memory
+    // Display-only channel snapshot. The parent injects a short-lived memory
     // so transient backend channel wipes do not flip cells between occupied
     // and free/disabled. `current` still uses the live station data, so a
     // resolved occupant without fresh data renders as last-known (stale).
-    channelOf?: (station: StationInfo) => number;
+    channelDisplayByAddress?: ReadonlyMap<string, number>;
   } = $props();
 
   interface Occupant {
@@ -32,7 +32,7 @@
   }
 
   const byChannel = $derived(stations.reduce((map, station) => {
-    const channel = channelOf(station);
+    const channel = channelDisplayByAddress.get(station.address) ?? station.channel;
     if (channel > 0) {
       const list = map.get(channel) ?? [];
       list.push({

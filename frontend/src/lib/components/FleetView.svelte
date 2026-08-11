@@ -14,7 +14,7 @@
 
   let {
     stations,
-    channelOf,
+    channelDisplayByAddress,
     selectedAddress,
     conflictDetails,
     scanError,
@@ -36,7 +36,7 @@
     onCancelRename
   }: {
     stations: StationInfo[];
-    channelOf: (station: StationInfo) => number;
+    channelDisplayByAddress: ReadonlyMap<string, number>;
     selectedAddress: string | null;
     conflictDetails: string;
     scanError: ScanErrorInfo | null;
@@ -81,7 +81,7 @@
   />
 {/if}
 {#if stations.length}
-  <ChannelMap stations={stations} {channelOf} {selectedAddress} onSelect={onSelect} />
+  <ChannelMap stations={stations} {channelDisplayByAddress} {selectedAddress} onSelect={onSelect} />
   <div class="station-grid">
     {#each stations as station, index (station.address)}
       <div
@@ -92,7 +92,7 @@
         <StationCard
           {station}
           {now}
-          channelDisplay={channelOf(station)}
+          channelDisplay={channelDisplayByAddress.get(station.address) ?? station.channel}
           renaming={editingAddress === station.address}
           feedback={feedbackByAddress[station.address]}
           pendingTarget={pendingTargetByAddress[station.address]}

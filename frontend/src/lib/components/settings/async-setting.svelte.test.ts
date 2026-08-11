@@ -128,4 +128,36 @@ describe('AsyncSetting', () => {
     expect(setter.mock.calls.map(([value]) => value)).toEqual([10, 20]);
     expect(applied).toEqual([10, 20]);
   });
+
+  it('rolls a failed queued save back to the preceding persisted value', async () => {
+    let persisted = 5;
+    const releaseFirstSave = deferred<void>();
+    const getter = vi.fn(async () => persisted);
+    const setter = vi.fn(async (value: number) => {
+      if (value === 10) {
+        await releaseFirstSave.promise;
+        persisted = value;
+        return;
+      }
+      throw new Error('save rejected');
+    });
+    const options = {
+      getter,
+      setter,
+      loadMessage: 'Scan duration could not be loaded' as const,
+      saveMessage: 'Scan duration could not be saved' as const
+    };
+    const first = new AsyncSetting(options);
+    const second = new AsyncSetting(options);
+    await Promise.all([first.load(), second.load()]);
+
+    const firstSave = first.change(10);
+    await vi.waitFor(() => expect(setter).toHaveBeenCalledOnce());
+    const secondSave = second.change(20);
+    releaseFirstSave.resolve(undefined);
+    await Promise.all([firstSave, secondSave]);
+
+    expect(persisted).toBe(10);
+    expect(second.value).toBe(10);
+  });
 });

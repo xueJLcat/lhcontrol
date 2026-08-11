@@ -11,18 +11,26 @@ import {
 export class FleetState {
   stations = $state<StationInfo[]>([]);
   private channelMemory = new ChannelMemory();
-  // Bumped when a cached display channel expires so the sorted list and any
-  // channelOf consumer re-evaluate even though the station list did not
+  // Bumped when a cached display channel expires so the shared display map
+  // and every consumer re-evaluate even though the station list did not
   // change. Derived views only recompute when a reactive input changes, and
   // Date.now() alone is not one.
   private channelMemoryTick = $state(0);
   private channelMemoryTimer: ReturnType<typeof setTimeout> | null = null;
 
-  sortedStations = $derived.by(() => {
+  channelDisplayByAddress = $derived.by(() => {
     void this.channelMemoryTick;
+    return new Map(this.stations.map((station) => [
+      station.address,
+      this.channelMemory.displayChannel(station)
+    ]));
+  });
+
+  sortedStations = $derived.by(() => {
+    const displayChannels = this.channelDisplayByAddress;
     return [...this.stations].sort((a, b) => {
-      const ac = this.displayChannel(a) || Number.MAX_SAFE_INTEGER;
-      const bc = this.displayChannel(b) || Number.MAX_SAFE_INTEGER;
+      const ac = displayChannels.get(a.address) || Number.MAX_SAFE_INTEGER;
+      const bc = displayChannels.get(b.address) || Number.MAX_SAFE_INTEGER;
       return ac - bc || a.name.localeCompare(b.name) || a.address.localeCompare(b.address);
     });
   });
@@ -69,7 +77,7 @@ export class FleetState {
   ).length);
 
   displayChannel(station: StationInfo): number {
-    return this.channelMemory.displayChannel(station);
+    return this.channelDisplayByAddress.get(station.address) ?? station.channel;
   }
 
   syncChannelMemory() {

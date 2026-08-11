@@ -179,7 +179,7 @@
   <main>
     <FleetView
       stations={store.sortedStations}
-      channelOf={(station) => store.displayChannel(station)}
+      channelDisplayByAddress={store.channelDisplayByAddress}
       selectedAddress={selectedAddress}
       conflictDetails={store.conflictDetails}
       scanError={store.scanError}

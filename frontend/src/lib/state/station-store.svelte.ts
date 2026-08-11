@@ -196,6 +196,7 @@ export class StationStore {
   get stations(): StationInfo[] { return this.fleet.stations; }
   set stations(stations: StationInfo[]) { this.fleet.replace(stations); }
   get sortedStations(): StationInfo[] { return this.fleet.sortedStations; }
+  get channelDisplayByAddress(): ReadonlyMap<string, number> { return this.fleet.channelDisplayByAddress; }
   get conflictDetails(): string { return this.fleet.conflictDetails; }
   get fleetOn(): number { return this.fleet.fleetOn; }
   get fleetStandby(): number { return this.fleet.fleetStandby; }
@@ -273,7 +274,7 @@ export class StationStore {
   scanRunning = $derived(this.isLoading || this.externalScanning);
   anyDeviceOperation = $derived(this.operationLocks.anyDeviceOperation);
   scanLocked = $derived(this.operationLocks.scanLocked);
-  bulkLocked = $derived(this.operationLocks.bulkLocked);
+  bulkLocked = $derived(this.operationLocks.bulkLocked || this.cancellingBulk);
   stationLocked = $derived(this.operationLocks.stationLocked);
   // The periodic status reader occupies one of the backend's two device
   // operation slots. Keep the remaining slot available to one foreground

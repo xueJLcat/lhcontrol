@@ -133,42 +133,10 @@
   const stalePower = $derived(hasKnownPower && !station.powerFresh);
   const unverified = $derived(hasKnownPower && station.powerFresh && !station.powerStateConfirmed);
 
-  // Display hysteresis for the channel chip. The keyed each upstream reuses
-  // this card while the station object is unchanged, so the expiry must run
-  // here: while the live channel is wiped the last known value persists for
-  // CHANNEL_MEMORY_MS before falling back to CH --.
-  const CHANNEL_MEMORY_MS = 45_000;
-  // Intentional one-time capture: channelDisplay seeds the hysteresis when a
-  // card mounts during a transient wipe; after that the card tracks changes
-  // through the station prop itself.
-  // svelte-ignore state_referenced_locally
-  let lastKnownChannel = $state(channelDisplay ?? 0);
-  // The memory window runs from the first observed wipe, not from the last
-  // confirmed channel: unchanged snapshots reuse the same object reference,
-  // so an "age of the last confirmed value" timestamp silently goes stale
-  // while a long-lived channel looks unchanged and the bridge collapses the
-  // moment the wipe happens.
-  // svelte-ignore state_referenced_locally
-  let wipeStartedAt = $state<number | null>(station.channel > 0 ? null : Date.now());
-  $effect(() => {
-    if (station.channel > 0) {
-      lastKnownChannel = station.channel;
-      wipeStartedAt = null;
-    } else if (wipeStartedAt === null) {
-      wipeStartedAt = Date.now();
-    }
-  });
-  // Schedule the expiry precisely at the remaining window so the chip drops
-  // the last known channel together with the fleet channel map (ChannelMemory
-  // expires at exactly CHANNEL_MEMORY_MS); a coarse poll could keep showing it
-  // for up to one interval after the map already released the channel.
-  $effect(() => {
-    if (station.channel > 0 || lastKnownChannel <= 0 || wipeStartedAt === null) return;
-    const remaining = CHANNEL_MEMORY_MS - (Date.now() - wipeStartedAt);
-    const timer = setTimeout(() => { lastKnownChannel = 0; }, Math.max(0, remaining));
-    return () => clearTimeout(timer);
-  });
-  const shownChannel = $derived(station.channel > 0 ? station.channel : lastKnownChannel);
+  // FleetState owns the single channel-memory clock. Treat channelDisplay as
+  // authoritative so an already-mounted card expires in the same render as
+  // the fleet map instead of starting a second 45-second window of its own.
+  const shownChannel = $derived(station.channel > 0 ? station.channel : (channelDisplay ?? 0));
   const channelLastKnown = $derived(shownChannel > 0 && !hasCurrentChannel(station));
 
   function openDetails() {

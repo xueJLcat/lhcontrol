@@ -250,7 +250,9 @@ export class StationActionController {
       if (!this.host.disposed) {
         if (this.host.globalOperation === 'bulk-power') this.host.globalOperation = 'idle';
         this.host.bulkTarget = null;
-        this.host.cancellingBulk = false;
+        // Intentionally leave cancellingBulk alone: cancelBulkPower owns it
+        // until its request settles. The bulk result can arrive first, but a
+        // late cancellation must not overlap a newly started bulk operation.
       }
     }
   }

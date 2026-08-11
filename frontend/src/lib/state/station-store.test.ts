@@ -518,6 +518,35 @@ describe('StationStore bulk power', () => {
     await vi.waitFor(() => expect(store.bulkTarget).toBeNull());
     expect(store.globalOperation).toBe('idle');
   });
+
+  it('keeps new bulk commands locked until a pending cancellation request settles', async () => {
+    const bulk = deferred<{ target: string; results: never[] }>();
+    const cancellation = deferred<void>();
+    backend.SetAllStationsPowerDetailed.mockReturnValueOnce(bulk.promise);
+    backend.CancelBulkPower.mockReturnValueOnce(cancellation.promise);
+    const { store } = mountStore();
+    await vi.waitFor(() => expect(store.stations).toHaveLength(1));
+
+    const runningBulk = store.runBulkPower('on');
+    await vi.waitFor(() => expect(backend.SetAllStationsPowerDetailed).toHaveBeenCalledOnce());
+    const pendingCancellation = store.cancelBulkPower();
+    await vi.waitFor(() => expect(backend.CancelBulkPower).toHaveBeenCalledOnce());
+
+    bulk.resolve({ target: 'on', results: [] });
+    await runningBulk;
+
+    expect(store.globalOperation).toBe('idle');
+    expect(store.cancellingBulk).toBe(true);
+    expect(store.bulkLocked).toBe(true);
+
+    await store.runBulkPower('sleep');
+    expect(backend.SetAllStationsPowerDetailed).toHaveBeenCalledOnce();
+
+    cancellation.resolve(undefined);
+    await pendingCancellation;
+    expect(store.cancellingBulk).toBe(false);
+    expect(store.bulkLocked).toBe(false);
+  });
 });
 
 describe('StationStore fleet aggregates', () => {

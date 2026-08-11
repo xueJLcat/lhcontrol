@@ -2,7 +2,6 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { StationInfo } from '../types';
 import { createStation } from '../../test/fixtures';
 import FleetView from './FleetView.svelte';
 
@@ -30,7 +29,7 @@ beforeEach(() => {
 function defaultProps(overrides: Record<string, unknown> = {}) {
   return {
     stations: [createStation()],
-    channelOf: (station: StationInfo) => station.channel,
+    channelDisplayByAddress: new Map<string, number>(),
     selectedAddress: null,
     conflictDetails: '',
     scanError: null,

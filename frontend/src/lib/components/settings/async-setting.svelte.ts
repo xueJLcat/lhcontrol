@@ -59,7 +59,16 @@ export class AsyncSetting<T> {
         try {
           await this.options.setter(next);
         } catch (error) {
-          this.value = previous;
+          // Another drawer instance may have completed an earlier queued save
+          // after this instance captured `previous`. Re-read inside the same
+          // serialization slot so a failed later save rolls back to the value
+          // that is actually persisted, not to an older local snapshot.
+          try {
+            const persisted = await this.options.getter();
+            this.value = this.options.map ? this.options.map(persisted) : persisted;
+          } catch {
+            this.value = previous;
+          }
           pushToast(withDetail(this.options.saveMessage, error));
           return;
         }

@@ -184,25 +184,17 @@ describe('StationCard channel memory', () => {
     expect(chip).toHaveAttribute('title', 'Last known channel');
   });
 
-  it('drops the last known channel exactly when the memory window elapses', async () => {
-    vi.useFakeTimers();
-    try {
-      const wiped = station();
-      wiped.channel = 0;
-      wiped.channelFresh = false;
-      render(StationCard, { props: { ...cardProps({}), renaming: false, station: wiped, channelDisplay: 5 } });
-      expect(screen.getByText('CH 05')).toBeInTheDocument();
+  it('drops the last known channel when the fleet memory expires', async () => {
+    const wiped = station();
+    wiped.channel = 0;
+    wiped.channelFresh = false;
+    const props = { ...cardProps({}), renaming: false, station: wiped, channelDisplay: 5 };
+    const view = render(StationCard, { props });
+    expect(screen.getByText('CH 05')).toBeInTheDocument();
 
-      await vi.advanceTimersByTimeAsync(44_999);
-      await tick();
-      expect(screen.getByText('CH 05')).toBeInTheDocument();
+    await view.rerender({ ...props, channelDisplay: 0 });
 
-      await vi.advanceTimersByTimeAsync(1);
-      await tick();
-      expect(screen.getByText('CH --')).toBeInTheDocument();
-    } finally {
-      vi.useRealTimers();
-    }
+    expect(screen.getByText('CH --')).toBeInTheDocument();
   });
 });
 
