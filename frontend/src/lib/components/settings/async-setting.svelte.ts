@@ -10,6 +10,22 @@ export interface AsyncSettingOptions<T> {
   afterSave?: (value: T) => void | Promise<void>;
 }
 
+const settingOperationTails = new WeakMap<object, Promise<void>>();
+
+function serializeSettingOperation<T>(key: object, operation: () => Promise<T>): Promise<T> {
+  const previous = settingOperationTails.get(key);
+  const result = previous ? previous.then(operation) : operation();
+  const tail = result.then(
+    () => undefined,
+    () => undefined
+  );
+  settingOperationTails.set(key, tail);
+  void tail.then(() => {
+    if (settingOperationTails.get(key) === tail) settingOperationTails.delete(key);
+  });
+  return result;
+}
+
 export class AsyncSetting<T> {
   value = $state<T | null>(null);
   error = $state<string | null>(null);
@@ -22,7 +38,7 @@ export class AsyncSetting<T> {
     this.busy = true;
     this.error = null;
     try {
-      const value = await this.options.getter();
+      const value = await serializeSettingOperation(this.options.setter, this.options.getter);
       this.value = this.options.map ? this.options.map(value) : value;
     } catch (error) {
       this.value = null;
@@ -39,22 +55,24 @@ export class AsyncSetting<T> {
     this.value = next;
     this.busy = true;
     try {
-      try {
-        await this.options.setter(next);
-      } catch (error) {
-        this.value = previous;
-        pushToast(withDetail(this.options.saveMessage, error));
-        return;
-      }
+      await serializeSettingOperation(this.options.setter, async () => {
+        try {
+          await this.options.setter(next);
+        } catch (error) {
+          this.value = previous;
+          pushToast(withDetail(this.options.saveMessage, error));
+          return;
+        }
 
-      try {
-        await this.options.afterSave?.(next);
-      } catch (error) {
-        // Persistence already succeeded. Keep the saved value visible and
-        // report only the local follow-up failure; rolling back here would
-        // make the UI disagree with the backend and the next application run.
-        pushToast(withDetail('Setting was saved, but the current view could not apply it immediately', error), 'warning');
-      }
+        try {
+          await this.options.afterSave?.(next);
+        } catch (error) {
+          // Persistence already succeeded. Keep the saved value visible and
+          // report only the local follow-up failure; rolling back here would
+          // make the UI disagree with the backend and the next application run.
+          pushToast(withDetail('Setting was saved, but the current view could not apply it immediately', error), 'warning');
+        }
+      });
     } finally {
       this.busy = false;
     }
