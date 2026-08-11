@@ -80,6 +80,7 @@
     inactive = false,
     onClose,
     onLanguageChanged = () => {},
+    onScanOnStartupChanged = () => {},
     onStatusPollIntervalChanged = () => {},
     onStatusPollingEnabledChanged = () => {},
     onStationProjectionChanged = () => {}
@@ -87,6 +88,7 @@
     inactive?: boolean;
     onClose: () => void;
     onLanguageChanged?: () => void;
+    onScanOnStartupChanged?: (enabled: boolean) => void;
     onStatusPollIntervalChanged?: (intervalSeconds: number) => void;
     onStatusPollingEnabledChanged?: (enabled: boolean) => void;
     onStationProjectionChanged?: () => void;
@@ -117,7 +119,8 @@
   });
   const scanOnStartupSetting = new AsyncSetting({
     getter: GetScanOnStartup, setter: SetScanOnStartup,
-    loadMessage: 'Startup scan setting could not be loaded', saveMessage: 'Startup scan setting could not be saved'
+    loadMessage: 'Startup scan setting could not be loaded', saveMessage: 'Startup scan setting could not be saved',
+    afterSave: (enabled) => onScanOnStartupChanged(enabled)
   });
   const scanDurationSetting = new AsyncSetting({
     getter: GetScanDurationSeconds, setter: SetScanDurationSeconds,

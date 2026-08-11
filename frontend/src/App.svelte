@@ -241,6 +241,7 @@
     inactive={channelEditorOpen || Boolean(bulkConfirmTarget)}
     onClose={closeSettings}
     onLanguageChanged={handleLanguageChanged}
+    onScanOnStartupChanged={(enabled) => store.setScanOnStartupEnabled(enabled)}
     onStatusPollIntervalChanged={(intervalSeconds) => {
       store.setStatusPollIntervalSeconds(intervalSeconds);
       void store.refreshStationProjection();

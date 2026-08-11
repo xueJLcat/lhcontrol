@@ -49,6 +49,14 @@ function createUi(): StationStoreUi {
   };
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
 let store: StationStore | null = null;
 
 function mountStore(ui = createUi()) {
@@ -202,6 +210,63 @@ afterEach(() => {
 });
 
 describe('StationStore startup', () => {
+  it('does not let a delayed startup polling preference override a saved change', async () => {
+    vi.useFakeTimers();
+    const startupPreference = deferred<boolean>();
+    backend.GetScanOnStartup.mockResolvedValue(false);
+    backend.GetStatusPollingEnabled.mockReturnValue(startupPreference.promise);
+    const { store } = mountStore();
+
+    // The persisted value was false when the startup read began. The user
+    // enables it before that old response arrives; true equals the runtime
+    // default, so this also covers the otherwise easy-to-miss no-op path.
+    store.setStatusPollingEnabled(true);
+    startupPreference.resolve(false);
+    await vi.advanceTimersByTimeAsync(0);
+    backend.CheckAllStationStatuses.mockClear();
+
+    await vi.advanceTimersByTimeAsync(15_000);
+
+    expect(backend.CheckAllStationStatuses).toHaveBeenCalledOnce();
+  });
+
+  it('does not let a delayed startup interval override a saved change', async () => {
+    vi.useFakeTimers();
+    const startupInterval = deferred<number>();
+    backend.GetScanOnStartup.mockResolvedValue(false);
+    backend.GetStatusPollIntervalSeconds.mockReturnValue(startupInterval.promise);
+    const { store } = mountStore();
+
+    // The user restores the 15-second default while a stale persisted
+    // 30-second response is in flight. The explicit save must still win even
+    // though applying 15 seconds is an immediate runtime no-op.
+    store.setStatusPollIntervalSeconds(15);
+    startupInterval.resolve(30);
+    await vi.advanceTimersByTimeAsync(0);
+    backend.CheckAllStationStatuses.mockClear();
+
+    await vi.advanceTimersByTimeAsync(15_000);
+
+    expect(backend.CheckAllStationStatuses).toHaveBeenCalledOnce();
+  });
+
+  it('ignores delayed startup preferences after disposal', async () => {
+    vi.useFakeTimers();
+    const startupInterval = deferred<number>();
+    backend.GetScanOnStartup.mockResolvedValue(false);
+    backend.GetStatusPollIntervalSeconds.mockReturnValue(startupInterval.promise);
+    const { store } = mountStore();
+    await vi.advanceTimersByTimeAsync(0);
+    const healthCallsBeforeDispose = backend.GetAPIStatus.mock.calls.length;
+
+    store.dispose();
+    startupInterval.resolve(5);
+    await vi.advanceTimersByTimeAsync(15_000);
+
+    expect(backend.GetAPIStatus).toHaveBeenCalledTimes(healthCallsBeforeDispose);
+    expect(backend.CheckAllStationStatuses).not.toHaveBeenCalled();
+  });
+
   it('uses the persisted automatic polling interval', async () => {
     vi.useFakeTimers();
     backend.GetStatusPollIntervalSeconds.mockResolvedValue(30);

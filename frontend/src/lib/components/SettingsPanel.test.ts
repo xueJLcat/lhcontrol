@@ -252,11 +252,13 @@ describe('SettingsPanel', () => {
   });
 
   it('persists scan and automatic station refresh preferences', async () => {
+    const onScanOnStartupChanged = vi.fn();
     const onStatusPollingEnabledChanged = vi.fn();
-    render(SettingsPanel, { props: { onClose: vi.fn(), onStatusPollingEnabledChanged } });
+    render(SettingsPanel, { props: { onClose: vi.fn(), onScanOnStartupChanged, onStatusPollingEnabledChanged } });
 
     await fireEvent.click(await screen.findByRole('checkbox', { name: 'Scan when the application starts' }));
     await waitFor(() => expect(backend.SetScanOnStartup).toHaveBeenCalledWith(false));
+    expect(onScanOnStartupChanged).toHaveBeenCalledWith(false);
 
     const duration = screen.getByLabelText('Bluetooth scan duration');
     await fireEvent.input(duration, { target: { value: '12' } });

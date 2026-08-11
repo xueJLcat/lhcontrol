@@ -110,6 +110,14 @@ function externalScanEvent(id: number, overrides: Partial<{ stations: StationInf
   return { id, ...overrides };
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   Object.defineProperty(Element.prototype, 'animate', {
@@ -214,6 +222,25 @@ afterEach(() => {
 });
 
 describe('App settings drawer', () => {
+  it('honors a startup-scan change made before the startup read settles', async () => {
+    const startupPreference = deferred<boolean>();
+    api.GetScanOnStartup
+      .mockReturnValueOnce(startupPreference.promise)
+      .mockResolvedValueOnce(true);
+    render(App);
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Open settings' }));
+    const toggle = await screen.findByRole('checkbox', { name: 'Scan when the application starts' });
+    await fireEvent.click(toggle);
+    await waitFor(() => expect(api.SetScanOnStartup).toHaveBeenCalledWith(false));
+
+    startupPreference.resolve(true);
+    await waitFor(() => expect(api.GetScanOnStartup).toHaveBeenCalledTimes(2));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(api.ScanAndFetchStations).not.toHaveBeenCalled();
+  });
+
   it('opens the settings drawer and lists adapter diagnostics', async () => {
     api.ListBluetoothAdapters.mockResolvedValue([
       { deviceId: 'BT-1', name: 'Intel Wireless Bluetooth' },

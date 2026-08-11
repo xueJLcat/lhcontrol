@@ -79,6 +79,10 @@ export class StationStore {
   private projectionRefreshFailures = 0;
   private statusPollIntervalSeconds = DEFAULT_STATUS_POLL_INTERVAL_SECONDS;
   private statusPollingEnabled = true;
+  private scanOnStartupEnabled = false;
+  private scanOnStartupPreferenceRevision = 0;
+  private statusPollIntervalPreferenceRevision = 0;
+  private statusPollingEnabledPreferenceRevision = 0;
   private apiStatusStarted = false;
   private startupAPIStatusReady: Promise<void> = Promise.resolve();
   private cancelExternalScanListener: (() => void) | null = null;
@@ -514,6 +518,20 @@ export class StationStore {
 
   setStatusPollIntervalSeconds(intervalSeconds: number) {
     if (this.disposed || !Number.isFinite(intervalSeconds)) return;
+    // An explicit settings save must supersede the startup getter even when
+    // the value already matches the runtime default and applying it is a no-op.
+    this.statusPollIntervalPreferenceRevision += 1;
+    this.applyStatusPollIntervalSeconds(intervalSeconds);
+  }
+
+  setScanOnStartupEnabled(enabled: boolean) {
+    if (this.disposed) return;
+    this.scanOnStartupPreferenceRevision += 1;
+    this.scanOnStartupEnabled = enabled;
+  }
+
+  private applyStatusPollIntervalSeconds(intervalSeconds: number) {
+    if (this.disposed || !Number.isFinite(intervalSeconds)) return;
     const next = Math.min(
       MAX_STATUS_POLL_INTERVAL_SECONDS,
       Math.max(MIN_STATUS_POLL_INTERVAL_SECONDS, Math.round(intervalSeconds))
@@ -537,6 +555,15 @@ export class StationStore {
   }
 
   setStatusPollingEnabled(enabled: boolean) {
+    if (this.disposed) return;
+    // Count the user's intent before the equality fast path. At startup the
+    // in-memory default can already equal a newly saved value while an older
+    // backend read is still in flight.
+    this.statusPollingEnabledPreferenceRevision += 1;
+    this.applyStatusPollingEnabled(enabled);
+  }
+
+  private applyStatusPollingEnabled(enabled: boolean) {
     if (this.disposed || this.statusPollingEnabled === enabled) return;
     this.statusPollingEnabled = enabled;
     if (this.statusCheckInterval) clearInterval(this.statusCheckInterval);
@@ -597,28 +624,49 @@ export class StationStore {
     });
     // Register operation listeners before the first asynchronous health poll
     // so a newly started HTTP action cannot slip through the mount window.
-    this.setStatusPollIntervalSeconds(DEFAULT_STATUS_POLL_INTERVAL_SECONDS);
+    this.applyStatusPollIntervalSeconds(DEFAULT_STATUS_POLL_INTERVAL_SECONDS);
+    const startupStatusPollIntervalRevision = this.statusPollIntervalPreferenceRevision;
     const statusPollIntervalReady = GetStatusPollIntervalSeconds()
-      .then((intervalSeconds) => this.setStatusPollIntervalSeconds(intervalSeconds))
+      .then((intervalSeconds) => {
+        if (this.statusPollIntervalPreferenceRevision === startupStatusPollIntervalRevision) {
+          this.applyStatusPollIntervalSeconds(intervalSeconds);
+        }
+      })
       .catch(() => {
         // Keep the default interval when the persisted preference cannot be read.
       });
+    const startupStatusPollingEnabledRevision = this.statusPollingEnabledPreferenceRevision;
     const statusPollingPreferenceReady = GetStatusPollingEnabled()
-      .then((enabled) => this.setStatusPollingEnabled(enabled))
+      .then((enabled) => {
+        if (this.statusPollingEnabledPreferenceRevision === startupStatusPollingEnabledRevision) {
+          this.applyStatusPollingEnabled(enabled);
+        }
+      })
       .catch(() => {
         // Keep automatic station refresh enabled when the preference is unreadable.
+      });
+    const startupScanPreferenceRevision = this.scanOnStartupPreferenceRevision;
+    const startupScanPreferenceReady = GetScanOnStartup()
+      .then((enabled) => {
+        if (!this.disposed && this.scanOnStartupPreferenceRevision === startupScanPreferenceRevision) {
+          this.scanOnStartupEnabled = enabled;
+        }
+      })
+      .catch(() => {
+        // Fail closed only when no newer saved preference has superseded this
+        // startup read. A delayed failure must not erase the user's choice.
+        if (!this.disposed && this.scanOnStartupPreferenceRevision === startupScanPreferenceRevision) {
+          this.scanOnStartupEnabled = false;
+        }
       });
     // A non-default persisted interval restarts ApiStatusPoller and revision-
     // gates its first request. Read the promise only after that restart has
     // happened so startup waits for the response that can actually commit.
     const startupAPIStatusReady = statusPollIntervalReady.then(() => this.startupAPIStatusReady);
     void (async () => {
-      const [startupScanning, scanOnStartup] = await Promise.all([
+      const [startupScanning] = await Promise.all([
         IsScanning().catch(() => false),
-        // Fail closed: when the persisted preference is unreadable, skipping
-        // the scan honors a disabled setting instead of triggering a scan the
-        // user explicitly turned off.
-        GetScanOnStartup().catch(() => false),
+        startupScanPreferenceReady,
         // Wait for the operation-health snapshot started above. It recovers
         // automatic sleep (and HTTP work) that began before event listeners
         // mounted, closing the only window where an internal scan could be
@@ -638,7 +686,7 @@ export class StationStore {
         if (!this.autoSleepRunning && !this.externalOperationRunning) {
           await this.externalScan.adoptUnknown();
         }
-      } else if (scanOnStartup) {
+      } else if (this.scanOnStartupEnabled) {
         await this.startScan();
       }
     })();
