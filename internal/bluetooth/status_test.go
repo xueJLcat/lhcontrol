@@ -455,6 +455,102 @@ func TestRefreshCapabilitiesContextDoesNotDisconnectForPreCancelledContext(t *te
 		t.Fatalf("pre-cancelled refresh invalidated known capabilities: %+v", snapshot)
 	}
 }
+
+func TestEnsureCapabilitiesContextDoesNotDisconnectForPreCancelledContext(t *testing.T) {
+	device := &trackingConnectedDevice{}
+	station := connectedFakeStation(
+		&fakeCharacteristic{},
+		nil,
+		nil,
+		Capabilities{PowerRead: true},
+	)
+	station.device = device
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := EnsureCapabilitiesContext(ctx, station)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("EnsureCapabilitiesContext() error = %v, want context.Canceled", err)
+	}
+	if device.disconnects != 0 || !station.Snapshot().Connected {
+		t.Fatalf("pre-cancelled capability check changed the healthy connection: disconnects=%d snapshot=%+v", device.disconnects, station.Snapshot())
+	}
+}
+
+func TestFetchInitialPowerStateContextDoesNotDisconnectForPreCancelledContext(t *testing.T) {
+	device := &trackingConnectedDevice{}
+	station := connectedFakeStation(
+		&fakeCharacteristic{value: []byte{0x0B}},
+		nil,
+		nil,
+		Capabilities{PowerRead: true},
+	)
+	station.device = device
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := FetchInitialPowerStateContext(ctx, station)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("FetchInitialPowerStateContext() error = %v, want context.Canceled", err)
+	}
+	if device.disconnects != 0 || !station.Snapshot().Connected {
+		t.Fatalf("pre-cancelled initial read changed the healthy connection: disconnects=%d snapshot=%+v", device.disconnects, station.Snapshot())
+	}
+}
+
+func TestCapabilityReadsDoNotDisconnectWhenCancelledWaitingForStation(t *testing.T) {
+	operations := map[string]func(context.Context, *BaseStation) error{
+		"ensure capabilities": func(ctx context.Context, station *BaseStation) error {
+			_, err := EnsureCapabilitiesContext(ctx, station)
+			return err
+		},
+		"initial state": FetchInitialPowerStateContext,
+	}
+	for name, operation := range operations {
+		t.Run(name, func(t *testing.T) {
+			device := &trackingConnectedDevice{}
+			station := connectedFakeStation(
+				&fakeCharacteristic{value: []byte{0x0B}},
+				nil,
+				nil,
+				Capabilities{PowerRead: true},
+			)
+			station.device = device
+			baseContext, cancel := context.WithCancel(context.Background())
+			ctx := &observeFirstContextCheck{Context: baseContext, checked: make(chan struct{})}
+			station.mutex.Lock()
+			locked := true
+			defer func() {
+				if locked {
+					station.mutex.Unlock()
+				}
+			}()
+			result := make(chan error, 1)
+			go func() { result <- operation(ctx, station) }()
+			select {
+			case <-ctx.checked:
+			case <-time.After(time.Second):
+				t.Fatal("operation did not reach its initial context check")
+			}
+			cancel()
+			station.mutex.Unlock()
+			locked = false
+
+			select {
+			case err := <-result:
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("operation error = %v, want context.Canceled", err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("cancelled operation did not return after the station lock was released")
+			}
+			if device.disconnects != 0 || !station.Snapshot().Connected {
+				t.Fatalf("waiting cancellation changed the healthy connection: disconnects=%d snapshot=%+v", device.disconnects, station.Snapshot())
+			}
+		})
+	}
+}
+
 func TestRefreshCapabilitiesContextDoesNotDisconnectWhenCancelledWaitingForStation(t *testing.T) {
 	device := &trackingConnectedDevice{}
 	station := connectedFakeStation(

@@ -290,6 +290,53 @@ func TestContextCancellationDoesNotRequireReconnect(t *testing.T) {
 		t.Fatal("genuine transport failure did not require reconnect")
 	}
 }
+
+func TestSetChannelContextDoesNotDisconnectWhenCancelledWaitingForStation(t *testing.T) {
+	device := &trackingConnectedDevice{}
+	station := connectedFakeStation(
+		&fakeCharacteristic{},
+		&fakeCharacteristic{value: []byte{3}},
+		nil,
+		Capabilities{ChannelRead: true, ChannelWrite: true},
+	)
+	station.device = device
+	baseContext, cancel := context.WithCancel(context.Background())
+	ctx := &observeFirstContextCheck{Context: baseContext, checked: make(chan struct{})}
+	station.mutex.Lock()
+	locked := true
+	defer func() {
+		if locked {
+			station.mutex.Unlock()
+		}
+	}()
+	result := make(chan error, 1)
+	go func() {
+		_, err := SetChannelContext(ctx, station, 5)
+		result <- err
+	}()
+	select {
+	case <-ctx.checked:
+	case <-time.After(time.Second):
+		t.Fatal("channel operation did not reach its initial context check")
+	}
+	cancel()
+	station.mutex.Unlock()
+	locked = false
+
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("SetChannelContext() error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cancelled channel operation did not return after the station lock was released")
+	}
+	snapshot := station.Snapshot()
+	if device.disconnects != 0 || !snapshot.Connected {
+		t.Fatalf("waiting cancellation changed the healthy connection: disconnects=%d snapshot=%+v", device.disconnects, snapshot)
+	}
+}
+
 func TestSetChannelAcceptsConfirmedReadbackAfterWriteError(t *testing.T) {
 	mode := &fakeCharacteristic{
 		value:                []byte{0x03},

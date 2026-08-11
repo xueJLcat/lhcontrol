@@ -214,6 +214,14 @@ func (bs *BaseStation) setOperationErrorInternal(err error) {
 	bs.refreshLastErrorInternal()
 }
 
+// ClearOperationError removes a resolved foreground-operation error without
+// disturbing current connection, status, or metadata read errors.
+func (bs *BaseStation) ClearOperationError() {
+	bs.mutex.Lock()
+	defer bs.mutex.Unlock()
+	bs.setOperationErrorInternal(nil)
+}
+
 type BaseStationSnapshot struct {
 	Name              string
 	Address           string

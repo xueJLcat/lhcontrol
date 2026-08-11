@@ -121,6 +121,10 @@ func (m *Manager) RefreshStationCapabilities(address string) (StationInfo, error
 		// failure.
 		return m.stationInfoByAddress(address)
 	}
+	// A complete rediscovery and state read resolves any error left by an older
+	// foreground command. Keep partial reads conservative because they may not
+	// have observed the field affected by that command.
+	stationPtr.ClearOperationError()
 	m.clearStatusFailure(canonicalAddress)
 	return m.stationInfoByAddress(address)
 }

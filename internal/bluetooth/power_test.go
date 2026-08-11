@@ -593,6 +593,21 @@ func TestErrorDomainsClearIndependently(t *testing.T) {
 		t.Fatalf("clearing power error changed metadata error = %q", station.LastError)
 	}
 }
+
+func TestClearOperationErrorPreservesOtherErrorDomains(t *testing.T) {
+	station := &BaseStation{}
+	station.setPowerErrorInternal(errors.New("power unavailable"))
+	station.setMetadataErrorInternal(errors.New("firmware read failed"))
+	station.setOperationErrorInternal(errors.New("identify failed"))
+
+	station.ClearOperationError()
+
+	if !strings.Contains(station.LastError, "power unavailable") ||
+		!strings.Contains(station.LastError, "firmware read failed") ||
+		strings.Contains(station.LastError, "identify failed") {
+		t.Fatalf("clearing operation error changed independent error domains = %q", station.LastError)
+	}
+}
 func TestIdentifyDoesNotRetryAmbiguousWrite(t *testing.T) {
 	identify := &fakeCharacteristic{writeWithoutResponseErr: tinybluetooth.ErrGATTUnreachable}
 	station := connectedFakeStation(&fakeCharacteristic{}, nil, identify, Capabilities{Identify: true})

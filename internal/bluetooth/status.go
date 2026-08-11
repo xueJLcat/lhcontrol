@@ -334,8 +334,16 @@ func EnsureCapabilitiesContext(ctx context.Context, station *BaseStation) (Capab
 		return Capabilities{}, fmt.Errorf("station is nil")
 	}
 	ctx = normalizeContext(ctx)
+	if err := ctx.Err(); err != nil {
+		return Capabilities{}, err
+	}
 	station.mutex.Lock()
 	defer station.mutex.Unlock()
+	// Cancellation can land while this check waits for another station
+	// operation. If discovery never starts, preserve the healthy session.
+	if err := ctx.Err(); err != nil {
+		return Capabilities{}, err
+	}
 	if err := connectAndDiscoverInternalContext(ctx, station); err != nil {
 		if contextErr := ctx.Err(); contextErr != nil {
 			return Capabilities{}, finishCancelledCapabilityDiscovery(station, contextErr)
@@ -463,9 +471,17 @@ func FetchInitialPowerStateContext(ctx context.Context, station *BaseStation) er
 		return fmt.Errorf("station is nil")
 	}
 	ctx = normalizeContext(ctx)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	station.mutex.Lock() // Lock for the whole operation
 	defer station.mutex.Unlock()
+	// A timeout may expire while this initial read waits behind another
+	// operation. Do not treat a read that never started as cancelled discovery.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	err := connectAndDiscoverInternalContext(ctx, station)
 	if err != nil {

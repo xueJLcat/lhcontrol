@@ -85,6 +85,12 @@ func SetChannelContext(ctx context.Context, station *BaseStation, channel int) (
 	}
 	station.mutex.Lock()
 	defer station.mutex.Unlock()
+	// Cancellation can land while another operation owns the station lock. A
+	// request that never starts must not disconnect an otherwise healthy GATT
+	// session in the discovery-error cleanup below.
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
 	if err := connectAndDiscoverInternalContext(ctx, station); err != nil {
 		// Cancellation during discovery leaves the session connected;
 		// disconnect so the station is not left holding a live GATT session

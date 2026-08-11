@@ -229,6 +229,7 @@ func TestRefreshCapabilitiesReturnsStationAfterChannelOnlyReadFailure(t *testing
 	address := "11:22:33:44:55:83"
 	manager.stations[address] = &internalbluetooth.BaseStation{
 		Name: "LHB-CHANNEL-PARTIAL", Address: mustAddress(t, address), Present: true,
+		LastError: "operation: previous channel result was unresolved",
 	}
 	manager.bluetoothOps.refreshCapabilities = func(context.Context, *internalbluetooth.BaseStation) (internalbluetooth.Capabilities, error) {
 		return internalbluetooth.Capabilities{PowerRead: true, ChannelRead: true}, nil
@@ -241,7 +242,8 @@ func TestRefreshCapabilitiesReturnsStationAfterChannelOnlyReadFailure(t *testing
 	if err != nil {
 		t.Fatalf("RefreshStationCapabilities() error = %v", err)
 	}
-	if info.Address != address || info.Name != "LHB-CHANNEL-PARTIAL" {
+	if info.Address != address || info.Name != "LHB-CHANNEL-PARTIAL" ||
+		info.LastError != "operation: previous channel result was unresolved" {
 		t.Fatalf("RefreshStationCapabilities() returned zero or wrong station: %+v", info)
 	}
 }
@@ -273,6 +275,32 @@ func TestRefreshCapabilitiesReturnsStationAfterPowerReadFailure(t *testing.T) {
 	manager.statusRetryMutex.Unlock()
 	if !tracked || effectiveStatusRetryKinds(retry)&statusRetryConnection == 0 {
 		t.Fatalf("power read recovery was not scheduled: %+v", retry)
+	}
+}
+
+func TestRefreshCapabilitiesClearsStaleOperationErrorAfterFullRead(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	address := "11:22:33:44:55:85"
+	manager.stations[address] = &internalbluetooth.BaseStation{
+		Name:      "LHB-REFRESH-RECOVERY",
+		Address:   mustAddress(t, address),
+		Present:   true,
+		LastError: "operation: previous identify failed",
+	}
+	manager.bluetoothOps.refreshCapabilities = func(context.Context, *internalbluetooth.BaseStation) (internalbluetooth.Capabilities, error) {
+		return internalbluetooth.Capabilities{PowerRead: true, ChannelRead: true}, nil
+	}
+	manager.bluetoothOps.fetchInitialPowerState = func(context.Context, *internalbluetooth.BaseStation) error {
+		return nil
+	}
+
+	info, err := manager.RefreshStationCapabilities(address)
+	if err != nil {
+		t.Fatalf("RefreshStationCapabilities() error = %v", err)
+	}
+	if info.LastError != "" {
+		t.Fatalf("successful capability refresh retained stale operation error %q", info.LastError)
 	}
 }
 
