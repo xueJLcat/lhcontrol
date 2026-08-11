@@ -27,6 +27,7 @@ export interface AutoSleepEventDependencies {
 export class AutoSleepEventCoordinator {
   private readonly activeActionIds = new Set<number>();
   private latestStatusId = 0;
+  private latestStatusPhase: AutoSleepEvent['phase'] | null = null;
 
   constructor(private dependencies: AutoSleepEventDependencies) {}
 
@@ -38,8 +39,19 @@ export class AutoSleepEventCoordinator {
 
     const id = Number(event.id ?? 0);
     if (Number.isInteger(id) && id > 0) {
-      if (event.phase === 'started') this.activeActionIds.add(id);
-      else this.activeActionIds.delete(id);
+      if (event.phase === 'started') {
+        // IDs increase when an action acquires the serialized auto-sleep
+        // slot. A start at or below the latest displayed lifecycle is either
+        // a duplicate or a delayed event whose terminal phase already won;
+        // admitting it would leave the controls locked with no future
+        // terminal event to remove it.
+        if (id <= this.latestStatusId) return;
+        this.activeActionIds.add(id);
+      } else {
+        // Older terminal events still release the action they own even when
+        // their status copy is stale.
+        this.activeActionIds.delete(id);
+      }
       // Keep controls locked while any superseded action is still draining,
       // even if a newer replacement already finished or was skipped.
       this.dependencies.setRunning(this.activeActionIds.size > 0);
@@ -47,7 +59,12 @@ export class AutoSleepEventCoordinator {
       // replacement action started. Its station snapshot is still useful and
       // update-ID gated above, but its copy must not replace the newer status.
       if (id < this.latestStatusId) return;
+      // A terminal phase is allowed to follow the matching start exactly
+      // once. Duplicate or contradictory terminal deliveries for that same
+      // action must not repeat toasts or rewrite a newer status operation.
+      if (id === this.latestStatusId && this.latestStatusPhase !== 'started') return;
       this.latestStatusId = id;
+      this.latestStatusPhase = event.phase;
     } else {
       // Compatibility with unsequenced events from older backends and tests.
       this.dependencies.setRunning(event.phase === 'started');

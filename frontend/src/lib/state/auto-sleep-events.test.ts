@@ -66,4 +66,49 @@ describe('AutoSleepEventCoordinator', () => {
       'Auto sleep finished: 1 confirmed, 0 unconfirmed, 0 failed, 0 skipped.'
     );
   });
+
+  it('ignores a delayed start after the same action already reached a terminal phase', () => {
+    const dependencies = {
+      isDisposed: vi.fn(() => false),
+      setRunning: vi.fn(),
+      beginStatusOperation: vi.fn(),
+      setStatusMessage: vi.fn(),
+      applyStations: vi.fn()
+    };
+    const coordinator = new AutoSleepEventCoordinator(dependencies);
+
+    coordinator.handle({ id: 7, phase: 'completed', success: 1, updateId: 12, stations: [] });
+    expect(dependencies.setRunning).toHaveBeenLastCalledWith(false);
+
+    vi.clearAllMocks();
+    coordinator.handle({ id: 7, phase: 'started' });
+
+    expect(dependencies.setRunning).not.toHaveBeenCalled();
+    expect(dependencies.beginStatusOperation).not.toHaveBeenCalled();
+    expect(dependencies.setStatusMessage).not.toHaveBeenCalled();
+    expect(pushToast).not.toHaveBeenCalled();
+  });
+
+  it('does not replay status or notifications for a duplicate terminal event', () => {
+    const dependencies = {
+      isDisposed: vi.fn(() => false),
+      setRunning: vi.fn(),
+      beginStatusOperation: vi.fn(),
+      setStatusMessage: vi.fn(),
+      applyStations: vi.fn()
+    };
+    const coordinator = new AutoSleepEventCoordinator(dependencies);
+    const event = { id: 9, phase: 'failed' as const, error: 'adapter unavailable' };
+
+    coordinator.handle(event);
+    expect(dependencies.setStatusMessage).toHaveBeenCalledOnce();
+    expect(pushToast).toHaveBeenCalledOnce();
+
+    vi.clearAllMocks();
+    coordinator.handle(event);
+
+    expect(dependencies.beginStatusOperation).not.toHaveBeenCalled();
+    expect(dependencies.setStatusMessage).not.toHaveBeenCalled();
+    expect(pushToast).not.toHaveBeenCalled();
+  });
 });
