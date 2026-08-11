@@ -85,6 +85,59 @@ func TestRunAutoSleepUsesDistinctLifecycleIDs(t *testing.T) {
 	}
 }
 
+func TestAutoSleepAndHTTPSnapshotsShareUpdateSequencer(t *testing.T) {
+	app := NewApp()
+	httpSnapshotStarted := make(chan struct{})
+	releaseHTTPSnapshot := make(chan struct{})
+	httpEvents := make(chan stationUpdateEvent, 1)
+	autoSleepEvents := make(chan autoSleepEvent, 1)
+	app.autoSleepEventSink = func(event autoSleepEvent) { autoSleepEvents <- event }
+
+	go emitStationUpdate(scanEventCallbacks{
+		snapshotUpdate: app.snapshotExternalStationUpdate,
+		updated:        func(event stationUpdateEvent) { httpEvents <- event },
+	}, "http-power", func() []station.StationInfo {
+		close(httpSnapshotStarted)
+		<-releaseHTTPSnapshot
+		return []station.StationInfo{{Address: "AA"}}
+	})
+	select {
+	case <-httpSnapshotStarted:
+	case <-time.After(time.Second):
+		t.Fatal("HTTP station snapshot did not start")
+	}
+
+	go app.emitTerminalAutoSleep(autoSleepEvent{Phase: "completed"})
+	autoSleepFinishedEarly := false
+	select {
+	case <-autoSleepEvents:
+		autoSleepFinishedEarly = true
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(releaseHTTPSnapshot)
+
+	var httpEvent stationUpdateEvent
+	select {
+	case httpEvent = <-httpEvents:
+	case <-time.After(time.Second):
+		t.Fatal("HTTP station update did not finish")
+	}
+	var autoEvent autoSleepEvent
+	if !autoSleepFinishedEarly {
+		select {
+		case autoEvent = <-autoSleepEvents:
+		case <-time.After(time.Second):
+			t.Fatal("automatic-sleep station update did not finish")
+		}
+	}
+	if autoSleepFinishedEarly {
+		t.Fatal("automatic-sleep snapshot bypassed the in-flight HTTP snapshot transaction")
+	}
+	if httpEvent.ID != 1 || autoEvent.UpdateID != 2 {
+		t.Fatalf("shared update IDs = HTTP %d, auto-sleep %d; want 1 then 2", httpEvent.ID, autoEvent.UpdateID)
+	}
+}
+
 func TestRunAutoSleepReplacementWaitsForCancelledSessionToDrain(t *testing.T) {
 	app := NewApp()
 	closedAt := time.Now()

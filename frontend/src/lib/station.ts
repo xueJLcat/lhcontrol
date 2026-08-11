@@ -61,8 +61,10 @@ export function maySetPower(station: StationInfo, state: PowerTarget): boolean {
 }
 
 export function canSetPower(station: StationInfo, state: PowerTarget): boolean {
+  // A stale confirmed value remains actionable: the backend re-reads expired
+  // power state before deciding whether this is a no-op or needs a command.
   return maySetPower(station, state) &&
-    !isCurrentPowerState(station, state);
+    !hasVerifiedPowerState(station, state);
 }
 
 export function stateLabel(station: StationInfo): string {

@@ -178,3 +178,20 @@ describe('StationCard channel memory', () => {
     }
   });
 });
+
+describe('StationCard stale power revalidation', () => {
+  it('keeps the cached target selected while allowing it to be verified again', async () => {
+    const stale = station();
+    stale.powerFresh = false;
+    const onPower = vi.fn();
+    render(StationCard, {
+      props: { ...cardProps({ onPower }), renaming: false, station: stale }
+    });
+
+    const onButton = screen.getByRole('button', { name: `Turn ${stale.name} on` });
+    expect(onButton).toHaveAttribute('aria-pressed', 'true');
+    expect(onButton).toBeEnabled();
+    await fireEvent.click(onButton);
+    expect(onPower).toHaveBeenCalledWith(stale, 'on');
+  });
+});

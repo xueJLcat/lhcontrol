@@ -238,15 +238,9 @@ func (a *App) emitAutoSleep(event autoSleepEvent) {
 
 func (a *App) emitTerminalAutoSleep(event autoSleepEvent) {
 
-	// Allocate the shared update ID before taking the snapshot. Concurrent HTTP
-
-	// updates with a larger ID are then guaranteed to start their snapshot no
-
-	// earlier than this one, so an older snapshot can never look newer.
-
-	event.UpdateID = a.externalUpdateID.Add(1)
-
-	event.Stations = a.stationManager.GetStationInfo()
+	// HTTP mutations and automatic sleep share one sequencer so update IDs
+	// describe snapshot order across both event streams.
+	event.UpdateID, event.Stations = a.snapshotExternalStationUpdate(a.stationManager.GetStationInfo)
 
 	a.emitAutoSleep(event)
 

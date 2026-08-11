@@ -44,8 +44,10 @@ type App struct {
 	apiShutdownWait           time.Duration
 	apiGeneration             uint64
 	externalScanID            atomic.Uint64
+	externalUpdateMutex       sync.Mutex
 	externalUpdateID          atomic.Uint64
 	externalOperationID       atomic.Uint64
+	operationEventMutex       sync.Mutex
 	externalOperationMutex    sync.RWMutex
 	activeExternalOperations  map[uint64]string
 	externalOperationRevision uint64
@@ -95,6 +97,22 @@ func NewApp() *App {
 	return app
 }
 
+// snapshotExternalStationUpdate assigns an update ID and captures the
+// corresponding station snapshot as one ordered transaction. Every producer
+// of externally-pushed station state uses this sequencer, so a lower ID can
+// never describe a snapshot taken after a higher ID's snapshot.
+func (a *App) snapshotExternalStationUpdate(snapshot func() []station.StationInfo) (uint64, []station.StationInfo) {
+	a.externalUpdateMutex.Lock()
+	defer a.externalUpdateMutex.Unlock()
+
+	id := a.externalUpdateID.Add(1)
+	stations := []station.StationInfo{}
+	if snapshot != nil {
+		stations = snapshot()
+	}
+	return id, stations
+}
+
 // startup is called when the app starts.
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
@@ -127,9 +145,7 @@ func (a *App) startup(ctx context.Context) {
 		nextID: func() uint64 {
 			return a.externalScanID.Add(1)
 		},
-		nextUpdateID: func() uint64 {
-			return a.externalUpdateID.Add(1)
-		},
+		snapshotUpdate: a.snapshotExternalStationUpdate,
 		nextOperationID: func() uint64 {
 			return a.externalOperationID.Add(1)
 		},
@@ -280,9 +296,25 @@ func (a *App) recordExternalOperation(event externalOperationEvent) externalOper
 }
 
 func (a *App) emitTrackedOperation(event externalOperationEvent) {
+	a.dispatchExternalOperation(event, func(sequenced externalOperationEvent) {
+		if a.ctx != nil && !a.shuttingDown.Load() {
+			runtime.EventsEmit(a.ctx, "external-operation", sequenced)
+		}
+	})
+}
+
+// dispatchExternalOperation keeps delta-event delivery in the same order as
+// the revisions assigned to the authoritative operation set. The frontend
+// intentionally discards older revisions, so allowing a later event to pass
+// a delayed earlier event would permanently lose that earlier delta until a
+// health poll repaired the full set.
+func (a *App) dispatchExternalOperation(event externalOperationEvent, emit func(externalOperationEvent)) {
+	a.operationEventMutex.Lock()
+	defer a.operationEventMutex.Unlock()
+
 	event = a.recordExternalOperation(event)
-	if a.ctx != nil && !a.shuttingDown.Load() {
-		runtime.EventsEmit(a.ctx, "external-operation", event)
+	if emit != nil {
+		emit(event)
 	}
 }
 

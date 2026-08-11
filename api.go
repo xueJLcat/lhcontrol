@@ -116,7 +116,7 @@ type apiStationManager interface {
 
 type scanEventCallbacks struct {
 	nextID          func() uint64
-	nextUpdateID    func() uint64
+	snapshotUpdate  func(func() []station.StationInfo) (uint64, []station.StationInfo)
 	nextOperationID func() uint64
 	started         func(scanEvent)
 	completed       func(scanEvent)
@@ -172,11 +172,10 @@ func emitStationUpdate(events scanEventCallbacks, source string, snapshot func()
 		return
 	}
 	id := uint64(0)
-	if events.nextUpdateID != nil {
-		id = events.nextUpdateID()
-	}
 	stations := []station.StationInfo{}
-	if snapshot != nil {
+	if events.snapshotUpdate != nil {
+		id, stations = events.snapshotUpdate(snapshot)
+	} else if snapshot != nil {
 		stations = snapshot()
 	}
 	events.updated(stationUpdateEvent{ID: id, Source: source, Stations: stations})

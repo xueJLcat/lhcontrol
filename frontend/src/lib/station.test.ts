@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { hasStableConfirmedPowerState, sameStationInfo, stateClass } from './station';
+import { canSetPower, hasStableConfirmedPowerState, sameStationInfo, stateClass } from './station';
 import type { StationInfo } from './types';
 import { createOnStation } from '../test/fixtures';
 
@@ -98,5 +98,12 @@ describe('hasStableConfirmedPowerState', () => {
     expect(hasStableConfirmedPowerState(station({ powerState: 2, powerStateName: 'standby', rawPowerState: 0x01 }), 'standby')).toBe(false);
     expect(hasStableConfirmedPowerState(station({ powerState: 0, powerStateName: 'sleep', rawPowerState: 0x00 }), 'sleep')).toBe(true);
     expect(hasStableConfirmedPowerState(station({ powerState: 0, powerStateName: 'sleep', rawPowerState: 0x08 }), 'sleep')).toBe(false);
+  });
+});
+
+describe('canSetPower', () => {
+  it('blocks a fresh confirmed target but allows its stale cache to be revalidated', () => {
+    expect(canSetPower(station({ powerFresh: true }), 'on')).toBe(false);
+    expect(canSetPower(station({ powerFresh: false }), 'on')).toBe(true);
   });
 });

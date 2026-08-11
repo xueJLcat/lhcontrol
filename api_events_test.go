@@ -2,11 +2,14 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"lhcontrol/internal/bluetooth"
 	"lhcontrol/internal/station"
@@ -212,13 +215,13 @@ func TestHTTPMutationsEmitMonotonicStationUpdates(t *testing.T) {
 
 	api := fiber.New(fiber.Config{ErrorHandler: apiErrorHandler})
 
-	var nextID atomic.Uint64
+	sequencer := &App{}
 
 	updates := []stationUpdateEvent{}
 
 	registerAPIRoutes(api, manager, scanEventCallbacks{
 
-		nextUpdateID: func() uint64 { return nextID.Add(1) },
+		snapshotUpdate: sequencer.snapshotExternalStationUpdate,
 
 		updated: func(event stationUpdateEvent) {
 
@@ -262,17 +265,17 @@ func TestHTTPMutationsEmitMonotonicStationUpdates(t *testing.T) {
 
 }
 
-func TestStationUpdateAllocatesIDBeforeTakingSnapshot(t *testing.T) {
+func TestStationUpdateUsesSnapshotSequencer(t *testing.T) {
 
 	order := []string{}
 
 	emitStationUpdate(scanEventCallbacks{
 
-		nextUpdateID: func() uint64 {
+		snapshotUpdate: func(snapshot func() []station.StationInfo) (uint64, []station.StationInfo) {
 
-			order = append(order, "id")
+			order = append(order, "sequence")
 
-			return 7
+			return 7, snapshot()
 
 		},
 
@@ -295,12 +298,130 @@ func TestStationUpdateAllocatesIDBeforeTakingSnapshot(t *testing.T) {
 
 	})
 
-	if strings.Join(order, ",") != "id,snapshot,event" {
+	if strings.Join(order, ",") != "sequence,snapshot,event" {
 
 		t.Fatalf("update construction order = %v", order)
 
 	}
 
+}
+
+func TestConcurrentStationUpdateIDsFollowSnapshotCompletionOrder(t *testing.T) {
+	var snapshotOrder atomic.Uint64
+	sequencer := &App{}
+	firstStarted := make(chan struct{})
+	secondStarted := make(chan struct{})
+	secondInvoked := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	updates := make(chan stationUpdateEvent, 2)
+	events := scanEventCallbacks{
+		snapshotUpdate: sequencer.snapshotExternalStationUpdate,
+		updated:        func(event stationUpdateEvent) { updates <- event },
+	}
+
+	go emitStationUpdate(events, "first", func() []station.StationInfo {
+		close(firstStarted)
+		<-releaseFirst
+		sequence := snapshotOrder.Add(1)
+		return []station.StationInfo{{Address: fmt.Sprintf("snapshot-%d", sequence)}}
+	})
+	select {
+	case <-firstStarted:
+	case <-time.After(time.Second):
+		t.Fatal("first station snapshot did not start")
+	}
+
+	go func() {
+		close(secondInvoked)
+		emitStationUpdate(events, "second", func() []station.StationInfo {
+			close(secondStarted)
+			sequence := snapshotOrder.Add(1)
+			return []station.StationInfo{{Address: fmt.Sprintf("snapshot-%d", sequence)}}
+		})
+	}()
+	<-secondInvoked
+
+	collected := make([]stationUpdateEvent, 0, 2)
+	select {
+	case <-secondStarted:
+		// The old implementation allows the later call to finish its snapshot
+		// while the lower-ID call is still blocked.
+		select {
+		case event := <-updates:
+			collected = append(collected, event)
+		case <-time.After(time.Second):
+			t.Fatal("second station update did not finish")
+		}
+		close(releaseFirst)
+	case <-time.After(100 * time.Millisecond):
+		// A sequenced implementation keeps the second snapshot outside the
+		// transaction until the first snapshot and ID are committed together.
+		close(releaseFirst)
+	}
+
+	deadline := time.After(time.Second)
+	for len(collected) < 2 {
+		select {
+		case event := <-updates:
+			collected = append(collected, event)
+		case <-deadline:
+			t.Fatalf("received %d station update(s), want 2", len(collected))
+		}
+	}
+	sort.Slice(collected, func(i, j int) bool { return collected[i].ID < collected[j].ID })
+	if collected[0].Stations[0].Address != "snapshot-1" || collected[1].Stations[0].Address != "snapshot-2" {
+		t.Fatalf("updates ordered by ID = %+v, want snapshot completion order", collected)
+	}
+}
+
+func TestConcurrentExternalOperationEventsFollowRevisionOrder(t *testing.T) {
+	app := NewApp()
+	firstEmitStarted := make(chan struct{})
+	secondInvoked := make(chan struct{})
+	releaseFirstEmit := make(chan struct{})
+	emitted := make(chan externalOperationEvent, 2)
+	dispatch := func(event externalOperationEvent, block bool) {
+		app.dispatchExternalOperation(event, func(sequenced externalOperationEvent) {
+			if block {
+				close(firstEmitStarted)
+				<-releaseFirstEmit
+			}
+			emitted <- sequenced
+		})
+	}
+
+	go dispatch(externalOperationEvent{ID: 1, Phase: "started", Kind: "power"}, true)
+	select {
+	case <-firstEmitStarted:
+	case <-time.After(time.Second):
+		t.Fatal("first external-operation event did not reach emission")
+	}
+	go func() {
+		close(secondInvoked)
+		dispatch(externalOperationEvent{ID: 2, Phase: "started", Kind: "identify"}, false)
+	}()
+	<-secondInvoked
+
+	collected := make([]externalOperationEvent, 0, 2)
+	select {
+	case event := <-emitted:
+		collected = append(collected, event)
+		close(releaseFirstEmit)
+	case <-time.After(100 * time.Millisecond):
+		close(releaseFirstEmit)
+	}
+	deadline := time.After(time.Second)
+	for len(collected) < 2 {
+		select {
+		case event := <-emitted:
+			collected = append(collected, event)
+		case <-deadline:
+			t.Fatalf("received %d external-operation event(s), want 2", len(collected))
+		}
+	}
+	if collected[0].Revision != 1 || collected[1].Revision != 2 {
+		t.Fatalf("external-operation revision delivery = %d then %d, want 1 then 2", collected[0].Revision, collected[1].Revision)
+	}
 }
 
 func TestAutoSleepSummaryDoesNotCountSkippedStationsAsFailed(t *testing.T) {
