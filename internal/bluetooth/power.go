@@ -376,6 +376,12 @@ func SetPowerStateContext(ctx context.Context, station *BaseStation, target Powe
 	}
 	station.mutex.Lock()
 	defer station.mutex.Unlock()
+	// Cancellation can land while another station operation owns the lock.
+	// Re-check before rearming boot-state inference so an operation that never
+	// starts cannot change the cached interpretation of compatibility firmware.
+	if err := ctx.Err(); err != nil {
+		return PowerControlResult{}, err
+	}
 	// A new command can legitimately reboot or transition an already-on
 	// station. Re-arm boot-state observation before writing so the previous
 	// connection's compatibility inference cannot hide that transition.

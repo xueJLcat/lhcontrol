@@ -27,6 +27,55 @@ func (f *sleepFinalBlockingCharacteristic) WriteWithoutResponseContext(ctx conte
 	return 0, ctx.Err()
 }
 
+func TestSetPowerStateContextDoesNotRearmBootStateWhenCancelledWaitingForStation(t *testing.T) {
+	power := &fakeCharacteristic{value: []byte{0x01}, ignoreWrite: true}
+	station := connectedFakeStation(power, nil, nil, Capabilities{PowerRead: true, PowerWrite: true})
+	station.PowerState = PowerStateOn
+	station.RawPowerState = 0x01
+	station.bootRawTrustedOn = true
+	baseContext, cancel := context.WithCancel(context.Background())
+	ctx := &observeFirstContextCheck{Context: baseContext, checked: make(chan struct{})}
+	station.mutex.Lock()
+	locked := true
+	defer func() {
+		if locked {
+			station.mutex.Unlock()
+		}
+	}()
+	type outcome struct {
+		result PowerControlResult
+		err    error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		result, err := SetPowerStateContext(ctx, station, PowerStateOn)
+		done <- outcome{result: result, err: err}
+	}()
+	select {
+	case <-ctx.checked:
+	case <-time.After(time.Second):
+		t.Fatal("power operation did not reach its initial context check")
+	}
+	cancel()
+	station.mutex.Unlock()
+	locked = false
+
+	select {
+	case got := <-done:
+		if !errors.Is(got.err, context.Canceled) || got.result != (PowerControlResult{}) {
+			t.Fatalf("SetPowerStateContext() = %+v, %v; want zero result and context.Canceled", got.result, got.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cancelled power operation did not return after the station lock was released")
+	}
+	if !station.bootRawTrustedOn {
+		t.Fatal("pre-operation cancellation rearmed the station's compatibility boot state")
+	}
+	if len(power.writes) != 0 {
+		t.Fatalf("pre-operation cancellation wrote %d command(s)", len(power.writes))
+	}
+}
+
 func TestSetPowerStateConfirmsCompatibilityFirmwareAfterFreshFallbackWindow(t *testing.T) {
 	// A new command must get a fresh transition window even when this connection
 	// previously completed the compatibility fallback. Persistent boot-like raw

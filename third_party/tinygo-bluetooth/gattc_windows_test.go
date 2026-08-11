@@ -60,6 +60,29 @@ func TestClassifyWriteFailureProtocolRejectionIsNotPossiblySent(t *testing.T) {
 	}
 }
 
+func TestClassifyWriteFailureProtocolRejectionCarriesDefiniteClassification(t *testing.T) {
+	cause := gattCommunicationStatusError(
+		"write rejected",
+		int32(genericattributeprofile.GattCommunicationStatusProtocolError),
+	)
+	err := classifyWriteFailure(
+		genericattributeprofile.GattWriteOptionWriteWithoutResponse,
+		true,
+		true,
+		cause,
+	)
+	var classification interface{ PossiblySent() bool }
+	if !errors.As(err, &classification) {
+		t.Fatalf("classifyWriteFailure() = %v, want an explicit send classification", err)
+	}
+	if classification.PossiblySent() {
+		t.Fatalf("classifyWriteFailure() = %v, protocol rejection was marked possibly sent", err)
+	}
+	if !errors.Is(err, cause) {
+		t.Fatalf("classified error does not wrap cause: %v", err)
+	}
+}
+
 func TestClassifyWriteFailureWithResponseIsPossiblySent(t *testing.T) {
 	cause := errors.New("completion failed")
 	err := classifyWriteFailure(genericattributeprofile.GattWriteOptionWriteWithResponse, true, false, cause)

@@ -141,6 +141,13 @@ func ReadPowerStateContext(ctx context.Context, station *BaseStation) error {
 
 	station.mutex.Lock() // Lock for the duration
 	defer station.mutex.Unlock()
+	// The context can expire while this read waits behind another operation.
+	// In that case no field read started, so preserve the last authoritative
+	// values and error domains instead of turning cancellation into a failed
+	// power observation.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	if !station.isConnected || station.device == nil {
 		return fmt.Errorf("station %s is not connected", station.Name)
@@ -352,8 +359,17 @@ func RefreshCapabilitiesContext(ctx context.Context, station *BaseStation) (Capa
 		return Capabilities{}, fmt.Errorf("station is nil")
 	}
 	ctx = normalizeContext(ctx)
+	if err := ctx.Err(); err != nil {
+		return Capabilities{}, err
+	}
 	station.mutex.Lock()
 	defer station.mutex.Unlock()
+	// Cancellation may land while this refresh waits for an in-flight station
+	// operation. Re-check before disconnecting: a refresh that never started
+	// must not destroy a healthy cached connection or invalidate capabilities.
+	if err := ctx.Err(); err != nil {
+		return Capabilities{}, err
+	}
 	if err := disconnectInternal(station); err != nil {
 		return Capabilities{}, transportError("cleanup before capability refresh", err)
 	}

@@ -15,6 +15,20 @@ type cancelAfterSuccessfulRead struct {
 	cancel context.CancelFunc
 }
 
+type observeFirstContextCheck struct {
+	context.Context
+	checked chan struct{}
+	once    atomic.Bool
+}
+
+func (c *observeFirstContextCheck) Err() error {
+	err := c.Context.Err()
+	if err == nil && c.once.CompareAndSwap(false, true) {
+		close(c.checked)
+	}
+	return err
+}
+
 func (f *cancelAfterSuccessfulRead) ReadContext(_ context.Context, destination []byte) (int, error) {
 	n, err := f.fakeCharacteristic.Read(destination)
 	f.cancel()
@@ -326,6 +340,56 @@ func TestReadPowerStateContextReplacesStalePowerErrorWhenCancelledBetweenFields(
 	}
 }
 
+func TestReadPowerStateContextDoesNotMutateWhenCancelledWaitingForStation(t *testing.T) {
+	station := connectedFakeStation(
+		&fakeCharacteristic{value: []byte{0x0B}},
+		nil,
+		nil,
+		Capabilities{PowerRead: true},
+	)
+	freshRead := time.Now()
+	station.PowerState = PowerStateOn
+	station.RawPowerState = 0x0B
+	station.LastPowerReadAt = freshRead
+	station.setPowerErrorInternal(errors.New("previous observation warning"))
+
+	baseContext, cancel := context.WithCancel(context.Background())
+	ctx := &observeFirstContextCheck{Context: baseContext, checked: make(chan struct{})}
+	station.mutex.Lock()
+	locked := true
+	defer func() {
+		if locked {
+			station.mutex.Unlock()
+		}
+	}()
+	result := make(chan error, 1)
+	go func() { result <- ReadPowerStateContext(ctx, station) }()
+	select {
+	case <-ctx.checked:
+	case <-time.After(time.Second):
+		t.Fatal("status read did not reach its initial context check")
+	}
+	cancel()
+	station.mutex.Unlock()
+	locked = false
+
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("ReadPowerStateContext() error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cancelled status read did not return after the station lock was released")
+	}
+	snapshot := station.Snapshot()
+	if !snapshot.LastPowerReadAt.Equal(freshRead) || snapshot.PowerState != PowerStateOn || snapshot.RawPowerState != 0x0B {
+		t.Fatalf("pre-operation cancellation changed the last observation: %+v", snapshot)
+	}
+	if snapshot.LastError != "power: previous observation warning" {
+		t.Fatalf("pre-operation cancellation replaced prior error state: %q", snapshot.LastError)
+	}
+}
+
 func TestEnsureCapabilitiesUsesConnectedDiscovery(t *testing.T) {
 	station := connectedFakeStation(
 		&fakeCharacteristic{},
@@ -364,6 +428,77 @@ func TestEnsureCapabilitiesContextCleansUpCancelledDiscovery(t *testing.T) {
 	}
 	if device.disconnects != 1 || station.Snapshot().Connected {
 		t.Fatalf("cancelled discovery cleanup: disconnects=%d connected=%v", device.disconnects, station.Snapshot().Connected)
+	}
+}
+func TestRefreshCapabilitiesContextDoesNotDisconnectForPreCancelledContext(t *testing.T) {
+	device := &trackingConnectedDevice{}
+	station := connectedFakeStation(
+		&fakeCharacteristic{},
+		nil,
+		nil,
+		Capabilities{PowerWrite: true},
+	)
+	station.device = device
+	station.CapabilitiesKnown = true
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := RefreshCapabilitiesContext(ctx, station)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("RefreshCapabilitiesContext() error = %v, want context.Canceled", err)
+	}
+	snapshot := station.Snapshot()
+	if device.disconnects != 0 || !snapshot.Connected {
+		t.Fatalf("pre-cancelled refresh changed the healthy connection: disconnects=%d snapshot=%+v", device.disconnects, snapshot)
+	}
+	if !snapshot.CapabilitiesKnown || !snapshot.Capabilities.PowerWrite {
+		t.Fatalf("pre-cancelled refresh invalidated known capabilities: %+v", snapshot)
+	}
+}
+func TestRefreshCapabilitiesContextDoesNotDisconnectWhenCancelledWaitingForStation(t *testing.T) {
+	device := &trackingConnectedDevice{}
+	station := connectedFakeStation(
+		&fakeCharacteristic{},
+		nil,
+		nil,
+		Capabilities{PowerWrite: true},
+	)
+	station.device = device
+	station.CapabilitiesKnown = true
+	baseContext, cancel := context.WithCancel(context.Background())
+	ctx := &observeFirstContextCheck{Context: baseContext, checked: make(chan struct{})}
+	station.mutex.Lock()
+	locked := true
+	defer func() {
+		if locked {
+			station.mutex.Unlock()
+		}
+	}()
+	result := make(chan error, 1)
+	go func() {
+		_, err := RefreshCapabilitiesContext(ctx, station)
+		result <- err
+	}()
+	select {
+	case <-ctx.checked:
+	case <-time.After(time.Second):
+		t.Fatal("capability refresh did not reach its initial context check")
+	}
+	cancel()
+	station.mutex.Unlock()
+	locked = false
+
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("RefreshCapabilitiesContext() error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cancelled capability refresh did not return after the station lock was released")
+	}
+	snapshot := station.Snapshot()
+	if device.disconnects != 0 || !snapshot.Connected || !snapshot.CapabilitiesKnown {
+		t.Fatalf("waiting cancellation changed capability state: disconnects=%d snapshot=%+v", device.disconnects, snapshot)
 	}
 }
 func TestStrictPowerConfirmationDoesNotAcceptTransitionalRawState(t *testing.T) {

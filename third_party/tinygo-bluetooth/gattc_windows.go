@@ -588,9 +588,11 @@ func (c DeviceCharacteristic) writeContext(ctx context.Context, p []byte, mode g
 	if status == genericattributeprofile.GattCommunicationStatusProtocolError {
 		protocolErr := result.protocolError()
 		if protocolErr != nil {
-			return 0, errors.Join(errWriteFailed, protocolErr)
+			err := errors.Join(errWriteFailed, protocolErr)
+			return 0, classifyWriteFailure(mode, true, true, err)
 		}
-		return 0, errors.Join(errWriteFailed, gattCommunicationStatusError("Bluetooth write failed", int32(status)))
+		err := errors.Join(errWriteFailed, gattCommunicationStatusError("Bluetooth write failed", int32(status)))
+		return 0, classifyWriteFailure(mode, true, true, err)
 	}
 	err = errors.Join(errWriteFailed, gattCommunicationStatusError("Bluetooth write failed", int32(status)))
 	return 0, classifyWriteFailure(mode, true, false, err)
@@ -637,6 +639,25 @@ func (e *WriteNeverSubmittedError) PossiblySent() bool {
 	return false
 }
 
+// WriteRejectedError reports that WinRT received a terminal ATT rejection.
+// The async operation existed, but the peer explicitly rejected the request,
+// so callers can safely avoid treating the command as possibly applied.
+type WriteRejectedError struct {
+	Err error
+}
+
+func (e *WriteRejectedError) Error() string {
+	return fmt.Sprintf("bluetooth: write was rejected: %v", e.Err)
+}
+
+func (e *WriteRejectedError) Unwrap() error {
+	return e.Err
+}
+
+func (e *WriteRejectedError) PossiblySent() bool {
+	return false
+}
+
 func classifyWriteFailure(mode genericattributeprofile.GattWriteOption, operationCreated, explicitProtocolRejection bool, err error) error {
 	if err == nil {
 		return nil
@@ -645,11 +666,11 @@ func classifyWriteFailure(mode genericattributeprofile.GattWriteOption, operatio
 		return &WriteNeverSubmittedError{Err: err}
 	}
 	if explicitProtocolRejection {
-		return err
+		return &WriteRejectedError{Err: err}
 	}
 	var protocolErr AttributeProtocolError
 	if errors.As(err, &protocolErr) {
-		return err
+		return &WriteRejectedError{Err: err}
 	}
 	return &WritePossiblySentError{Err: err}
 }
