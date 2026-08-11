@@ -833,7 +833,7 @@ func (c DeviceCharacteristic) EnableNotifications(callback func(buf []byte)) err
 // Configuration Descriptor (CCCD). This means that most peripherals will send a
 // notification with a new value every time the value of the characteristic
 // changes. And you can select the notify/indicate mode as you need.
-func (c DeviceCharacteristic) EnableNotificationsWithMode(mode NotificationMode, callback func(buf []byte)) error {
+func (c DeviceCharacteristic) EnableNotificationsWithMode(mode NotificationMode, callback func(buf []byte)) (returnErr error) {
 	if err := c.available(); err != nil {
 		return err
 	}
@@ -917,11 +917,17 @@ func (c DeviceCharacteristic) EnableNotificationsWithMode(mode NotificationMode,
 		valueChangedEventHandler.Release()
 		return err
 	}
+	registration := notificationRegistration{
+		characteristic: c.characteristic,
+		token:          token,
+		handler:        valueChangedEventHandler,
+	}
 	registered := false
 	defer func() {
 		if !registered {
-			_ = c.characteristic.RemoveValueChanged(token)
-			valueChangedEventHandler.Release()
+			if rollbackErr := c.service.device.rollbackNotificationRegistration(registration); rollbackErr != nil {
+				returnErr = errors.Join(returnErr, rollbackErr)
+			}
 		}
 	}()
 
@@ -949,11 +955,7 @@ func (c DeviceCharacteristic) EnableNotificationsWithMode(mode NotificationMode,
 			gattCommunicationStatusError("Bluetooth notification setup failed", int32(result)),
 		)
 	}
-	if err := c.service.device.registerNotification(notificationRegistration{
-		characteristic: c.characteristic,
-		token:          token,
-		handler:        valueChangedEventHandler,
-	}); err != nil {
+	if err := c.service.device.registerNotification(registration); err != nil {
 		return err
 	}
 	registered = true

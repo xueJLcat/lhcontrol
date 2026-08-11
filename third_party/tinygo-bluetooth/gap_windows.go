@@ -783,6 +783,31 @@ type notificationRegistration struct {
 	characteristic *genericattributeprofile.GattCharacteristic
 	token          foundation.EventRegistrationToken
 	handler        *foundation.TypedEventHandler
+
+	// Optional cleanup hooks keep ownership transitions independently
+	// testable without invoking COM methods on fabricated WinRT objects.
+	removeValueChanged func() error
+	releaseHandler     func()
+}
+
+func (r notificationRegistration) unregister() error {
+	if r.removeValueChanged != nil {
+		return r.removeValueChanged()
+	}
+	if r.characteristic == nil {
+		return nil
+	}
+	return r.characteristic.RemoveValueChanged(r.token)
+}
+
+func (r notificationRegistration) release() {
+	if r.releaseHandler != nil {
+		r.releaseHandler()
+		return
+	}
+	if r.handler != nil {
+		r.handler.Release()
+	}
 }
 
 func (s *deviceState) beginCallback() bool {
@@ -872,17 +897,31 @@ func (d Device) registerNotification(registration notificationRegistration) erro
 	// registration for every value change.
 	for index, existing := range d.state.notifications {
 		if existing.characteristic == registration.characteristic {
-			if existing.characteristic != nil {
-				_ = existing.characteristic.RemoveValueChanged(existing.token)
+			if err := existing.unregister(); err != nil {
+				return fmt.Errorf("bluetooth: remove existing notification before replacement: %w", err)
 			}
-			if existing.handler != nil {
-				existing.handler.Release()
-			}
+			existing.release()
 			d.state.notifications[index] = registration
 			return nil
 		}
 	}
 	d.state.notifications = append(d.state.notifications, registration)
+	return nil
+}
+
+// rollbackNotificationRegistration releases a newly-added event handler when
+// notification setup fails. If WinRT refuses to unregister it, ownership must
+// remain attached to the device so Disconnect can retry the removal before it
+// releases the handler and characteristic.
+func (d Device) rollbackNotificationRegistration(registration notificationRegistration) error {
+	if err := registration.unregister(); err != nil {
+		if d.state == nil {
+			return fmt.Errorf("bluetooth: roll back notification registration (device state unavailable): %w", err)
+		}
+		d.state.notifications = append(d.state.notifications, registration)
+		return fmt.Errorf("bluetooth: roll back notification registration (retained for device cleanup): %w", err)
+	}
+	registration.release()
 	return nil
 }
 
@@ -1203,12 +1242,8 @@ func (d Device) cleanup(attempt *deviceCleanupAttempt) {
 			}
 		}
 		for _, notification := range state.notifications {
-			if notification.characteristic != nil {
-				if err := cleanupCall("remove characteristic notification", func() error {
-					return notification.characteristic.RemoveValueChanged(notification.token)
-				}); err != nil {
-					warnings = append(warnings, err)
-				}
+			if err := cleanupCall("remove characteristic notification", notification.unregister); err != nil {
+				warnings = append(warnings, err)
 			}
 		}
 	})
@@ -1242,13 +1277,11 @@ func (d Device) cleanup(attempt *deviceCleanupAttempt) {
 		}
 	}
 	for _, notification := range notifications {
-		if notification.handler != nil {
-			if err := cleanupCall("release notification handler", func() error {
-				notification.handler.Release()
-				return nil
-			}); err != nil {
-				warnings = append(warnings, err)
-			}
+		if err := cleanupCall("release notification handler", func() error {
+			notification.release()
+			return nil
+		}); err != nil {
+			warnings = append(warnings, err)
 		}
 	}
 	for _, characteristic := range characteristics {

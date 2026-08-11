@@ -386,6 +386,117 @@ func TestDisconnectRetriesAfterWinRTThreadInitializationFailure(t *testing.T) {
 	}
 }
 
+func TestRegisterNotificationKeepsExistingRegistrationWhenRemovalFails(t *testing.T) {
+	removeErr := errors.New("remove existing notification")
+	removed := 0
+	released := 0
+	state := &deviceState{
+		notifications: []notificationRegistration{{
+			token: foundation.EventRegistrationToken{Value: 1},
+			removeValueChanged: func() error {
+				removed++
+				return removeErr
+			},
+			releaseHandler: func() { released++ },
+		}},
+	}
+	device := Device{state: state}
+
+	err := device.registerNotification(notificationRegistration{
+		token: foundation.EventRegistrationToken{Value: 2},
+	})
+	if !errors.Is(err, removeErr) {
+		t.Fatalf("registerNotification() error = %v, want %v", err, removeErr)
+	}
+	if removed != 1 || released != 0 {
+		t.Fatalf("existing registration cleanup = (%d removes, %d releases), want (1, 0)", removed, released)
+	}
+	if len(state.notifications) != 1 || state.notifications[0].token.Value != 1 {
+		t.Fatalf("registrations = %+v, want the existing registration retained", state.notifications)
+	}
+}
+
+func TestRegisterNotificationReplacesExistingAfterSuccessfulRemoval(t *testing.T) {
+	removed := 0
+	released := 0
+	state := &deviceState{
+		notifications: []notificationRegistration{{
+			token: foundation.EventRegistrationToken{Value: 1},
+			removeValueChanged: func() error {
+				removed++
+				return nil
+			},
+			releaseHandler: func() { released++ },
+		}},
+	}
+	device := Device{state: state}
+
+	err := device.registerNotification(notificationRegistration{
+		token: foundation.EventRegistrationToken{Value: 2},
+	})
+	if err != nil {
+		t.Fatalf("registerNotification() error = %v", err)
+	}
+	if removed != 1 || released != 1 {
+		t.Fatalf("existing registration cleanup = (%d removes, %d releases), want (1, 1)", removed, released)
+	}
+	if len(state.notifications) != 1 || state.notifications[0].token.Value != 2 {
+		t.Fatalf("registrations = %+v, want the replacement registration", state.notifications)
+	}
+}
+
+func TestRollbackNotificationRetainsRegistrationWhenRemovalFails(t *testing.T) {
+	removeErr := errors.New("remove new notification")
+	removed := 0
+	released := 0
+	state := &deviceState{}
+	device := Device{state: state}
+	registration := notificationRegistration{
+		token: foundation.EventRegistrationToken{Value: 3},
+		removeValueChanged: func() error {
+			removed++
+			return removeErr
+		},
+		releaseHandler: func() { released++ },
+	}
+
+	err := device.rollbackNotificationRegistration(registration)
+	if !errors.Is(err, removeErr) {
+		t.Fatalf("rollbackNotificationRegistration() error = %v, want %v", err, removeErr)
+	}
+	if removed != 1 || released != 0 {
+		t.Fatalf("rollback cleanup = (%d removes, %d releases), want (1, 0)", removed, released)
+	}
+	if len(state.notifications) != 1 || state.notifications[0].token.Value != 3 {
+		t.Fatalf("registrations = %+v, want the failed registration retained", state.notifications)
+	}
+}
+
+func TestRollbackNotificationReleasesRegistrationAfterSuccessfulRemoval(t *testing.T) {
+	removed := 0
+	released := 0
+	state := &deviceState{}
+	device := Device{state: state}
+	registration := notificationRegistration{
+		token: foundation.EventRegistrationToken{Value: 4},
+		removeValueChanged: func() error {
+			removed++
+			return nil
+		},
+		releaseHandler: func() { released++ },
+	}
+
+	if err := device.rollbackNotificationRegistration(registration); err != nil {
+		t.Fatalf("rollbackNotificationRegistration() error = %v", err)
+	}
+	if removed != 1 || released != 1 {
+		t.Fatalf("rollback cleanup = (%d removes, %d releases), want (1, 1)", removed, released)
+	}
+	if len(state.notifications) != 0 {
+		t.Fatalf("registrations = %+v, want no retained registration", state.notifications)
+	}
+}
+
 func TestDisconnectSchedulesAutomaticRetryAfterWinRTThreadFailure(t *testing.T) {
 	originalEnter := enterWinRTThread
 	originalBaseDelay := cleanupRetryBaseDelay
