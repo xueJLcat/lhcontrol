@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { FleetState } from './fleet-state.svelte';
 import { createStation } from '../../test/fixtures';
 
@@ -30,5 +30,32 @@ describe('FleetState merge', () => {
     expect(fleet.stations).toHaveLength(2);
     expect(fleet.stations.find((station) => station.address === 'AA')?.name).toBe('updated-again');
     expect(fleet.stations.map((station) => station.address)).toEqual(['AA', 'BB']);
+  });
+});
+
+describe('FleetState channel memory', () => {
+  it('retains a long-lived channel for a full TTL after the first wipe', () => {
+    vi.useFakeTimers();
+    const fleet = new FleetState();
+    try {
+      fleet.replace([createStation({ address: 'AA', channel: 3 })]);
+      fleet.syncChannelMemory();
+
+      // Keeping a valid channel for longer than the retention TTL must not
+      // consume the window that is intended for a later transient wipe.
+      vi.advanceTimersByTime(60_000);
+      const wiped = createStation({ address: 'AA', channel: 0, channelFresh: false });
+      fleet.replace([wiped]);
+      fleet.syncChannelMemory();
+
+      expect(fleet.displayChannel(wiped)).toBe(3);
+      vi.advanceTimersByTime(44_999);
+      expect(fleet.displayChannel(wiped)).toBe(3);
+      vi.advanceTimersByTime(2);
+      expect(fleet.displayChannel(wiped)).toBe(0);
+    } finally {
+      fleet.stopChannelMemoryExpiry();
+      vi.useRealTimers();
+    }
   });
 });

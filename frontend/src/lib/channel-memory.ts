@@ -7,7 +7,10 @@ import type { StationInfo } from './types';
 // only; conflict checks, freshness gates, and the channel modal always use
 // the live station.channel.
 export class ChannelMemory {
-  private readonly entries = new Map<string, { channel: number; at: number }>();
+  private readonly entries = new Map<string, {
+    channel: number;
+    missingSince: number | null;
+  }>();
 
   constructor(private readonly ttlMs = 45_000) {}
 
@@ -20,7 +23,17 @@ export class ChannelMemory {
     for (const station of stations) {
       present.add(station.address);
       if (station.channel > 0) {
-        this.entries.set(station.address, { channel: station.channel, at: now });
+        // A live channel is not a transient value and must never age out. The
+        // retention window starts only when a later snapshot first loses it.
+        this.entries.set(station.address, {
+          channel: station.channel,
+          missingSince: null
+        });
+      } else {
+        const cached = this.entries.get(station.address);
+        if (cached?.missingSince === null) {
+          this.entries.set(station.address, { ...cached, missingSince: now });
+        }
       }
     }
     for (const cached of [...this.entries.keys()]) {
@@ -31,18 +44,23 @@ export class ChannelMemory {
   displayChannel(station: StationInfo): number {
     if (station.channel > 0) return station.channel;
     const cached = this.entries.get(station.address);
-    return cached && Date.now() - cached.at <= this.ttlMs ? cached.channel : 0;
+    if (!cached) return 0;
+    return cached.missingSince === null || Date.now() - cached.missingSince <= this.ttlMs
+      ? cached.channel
+      : 0;
   }
 
   // Drops expired entries and returns the milliseconds until the nearest
-  // remaining expiry (Infinity when nothing is cached). Derived views are only
-  // re-evaluated when their reactive inputs change, so an expiry alone would
-  // never re-render them; the caller schedules a tick at this delay to do so.
+  // missing-channel expiry (Infinity when no cached channel is currently
+  // missing). Derived views are only re-evaluated when their reactive inputs
+  // change, so an expiry alone would never re-render them; the caller schedules
+  // a tick at this delay to do so.
   pruneExpired(): number {
     const now = Date.now();
     let nextExpiry = Number.POSITIVE_INFINITY;
     for (const [address, entry] of [...this.entries]) {
-      const remaining = entry.at + this.ttlMs - now;
+      if (entry.missingSince === null) continue;
+      const remaining = entry.missingSince + this.ttlMs - now;
       if (remaining <= 0) {
         this.entries.delete(address);
       } else if (remaining < nextExpiry) {

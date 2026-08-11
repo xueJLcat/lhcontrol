@@ -32,6 +32,28 @@ describe('ChannelMemory', () => {
     }
   });
 
+  it('starts the TTL when the channel first disappears, not when it was last observed', () => {
+    vi.useFakeTimers();
+    try {
+      const memory = new ChannelMemory(45_000);
+      memory.refresh([withChannel(3)]);
+
+      // A healthy channel can remain unchanged for much longer than the
+      // display-memory TTL before a transient read wipes it.
+      vi.advanceTimersByTime(60_000);
+      const wiped = withChannel(0, { channelFresh: false });
+      memory.refresh([wiped]);
+
+      expect(memory.displayChannel(wiped)).toBe(3);
+      vi.advanceTimersByTime(44_999);
+      expect(memory.displayChannel(wiped)).toBe(3);
+      vi.advanceTimersByTime(2);
+      expect(memory.displayChannel(wiped)).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('drops entries for stations that left the list', () => {
     const memory = new ChannelMemory();
     memory.refresh([withChannel(3)]);
@@ -53,22 +75,27 @@ describe('ChannelMemory', () => {
     expect(memory.displayChannel(withChannel(0, { address: 'BB' }))).toBe(9);
   });
 
-  it('pruneExpired drops expired entries and reports the nearest expiry', () => {
+  it('pruneExpired only schedules and drops entries after their channel disappears', () => {
     vi.useFakeTimers();
     try {
       const memory = new ChannelMemory(45_000);
       expect(memory.pruneExpired()).toBe(Number.POSITIVE_INFINITY);
 
       memory.refresh([withChannel(3, { address: 'AA' })]);
-      // Nothing has expired yet; the nearest expiry is a full TTL away.
+      // Live channels remain useful indefinitely and need no expiry timer.
+      vi.advanceTimersByTime(60_000);
+      expect(memory.pruneExpired()).toBe(Number.POSITIVE_INFINITY);
+
+      const wiped = withChannel(0, { address: 'AA', channelFresh: false });
+      memory.refresh([wiped]);
       let next = memory.pruneExpired();
       expect(next).toBeGreaterThan(0);
       expect(next).toBeLessThanOrEqual(45_000);
-      expect(memory.displayChannel(withChannel(0, { address: 'AA' }))).toBe(3);
+      expect(memory.displayChannel(wiped)).toBe(3);
 
       vi.advanceTimersByTime(45_001);
       expect(memory.pruneExpired()).toBe(Number.POSITIVE_INFINITY);
-      expect(memory.displayChannel(withChannel(0, { address: 'AA' }))).toBe(0);
+      expect(memory.displayChannel(wiped)).toBe(0);
     } finally {
       vi.useRealTimers();
     }
