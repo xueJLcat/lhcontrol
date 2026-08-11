@@ -108,6 +108,17 @@ describe('ApiStatusPoller', () => {
     expect(backend.GetAPIStatus).toHaveBeenCalledTimes(1);
   });
 
+  it('does not restart or issue an explicit refresh after disposal', async () => {
+    backend.GetAPIStatus.mockResolvedValue(status());
+    const poller = new ApiStatusPoller(makeHost());
+
+    poller.dispose();
+    await poller.refresh();
+    await poller.start();
+
+    expect(backend.GetAPIStatus).not.toHaveBeenCalled();
+  });
+
   it('replaces the existing timer when the interval changes', async () => {
     vi.useFakeTimers();
     backend.GetAPIStatus.mockResolvedValue(status());

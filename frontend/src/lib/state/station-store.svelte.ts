@@ -530,6 +530,10 @@ export class StationStore {
     this.scanOnStartupEnabled = enabled;
   }
 
+  refreshAPIStatus() {
+    return this.apiStatus.refresh();
+  }
+
   private applyStatusPollIntervalSeconds(intervalSeconds: number) {
     if (this.disposed || !Number.isFinite(intervalSeconds)) return;
     const next = Math.min(

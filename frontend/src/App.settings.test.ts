@@ -256,6 +256,28 @@ describe('App settings drawer', () => {
     expect(screen.getByText('BT-1')).toBeInTheDocument();
   });
 
+  it('refreshes the published API address immediately after it is saved', async () => {
+    render(App);
+    await screen.findByText('LHB-TEST');
+    const apiStatus = await screen.findByRole('button', { name: 'API ready' });
+    expect(apiStatus).toHaveAttribute('title', 'HTTP API 127.0.0.1:7575');
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Open settings' }));
+    const input = await screen.findByLabelText('Listen address');
+    api.GetAPIStatus.mockResolvedValue({
+      running: true,
+      address: '127.0.0.1:8080',
+      error: '',
+      warnings: [],
+      configWritable: true
+    });
+    await fireEvent.input(input, { target: { value: '127.0.0.1:8080' } });
+    await fireEvent.change(input);
+
+    await waitFor(() => expect(api.SetAPIListenAddress).toHaveBeenCalledWith('127.0.0.1:8080'));
+    await waitFor(() => expect(apiStatus).toHaveAttribute('title', 'HTTP API 127.0.0.1:8080'));
+  });
+
   it('closes the settings drawer with Escape', async () => {
     render(App);
     await screen.findByText('LHB-TEST');

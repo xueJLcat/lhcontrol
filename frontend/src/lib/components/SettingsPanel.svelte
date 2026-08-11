@@ -50,7 +50,6 @@
     SetDiscoveryRetryDelayMs,
     SetIdentifyAttempts,
     SetInitialReadTimeoutSeconds,
-    SetLanguage,
     SetOperationRetryDelayMs,
     SetPowerConfirmAttemptsOff,
     SetPowerConfirmAttemptsOn,
@@ -72,7 +71,7 @@
   } from '../backend';
   import { autosleep as autosleepModels, bluetooth as bluetoothModels } from '../../../wailsjs/go/models';
   import { pushToast } from '../toast';
-  import { languagePreference, setLanguagePreference, t, type LanguagePreference } from '../i18n.svelte';
+  import { languagePreference, saveLanguagePreference, t, type LanguagePreference } from '../i18n.svelte';
   import SettingsDrawer from './SettingsDrawer.svelte';
   import { AsyncSetting } from './settings/async-setting.svelte';
 
@@ -80,6 +79,7 @@
     inactive = false,
     onClose,
     onLanguageChanged = () => {},
+    onAPIListenAddressChanged = () => {},
     onScanOnStartupChanged = () => {},
     onStatusPollIntervalChanged = () => {},
     onStatusPollingEnabledChanged = () => {},
@@ -88,6 +88,7 @@
     inactive?: boolean;
     onClose: () => void;
     onLanguageChanged?: () => void;
+    onAPIListenAddressChanged?: () => void | Promise<void>;
     onScanOnStartupChanged?: (enabled: boolean) => void;
     onStatusPollIntervalChanged?: (intervalSeconds: number) => void;
     onStatusPollingEnabledChanged?: (enabled: boolean) => void;
@@ -179,7 +180,8 @@
   });
   const apiListenAddressSetting = new AsyncSetting({
     getter: GetAPIListenAddress, setter: SetAPIListenAddress,
-    loadMessage: 'HTTP API settings could not be loaded', saveMessage: 'HTTP API settings could not be saved'
+    loadMessage: 'HTTP API settings could not be loaded', saveMessage: 'HTTP API settings could not be saved',
+    afterSave: () => onAPIListenAddressChanged()
   });
   const powerWriteAttempts = new AsyncSetting({ getter: GetPowerWriteAttempts, setter: SetPowerWriteAttempts, loadMessage: powerTimingLoad, saveMessage: powerTimingSave });
   const operationRetryDelay = new AsyncSetting({ getter: GetOperationRetryDelayMs, setter: SetOperationRetryDelayMs, loadMessage: powerTimingLoad, saveMessage: powerTimingSave });
@@ -239,19 +241,15 @@
 
   async function changeLanguage(next: LanguagePreference) {
     if (languageBusy || next === languagePreference()) return;
-    const previous = languagePreference();
-    setLanguagePreference(next);
-    onLanguageChanged();
     languageBusy = true;
-    try {
-      await SetLanguage(next === 'system' ? '' : next);
-    } catch (error) {
-      setLanguagePreference(previous);
-      onLanguageChanged();
-      pushToast(`${t('Language setting could not be saved')}: ${String(error)}`);
-    } finally {
-      languageBusy = false;
+    const save = saveLanguagePreference(next);
+    onLanguageChanged();
+    const result = await save;
+    if (!result.saved) {
+      if (result.reverted) onLanguageChanged();
+      pushToast(`${t('Language setting could not be saved')}: ${String(result.error)}`);
     }
+    languageBusy = false;
   }
 
 

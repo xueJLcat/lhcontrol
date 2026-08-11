@@ -1,4 +1,4 @@
-import { GetLanguage } from './backend';
+import { GetLanguage, SetLanguage } from './backend';
 
 export type Locale = 'en' | 'zh-CN';
 export type LanguagePreference = 'system' | Locale;
@@ -413,6 +413,14 @@ export type TranslationKey = keyof typeof zhCN;
 
 let currentLocale = $state<Locale>('en');
 let currentLanguagePreference = $state<LanguagePreference>('system');
+let confirmedLanguagePreference: LanguagePreference = 'system';
+let pendingLanguageSaves = 0;
+let languageSaveRevision = 0;
+let languageSaveTail: Promise<void> = Promise.resolve();
+
+export type LanguagePreferenceSaveResult =
+  | { saved: true; reverted: false }
+  | { saved: false; reverted: boolean; error: unknown };
 
 export function locale(): Locale {
   return currentLocale;
@@ -451,6 +459,37 @@ export function setLanguagePreference(next: LanguagePreference): Locale {
   const effective = next === 'system' ? systemLocale() : next;
   setLocale(effective);
   return effective;
+}
+
+export async function saveLanguagePreference(next: LanguagePreference): Promise<LanguagePreferenceSaveResult> {
+  // A new chain starts from the value already known to be persisted. Saves
+  // from separate SettingsPanel instances can overlap when a panel is closed
+  // and reopened, so the confirmed value and revision must live at module
+  // scope rather than in one component instance.
+  if (pendingLanguageSaves === 0) confirmedLanguagePreference = currentLanguagePreference;
+  pendingLanguageSaves += 1;
+  const revision = ++languageSaveRevision;
+  setLanguagePreference(next);
+
+  const operation = languageSaveTail.then(async () => {
+    await SetLanguage(next === 'system' ? '' : next);
+    confirmedLanguagePreference = next;
+  });
+  languageSaveTail = operation.then(
+    () => undefined,
+    () => undefined
+  );
+
+  try {
+    await operation;
+    return { saved: true, reverted: false };
+  } catch (error) {
+    const reverted = revision === languageSaveRevision;
+    if (reverted) setLanguagePreference(confirmedLanguagePreference);
+    return { saved: false, reverted, error };
+  } finally {
+    pendingLanguageSaves -= 1;
+  }
 }
 
 export async function initializeLocale(): Promise<Locale> {

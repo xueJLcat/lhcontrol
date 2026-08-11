@@ -241,6 +241,7 @@
     inactive={channelEditorOpen || Boolean(bulkConfirmTarget)}
     onClose={closeSettings}
     onLanguageChanged={handleLanguageChanged}
+    onAPIListenAddressChanged={() => store.refreshAPIStatus()}
     onScanOnStartupChanged={(enabled) => store.setScanOnStartupEnabled(enabled)}
     onStatusPollIntervalChanged={(intervalSeconds) => {
       store.setStatusPollIntervalSeconds(intervalSeconds);

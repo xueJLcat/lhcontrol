@@ -85,6 +85,16 @@ import { languagePreference, setLanguagePreference } from '../i18n.svelte';
 
 afterEach(cleanup);
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((done, fail) => {
+    resolve = done;
+    reject = fail;
+  });
+  return { promise, resolve, reject };
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   Object.defineProperty(Element.prototype, 'animate', {
@@ -371,11 +381,13 @@ describe('SettingsPanel', () => {
   });
 
   it('persists the API listen address', async () => {
-    render(SettingsPanel, { props: { onClose: vi.fn() } });
+    const onAPIListenAddressChanged = vi.fn();
+    render(SettingsPanel, { props: { onClose: vi.fn(), onAPIListenAddressChanged } });
     const input = await screen.findByLabelText('Listen address');
     await fireEvent.input(input, { target: { value: '127.0.0.1:8080' } });
     await fireEvent.change(input);
     await waitFor(() => expect(backend.SetAPIListenAddress).toHaveBeenCalledWith('127.0.0.1:8080'));
+    expect(onAPIListenAddressChanged).toHaveBeenCalledOnce();
   });
 
   it('rolls the API listen address back when saving fails', async () => {
@@ -520,6 +532,61 @@ describe('SettingsPanel', () => {
     await waitFor(() => expect(backend.SetLanguage).toHaveBeenCalledOnce());
     expect(await screen.findByRole('dialog', { name: 'Settings' })).toBeInTheDocument();
     expect(languagePreference()).toBe('system');
-    expect(pushToast).toHaveBeenCalledWith('Language setting could not be saved: Error: config locked');
+    await waitFor(() => expect(pushToast).toHaveBeenCalledWith(
+      'Language setting could not be saved: Error: config locked'
+    ));
+  });
+
+  it('does not let an older failed save roll back a newer language choice', async () => {
+    const firstSave = deferred<void>();
+    backend.SetLanguage
+      .mockReturnValueOnce(firstSave.promise)
+      .mockResolvedValueOnce(undefined);
+
+    const firstPanel = render(SettingsPanel, { props: { onClose: vi.fn() } });
+    await screen.findByRole('dialog', { name: 'Settings' });
+    await fireEvent.click(screen.getByRole('radio', { name: '简体中文' }));
+    await waitFor(() => expect(backend.SetLanguage).toHaveBeenCalledWith('zh-CN'));
+
+    firstPanel.unmount();
+    render(SettingsPanel, { props: { onClose: vi.fn() } });
+    await screen.findByRole('dialog', { name: '设置' });
+    await fireEvent.click(screen.getByRole('radio', { name: 'English' }));
+
+    firstSave.reject(new Error('first save failed'));
+    await waitFor(() => expect(backend.SetLanguage).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(pushToast).toHaveBeenCalledWith(
+      'Language setting could not be saved: Error: first save failed'
+    ));
+    await waitFor(() => expect(screen.getByRole('radio', { name: 'English' })).toBeEnabled());
+
+    expect(languagePreference()).toBe('en');
+  });
+
+  it('rolls a newer failed save back to the latest persisted language', async () => {
+    const firstSave = deferred<void>();
+    backend.SetLanguage
+      .mockReturnValueOnce(firstSave.promise)
+      .mockRejectedValueOnce(new Error('second save failed'));
+
+    const firstPanel = render(SettingsPanel, { props: { onClose: vi.fn() } });
+    await screen.findByRole('dialog', { name: 'Settings' });
+    await fireEvent.click(screen.getByRole('radio', { name: '简体中文' }));
+    await waitFor(() => expect(backend.SetLanguage).toHaveBeenCalledWith('zh-CN'));
+
+    firstPanel.unmount();
+    render(SettingsPanel, { props: { onClose: vi.fn() } });
+    await screen.findByRole('dialog', { name: '设置' });
+    await fireEvent.click(screen.getByRole('radio', { name: 'English' }));
+
+    firstSave.resolve(undefined);
+    await waitFor(() => expect(backend.SetLanguage).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(pushToast).toHaveBeenCalledWith(
+      '语言设置无法保存: Error: second save failed'
+    ));
+    expect(await screen.findByRole('dialog', { name: '设置' })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole('radio', { name: '简体中文' })).toBeEnabled());
+
+    expect(languagePreference()).toBe('zh-CN');
   });
 });

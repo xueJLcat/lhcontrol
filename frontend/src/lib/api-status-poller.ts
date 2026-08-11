@@ -16,10 +16,12 @@ export class ApiStatusPoller {
   private readonly revisions = new RevisionGate();
   private readonly reportedWarnings = new Set<string>();
   private interval: ReturnType<typeof setInterval> | null = null;
+  private disposed = false;
 
   constructor(private readonly host: ApiStatusPollerHost) {}
 
   start(intervalMs = 15000): Promise<void> {
+    if (this.disposed || this.host.isDisposed()) return Promise.resolve();
     if (this.interval) clearInterval(this.interval);
     const initialRefresh = this.refresh();
     this.interval = setInterval(() => this.refresh(), intervalMs);
@@ -27,6 +29,7 @@ export class ApiStatusPoller {
   }
 
   refresh(): Promise<void> {
+    if (this.disposed || this.host.isDisposed()) return Promise.resolve();
     const revision = this.revisions.next();
     return GetAPIStatus().then((status) => {
       if (this.host.isDisposed() || !this.revisions.isCurrent(revision)) return;
@@ -50,6 +53,7 @@ export class ApiStatusPoller {
   }
 
   dispose() {
+    this.disposed = true;
     if (this.interval) clearInterval(this.interval);
     this.interval = null;
     this.revisions.dispose();
