@@ -191,6 +191,44 @@ func TestBulkPowerSchedulesRecoveryForFailedVerificationChannel(t *testing.T) {
 	}
 }
 
+func TestBulkPowerPreservesChannelRecoveryAfterFailedVerificationAndSuccessfulWrite(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	manager.statusRecoveryStart.Do(func() {})
+	manager.statusRetryBase = time.Hour
+	address := "11:22:33:44:55:6C"
+	station := &internalbluetooth.BaseStation{
+		Name:              "LHB-BULK-FAILED-VERIFICATION",
+		Address:           mustAddress(t, address),
+		Present:           true,
+		Capabilities:      internalbluetooth.Capabilities{PowerRead: true, PowerWrite: true, ChannelRead: true},
+		CapabilitiesKnown: true,
+	}
+	manager.stations[address] = station
+	manager.bluetoothOps.disconnectStation = func(*internalbluetooth.BaseStation) error { return nil }
+	manager.bluetoothOps.fetchInitialPowerState = func(context.Context, *internalbluetooth.BaseStation) error {
+		return &internalbluetooth.InitialReadError{
+			Power:   errors.New("power read unavailable"),
+			Channel: errors.New("channel read unavailable"),
+		}
+	}
+	manager.bluetoothOps.setPowerState = func(context.Context, *internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
+		return internalbluetooth.PowerControlResult{State: internalbluetooth.PowerStateOn, Confirmed: true}, nil
+	}
+
+	result, err := manager.SetAllStationsPowerDetailed("on")
+	if err != nil || len(result.Results) != 1 || !result.Results[0].Success ||
+		!result.Results[0].CommandSent || !result.Results[0].Confirmed {
+		t.Fatalf("SetAllStationsPowerDetailed() result = %+v, error = %v; want confirmed write", result, err)
+	}
+	manager.statusRetryMutex.Lock()
+	retry, tracked := manager.statusRetries[address]
+	manager.statusRetryMutex.Unlock()
+	if !tracked || effectiveStatusRetryKinds(retry) != statusRetryChannel || retry.channelFailures != 1 {
+		t.Fatalf("bulk verification retry = %+v, tracked=%v; want channel recovery after successful write", retry, tracked)
+	}
+}
+
 func TestBulkPowerDoesNotStartQueuedWorkAfterShutdown(t *testing.T) {
 	manager := NewManager(config.NewConfig())
 	started := make(chan struct{}, 2)

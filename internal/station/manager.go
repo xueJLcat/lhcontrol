@@ -485,22 +485,37 @@ func (m *Manager) recordStructuredReadResult(
 	powerErr error,
 	channelErr error,
 ) {
+	m.recordObservedReadResult(station, address, true, powerErr, true, channelErr)
+}
+
+func (m *Manager) recordObservedReadResult(
+	station *bluetooth.BaseStation,
+	address string,
+	powerObserved bool,
+	powerErr error,
+	channelObserved bool,
+	channelErr error,
+) {
 	connectionNoted := false
-	if powerErr == nil || bluetooth.IsUnsupportedCapabilityError(powerErr) {
-		m.clearStatusFailureKind(address, statusRetryConnection)
-	} else {
-		_ = m.bluetoothOps.disconnectStation(station)
-		m.noteStatusFailure(address)
-		connectionNoted = true
+	if powerObserved {
+		if powerErr == nil || bluetooth.IsUnsupportedCapabilityError(powerErr) {
+			m.clearStatusFailureKind(address, statusRetryConnection)
+		} else {
+			_ = m.bluetoothOps.disconnectStation(station)
+			m.noteStatusFailure(address)
+			connectionNoted = true
+		}
 	}
-	if channelErr == nil || bluetooth.IsUnsupportedCapabilityError(channelErr) {
-		m.clearStatusFailureKind(address, statusRetryChannel)
-	} else {
-		m.noteChannelFailure(address)
-		if bluetooth.RequiresReconnect(channelErr) || bluetooth.IsAdapterUnavailable(channelErr) {
-			if !connectionNoted {
-				_ = m.bluetoothOps.disconnectStation(station)
-				m.noteStatusFailure(address)
+	if channelObserved {
+		if channelErr == nil || bluetooth.IsUnsupportedCapabilityError(channelErr) {
+			m.clearStatusFailureKind(address, statusRetryChannel)
+		} else {
+			m.noteChannelFailure(address)
+			if bluetooth.RequiresReconnect(channelErr) || bluetooth.IsAdapterUnavailable(channelErr) {
+				if !connectionNoted {
+					_ = m.bluetoothOps.disconnectStation(station)
+					m.noteStatusFailure(address)
+				}
 			}
 		}
 	}

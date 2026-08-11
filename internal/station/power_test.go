@@ -497,6 +497,89 @@ func TestSinglePowerSchedulesRecoveryForFailedVerificationChannel(t *testing.T) 
 	}
 }
 
+func TestSinglePowerSuccessfulVerificationClearsRecovery(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	manager.statusRecoveryStart.Do(func() {})
+	address := "11:22:33:44:55:80"
+	station := &internalbluetooth.BaseStation{
+		Name:              "LHB-COMPLETE-VERIFICATION",
+		Address:           mustAddress(t, address),
+		Present:           true,
+		Capabilities:      internalbluetooth.Capabilities{PowerRead: true, PowerWrite: true, ChannelRead: true},
+		CapabilitiesKnown: true,
+	}
+	manager.stations[address] = station
+	manager.statusRetryMutex.Lock()
+	manager.statusRetries[address] = statusRetry{
+		kinds:           statusRetryConnection | statusRetryChannel,
+		failures:        2,
+		channelFailures: 3,
+		nextAt:          time.Now().Add(time.Hour),
+		channelNextAt:   time.Now().Add(time.Hour),
+	}
+	manager.statusRetryMutex.Unlock()
+	manager.bluetoothOps.fetchInitialPowerState = func(context.Context, *internalbluetooth.BaseStation) error {
+		station.PowerState = internalbluetooth.PowerStateOn
+		station.RawPowerState = 0x0B
+		station.LastPowerReadAt = time.Now()
+		station.LastChannelReadAt = time.Now()
+		return nil
+	}
+	manager.bluetoothOps.setPowerState = func(context.Context, *internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
+		t.Fatal("power write was attempted after a complete target-state verification")
+		return internalbluetooth.PowerControlResult{}, nil
+	}
+
+	result, err := manager.SetStationPower(address, "on")
+	if err != nil || !result.Skipped || !result.Confirmed {
+		t.Fatalf("SetStationPower() result = %+v, error = %v; want confirmed no-op", result, err)
+	}
+	manager.statusRetryMutex.Lock()
+	_, tracked := manager.statusRetries[address]
+	manager.statusRetryMutex.Unlock()
+	if tracked {
+		t.Fatal("complete verification left obsolete connection/channel recovery scheduled")
+	}
+}
+
+func TestSinglePowerPreservesChannelRecoveryAfterFailedVerificationAndSuccessfulWrite(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	manager.statusRecoveryStart.Do(func() {})
+	manager.statusRetryBase = time.Hour
+	address := "11:22:33:44:55:81"
+	station := &internalbluetooth.BaseStation{
+		Name:              "LHB-FAILED-VERIFICATION",
+		Address:           mustAddress(t, address),
+		Present:           true,
+		Capabilities:      internalbluetooth.Capabilities{PowerRead: true, PowerWrite: true, ChannelRead: true},
+		CapabilitiesKnown: true,
+	}
+	manager.stations[address] = station
+	manager.bluetoothOps.disconnectStation = func(*internalbluetooth.BaseStation) error { return nil }
+	manager.bluetoothOps.fetchInitialPowerState = func(context.Context, *internalbluetooth.BaseStation) error {
+		return &internalbluetooth.InitialReadError{
+			Power:   errors.New("power read unavailable"),
+			Channel: errors.New("channel read unavailable"),
+		}
+	}
+	manager.bluetoothOps.setPowerState = func(context.Context, *internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
+		return internalbluetooth.PowerControlResult{State: internalbluetooth.PowerStateOn, Confirmed: true}, nil
+	}
+
+	result, err := manager.SetStationPower(address, "on")
+	if err != nil || !result.CommandSent || !result.Confirmed {
+		t.Fatalf("SetStationPower() result = %+v, error = %v; want confirmed write", result, err)
+	}
+	manager.statusRetryMutex.Lock()
+	retry, tracked := manager.statusRetries[address]
+	manager.statusRetryMutex.Unlock()
+	if !tracked || effectiveStatusRetryKinds(retry) != statusRetryChannel || retry.channelFailures != 1 {
+		t.Fatalf("verification retry = %+v, tracked=%v; want channel recovery after successful write", retry, tracked)
+	}
+}
+
 func TestSinglePowerDoesNotWriteNonTargetReadAfterBudgetExpires(t *testing.T) {
 	manager := NewManager(config.NewConfig())
 	defer manager.Shutdown()

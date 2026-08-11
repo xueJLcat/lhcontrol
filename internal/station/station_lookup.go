@@ -113,19 +113,38 @@ func powerReadSucceeded(err error) bool {
 	return errors.As(err, &initialErr) && initialErr.Power == nil
 }
 
-// recordPartialPowerVerificationResult preserves the successful power read as
-// the operation's decision input while independently tracking a failed optional
-// channel read. Metadata errors are deliberately excluded because a connected
-// fetch can surface an old discovery error rather than a fresh metadata attempt.
-func (m *Manager) recordPartialPowerVerificationResult(
+// recordPowerVerificationResult tracks the power and channel observations made
+// by a cache verification independently. Metadata errors are deliberately
+// excluded because a connected fetch can surface an old discovery error rather
+// than a fresh metadata attempt.
+func (m *Manager) recordPowerVerificationResult(
 	station *bluetooth.BaseStation,
 	address string,
+	before bluetooth.BaseStationSnapshot,
 	err error,
 ) {
+	after := station.Snapshot()
+	powerObserved := after.LastPowerReadAt.After(before.LastPowerReadAt)
+	channelObserved := after.LastChannelReadAt.After(before.LastChannelReadAt)
+	var powerErr error
+	var channelErr error
 	var initialErr *bluetooth.InitialReadError
-	if !errors.As(err, &initialErr) || initialErr.Power != nil || initialErr.Channel == nil {
+	if err != nil && !errors.As(err, &initialErr) {
 		return
 	}
-	m.observeBluetoothError(initialErr.Channel)
-	m.recordStructuredReadResult(station, address, nil, initialErr.Channel)
+	if initialErr != nil {
+		powerErr = initialErr.Power
+		channelErr = initialErr.Channel
+		powerObserved = powerObserved || powerErr != nil
+		channelObserved = channelObserved || channelErr != nil
+		m.observeBluetoothError(errors.Join(powerErr, channelErr))
+	}
+	m.recordObservedReadResult(
+		station,
+		address,
+		powerObserved,
+		powerErr,
+		channelObserved,
+		channelErr,
+	)
 }
