@@ -7,7 +7,7 @@
     LoaderCircle, Moon, Pause, SquarePen, TriangleAlert, X, Zap
   } from 'lucide-svelte';
   import type { PowerFeedback, PowerTarget, StationInfo } from '../types';
-  import { canSetPower, channelLabel, isCurrentPowerState, stateClass, stateLabel } from '../station';
+  import { canSetPower, channelLabel, hasCurrentChannel, isCurrentPowerState, stateClass, stateLabel } from '../station';
   import { relativeTime } from '../relative-time';
   import { autofocus } from '../actions';
   import { dur } from '../motion';
@@ -167,7 +167,7 @@
     return () => clearTimeout(timer);
   });
   const shownChannel = $derived(station.channel > 0 ? station.channel : lastKnownChannel);
-  const channelLastKnown = $derived(station.channel <= 0 && shownChannel > 0);
+  const channelLastKnown = $derived(shownChannel > 0 && !hasCurrentChannel(station));
 
   function openDetails() {
     if (!renaming) onOpenDetails(station);

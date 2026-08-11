@@ -157,6 +157,21 @@ describe('StationCard rename submission', () => {
 });
 
 describe('StationCard channel memory', () => {
+  it.each([
+    ['channel data is stale', { channelFresh: false }],
+    ['the latest scan is stale', { scanFresh: false }],
+    ['the station is absent', { isPresent: false }]
+  ])('marks a positive channel as last-known when %s', (_, overrides) => {
+    const stale = Object.assign(station(), overrides);
+    render(StationCard, {
+      props: { ...cardProps({}), renaming: false, station: stale }
+    });
+
+    const chip = screen.getByText('CH 03');
+    expect(chip).toHaveClass('stale');
+    expect(chip).toHaveAttribute('title', 'Last known channel');
+  });
+
   it('drops the last known channel exactly when the memory window elapses', async () => {
     vi.useFakeTimers();
     try {
