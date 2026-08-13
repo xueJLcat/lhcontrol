@@ -91,22 +91,15 @@ func (m *Manager) SetAllStationsPowerDetailedContext(ctx context.Context, state 
 		}
 		m.bulkLifecycleMutex.Unlock()
 	}()
-	result, err := m.setAllStationsPowerDetailed(operationContext, state)
-	if contextErr := operationContext.Err(); contextErr != nil {
-		// The expiry can land in the instant after the final worker confirms its
-		// target. When every station already reached its confirmed goal, nothing
-		// was left unfinished, so the operation must not be relabelled as
-		// cancelled/timed out and no expiry error is surfaced.
-		allConfirmed := len(result.Results) > 0
-		for _, item := range result.Results {
-			if !(item.Success && item.Confirmed) {
-				allConfirmed = false
-				break
-			}
-		}
-		if allConfirmed {
-			return result, nil
-		}
+	result, contextAffected, err := m.setAllStationsPowerDetailed(operationContext, state)
+	contextErr := operationContext.Err()
+	if contextAffected && contextErr == nil && errors.Is(err, ErrShuttingDown) {
+		// Lifecycle cancellation is delivered asynchronously by context.AfterFunc.
+		// Preserve a deterministic cancelled result if shutdown reached a worker
+		// before the derived operation context observed it.
+		contextErr = context.Canceled
+	}
+	if contextAffected && contextErr != nil {
 		result.Cancelled = true
 		result.TimedOut = errors.Is(contextErr, context.DeadlineExceeded)
 		reason := ReasonOperationCancelled
@@ -167,20 +160,26 @@ func (m *Manager) CancelBulkPower() error {
 	}
 }
 
-func (m *Manager) setAllStationsPowerDetailed(ctx context.Context, state string) (BulkPowerResult, error) {
+// setAllStationsPowerDetailed reports whether cancellation or shutdown
+// actually prevented any selected station from reaching a terminal result.
+// The caller uses that signal to distinguish an interrupted batch from a
+// context that happened to finish after all station work was already done.
+func (m *Manager) setAllStationsPowerDetailed(ctx context.Context, state string) (BulkPowerResult, bool, error) {
 	target, err := bluetooth.ParsePowerTarget(state)
 	result := BulkPowerResult{Target: target.String(), Results: []BulkPowerStationResult{}}
 	if err != nil {
-		return result, fmt.Errorf("%w: %v", ErrInvalidArgument, err)
+		return result, false, fmt.Errorf("%w: %v", ErrInvalidArgument, err)
 	}
 	if m.shuttingDown.Load() {
-		return result, ErrShuttingDown
+		return result, true, ErrShuttingDown
 	}
 	if err := ctx.Err(); err != nil {
-		return result, err
+		return result, true, err
 	}
 	if err := m.beginBulkGlobalOperationContext(ctx); err != nil {
-		return result, err
+		contextAffected := errors.Is(err, context.Canceled) ||
+			errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrShuttingDown)
+		return result, contextAffected, err
 	}
 	defer m.endForegroundGlobalOperation()
 
@@ -245,7 +244,7 @@ func (m *Manager) setAllStationsPowerDetailed(ctx context.Context, state string)
 		}
 	}
 	if len(work) == 0 {
-		return result, nil
+		return result, false, nil
 	}
 	if err := m.ensureReady(); err != nil {
 		for index := range result.Results {
@@ -254,14 +253,15 @@ func (m *Manager) setAllStationsPowerDetailed(ctx context.Context, state string)
 				item.Error = err.Error()
 			}
 		}
-		return result, err
+		return result, errors.Is(err, ErrShuttingDown), err
 	}
 	if err := ctx.Err(); err != nil {
-		return result, err
+		return result, true, err
 	}
 
 	var wg sync.WaitGroup
 	semaphore := make(chan struct{}, 2)
+	contextAffected := make([]bool, len(result.Results))
 
 	for _, item := range work {
 		wg.Add(1)
@@ -270,6 +270,7 @@ func (m *Manager) setAllStationsPowerDetailed(ctx context.Context, state string)
 			select {
 			case semaphore <- struct{}{}:
 			case <-ctx.Done():
+				contextAffected[resultIndex] = true
 				result.Results[resultIndex].Skipped = true
 				if m.shuttingDown.Load() {
 					result.Results[resultIndex].Reason = ReasonShuttingDown
@@ -280,6 +281,7 @@ func (m *Manager) setAllStationsPowerDetailed(ctx context.Context, state string)
 				}
 				return
 			case <-m.shutdownCh:
+				contextAffected[resultIndex] = true
 				result.Results[resultIndex].Skipped = true
 				result.Results[resultIndex].Reason = ReasonShuttingDown
 				return
@@ -288,6 +290,7 @@ func (m *Manager) setAllStationsPowerDetailed(ctx context.Context, state string)
 			operationContext, cancelOperation := m.newStationOperationContext(ctx)
 			defer cancelOperation()
 			if m.shuttingDown.Load() || ctx.Err() != nil {
+				contextAffected[resultIndex] = true
 				result.Results[resultIndex].Skipped = true
 				if m.shuttingDown.Load() {
 					result.Results[resultIndex].Reason = ReasonShuttingDown
@@ -391,6 +394,10 @@ func (m *Manager) setAllStationsPowerDetailed(ctx context.Context, state string)
 				return err
 			})
 			if workerErr != nil {
+				if (errors.Is(workerErr, context.Canceled) || errors.Is(workerErr, context.DeadlineExceeded)) &&
+					(ctx.Err() != nil || m.shuttingDown.Load()) {
+					contextAffected[resultIndex] = true
+				}
 				var confirmationErr *bluetooth.PowerConfirmationError
 				if errors.As(workerErr, &confirmationErr) {
 					// A possibly-sent command keeps its command-sent outcome even
@@ -452,11 +459,17 @@ func (m *Manager) setAllStationsPowerDetailed(ctx context.Context, state string)
 	}
 
 	wg.Wait()
-	if err := ctx.Err(); err != nil {
-		if m.shuttingDown.Load() {
-			return result, nil
+	for _, affected := range contextAffected {
+		if !affected {
+			continue
 		}
-		return result, err
+		if err := ctx.Err(); err != nil {
+			return result, true, err
+		}
+		if m.shuttingDown.Load() {
+			return result, true, ErrShuttingDown
+		}
+		return result, true, context.Canceled
 	}
-	return result, nil
+	return result, false, nil
 }

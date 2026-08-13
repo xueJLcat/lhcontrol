@@ -1023,6 +1023,46 @@ func TestBulkPowerLateDeadlineAfterAllConfirmedNotMislabelled(t *testing.T) {
 	}
 }
 
+// TestBulkPowerLateCancellationAfterTerminalUnconfirmedWriteNotMislabelled
+// guards write-only firmware, where a successfully sent command is a complete
+// result even though the station cannot confirm the new state. Cancellation
+// arriving at that final boundary must not overwrite the terminal outcome.
+func TestBulkPowerLateCancellationAfterTerminalUnconfirmedWriteNotMislabelled(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	address := "11:22:33:44:AA:08"
+	manager.stations[address] = &internalbluetooth.BaseStation{
+		Name:              "LHB-WRITE-ONLY",
+		Address:           mustAddress(t, address),
+		Present:           true,
+		PowerState:        internalbluetooth.PowerStateSleep,
+		RawPowerState:     0x00,
+		LastPowerReadAt:   time.Now(),
+		Capabilities:      internalbluetooth.Capabilities{PowerWrite: true},
+		CapabilitiesKnown: true,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	manager.bluetoothOps.setPowerState = func(_ context.Context, _ *internalbluetooth.BaseStation, target internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
+		cancel()
+		return internalbluetooth.PowerControlResult{State: target, Confirmed: false}, nil
+	}
+
+	result, err := manager.SetAllStationsPowerDetailedContext(ctx, "on")
+	if err != nil {
+		t.Fatalf("terminal write-only result returned error = %v", err)
+	}
+	if result.Cancelled || result.TimedOut {
+		t.Fatalf("terminal write-only result was mislabelled: %+v", result)
+	}
+	if len(result.Results) != 1 || !result.Results[0].Success ||
+		!result.Results[0].CommandSent || result.Results[0].Confirmed ||
+		result.Results[0].Skipped || result.Results[0].Error != "" {
+		t.Fatalf("write-only bulk result = %+v", result.Results)
+	}
+}
+
 // TestBulkCancelOwnsSkipWhenStationBudgetAlsoExpires verifies that a batch
 // cancellation is the reported skip reason even when a station's own budget
 // happens to expire in the same instant, instead of blaming the station.
