@@ -379,6 +379,31 @@ describe('StationStore startup', () => {
     expect(backend.ScanAndFetchStations).not.toHaveBeenCalled();
   });
 
+  it('cancels a deferred startup scan when the preference is disabled before the lock clears', async () => {
+    backend.GetAPIStatus.mockResolvedValue({
+      running: true,
+      address: '127.0.0.1:7575',
+      error: '',
+      warnings: [],
+      configWritable: true,
+      activeOperations: [{ id: 43, kind: 'power' }],
+      operationRevision: 1
+    });
+
+    const { store } = mountStore();
+    await vi.waitFor(() => expect(store.externalOperationRunning).toBe(true));
+    await vi.waitFor(() => expect(backend.IsScanning).toHaveBeenCalled());
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(backend.ScanAndFetchStations).not.toHaveBeenCalled();
+
+    store.setScanOnStartupEnabled(false);
+    runtime.handlers.get('external-operation')?.({ id: 43, phase: 'finished', kind: 'power', revision: 2 });
+    await vi.waitFor(() => expect(store.externalOperationRunning).toBe(false));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(backend.ScanAndFetchStations).not.toHaveBeenCalled();
+  });
+
   it('waits for the restarted health poll before classifying a startup scan', async () => {
     backend.IsScanning.mockResolvedValue(true);
     backend.GetStatusPollIntervalSeconds.mockResolvedValue(30);

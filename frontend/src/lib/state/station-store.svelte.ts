@@ -557,6 +557,10 @@ export class StationStore {
     if (this.disposed) return;
     this.scanOnStartupPreferenceRevision += 1;
     this.scanOnStartupEnabled = enabled;
+    // A deferred scan belongs to the startup preference that requested it.
+    // Turning that preference off must also cancel work queued behind a
+    // startup lock; enabling it again applies to the next application start.
+    if (!enabled) this.startupScanDeferred = false;
   }
 
   refreshAPIStatus() {
@@ -723,9 +727,11 @@ export class StationStore {
           await this.externalScan.adoptUnknown();
         }
       } else if (this.scanOnStartupEnabled) {
-        if (!await this.startScan()) {
+        if (!await this.startScan() && this.scanOnStartupEnabled) {
           // Locked at startup (an auto-sleep or HTTP operation was already
-          // running). Defer and retry once the lock releases.
+          // running). Defer and retry once the lock releases. Re-check the
+          // preference after await so a concurrent settings save cannot
+          // recreate a deferred scan that it just cancelled.
           this.startupScanDeferred = true;
         }
       }
@@ -737,6 +743,10 @@ export class StationStore {
   // state; the pending flag keeps it a no-op everywhere else.
   private maybeRunDeferredStartupScan() {
     if (this.disposed || !this.startupScanDeferred) return;
+    if (!this.scanOnStartupEnabled) {
+      this.startupScanDeferred = false;
+      return;
+    }
     if (this.scanLocked || this.isLoading) return;
     this.startupScanDeferred = false;
     void this.startScan();
