@@ -462,10 +462,10 @@ func (c DeviceCharacteristic) GetMTU() (uint16, error) {
 // call will return after all data has been written.
 func (c DeviceCharacteristic) Write(p []byte) (n int, err error) {
 	if err := c.available(); err != nil {
-		return 0, err
+		return 0, classifyWriteFailure(genericattributeprofile.GattWriteOptionWriteWithResponse, false, false, err)
 	}
 	if c.properties&genericattributeprofile.GattCharacteristicPropertiesWrite == 0 {
-		return 0, errNoWrite
+		return 0, classifyWriteFailure(genericattributeprofile.GattWriteOptionWriteWithResponse, false, false, errNoWrite)
 	}
 
 	return c.write(p, genericattributeprofile.GattWriteOptionWriteWithResponse)
@@ -477,10 +477,10 @@ func (c DeviceCharacteristic) Write(p []byte) (n int, err error) {
 // semantics.
 func (c DeviceCharacteristic) WriteContext(ctx context.Context, p []byte) (n int, err error) {
 	if err := c.available(); err != nil {
-		return 0, err
+		return 0, classifyWriteFailure(genericattributeprofile.GattWriteOptionWriteWithResponse, false, false, err)
 	}
 	if c.properties&genericattributeprofile.GattCharacteristicPropertiesWrite == 0 {
-		return 0, errNoWrite
+		return 0, classifyWriteFailure(genericattributeprofile.GattWriteOptionWriteWithResponse, false, false, errNoWrite)
 	}
 
 	return c.writeContext(ctx, p, genericattributeprofile.GattWriteOptionWriteWithResponse)
@@ -492,10 +492,10 @@ func (c DeviceCharacteristic) WriteContext(ctx context.Context, p []byte) (n int
 // "write command" (as opposed to a write request).
 func (c DeviceCharacteristic) WriteWithoutResponse(p []byte) (n int, err error) {
 	if err := c.available(); err != nil {
-		return 0, err
+		return 0, classifyWriteFailure(genericattributeprofile.GattWriteOptionWriteWithoutResponse, false, false, err)
 	}
 	if c.properties&genericattributeprofile.GattCharacteristicPropertiesWriteWithoutResponse == 0 {
-		return 0, errNoWriteWithoutResponse
+		return 0, classifyWriteFailure(genericattributeprofile.GattWriteOptionWriteWithoutResponse, false, false, errNoWriteWithoutResponse)
 	}
 	return c.write(p, genericattributeprofile.GattWriteOptionWriteWithoutResponse)
 }
@@ -503,10 +503,10 @@ func (c DeviceCharacteristic) WriteWithoutResponse(p []byte) (n int, err error) 
 // WriteWithoutResponseContext is the cancellable form of WriteWithoutResponse.
 func (c DeviceCharacteristic) WriteWithoutResponseContext(ctx context.Context, p []byte) (n int, err error) {
 	if err := c.available(); err != nil {
-		return 0, err
+		return 0, classifyWriteFailure(genericattributeprofile.GattWriteOptionWriteWithoutResponse, false, false, err)
 	}
 	if c.properties&genericattributeprofile.GattCharacteristicPropertiesWriteWithoutResponse == 0 {
-		return 0, errNoWriteWithoutResponse
+		return 0, classifyWriteFailure(genericattributeprofile.GattWriteOptionWriteWithoutResponse, false, false, errNoWriteWithoutResponse)
 	}
 	return c.writeContext(ctx, p, genericattributeprofile.GattWriteOptionWriteWithoutResponse)
 }
@@ -520,28 +520,28 @@ func (c DeviceCharacteristic) writeContext(ctx context.Context, p []byte, mode g
 		ctx = context.Background()
 	}
 	if err := ctx.Err(); err != nil {
-		return 0, err
+		return 0, classifyWriteFailure(mode, false, false, err)
 	}
 	if _, err := c.service.device.beginOperation(); err != nil {
-		return 0, err
+		return 0, classifyWriteFailure(mode, false, false, err)
 	}
 	defer c.service.device.endOperation()
 
 	// Convert data to buffer
 	writer, err := streams.NewDataWriter()
 	if err != nil {
-		return 0, err
+		return 0, classifyWriteFailure(mode, false, false, err)
 	}
 	defer writer.Release()
 
 	// Add bytes to writer
 	if err := writer.WriteBytes(uint32(len(p)), p); err != nil {
-		return 0, err
+		return 0, classifyWriteFailure(mode, false, false, err)
 	}
 
 	value, err := writer.DetachBuffer()
 	if err != nil {
-		return 0, err
+		return 0, classifyWriteFailure(mode, false, false, err)
 	}
 	defer value.Release()
 

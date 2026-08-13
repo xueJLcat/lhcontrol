@@ -3,11 +3,36 @@
 package bluetooth
 
 import (
+	"context"
 	"errors"
 	"testing"
 
 	"github.com/saltosystems/winrt-go/windows/devices/bluetooth/genericattributeprofile"
 )
+
+func TestWriteWithoutResponseClassifiesDisconnectedDeviceAsNeverSubmitted(t *testing.T) {
+	characteristic := DeviceCharacteristic{deviceCharacteristic: &deviceCharacteristic{
+		characteristic: &genericattributeprofile.GattCharacteristic{},
+		properties:     genericattributeprofile.GattCharacteristicPropertiesWriteWithoutResponse,
+		service: DeviceService{deviceService: &deviceService{
+			device: Device{},
+		}},
+	}}
+
+	n, err := characteristic.WriteWithoutResponseContext(context.Background(), []byte{0x01})
+	var neverSubmitted *WriteNeverSubmittedError
+	if n != 0 || !errors.As(err, &neverSubmitted) {
+		t.Fatalf(
+			"WriteWithoutResponseContext() = %d, %v (type %T), want 0 and WriteNeverSubmittedError",
+			n,
+			err,
+			err,
+		)
+	}
+	if neverSubmitted.PossiblySent() {
+		t.Fatal("pre-submission disconnect was marked possibly sent")
+	}
+}
 
 func TestClassifyWriteFailurePossiblySent(t *testing.T) {
 	cause := errors.New("completion failed")
