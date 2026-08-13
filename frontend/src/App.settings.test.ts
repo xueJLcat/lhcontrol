@@ -306,6 +306,18 @@ describe('App settings drawer', () => {
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Settings' })).not.toBeInTheDocument());
   });
 
+  it('keeps the settings drawer open when Escape belongs to an IME composition', async () => {
+    render(App);
+    await screen.findByText('LHB-TEST');
+    await fireEvent.click(screen.getByRole('button', { name: 'Open settings' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Settings' });
+    const input = await screen.findByLabelText('Listen address');
+
+    await fireEvent.keyDown(input, { key: 'Escape', isComposing: true });
+
+    expect(dialog).toBeInTheDocument();
+  });
+
   it('replaces the settings drawer when a station is selected', async () => {
     render(App);
     await screen.findByText('LHB-TEST');

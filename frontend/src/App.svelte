@@ -133,7 +133,10 @@
 
   function handleGlobalKeydown(event: KeyboardEvent) {
     if (event.key !== 'Escape') return;
-    if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey) return;
+    // During IME composition Escape belongs to the candidate window. Treating
+    // it as an application shortcut closes the active drawer and discards the
+    // editing context while the user is only cancelling a composition.
+    if (event.defaultPrevented || event.isComposing || event.altKey || event.ctrlKey || event.metaKey) return;
     if (channelEditorOpen) {
       closeChannelEditor();
     } else if (bulkConfirmTarget) {
