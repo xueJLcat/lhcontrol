@@ -108,6 +108,44 @@ describe('ApiStatusPoller', () => {
     poller.dispose();
   });
 
+  it('settles active and trailing callers through a superseding restart', async () => {
+    backend.GetAPIStatus
+      .mockReturnValueOnce(new Promise(() => {}))
+      .mockResolvedValueOnce(status({ address: 'replacement' }));
+    const host = makeHost();
+    const poller = new ApiStatusPoller(host);
+
+    let activeSettled = false;
+    let trailingSettled = false;
+    void poller.refresh().then(() => { activeSettled = true; });
+    void poller.refresh().then(() => { trailingSettled = true; });
+
+    await poller.start(20_000);
+    await Promise.resolve();
+
+    expect(backend.GetAPIStatus).toHaveBeenCalledTimes(2);
+    expect(host.commitStatus).toHaveBeenCalledWith(status({ address: 'replacement' }));
+    expect(activeSettled).toBe(true);
+    expect(trailingSettled).toBe(true);
+    poller.dispose();
+  });
+
+  it('settles active and trailing callers when disposed during a hung request', async () => {
+    backend.GetAPIStatus.mockReturnValueOnce(new Promise(() => {}));
+    const poller = new ApiStatusPoller(makeHost());
+
+    let activeSettled = false;
+    let trailingSettled = false;
+    void poller.refresh().then(() => { activeSettled = true; });
+    void poller.refresh().then(() => { trailingSettled = true; });
+
+    poller.dispose();
+    await Promise.resolve();
+
+    expect(activeSettled).toBe(true);
+    expect(trailingSettled).toBe(true);
+  });
+
   it('ignores responses after disposal', async () => {
     let resolveStatus!: (value: unknown) => void;
     backend.GetAPIStatus.mockReturnValueOnce(new Promise((resolve) => { resolveStatus = resolve; }));
