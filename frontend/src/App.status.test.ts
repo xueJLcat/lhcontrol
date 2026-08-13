@@ -116,7 +116,7 @@ describe('App asynchronous operations', () => {
     for (const button of scanningButtons) expect(button).toBeEnabled();
   });
 
-  it('does not let an older API status response overwrite a newer poll', async () => {
+  it('serializes a slow API status poll and commits one trailing result', async () => {
     vi.useFakeTimers();
     let resolveFirst!: (value: unknown) => void;
     api.GetAPIStatus
@@ -125,11 +125,12 @@ describe('App asynchronous operations', () => {
 
     render(App);
     await vi.advanceTimersByTimeAsync(15_000);
-    await vi.waitFor(() => expect(api.GetAPIStatus).toHaveBeenCalledTimes(2));
-    await vi.waitFor(() => expect(screen.getByText('API offline')).toHaveAttribute('title', 'new failure'));
+    expect(api.GetAPIStatus).toHaveBeenCalledTimes(1);
 
     resolveFirst({ running: true, address: '127.0.0.1:7575', error: '' });
     await vi.advanceTimersByTimeAsync(0);
+    await vi.waitFor(() => expect(api.GetAPIStatus).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(screen.getByText('API offline')).toHaveAttribute('title', 'new failure'));
     expect(screen.getByText('API offline')).toHaveAttribute('title', 'new failure');
   });
 

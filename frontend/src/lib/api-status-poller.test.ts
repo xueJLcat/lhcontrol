@@ -64,7 +64,31 @@ describe('ApiStatusPoller', () => {
     expect(host.reportConfigWarning).toHaveBeenNthCalledWith(2, warning);
   });
 
-  it('never lets an out-of-order response overwrite a newer poll', async () => {
+  it('serializes concurrent refreshes and coalesces them into one trailing poll', async () => {
+    let resolveFirst!: (value: unknown) => void;
+    let resolveSecond!: (value: unknown) => void;
+    backend.GetAPIStatus
+      .mockReturnValueOnce(new Promise((resolve) => { resolveFirst = resolve; }))
+      .mockReturnValueOnce(new Promise((resolve) => { resolveSecond = resolve; }));
+    const host = makeHost();
+    const poller = new ApiStatusPoller(host);
+
+    const first = poller.refresh();
+    const second = poller.refresh();
+    const third = poller.refresh();
+    expect(backend.GetAPIStatus).toHaveBeenCalledTimes(1);
+
+    resolveFirst(status({ address: 'first' }));
+    await vi.waitFor(() => expect(backend.GetAPIStatus).toHaveBeenCalledTimes(2));
+    expect(host.commitStatus).toHaveBeenCalledWith(status({ address: 'first' }));
+
+    resolveSecond(status({ address: 'second' }));
+    await Promise.all([first, second, third]);
+    expect(backend.GetAPIStatus).toHaveBeenCalledTimes(2);
+    expect(host.commitStatus).toHaveBeenNthCalledWith(2, status({ address: 'second' }));
+  });
+
+  it('lets an explicit restart supersede a hung request', async () => {
     let resolveOld!: (value: unknown) => void;
     backend.GetAPIStatus
       .mockReturnValueOnce(new Promise((resolve) => { resolveOld = resolve; }))
@@ -72,14 +96,16 @@ describe('ApiStatusPoller', () => {
     const host = makeHost();
     const poller = new ApiStatusPoller(host);
 
-    poller.refresh();
-    poller.refresh();
-    await vi.waitFor(() => expect(host.commitStatus).toHaveBeenCalledWith(status({ address: 'new' })));
+    const oldRequest = poller.start(10_000);
+    await poller.start(20_000);
+    expect(backend.GetAPIStatus).toHaveBeenCalledTimes(2);
+    expect(host.commitStatus).toHaveBeenCalledOnce();
+    expect(host.commitStatus).toHaveBeenCalledWith(status({ address: 'new' }));
 
     resolveOld(status({ address: 'old' }));
-    await vi.waitFor(() => expect(backend.GetAPIStatus).toHaveBeenCalledTimes(2));
-    expect(host.commitStatus).toHaveBeenCalledTimes(1);
-    expect(host.commitStatus).toHaveBeenCalledWith(status({ address: 'new' }));
+    await oldRequest;
+    expect(host.commitStatus).toHaveBeenCalledOnce();
+    poller.dispose();
   });
 
   it('ignores responses after disposal', async () => {
