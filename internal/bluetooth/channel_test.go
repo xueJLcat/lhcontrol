@@ -337,6 +337,33 @@ func TestSetChannelContextDoesNotDisconnectWhenCancelledWaitingForStation(t *tes
 	}
 }
 
+func TestSetChannelContextDoesNotDisconnectWhenCancelledBeforeWrite(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	device := &trackingConnectedDevice{}
+	mode := &fakeCharacteristic{value: []byte{3}, onRead: cancel}
+	station := connectedFakeStation(
+		&fakeCharacteristic{},
+		mode,
+		nil,
+		Capabilities{ChannelRead: true, ChannelWrite: true},
+	)
+	station.device = device
+
+	result, err := SetChannelContext(ctx, station, 5)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("SetChannelContext() error = %v, want context.Canceled", err)
+	}
+	if result.PreviousChannel != 3 || result.CommandSent {
+		t.Fatalf("SetChannelContext() result = %+v, want previous channel 3 and no command sent", result)
+	}
+	if len(mode.writes) != 0 {
+		t.Fatalf("writes after pre-write cancellation = %v, want none", mode.writes)
+	}
+	if snapshot := station.Snapshot(); device.disconnects != 0 || !snapshot.Connected {
+		t.Fatalf("pre-write cancellation changed the healthy connection: disconnects=%d snapshot=%+v", device.disconnects, snapshot)
+	}
+}
+
 func TestSetChannelAcceptsConfirmedReadbackAfterWriteError(t *testing.T) {
 	mode := &fakeCharacteristic{
 		value:                []byte{0x03},

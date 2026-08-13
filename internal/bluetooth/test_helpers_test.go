@@ -122,6 +122,7 @@ type fakeCharacteristic struct {
 	writeWithoutResponseAttempts int
 	writes                       [][]byte
 	writeErrors                  []error
+	onRead                       func()
 	onWrite                      func([]byte)
 }
 type blockingContextCharacteristic struct {
@@ -159,6 +160,7 @@ type trackingConnectedDevice struct {
 	disconnected  bool
 	disconnectErr error
 	disconnects   int
+	onConnected   func()
 }
 type staleTrackingConnectedDevice struct {
 	trackingConnectedDevice
@@ -243,7 +245,12 @@ func TestCompletedPendingCleanupWarningIsCleared(t *testing.T) {
 		t.Fatal("completed pending cleanup warning retained the stale device")
 	}
 }
-func (*trackingConnectedDevice) Connected() (bool, error) { return true, nil }
+func (device *trackingConnectedDevice) Connected() (bool, error) {
+	if device.onConnected != nil {
+		device.onConnected()
+	}
+	return true, nil
+}
 func (*trackingConnectedDevice) DiscoverServices([]tinybluetooth.UUID) ([]tinybluetooth.DeviceService, error) {
 	return nil, errors.New("fake discovery is not configured")
 }
@@ -260,9 +267,17 @@ func (f *fakeCharacteristic) Read(destination []byte) (int, error) {
 	if f.readIndex < len(f.readValues) {
 		value := f.readValues[f.readIndex]
 		f.readIndex++
-		return copy(destination, value), nil
+		n := copy(destination, value)
+		if f.onRead != nil {
+			f.onRead()
+		}
+		return n, nil
 	}
-	return copy(destination, f.value), nil
+	n := copy(destination, f.value)
+	if f.onRead != nil {
+		f.onRead()
+	}
+	return n, nil
 }
 func (f *fakeCharacteristic) Write(value []byte) (int, error) {
 	f.writeWithResponseAttempts++

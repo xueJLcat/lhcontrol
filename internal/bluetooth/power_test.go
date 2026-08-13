@@ -76,6 +76,25 @@ func TestSetPowerStateContextDoesNotRearmBootStateWhenCancelledWaitingForStation
 	}
 }
 
+func TestSetPowerStateContextDoesNotDisconnectWhenCancelledBeforeWrite(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	device := &trackingConnectedDevice{onConnected: cancel}
+	power := &fakeCharacteristic{value: []byte{0x00}, powerSemantics: true}
+	station := connectedFakeStation(power, nil, nil, Capabilities{PowerRead: true, PowerWrite: true})
+	station.device = device
+
+	result, err := SetPowerStateContext(ctx, station, PowerStateOn)
+	if !errors.Is(err, context.Canceled) || result != (PowerControlResult{}) {
+		t.Fatalf("SetPowerStateContext() = %+v, %v; want zero result and context.Canceled", result, err)
+	}
+	if len(power.writes) != 0 {
+		t.Fatalf("writes after pre-write cancellation = %v, want none", power.writes)
+	}
+	if snapshot := station.Snapshot(); device.disconnects != 0 || !snapshot.Connected {
+		t.Fatalf("pre-write cancellation changed the healthy connection: disconnects=%d snapshot=%+v", device.disconnects, snapshot)
+	}
+}
+
 func TestSetPowerStateConfirmsCompatibilityFirmwareAfterFreshFallbackWindow(t *testing.T) {
 	// A new command must get a fresh transition window even when this connection
 	// previously completed the compatibility fallback. Persistent boot-like raw
@@ -405,6 +424,29 @@ func TestWriteCharacteristicPreservesDefinitelyNotSentClassification(t *testing.
 		t.Fatalf("writeCharacteristicValueInternal() error = %v, want definitely-not-sent classification", err)
 	}
 }
+
+func TestDefinitelyUnsentContextErrorHonorsTransportClassification(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	for name, test := range map[string]struct {
+		err  error
+		want bool
+	}{
+		"bare cancellation":       {err: context.Canceled, want: true},
+		"wrapped cancellation":    {err: transportError("write characteristic", context.Canceled), want: true},
+		"explicitly not sent":     {err: errors.Join(context.Canceled, &classifiedWriteError{possiblySent: false}), want: true},
+		"possibly sent":           {err: errors.Join(context.Canceled, &classifiedWriteError{possiblySent: true}), want: false},
+		"unrelated write failure": {err: errors.New("write failed"), want: false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := isDefinitelyUnsentContextError(ctx, test.err); got != test.want {
+				t.Fatalf("isDefinitelyUnsentContextError() = %v, want %v for %v", got, test.want, test.err)
+			}
+		})
+	}
+}
+
 func TestPowerConfirmationReadUnsupportedRetainsConnection(t *testing.T) {
 	device := &trackingConnectedDevice{}
 	power := &fakeCharacteristic{
@@ -563,6 +605,24 @@ func TestIdentifyWritesOne(t *testing.T) {
 	}
 	if station.LastError != "" {
 		t.Fatalf("successful identify retained stale error %q", station.LastError)
+	}
+}
+func TestIdentifyContextDoesNotDisconnectWhenCancelledBeforeWrite(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	device := &trackingConnectedDevice{onConnected: cancel}
+	identify := &fakeCharacteristic{}
+	station := connectedFakeStation(&fakeCharacteristic{}, nil, identify, Capabilities{Identify: true})
+	station.device = device
+
+	err := IdentifyContext(ctx, station)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("IdentifyContext() error = %v, want context.Canceled", err)
+	}
+	if len(identify.writes) != 0 {
+		t.Fatalf("writes after pre-write cancellation = %v, want none", identify.writes)
+	}
+	if snapshot := station.Snapshot(); device.disconnects != 0 || !snapshot.Connected {
+		t.Fatalf("pre-write cancellation changed the healthy connection: disconnects=%d snapshot=%+v", device.disconnects, snapshot)
 	}
 }
 func TestIdentifySuccessPreservesUnresolvedPowerError(t *testing.T) {

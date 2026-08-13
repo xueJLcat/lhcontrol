@@ -28,6 +28,9 @@ func IdentifyContext(ctx context.Context, station *BaseStation) error {
 		} else if !station.Capabilities.Identify || station.identifyCharacteristic == nil {
 			return unsupportedCapability("identify", nil)
 		} else if err := writeCharacteristicValueInternal(ctx, station.identifyCharacteristic, 0x01); err != nil {
+			if isDefinitelyUnsentContextError(ctx, err) {
+				return ctx.Err()
+			}
 			if IsCapabilityUnsupported(err) {
 				station.Capabilities.Identify = false
 				station.setOperationErrorInternal(err)
@@ -118,6 +121,9 @@ func SetChannelContext(ctx context.Context, station *BaseStation, channel int) (
 		return result, nil
 	}
 	if writeErr := writeCharacteristicValueInternal(ctx, station.modeCharacteristic, byte(channel)); writeErr != nil {
+		if isDefinitelyUnsentContextError(ctx, writeErr) {
+			return result, ctx.Err()
+		}
 		if IsCapabilityUnsupported(writeErr) {
 			station.Capabilities.ChannelWrite = false
 			station.setOperationErrorInternal(writeErr)

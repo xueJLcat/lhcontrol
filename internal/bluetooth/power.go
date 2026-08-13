@@ -215,6 +215,25 @@ func isDefiniteWriteRejection(err error) bool {
 	var protocolErr bluetooth.AttributeProtocolError
 	return errors.As(err, &protocolErr)
 }
+
+// isDefinitelyUnsentContextError distinguishes cancellation at the write
+// boundary from cancellation after transport submission. The Windows
+// transport marks every post-submission failure as possibly sent (and may
+// explicitly mark pre-submission failures as not sent), so an unmarked or
+// definitely-not-sent context error is safe to abort without reconnecting or
+// retrying the command.
+func isDefinitelyUnsentContextError(ctx context.Context, err error) bool {
+	if ctx == nil || err == nil {
+		return false
+	}
+	contextErr := ctx.Err()
+	if contextErr == nil || !errors.Is(err, contextErr) {
+		return false
+	}
+	possiblySent, classified := possiblySentClassification(err)
+	return !classified || !possiblySent
+}
+
 func writePowerValueInternal(ctx context.Context, station *BaseStation, value byte) error {
 	if station.characteristic == nil {
 		return fmt.Errorf("power characteristic is unavailable")
@@ -464,6 +483,13 @@ func SetPowerStateContext(ctx context.Context, station *BaseStation, target Powe
 		}
 		if err == nil {
 			break
+		}
+		// A cancelled first write never reached the transport. Preserve the
+		// healthy cached connection and do not enter the retry path. Once a
+		// sleep prepare write succeeds, however, the paired sequence has begun
+		// and the final-write outcome must still be handled as command state.
+		if !sleepFinalAttempted && isDefinitelyUnsentContextError(ctx, err) {
+			return PowerControlResult{}, ctx.Err()
 		}
 		if IsPossiblySent(err) {
 			ambiguousWrite = err
