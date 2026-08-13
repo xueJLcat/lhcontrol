@@ -61,7 +61,7 @@ describe('FleetState channel memory', () => {
 });
 
 describe('FleetState channel conflict risk', () => {
-  it('treats a display-fresh but operationally stale peer channel as unknown', () => {
+  it('treats a display-fresh but operationally stale peer channel as unknown rather than occupied', () => {
     const fleet = new FleetState();
     fleet.replace([
       createStation({ address: 'AA', channel: 3 }),
@@ -69,6 +69,7 @@ describe('FleetState channel conflict risk', () => {
     ]);
 
     expect(fleet.hasUnknownVisibleChannelExcluding('AA')).toBe(true);
+    expect(fleet.occupiedChannelsExcluding('AA').has(4)).toBe(false);
   });
 
   it('expires operation freshness between slow backend polls without aging the display', async () => {

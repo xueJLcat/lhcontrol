@@ -473,7 +473,7 @@ describe('App asynchronous operations', () => {
     expect(screen.queryByText('CH 03')).not.toBeInTheDocument();
   });
 
-  it('offers conflict-risk confirmation when a peer channel is display-fresh but unsafe for writes', async () => {
+  it('allows confirmed reuse when a peer channel is display-fresh but unsafe for writes', async () => {
     const selected = createStation({ address: 'AA', channel: 3 });
     const stalePeer = createStation({
       name: 'LHB-PEER',
@@ -483,12 +483,12 @@ describe('App asynchronous operations', () => {
       channelFresh: true,
       channelOperationallyFresh: false
     });
-    const updated = createStation({ ...selected, channel: 5, channelOperationallyFresh: true });
+    const updated = createStation({ ...selected, channel: 4, channelOperationallyFresh: true });
     api.ScanAndFetchStations.mockResolvedValue([selected, stalePeer]);
     api.SetStationChannel.mockResolvedValue({
       address: selected.address,
       previousChannel: 3,
-      channel: 5,
+      channel: 4,
       warnings: [],
       commandSent: true,
       confirmed: true,
@@ -501,7 +501,7 @@ describe('App asynchronous operations', () => {
     await fireEvent.click(screen.getByRole('button', { name: 'Details for LHB-TEST' }));
     await fireEvent.click(await screen.findByRole('button', { name: /Change Channel/ }));
     const dialog = await screen.findByRole('dialog', { name: 'Change channel' });
-    await fireEvent.click(within(dialog).getByRole('button', { name: '5' }));
+    await fireEvent.click(within(dialog).getByRole('button', { name: '4' }));
 
     const confirm = within(dialog).getByRole('button', { name: 'Confirm change' });
     expect(within(dialog).getByRole('checkbox')).toBeInTheDocument();
@@ -509,7 +509,7 @@ describe('App asynchronous operations', () => {
     await fireEvent.click(within(dialog).getByRole('checkbox'));
     await fireEvent.click(confirm);
 
-    await waitFor(() => expect(api.SetStationChannel).toHaveBeenCalledWith('AA', 5, true));
+    await waitFor(() => expect(api.SetStationChannel).toHaveBeenCalledWith('AA', 4, true));
   });
 
   it('clears selection and channel editor state when a status refresh drops the selected station', async () => {

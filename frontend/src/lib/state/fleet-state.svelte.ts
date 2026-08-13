@@ -3,7 +3,7 @@ import type { PowerTarget, StationInfo } from '../types';
 import { ChannelMemory } from '../channel-memory';
 import {
   canSetPower,
-  hasCurrentChannel,
+  hasOperationallyCurrentChannel,
   hasStableConfirmedPowerState,
   sameStationInfo
 } from '../station';
@@ -204,7 +204,9 @@ export class FleetState {
   occupiedChannelsExcluding(selectedAddress: string | null): Map<number, string[]> {
     const occupied = new Map<number, string[]>();
     const candidates = this.stations
-      .filter((station) => hasCurrentChannel(station) && station.address !== selectedAddress)
+      // Only an operation-fresh read can prove occupancy. Older display data
+      // remains visible, but is handled by the explicit unknown-risk flow.
+      .filter((station) => hasOperationallyCurrentChannel(station) && station.address !== selectedAddress)
       .sort((a, b) => a.name.localeCompare(b.name) || a.address.localeCompare(b.address));
     for (const station of candidates) {
       occupied.set(station.channel, [...(occupied.get(station.channel) ?? []), station.name]);
