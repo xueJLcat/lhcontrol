@@ -113,20 +113,48 @@ describe('StationStore projection settings', () => {
       await store.refreshStationProjection(false);
     }
 
-    // Six failures reach the give-up threshold. A passive caller and the
-    // disabled-polling health snapshot must not silently reset that bound.
+    // Six failures reach the give-up threshold. An ordinary passive caller
+    // must not silently reset that bound.
     const pending = (store as unknown as { projectionRefreshPending: boolean }).projectionRefreshPending;
     expect(pending).toBe(false);
     expect(backend.GetCurrentStationInfo).toHaveBeenCalledTimes(6);
     await store.refreshStationProjection(false);
     expect(backend.GetCurrentStationInfo).toHaveBeenCalledTimes(6);
-    (store as unknown as { statusPollingEnabled: boolean }).statusPollingEnabled = false;
-    await store.apiStatus.refresh();
-    await Promise.resolve();
-    expect(backend.GetCurrentStationInfo).toHaveBeenCalledTimes(6);
 
     await store.refreshStationProjection();
     expect(backend.GetCurrentStationInfo).toHaveBeenCalledTimes(7);
+    consoleError.mockRestore();
+  });
+
+  it('half-opens an exhausted projection refresh after a successful health poll', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    backend.GetCurrentStationInfo.mockRejectedValue(new Error('read failed'));
+    store = new StationStore(createUi());
+    store.startupPending = false;
+    store.stations = [createStation({ name: 'LHB-STALE', powerFresh: true })];
+    (store as unknown as { statusPollingEnabled: boolean }).statusPollingEnabled = false;
+
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      await store.refreshStationProjection(false);
+    }
+    expect(backend.GetCurrentStationInfo).toHaveBeenCalledTimes(6);
+
+    // A healthy API snapshot permits one probe, but a failed probe keeps the
+    // circuit open instead of restarting the rapid exponential-retry loop.
+    await store.apiStatus.refresh();
+    await vi.waitFor(() => expect(backend.GetCurrentStationInfo).toHaveBeenCalledTimes(7));
+    await vi.waitFor(() => expect(consoleError).toHaveBeenCalledTimes(7));
+    expect((store as unknown as { projectionRefreshPending: boolean }).projectionRefreshPending).toBe(false);
+    expect((store as unknown as { projectionRefreshTimer: unknown }).projectionRefreshTimer).toBeNull();
+
+    backend.GetCurrentStationInfo.mockResolvedValue([
+      createStation({ name: 'LHB-RECOVERED', powerFresh: false, statusFresh: false })
+    ]);
+    await store.apiStatus.refresh();
+
+    await vi.waitFor(() => expect(backend.GetCurrentStationInfo).toHaveBeenCalledTimes(8));
+    expect(store.stations[0].name).toBe('LHB-RECOVERED');
+    expect(store.stations[0].powerFresh).toBe(false);
     consoleError.mockRestore();
   });
 

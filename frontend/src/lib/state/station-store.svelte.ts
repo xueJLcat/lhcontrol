@@ -32,9 +32,10 @@ const MIN_STATUS_POLL_INTERVAL_SECONDS = 5;
 const MAX_STATUS_POLL_INTERVAL_SECONDS = 300;
 const PROJECTION_REFRESH_RETRY_MS = 250;
 const PROJECTION_REFRESH_MAX_RETRY_MS = 5000;
-// Bound the failure-retry loop so a persistently rejecting backend read cannot
-// be hammered every few seconds for the whole session. An explicit settings
-// save (or polling re-enable) resets the backoff and tries again.
+// Bound the exponential failure loop so a persistently rejecting backend read
+// cannot keep a fast retry timer alive for the whole session. An explicit
+// settings save resets the backoff; successful API-health polls only allow one
+// half-open probe until the cached projection can be read again.
 const PROJECTION_REFRESH_GIVE_UP_AFTER = 6;
 
 // Overlay controls owned by App. The store calls back into them whenever an
@@ -168,7 +169,7 @@ export class StationStore {
       // Disabling automatic station polling must not freeze time-derived
       // freshness flags forever. Re-project the cached snapshots alongside
       // the lightweight API-health poll without performing any Bluetooth I/O.
-      if (!this.statusPollingEnabled) void this.refreshStationProjection(false);
+      if (!this.statusPollingEnabled) void this.refreshStationProjectionAfterHealthCheck();
     },
     commitFailure: (error) => {
       this.apiRunning = false;
@@ -448,13 +449,28 @@ export class StationStore {
   }
 
   async refreshStationProjection(resetFailureBackoff = true) {
+    return this.runProjectionRefresh(resetFailureBackoff, false);
+  }
+
+  private refreshStationProjectionAfterHealthCheck() {
+    return this.runProjectionRefresh(false, true);
+  }
+
+  private async runProjectionRefresh(resetFailureBackoff: boolean, allowExhaustedProbe: boolean) {
     if (this.disposed) return;
     if (resetFailureBackoff) {
       this.projectionRefreshFailures = 0;
       if (this.projectionRefreshTimer !== null) clearTimeout(this.projectionRefreshTimer);
       this.projectionRefreshTimer = null;
     }
-    if (!resetFailureBackoff && this.projectionRefreshFailures >= PROJECTION_REFRESH_GIVE_UP_AFTER) return;
+    if (!resetFailureBackoff && this.projectionRefreshFailures >= PROJECTION_REFRESH_GIVE_UP_AFTER) {
+      if (!allowExhaustedProbe) return;
+      // A healthy API snapshot is the circuit breaker's half-open signal. Do
+      // not queue that probe behind an authoritative operation or another
+      // projection request: the next health tick can try again, while this
+      // keeps the exhausted state to at most one backend read per health poll.
+      if (this.projectionRefreshInFlight || this.projectionRefreshBlocked()) return;
+    }
     // A setting can be saved while a scan, command, or external operation is
     // active. Coalesce those requests and retry once the authoritative work
     // settles instead of dropping the projection update permanently.
