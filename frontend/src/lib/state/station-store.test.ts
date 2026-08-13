@@ -734,7 +734,7 @@ describe('StationStore auto sleep events', () => {
     await vi.waitFor(() => expect(runtime.handlers.has('auto-sleep')).toBe(true));
 
     // The auto-sleep event stream arms the busy flag.
-    runtime.handlers.get('auto-sleep')?.({ phase: 'started' });
+    runtime.handlers.get('auto-sleep')?.({ id: 1, phase: 'started' });
     expect(store.autoSleepRunning).toBe(true);
 
     // Simulate a lost terminal event: only the authoritative health snapshot
@@ -745,6 +745,16 @@ describe('StationStore auto sleep events', () => {
       activeOperations: [], operationRevision: 9
     });
     await store.apiStatus.refresh();
+
+    expect(store.autoSleepRunning).toBe(false);
+
+    // A later lifecycle must also settle immediately. If reconciliation only
+    // clears the visible flag, the lost action ID remains in the coordinator
+    // and re-locks the UI when this newer action completes.
+    runtime.handlers.get('auto-sleep')?.({ id: 2, phase: 'started' });
+    runtime.handlers.get('auto-sleep')?.({
+      id: 2, phase: 'completed', success: 1, updateId: 10, stations: []
+    });
 
     expect(store.autoSleepRunning).toBe(false);
   });

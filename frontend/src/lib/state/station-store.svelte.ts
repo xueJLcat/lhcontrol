@@ -518,9 +518,8 @@ export class StationStore {
     // tracks the running auto-sleep action as a kind="auto-sleep" operation,
     // so its absence means the action settled and the flag must clear. Only
     // ever clear here; the event stream still owns arming the flag.
-    if (this.autoSleepRunning &&
-      !operations.some((operation) => operation.kind === 'auto-sleep')) {
-      this.autoSleepRunning = false;
+    if (!operations.some((operation) => operation.kind === 'auto-sleep')) {
+      this.autoSleepEvents.reconcileIdle();
     }
     // A deferred startup scan can run once this snapshot shows the locks clear.
     this.maybeRunDeferredStartupScan();

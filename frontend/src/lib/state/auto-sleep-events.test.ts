@@ -153,4 +153,25 @@ describe('AutoSleepEventCoordinator', () => {
 
     expect(dependencies.setRunning).not.toHaveBeenCalledWith(false);
   });
+
+  it('forgets tracked actions when the authoritative operation snapshot is idle', () => {
+    const dependencies = {
+      isDisposed: vi.fn(() => false),
+      setRunning: vi.fn(),
+      beginStatusOperation: vi.fn(),
+      setStatusMessage: vi.fn(),
+      applyStations: vi.fn()
+    };
+    const coordinator = new AutoSleepEventCoordinator(dependencies);
+
+    coordinator.handle({ id: 1, phase: 'started' });
+    coordinator.reconcileIdle();
+    expect(dependencies.setRunning).toHaveBeenLastCalledWith(false);
+
+    vi.clearAllMocks();
+    coordinator.handle({ id: 2, phase: 'started' });
+    coordinator.handle({ id: 2, phase: 'completed', success: 1 });
+
+    expect(dependencies.setRunning).toHaveBeenLastCalledWith(false);
+  });
 });

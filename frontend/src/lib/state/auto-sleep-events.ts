@@ -31,6 +31,16 @@ export class AutoSleepEventCoordinator {
 
   constructor(private dependencies: AutoSleepEventDependencies) {}
 
+  // The operation-health snapshot is authoritative when it reports that no
+  // auto-sleep action is active. Clear the tracked IDs as well as the visible
+  // flag so a lost terminal event cannot poison every later lifecycle. Keep
+  // the latest lifecycle revision: delayed events still need to be rejected.
+  reconcileIdle() {
+    if (this.dependencies.isDisposed()) return;
+    this.activeActionIds.clear();
+    this.dependencies.setRunning(false);
+  }
+
   handle(event: AutoSleepEvent) {
     if (this.dependencies.isDisposed() || !event) return;
     if (event.phase !== 'started' && Array.isArray(event.stations)) {
