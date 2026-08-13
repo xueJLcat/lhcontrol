@@ -12,7 +12,7 @@ import type { PowerFeedback, PowerTarget, StationInfo } from '../types';
 import {
   canSetPower,
   channelChangeBlockedReason,
-  hasCurrentChannel,
+  hasOperationallyCurrentChannel,
   powerTargetLabel,
   stateLabel
 } from '../station';
@@ -420,7 +420,7 @@ export class StationActionController {
       return;
     }
     if (this.host.stationBusy(station.address) || this.host.gattLockedFor(station.address) ||
-      (hasCurrentChannel(station) && station.channel === targetChannel)) return;
+      (hasOperationallyCurrentChannel(station) && station.channel === targetChannel)) return;
     const address = station.address;
     // Capture the display name: the station can drop out of the list while
     // the write is in flight, and the post-await status messages must not

@@ -3,7 +3,7 @@
   import { scale } from 'svelte/transition';
   import { Eye, LoaderCircle, X } from 'lucide-svelte';
   import type { StationInfo } from '../types';
-  import { channelChangeBlockedReason } from '../station';
+  import { channelChangeBlockedReason, hasOperationallyCurrentChannel } from '../station';
   import { focusTrap } from '../actions';
   import { dur } from '../motion';
   import { t } from '../i18n.svelte';
@@ -59,8 +59,7 @@
     }
   });
 
-  const unchanged = $derived(station.isPresent && station.scanFresh && station.channelOperationallyFresh &&
-    station.channel > 0 && station.channel === targetChannel);
+  const unchanged = $derived(hasOperationallyCurrentChannel(station) && station.channel === targetChannel);
   const blockedReason = $derived(channelChangeBlockedReason(station));
   const allChannelsOccupied = $derived(occupiedChannels.size >= 16);
   const saveDisabled = $derived(Boolean(blockedReason) || unchanged || occupiedChannels.has(targetChannel) ||

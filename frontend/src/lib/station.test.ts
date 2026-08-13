@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { canSetPower, hasStableConfirmedPowerState, sameStationInfo, stateClass } from './station';
+import {
+  canSetPower,
+  hasCurrentChannel,
+  hasOperationallyCurrentChannel,
+  hasStableConfirmedPowerState,
+  sameStationInfo,
+  stateClass
+} from './station';
 import type { StationInfo } from './types';
 import { createOnStation } from '../test/fixtures';
 
@@ -34,6 +41,14 @@ describe('stateClass', () => {
 
   it('ignores the backend label so odd casing cannot break selectors', () => {
     expect(stateClass(station({ powerState: 1, powerStateName: 'ON now' }))).toBe('on');
+  });
+});
+
+describe('channel freshness', () => {
+  it('keeps display and operation freshness as separate decisions', () => {
+    const displayOnly = station({ channelFresh: true, channelOperationallyFresh: false });
+    expect(hasCurrentChannel(displayOnly)).toBe(true);
+    expect(hasOperationallyCurrentChannel(displayOnly)).toBe(false);
   });
 });
 

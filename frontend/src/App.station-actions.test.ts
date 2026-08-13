@@ -302,6 +302,35 @@ describe('App asynchronous operations', () => {
     expect(warning).toHaveTextContent('Readback: last-known 3');
   });
 
+  it('submits a display-fresh channel again when its operational freshness has expired', async () => {
+    const staleForOperations = createStation({
+      channelFresh: true,
+      channelOperationallyFresh: false,
+      channelOperationalFreshUntil: '2026-07-29T08:00:00Z'
+    });
+    api.ScanAndFetchStations.mockResolvedValue([staleForOperations]);
+    api.SetStationChannel.mockResolvedValue({
+      address: staleForOperations.address,
+      previousChannel: 3,
+      channel: 3,
+      warnings: [],
+      commandSent: false,
+      confirmed: true,
+      confirmationError: '',
+      station: staleForOperations
+    });
+
+    render(App);
+    await screen.findByText('LHB-TEST');
+    await fireEvent.click(screen.getByRole('button', { name: 'Details for LHB-TEST' }));
+    await fireEvent.click(await screen.findByRole('button', { name: /Change Channel/ }));
+    const confirm = screen.getByRole('button', { name: 'Confirm change' });
+    expect(confirm).toBeEnabled();
+    await fireEvent.click(confirm);
+
+    await waitFor(() => expect(api.SetStationChannel).toHaveBeenCalledWith('11:22:33:44:55:66', 3, false));
+  });
+
   it('uses the authoritative channel result without another station-list read', async () => {
     const updated = createStation({
       channel: 4,
