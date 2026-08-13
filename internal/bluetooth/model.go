@@ -238,6 +238,10 @@ type BaseStationSnapshot struct {
 	LastPowerReadAt   time.Time
 	LastChannelReadAt time.Time
 	MetadataReadAt    time.Time
+	// MetadataReadError exposes the most recent metadata read failure so
+	// operation layers can reconcile background metadata recovery after a
+	// reconnect that re-read device information as a side effect.
+	MetadataReadError error
 	LastError         string
 	MissedScans       int
 	Connected         bool
@@ -263,6 +267,7 @@ func (bs *BaseStation) Snapshot() BaseStationSnapshot {
 		LastPowerReadAt:   bs.LastPowerReadAt,
 		LastChannelReadAt: bs.LastChannelReadAt,
 		MetadataReadAt:    bs.MetadataReadAt,
+		MetadataReadError: bs.metadataReadError,
 		LastError:         bs.LastError,
 		MissedScans:       bs.MissedScans,
 		Connected:         bs.isConnected && bs.device != nil,

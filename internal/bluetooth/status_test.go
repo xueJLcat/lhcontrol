@@ -728,6 +728,75 @@ func TestPersistentBootRawFallbackIsStickyAndCompatibilityVerified(t *testing.T)
 		t.Fatalf("sticky compatibility fallback must count as verified for operation decisions: %+v", station.Snapshot())
 	}
 }
+
+// TestDisconnectResetsBootFallbackWindow guards the connection-scoped boot
+// observation window: a disconnect can outlast the fallback window, and the
+// first boot-like read after reconnecting must start a fresh window instead
+// of fast-forwarding to a trusted On.
+func TestDisconnectResetsBootFallbackWindow(t *testing.T) {
+	const fallback = 10 * time.Second
+	setTestBootFallback(t, fallback)
+	power := &fakeCharacteristic{value: []byte{0x01}}
+	station := connectedFakeStation(power, nil, nil, Capabilities{PowerRead: true})
+	if err := ReadPowerState(station); err != nil {
+		t.Fatalf("initial booting read error = %v", err)
+	}
+	if station.PowerState != PowerStateBooting || station.bootingSince.IsZero() {
+		t.Fatalf("state after first read = %v bootingSince=%v, want Booting with an open window", station.PowerState, station.bootingSince)
+	}
+	station.mutex.Lock()
+	err := disconnectInternal(station)
+	station.mutex.Unlock()
+	if err != nil {
+		t.Fatalf("disconnectInternal() error = %v", err)
+	}
+	if station.PowerState != PowerStateBooting {
+		t.Fatalf("disconnect must preserve the cached state for offline display, got %v", station.PowerState)
+	}
+	if !station.bootingSince.IsZero() || station.bootRawTrustedOn {
+		t.Fatalf("disconnect leaked the boot window: bootingSince=%v trusted=%v", station.bootingSince, station.bootRawTrustedOn)
+	}
+	// Simulate the reconnect: the next read happens long after the old window
+	// would have elapsed, yet it must expose Booting and open a fresh window.
+	station.mutex.Lock()
+	station.device = fakeConnectedDevice{}
+	station.characteristic = power
+	station.isConnected = true
+	station.mutex.Unlock()
+	if err := ReadPowerState(station); err != nil {
+		t.Fatalf("post-reconnect read error = %v", err)
+	}
+	if station.PowerState != PowerStateBooting || station.bootRawTrustedOn {
+		t.Fatalf("first post-reconnect read = %v trusted=%v, want Booting without trust", station.PowerState, station.bootRawTrustedOn)
+	}
+	if station.bootingSince.IsZero() {
+		t.Fatal("post-reconnect booting read did not open a fresh fallback window")
+	}
+}
+
+// TestPowerWriteRearmsBootFallbackWindow verifies that a power command resets
+// the boot observation window: a stale window must not fast-forward the first
+// readback after the write to a confirmed On, because the command itself can
+// reboot the station.
+func TestPowerWriteRearmsBootFallbackWindow(t *testing.T) {
+	const fallback = 10 * time.Second
+	setTestBootFallback(t, fallback)
+	power := &fakeCharacteristic{value: []byte{0x01}}
+	station := connectedFakeStation(power, nil, nil, Capabilities{PowerRead: true, PowerWrite: true})
+	station.PowerState = PowerStateBooting
+	station.bootingSince = time.Now().Add(-fallback)
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	result, err := SetPowerStateContext(ctx, station, PowerStateOn)
+	var confirmationErr *PowerConfirmationError
+	if !errors.As(err, &confirmationErr) || result.Confirmed {
+		t.Fatalf("SetPowerState() result=%+v error=%v, want an unconfirmed boot transition", result, err)
+	}
+	if station.PowerState != PowerStateBooting || station.bootRawTrustedOn {
+		t.Fatalf("state after re-armed write = %v trusted=%v, want Booting without trust", station.PowerState, station.bootRawTrustedOn)
+	}
+}
+
 func TestPowerConfirmationKeepsPollingDuringGenuineBoot(t *testing.T) {
 	power := &fakeCharacteristic{value: []byte{0x01}}
 	station := connectedFakeStation(power, nil, nil, Capabilities{PowerRead: true, PowerWrite: true})

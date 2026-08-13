@@ -39,7 +39,7 @@ func (m *Manager) SetStationChannel(
 	operationContext, cancelOperation := m.newStationOperationContext(m.lifecycleContext)
 	defer cancelOperation()
 	if err := m.beginForegroundStationOperationContext(operationContext, canonicalAddress); err != nil {
-		return result, stationOperationContextError(err)
+		return result, m.stationOperationContextError(err)
 	}
 	defer m.endStationOperation(canonicalAddress)
 	targetSnapshot := stationPtr.Snapshot()
@@ -62,7 +62,7 @@ func (m *Manager) SetStationChannel(
 		return result, err
 	}
 	if err := operationContext.Err(); err != nil {
-		return result, stationOperationContextError(err)
+		return result, m.stationOperationContextError(err)
 	}
 	if !m.channelOperationMutex.TryLock() {
 		return result, ErrOperationInProgress
@@ -152,12 +152,22 @@ func (m *Manager) SetStationChannel(
 			return result, fmt.Errorf("%w: one or more visible stations have an unknown channel", ErrScanRequired)
 		}
 	}
+	// A channel change connects and runs GATT discovery, which re-reads device
+	// metadata as a side effect. Reconcile the background metadata retry with
+	// that outcome so a satisfied read clears the pending retry and a newly
+	// failed read is tracked, matching the scan and capability-refresh paths.
+	metadataReadBefore := stationPtr.Snapshot().MetadataReadAt
 	var writeResult bluetooth.ChannelWriteResult
 	err = runSafely("channel operation", func() error {
 		var channelErr error
 		writeResult, channelErr = m.bluetoothOps.setChannel(operationContext, stationPtr, channel)
 		return channelErr
 	})
+	metadataAfter := stationPtr.Snapshot()
+	if metadataAfter.MetadataReadAt.After(metadataReadBefore) ||
+		(metadataAfter.MetadataReadAt.IsZero() && !metadataReadBefore.IsZero()) {
+		m.recordMetadataReadResult(canonicalAddress, metadataAfter.MetadataReadError)
+	}
 	result.PreviousChannel = writeResult.PreviousChannel
 	result.Channel = writeResult.Channel
 	result.CommandSent = writeResult.CommandSent

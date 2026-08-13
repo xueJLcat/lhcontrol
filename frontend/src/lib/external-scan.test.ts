@@ -130,6 +130,28 @@ describe('ExternalScanCoordinator', () => {
     expect(host.notifyExternalScanFailure).toHaveBeenCalledWith('External scan failed: adapter lost');
   });
 
+  it('keeps a failed terminal recoverable when its status commit is rejected mid-read', async () => {
+    const { host } = createHost();
+    const coordinator = new ExternalScanCoordinator(host);
+    coordinator.handleStarted({ id: 5 });
+    // Another status owner claims the epoch while the failure reads are in
+    // flight, so the terminal status commit must be rejected.
+    (host.getCurrentStationInfo as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      host.beginStatusOperation();
+      return [];
+    });
+    (host.getScanStatus as ReturnType<typeof vi.fn>).mockResolvedValue({
+      state: 'failed', found: 0, error: 'boom', warnings: []
+    });
+
+    await coordinator.handleFailed({ id: 5, error: 'boom' });
+
+    // The commit was rejected before clearing the recovery epochs, so the
+    // periodic check can still retry instead of dropping the failure forever.
+    expect(coordinator.hasPendingRecovery()).toBe(true);
+    expect(host.notifyExternalScanFailure).not.toHaveBeenCalled();
+  });
+
   it('keeps adopting while the backend scan is still running', async () => {
     const { host, state } = createHost();
     mockIsScanning(host, true);

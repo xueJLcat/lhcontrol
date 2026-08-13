@@ -154,10 +154,14 @@ export class StationActionController {
         target: state,
         readAt: actual?.lastPowerReadAt
       });
+      const failureMessage = `${t('Power change failed for {name}', { name: station.name })}: ${errorText}`;
       if (this.host.gates.canCommitStatus(statusOperation)) {
-        this.host.statusMessage = `${t('Power change failed for {name}', { name: station.name })}: ${errorText}`;
-        pushToast(this.host.statusMessage);
+        this.host.statusMessage = failureMessage;
       }
+      // The failure toast must not be gated by status-line ownership: a newer
+      // owner (for example an auto-sleep event) can take the footer while this
+      // operation was in flight, yet the user still needs to see the failure.
+      pushToast(failureMessage);
     } finally {
       if (this.host.gates.canCleanupStationOperation(station.address, operationRevision)) {
         const nextTargets = { ...this.host.powerTargetByAddress };
@@ -242,10 +246,14 @@ export class StationActionController {
       if (!this.host.gates.canCommitOperation(operationEpoch)) return;
       await this.fetchLatestList();
       if (!this.host.gates.canCommitOperation(operationEpoch)) return;
+      const failureMessage = `${t('Bulk {target} operation partially failed', { target: targetLabel })}: ${String(error)}`;
       if (this.host.gates.canCommitStatus(statusOperation)) {
-        this.host.statusMessage = `${t('Bulk {target} operation partially failed', { target: targetLabel })}: ${String(error)}`;
-        pushToast(this.host.statusMessage);
+        this.host.statusMessage = failureMessage;
       }
+      // As with single-station failures, keep the toast independent of
+      // status-line ownership so a concurrent auto-sleep or HTTP event cannot
+      // swallow the only notification of the failure.
+      pushToast(failureMessage);
     } finally {
       if (!this.host.disposed) {
         if (this.host.globalOperation === 'bulk-power') this.host.globalOperation = 'idle';

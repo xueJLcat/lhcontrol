@@ -103,6 +103,21 @@ describe('StationStore projection settings', () => {
     expect(store.stations[0].powerFresh).toBe(false);
   });
 
+  it('stops self-retrying a persistently failing projection refresh', async () => {
+    backend.GetCurrentStationInfo.mockRejectedValue(new Error('read failed'));
+    store = new StationStore(createUi());
+    store.startupPending = false;
+
+    for (let attempt = 0; attempt < 7; attempt += 1) {
+      await store.refreshStationProjection(false);
+    }
+
+    // Six failures reach the give-up threshold; the pending flag must clear so
+    // the backoff loop stops scheduling further backend reads on its own.
+    const pending = (store as unknown as { projectionRefreshPending: boolean }).projectionRefreshPending;
+    expect(pending).toBe(false);
+  });
+
   it('defers a projection refresh until an authoritative operation settles', async () => {
     vi.useFakeTimers();
     store = new StationStore(createUi());
@@ -700,6 +715,26 @@ describe('StationStore auto sleep events', () => {
     await (store as unknown as { periodicStatusCheck(): Promise<void> }).periodicStatusCheck();
 
     expect(backend.CheckAllStationStatuses).not.toHaveBeenCalled();
+  });
+
+  it('reconciles a stuck auto-sleep busy flag against the health snapshot', async () => {
+    const { store } = mountStore();
+    await vi.waitFor(() => expect(runtime.handlers.has('auto-sleep')).toBe(true));
+
+    // The auto-sleep event stream arms the busy flag.
+    runtime.handlers.get('auto-sleep')?.({ phase: 'started' });
+    expect(store.autoSleepRunning).toBe(true);
+
+    // Simulate a lost terminal event: only the authoritative health snapshot
+    // still knows the action settled. Reconciling against a snapshot with no
+    // active auto-sleep operation must clear the flag so the UI unlocks.
+    backend.GetAPIStatus.mockResolvedValue({
+      running: true, address: '127.0.0.1:7575', error: '', warnings: [], configWritable: true,
+      activeOperations: [], operationRevision: 9
+    });
+    await store.apiStatus.refresh();
+
+    expect(store.autoSleepRunning).toBe(false);
   });
 });
 

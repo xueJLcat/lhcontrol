@@ -105,7 +105,13 @@ func (c *Config) Load() error {
 	err = json.Unmarshal(configFile, &loaded)
 	if err != nil {
 		invalidPath := fmt.Sprintf("%s.invalid-%s", configFilePath, time.Now().Format("20060102T150405.000000000"))
-		if renameErr := configFileRenamer(configFilePath, invalidPath); renameErr != nil {
+		renameErr := configFileRenamer(configFilePath, invalidPath)
+		if renameErr != nil && os.IsNotExist(renameErr) {
+			// A concurrent Load already quarantined the invalid file; the goal of
+			// preserving it was achieved, so do not block persistence for it.
+			renameErr = nil
+		}
+		if renameErr != nil {
 			c.mutex.Lock()
 			c.persistenceBlockedErr = fmt.Errorf("invalid config could not be preserved: %w", renameErr)
 			c.lastPersistenceErr = c.persistenceBlockedErr

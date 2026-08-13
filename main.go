@@ -223,7 +223,10 @@ func (writer *rotatingLogFile) reopenLocked() error {
 	if info, statErr := file.Stat(); statErr == nil {
 		writer.size = info.Size()
 	} else {
-		writer.size = 0
+		// An unknown size must not disable the cap: assume the worst case so
+		// the next write re-enters the rotation check instead of letting the
+		// file grow unbounded until the tracked size catches up.
+		writer.size = writer.maxSize
 	}
 	return nil
 }

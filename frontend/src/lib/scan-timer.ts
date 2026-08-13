@@ -13,7 +13,9 @@ export class ScanTimer {
     this.onElapsed(0);
     this.timer = setInterval(() => {
       if (this.startedAt !== null) {
-        this.onElapsed(Math.floor((Date.now() - this.startedAt) / 1000));
+        // Clamp against a backwards wall-clock adjustment so the elapsed
+        // display never goes negative or freezes on a skewed clock.
+        this.onElapsed(Math.max(0, Math.floor((Date.now() - this.startedAt) / 1000)));
       }
     }, 1000);
   }

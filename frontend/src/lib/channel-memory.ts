@@ -60,7 +60,9 @@ export class ChannelMemory {
     let nextExpiry = Number.POSITIVE_INFINITY;
     for (const [address, entry] of [...this.entries]) {
       if (entry.missingSince === null) continue;
-      const remaining = entry.missingSince + this.ttlMs - now;
+      // Clamp the remaining window so a backwards wall-clock adjustment cannot
+      // schedule an expiry timer longer than the retention period itself.
+      const remaining = Math.min(this.ttlMs, Math.max(0, entry.missingSince + this.ttlMs - now));
       if (remaining <= 0) {
         this.entries.delete(address);
       } else if (remaining < nextExpiry) {

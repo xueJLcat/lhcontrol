@@ -111,4 +111,46 @@ describe('AutoSleepEventCoordinator', () => {
     expect(dependencies.setStatusMessage).not.toHaveBeenCalled();
     expect(pushToast).not.toHaveBeenCalled();
   });
+
+  it('treats a cancelled sleep with only skipped stations as a warning', () => {
+    const dependencies = {
+      isDisposed: vi.fn(() => false),
+      setRunning: vi.fn(),
+      beginStatusOperation: vi.fn(),
+      setStatusMessage: vi.fn(),
+      applyStations: vi.fn()
+    };
+    const coordinator = new AutoSleepEventCoordinator(dependencies);
+
+    coordinator.handle({ id: 1, phase: 'started' });
+    vi.clearAllMocks();
+    coordinator.handle({ id: 1, phase: 'cancelled', skipped: 2, updateId: 3, stations: [] });
+
+    expect(pushToast).toHaveBeenCalledWith(
+      'Auto sleep cancelled: 0 confirmed, 0 unconfirmed, 0 failed, 2 skipped.',
+      'warning'
+    );
+  });
+
+  it('does not let an unsequenced terminal event unlock a tracked action', () => {
+    const dependencies = {
+      isDisposed: vi.fn(() => false),
+      setRunning: vi.fn(),
+      beginStatusOperation: vi.fn(),
+      setStatusMessage: vi.fn(),
+      applyStations: vi.fn()
+    };
+    const coordinator = new AutoSleepEventCoordinator(dependencies);
+
+    // A sequenced action starts and is still tracked as active.
+    coordinator.handle({ id: 5, phase: 'started' });
+    expect(dependencies.setRunning).toHaveBeenLastCalledWith(true);
+    vi.clearAllMocks();
+
+    // An unsequenced (legacy) terminal event must not clear the running flag
+    // while the tracked action is still draining.
+    coordinator.handle({ phase: 'completed', success: 1, updateId: 6, stations: [] });
+
+    expect(dependencies.setRunning).not.toHaveBeenCalledWith(false);
+  });
 });

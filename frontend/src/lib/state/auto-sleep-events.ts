@@ -67,7 +67,12 @@ export class AutoSleepEventCoordinator {
       this.latestStatusPhase = event.phase;
     } else {
       // Compatibility with unsequenced events from older backends and tests.
-      this.dependencies.setRunning(event.phase === 'started');
+      // When a sequenced action is already tracked it owns the running flag;
+      // an unsequenced event must neither unlock it prematurely nor re-lock it
+      // after it drained, so only act while no sequenced action is active.
+      if (this.activeActionIds.size === 0) {
+        this.dependencies.setRunning(event.phase === 'started');
+      }
     }
 
     switch (event.phase) {
@@ -126,7 +131,7 @@ export class AutoSleepEventCoordinator {
       : t('no station commands completed');
     const message = t('Auto sleep cancelled: {details}.', { details });
     this.setMessage(message);
-    pushToast(message, success || failed || unconfirmed ? 'warning' : 'info');
+    pushToast(message, success || failed || unconfirmed || skipped ? 'warning' : 'info');
   }
 
   private handleTimedOut(event: AutoSleepEvent) {

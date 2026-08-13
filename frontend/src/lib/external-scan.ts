@@ -140,12 +140,15 @@ export class ExternalScanCoordinator {
     const completedScanStatus = await this.host.getScanStatus().catch(() => null);
     const scanStatus = completedScanStatus && isTerminalScanState(completedScanStatus.state) ? completedScanStatus : null;
     if (this.host.isDisposed() || !this.host.isListRevisionCurrent(revision)) return;
+    if (!this.host.applyStationList(event.stations || [], revision, capturedStationRevisions)) return;
+    if (!this.host.canCommitStatus(statusOperation)) return;
+    // Clear the recovery epochs only once the terminal status is committed.
+    // Clearing earlier would strand the outcome when a newer status owner
+    // rejects this commit, leaving the periodic check nothing to retry.
     if (scanStatus) {
       this.recoveryEpoch = null;
       this.recoveryStatusEpoch = null;
     }
-    if (!this.host.applyStationList(event.stations || [], revision, capturedStationRevisions)) return;
-    if (!this.host.canCommitStatus(statusOperation)) return;
     const found = scanStatus?.found ?? this.host.seenInLatestScanCount();
     this.host.setStatusMessage(formatTerminalScanResult({
       state: 'completed', found, known: this.host.knownStationCount(),
@@ -179,11 +182,14 @@ export class ExternalScanCoordinator {
     const failedScanStatus = await this.host.getScanStatus().catch(() => null);
     const scanStatus = failedScanStatus && isTerminalScanState(failedScanStatus.state) ? failedScanStatus : null;
     if (this.host.isDisposed() || !this.host.isListRevisionCurrent(revision)) return;
+    if (!this.host.canCommitStatus(statusOperation)) return;
+    // Clear the recovery epochs only after the failed terminal status is
+    // committed; a rejected commit must leave them pending so the periodic
+    // check retries instead of silently dropping the failure.
     if (updated && scanStatus) {
       this.recoveryEpoch = null;
       this.recoveryStatusEpoch = null;
     }
-    if (!this.host.canCommitStatus(statusOperation)) return;
     this.host.setStatusMessage(formatTerminalScanResult({
       state: 'failed', error: message, known: this.host.knownStationCount(),
       warnings: scanStatus?.warnings, external: true
@@ -259,6 +265,11 @@ export class ExternalScanCoordinator {
       warnings: scanStatus?.warnings,
       external: true
     }));
+    if (scanStatus?.state === 'failed') {
+      this.host.notifyExternalScanFailure(t('External scan failed: {detail}', {
+        detail: scanStatus?.error || t('unknown error')
+      }));
+    }
   }
 
   async adoptUnknown(): Promise<void> {
@@ -328,6 +339,11 @@ export class ExternalScanCoordinator {
       warnings: scanStatus?.warnings,
       external: true
     }));
+    if (scanStatus?.state === 'failed') {
+      this.host.notifyExternalScanFailure(t('External scan failed: {detail}', {
+        detail: scanStatus?.error || t('unknown error')
+      }));
+    }
   }
 
   // Completes a stop whose StopScan promise settled while this coordinator

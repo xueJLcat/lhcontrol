@@ -122,8 +122,12 @@ export class StationScanController {
     }
   }
 
-  async startScan() {
-    if (this.host.isLoading || this.host.scanLocked) return;
+  // Returns whether a scan actually started. It reports false when a lock
+  // (another scan, a bulk operation, or an external/auto-sleep action) keeps
+  // the scan from starting, so callers such as the startup flow can defer and
+  // retry instead of silently giving up.
+  async startScan(): Promise<boolean> {
+    if (this.host.isLoading || this.host.scanLocked) return false;
     this.host.prepareForScan();
     // A pending stop belongs to the superseded scan. Its StopScan promise
     // can still be settling while the empty fleet lets the user start a new
@@ -139,13 +143,13 @@ export class StationScanController {
     const revision = this.host.listRevisions.next();
     this.host.statusMessage = t('Scanning for base stations...');
     try {
-      if (!this.host.applyStationList(await ScanAndFetchStations(), revision)) return;
+      if (!this.host.applyStationList(await ScanAndFetchStations(), revision)) return true;
       const scanStatus = await GetScanStatus().catch(() => null);
-      if (!this.host.gates.canCommitOperation(operationEpoch) || !this.host.listRevisions.isCurrent(revision) || !this.host.gates.canCommitStatus(statusOperation)) return;
+      if (!this.host.gates.canCommitOperation(operationEpoch) || !this.host.listRevisions.isCurrent(revision) || !this.host.gates.canCommitStatus(statusOperation)) return true;
       this.host.scanError = null;
       // A non-terminal status means another scan started while this read was
       // in flight; its own events own the status line from here on.
-      if (scanStatus && !isTerminalScanState(scanStatus.state)) return;
+      if (scanStatus && !isTerminalScanState(scanStatus.state)) return true;
       const found = scanStatus?.found ?? this.host.stations.filter((station) => station.seenInLatestScan).length;
       this.host.statusMessage = formatTerminalScanResult({
         state: scanStatus?.state ?? 'completed',
@@ -154,12 +158,12 @@ export class StationScanController {
         warnings: scanStatus?.warnings
       });
     } catch (error) {
-      if (!this.host.gates.canCommitOperation(operationEpoch) || !this.host.listRevisions.isCurrent(revision) || !this.host.gates.canCommitStatus(statusOperation)) return;
+      if (!this.host.gates.canCommitOperation(operationEpoch) || !this.host.listRevisions.isCurrent(revision) || !this.host.gates.canCommitStatus(statusOperation)) return true;
       const updated = await GetCurrentStationInfo().catch(() => null);
-      if (!this.host.gates.canCommitOperation(operationEpoch) || !this.host.listRevisions.isCurrent(revision)) return;
+      if (!this.host.gates.canCommitOperation(operationEpoch) || !this.host.listRevisions.isCurrent(revision)) return true;
       if (updated) this.host.applyStationList(updated, revision);
       const scanStatus = await GetScanStatus().catch(() => null);
-      if (!this.host.gates.canCommitOperation(operationEpoch) || !this.host.listRevisions.isCurrent(revision) || !this.host.gates.canCommitStatus(statusOperation)) return;
+      if (!this.host.gates.canCommitOperation(operationEpoch) || !this.host.listRevisions.isCurrent(revision) || !this.host.gates.canCommitStatus(statusOperation)) return true;
       // A scan that ended while a newer scan is already running was stopped
       // (superseded); only a terminal status can tell failed from stopped.
       const supersededByNewScan = scanStatus !== null && !isTerminalScanState(scanStatus.state);
@@ -182,6 +186,7 @@ export class StationScanController {
       if (!this.host.disposed && !this.host.stopRequestPending && !this.host.externalScanning) this.host.stoppingScan = false;
       this.host.maybeEndScanTimer();
     }
+    return true;
   }
 
   async stopScan() {

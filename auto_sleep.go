@@ -319,17 +319,24 @@ func (a *App) runAutoSleep(ctx context.Context) {
 
 }
 
+var _ autosleep.TriggerFunc = (*App)(nil).runAutoSleepSession
+
 // runAutoSleepSession is the watcher trigger: rescan for base stations, then put
 
 // every known station to sleep. When the user is running a Bluetooth
 
 // operation this cycle is skipped without a retry, as configured.
 
-func (a *App) runAutoSleepSession(ctx context.Context, closedAt time.Time) {
+// The returned settled flag implements autosleep.TriggerFunc: it is true once
+// the session's sleep reached a terminal outcome (completed, failed, skipped,
+// timed out, or was already settled by an earlier run), and false while the
+// action was cancelled before settling so the watcher keeps the sleep owed.
+
+func (a *App) runAutoSleepSession(ctx context.Context, closedAt time.Time) (settled bool) {
 
 	if a.shuttingDown.Load() || ctx.Err() != nil {
 
-		return
+		return false
 
 	}
 
@@ -341,13 +348,12 @@ func (a *App) runAutoSleepSession(ctx context.Context, closedAt time.Time) {
 
 	case <-ctx.Done():
 
-		return
+		return false
 
 	case <-a.autoSleepActionSlot:
 
 	}
 
-	settled := false
 	defer func() {
 
 		if settled && !closedAt.IsZero() {
@@ -362,17 +368,19 @@ func (a *App) runAutoSleepSession(ctx context.Context, closedAt time.Time) {
 
 	if a.shuttingDown.Load() || ctx.Err() != nil {
 
-		return
+		return false
 
 	}
 
 	// The old action may have completed normally between applyAutoSleep taking
 	// its owed-trigger snapshot and cancelling the watcher. In that case the
 	// carried replacement represents the same closed process session and must
-	// not run a duplicate scan/power lifecycle.
+	// not run a duplicate scan/power lifecycle. Report the session as settled
+	// so the watcher clears the owed trigger instead of re-arming a session
+	// whose sleep already ran.
 	if !closedAt.IsZero() && a.autoSleepSettledSession.Equal(closedAt) {
 
-		return
+		return true
 
 	}
 
@@ -506,6 +514,8 @@ func (a *App) runAutoSleepSession(ctx context.Context, closedAt time.Time) {
 		})
 
 	}
+
+	return settled
 
 }
 

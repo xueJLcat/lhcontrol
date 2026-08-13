@@ -93,6 +93,20 @@ func (m *Manager) SetAllStationsPowerDetailedContext(ctx context.Context, state 
 	}()
 	result, err := m.setAllStationsPowerDetailed(operationContext, state)
 	if contextErr := operationContext.Err(); contextErr != nil {
+		// The expiry can land in the instant after the final worker confirms its
+		// target. When every station already reached its confirmed goal, nothing
+		// was left unfinished, so the operation must not be relabelled as
+		// cancelled/timed out and no expiry error is surfaced.
+		allConfirmed := len(result.Results) > 0
+		for _, item := range result.Results {
+			if !(item.Success && item.Confirmed) {
+				allConfirmed = false
+				break
+			}
+		}
+		if allConfirmed {
+			return result, nil
+		}
 		result.Cancelled = true
 		result.TimedOut = errors.Is(contextErr, context.DeadlineExceeded)
 		reason := ReasonOperationCancelled
@@ -388,6 +402,11 @@ func (m *Manager) setAllStationsPowerDetailed(ctx context.Context, state string)
 						stationResult.Reason = ReasonShuttingDown
 					} else if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 						stationResult.Reason = ReasonBulkOperationTimeout
+					} else if errors.Is(ctx.Err(), context.Canceled) {
+						// A batch cancellation owns the skip even when this station's
+						// own budget happens to expire in the same instant, matching
+						// the semaphore-wait attribution above.
+						stationResult.Reason = ReasonOperationCancelled
 					} else if errors.Is(workerErr, context.DeadlineExceeded) {
 						// Only this station's own budget expired; the bulk
 						// deadline is still pending, so report the station-level

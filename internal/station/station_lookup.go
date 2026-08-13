@@ -70,11 +70,17 @@ func (m *Manager) cachedPowerOutcome(stationPtr *bluetooth.BaseStation, target b
 }
 
 // stationOperationContextError converts an expired per-station budget into the
-// public timeout sentinel while keeping cancellation untouched so shutdown
-// detection can still match context.Canceled upstream.
-func stationOperationContextError(err error) error {
+// public timeout sentinel and a lifecycle cancellation observed during shutdown
+// into the public shutdown sentinel. For single-station operations the
+// operation context is only ever cancelled by BeginShutdown, so the mapping is
+// unambiguous; leaving a raw context.Canceled here would surface as an unmapped
+// 500 instead of 503 in the HTTP API and as an opaque error in the desktop UI.
+func (m *Manager) stationOperationContextError(err error) error {
 	if errors.Is(err, context.DeadlineExceeded) {
 		return fmt.Errorf("%w: %w", ErrStationOperationTimeout, err)
+	}
+	if errors.Is(err, context.Canceled) && m.shuttingDown.Load() {
+		return ErrShuttingDown
 	}
 	return err
 }

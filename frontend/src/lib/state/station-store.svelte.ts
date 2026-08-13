@@ -32,6 +32,10 @@ const MIN_STATUS_POLL_INTERVAL_SECONDS = 5;
 const MAX_STATUS_POLL_INTERVAL_SECONDS = 300;
 const PROJECTION_REFRESH_RETRY_MS = 250;
 const PROJECTION_REFRESH_MAX_RETRY_MS = 5000;
+// Bound the failure-retry loop so a persistently rejecting backend read cannot
+// be hammered every few seconds for the whole session. An explicit settings
+// save (or polling re-enable) resets the backoff and tries again.
+const PROJECTION_REFRESH_GIVE_UP_AFTER = 6;
 
 // Overlay controls owned by App. The store calls back into them whenever an
 // operation must close or open a layer instead of reaching into UI state.
@@ -98,6 +102,11 @@ export class StationStore {
   stopRequestGeneration = 0;
   disposed = false;
   startupPending = true;
+  // A scan-on-startup was configured but blocked by a lock (auto-sleep or an
+  // external HTTP operation already running at boot). Retry it once the lock
+  // releases instead of skipping the configured startup scan for the session.
+  private startupScanDeferred = false;
+  private mounted = false;
 
   readonly powerFeedback = new PowerFeedbackRegistry((next) => {
     this.powerFeedbackMap = next;
@@ -179,7 +188,10 @@ export class StationStore {
 
   private autoSleepEvents = new AutoSleepEventCoordinator({
     isDisposed: () => this.disposed,
-    setRunning: (running) => { this.autoSleepRunning = running; },
+    setRunning: (running) => {
+      this.autoSleepRunning = running;
+      if (!running) this.maybeRunDeferredStartupScan();
+    },
     beginStatusOperation: () => { this.gates.beginStatusOperation(); },
     setStatusMessage: (message) => { this.statusMessage = message; },
     applyStations: (updateId, stations) => this.externalStationUpdates.apply(updateId, stations)
@@ -474,8 +486,12 @@ export class StationStore {
       // not replace the current operation status with a transient read error.
       console.error('Station projection refresh failed:', error);
       if (!this.disposed) {
-        this.projectionRefreshFailures = Math.min(this.projectionRefreshFailures + 1, 6);
-        this.projectionRefreshPending = true;
+        this.projectionRefreshFailures = Math.min(this.projectionRefreshFailures + 1, PROJECTION_REFRESH_GIVE_UP_AFTER);
+        if (this.projectionRefreshFailures >= PROJECTION_REFRESH_GIVE_UP_AFTER) {
+          this.projectionRefreshPending = false;
+        } else {
+          this.projectionRefreshPending = true;
+        }
       }
     } finally {
       this.projectionRefreshInFlight = false;
@@ -495,6 +511,18 @@ export class StationStore {
     }
     this.externalOperationIds = nextIds;
     this.externalOperationRunning = this.externalOperationIds.size > 0;
+    // The auto-sleep busy flag is normally driven by the auto-sleep event
+    // stream, but a lost terminal event would otherwise lock the UI forever.
+    // Reconcile it against the authoritative operation snapshot: the backend
+    // tracks the running auto-sleep action as a kind="auto-sleep" operation,
+    // so its absence means the action settled and the flag must clear. Only
+    // ever clear here; the event stream still owns arming the flag.
+    if (this.autoSleepRunning &&
+      !operations.some((operation) => operation.kind === 'auto-sleep')) {
+      this.autoSleepRunning = false;
+    }
+    // A deferred startup scan can run once this snapshot shows the locks clear.
+    this.maybeRunDeferredStartupScan();
   }
 
   private invalidateForExternalOperation() {
@@ -593,6 +621,8 @@ export class StationStore {
   }
 
   mount() {
+    if (this.mounted) return;
+    this.mounted = true;
     const startupScanEpoch = this.gates.currentScanEpoch;
     this.cancelExternalScanStartedListener = EventsOn('external-scan-started', (value: unknown) => {
       this.externalScan.handleStarted(value as ExternalScanEvent);
@@ -626,6 +656,7 @@ export class StationStore {
       } else if (event.phase === 'finished') this.externalOperationIds.delete(id);
       else return;
       this.externalOperationRunning = this.externalOperationIds.size > 0;
+      if (!this.externalOperationRunning) this.maybeRunDeferredStartupScan();
     });
     // Register operation listeners before the first asynchronous health poll
     // so a newly started HTTP action cannot slip through the mount window.
@@ -692,13 +723,28 @@ export class StationStore {
           await this.externalScan.adoptUnknown();
         }
       } else if (this.scanOnStartupEnabled) {
-        await this.startScan();
+        if (!await this.startScan()) {
+          // Locked at startup (an auto-sleep or HTTP operation was already
+          // running). Defer and retry once the lock releases.
+          this.startupScanDeferred = true;
+        }
       }
     })();
   }
 
+  // Retries a startup scan that was blocked by a lock once that lock clears.
+  // Called from every site that can release the auto-sleep / external-op busy
+  // state; the pending flag keeps it a no-op everywhere else.
+  private maybeRunDeferredStartupScan() {
+    if (this.disposed || !this.startupScanDeferred) return;
+    if (this.scanLocked || this.isLoading) return;
+    this.startupScanDeferred = false;
+    void this.startScan();
+  }
+
   dispose() {
     this.disposed = true;
+    this.mounted = false;
     this.gates.dispose();
     this.listRevisions.dispose();
     this.apiStatus.dispose();

@@ -334,10 +334,19 @@ func (m *Manager) scanAndFetchStations(ctx context.Context) ([]StationInfo, int,
 				}
 				readContext, cancelRead := context.WithTimeout(phaseContext, m.initialReadTimeoutDuration())
 				defer cancelRead()
+				// A per-station read can exhaust its own budget at the same instant
+				// the whole phase deadline lands. Attribute the failure to its real
+				// owner by comparing deadlines: only when the phase deadline is the
+				// binding constraint is this a phase-wide timeout; otherwise the
+				// structured per-station handling below must run so the failure is
+				// recorded and retried instead of being folded into the phase.
+				readDeadline, hasReadDeadline := readContext.Deadline()
+				phaseDeadline, hasPhaseDeadline := phaseContext.Deadline()
+				ownBudget := hasReadDeadline && hasPhaseDeadline && readDeadline.Before(phaseDeadline)
 				readResults[resultIndex].err = runSafely("initial station read", func() error {
 					return m.bluetoothOps.fetchInitialPowerState(readContext, ptr)
 				})
-				if ctx.Err() == nil && errors.Is(phaseContext.Err(), context.DeadlineExceeded) &&
+				if ctx.Err() == nil && !ownBudget && errors.Is(phaseContext.Err(), context.DeadlineExceeded) &&
 					errors.Is(readResults[resultIndex].err, context.DeadlineExceeded) {
 					readResults[resultIndex].phaseDeadlineExceeded = true
 				}

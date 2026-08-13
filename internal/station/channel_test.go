@@ -263,6 +263,49 @@ func TestSetStationChannelMapsConfirmedWriteResult(t *testing.T) {
 	}
 }
 
+// TestSetStationChannelReconcilesMetadataRetryAfterReread verifies that the
+// metadata re-read performed by a channel change's discovery reconciles the
+// background metadata retry, instead of leaving a satisfied retry to trigger
+// redundant recovery rounds.
+func TestSetStationChannelReconcilesMetadataRetryAfterReread(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	manager.statusRecoveryStart.Do(func() {})
+	now := time.Now()
+	address := "AA:BB:CC:DD:EE:0B"
+	manager.stations[address] = &internalbluetooth.BaseStation{
+		Address:           mustAddress(t, address),
+		Name:              "LHB-META",
+		Channel:           3,
+		Present:           true,
+		LastSeenAt:        now,
+		LastChannelReadAt: now,
+		MetadataReadAt:    now.Add(-time.Minute),
+		Capabilities: internalbluetooth.Capabilities{
+			ChannelRead: true, ChannelWrite: true,
+		},
+	}
+	// Seed a pending metadata retry that a satisfying re-read must clear.
+	manager.noteMetadataFailure(address)
+	manager.bluetoothOps.setChannel = func(_ context.Context, station *internalbluetooth.BaseStation, _ int) (internalbluetooth.ChannelWriteResult, error) {
+		station.Channel = 6
+		station.LastChannelReadAt = time.Now()
+		// Discovery re-read the device metadata successfully as a side effect.
+		station.MetadataReadAt = time.Now()
+		return internalbluetooth.ChannelWriteResult{PreviousChannel: 3, Channel: 6, CommandSent: true}, nil
+	}
+
+	if _, err := manager.SetStationChannel(address, 6, false); err != nil {
+		t.Fatalf("SetStationChannel() error = %v", err)
+	}
+	manager.statusRetryMutex.Lock()
+	retry, tracked := manager.statusRetries[address]
+	manager.statusRetryMutex.Unlock()
+	if tracked && effectiveStatusRetryKinds(retry)&statusRetryMetadata != 0 {
+		t.Fatalf("metadata retry survived a satisfied re-read during channel change: %+v", retry)
+	}
+}
+
 func TestSetStationChannelRejectsFreshBootingStation(t *testing.T) {
 	manager := NewManager(config.NewConfig())
 	address := "AA:BB:CC:DD:EE:0A"

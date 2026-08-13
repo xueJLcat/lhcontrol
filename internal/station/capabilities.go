@@ -19,14 +19,14 @@ func (m *Manager) IdentifyStation(address string) error {
 	operationContext, cancelOperation := m.newStationOperationContext(m.lifecycleContext)
 	defer cancelOperation()
 	if err := m.beginForegroundStationOperationContext(operationContext, canonicalAddress); err != nil {
-		return stationOperationContextError(err)
+		return m.stationOperationContextError(err)
 	}
 	defer m.endStationOperation(canonicalAddress)
 	if err := m.ensureReady(); err != nil {
 		return err
 	}
 	if err := operationContext.Err(); err != nil {
-		return stationOperationContextError(err)
+		return m.stationOperationContextError(err)
 	}
 	capabilities := stationPtr.Snapshot().Capabilities
 	if !capabilities.Identify {
@@ -60,7 +60,7 @@ func (m *Manager) IdentifyStation(address string) error {
 		if m.shuttingDown.Load() && errors.Is(err, context.Canceled) {
 			return ErrShuttingDown
 		}
-		return stationOperationContextError(m.observeStationBluetoothError(stationPtr, canonicalAddress, err))
+		return m.stationOperationContextError(m.observeStationBluetoothError(stationPtr, canonicalAddress, err))
 	}
 	m.clearStatusFailureKind(canonicalAddress, statusRetryConnection)
 	return nil
@@ -78,14 +78,14 @@ func (m *Manager) RefreshStationCapabilities(address string) (StationInfo, error
 	operationContext, cancelOperation := m.newStationOperationContext(m.lifecycleContext)
 	defer cancelOperation()
 	if err := m.beginForegroundStationOperationContext(operationContext, canonicalAddress); err != nil {
-		return StationInfo{}, stationOperationContextError(err)
+		return StationInfo{}, m.stationOperationContextError(err)
 	}
 	defer m.endStationOperation(canonicalAddress)
 	if err := m.ensureReady(); err != nil {
 		return StationInfo{}, err
 	}
 	if err := operationContext.Err(); err != nil {
-		return StationInfo{}, stationOperationContextError(err)
+		return StationInfo{}, m.stationOperationContextError(err)
 	}
 	if err := runSafely("capability refresh", func() error {
 		discoveryContext, cancelDiscovery := context.WithTimeout(operationContext, m.initialReadTimeoutDuration())
@@ -97,7 +97,7 @@ func (m *Manager) RefreshStationCapabilities(address string) (StationInfo, error
 			return StationInfo{}, ErrShuttingDown
 		}
 		m.observeStationBluetoothError(stationPtr, canonicalAddress, err)
-		return StationInfo{}, stationOperationContextError(err)
+		return StationInfo{}, m.stationOperationContextError(err)
 	}
 	if err := runSafely("capability refresh state read", func() error {
 		readContext, cancelRead := context.WithTimeout(operationContext, m.initialReadTimeoutDuration())
@@ -111,7 +111,7 @@ func (m *Manager) RefreshStationCapabilities(address string) (StationInfo, error
 		var readErr *bluetooth.InitialReadError
 		if !errors.As(err, &readErr) {
 			m.observeStationBluetoothError(stationPtr, canonicalAddress, err)
-			return StationInfo{}, stationOperationContextError(err)
+			return StationInfo{}, m.stationOperationContextError(err)
 		}
 		m.recordStructuredReadResult(stationPtr, canonicalAddress, readErr.Power, readErr.Channel)
 		m.recordMetadataReadResult(canonicalAddress, readErr.Metadata)

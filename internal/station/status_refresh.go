@@ -76,6 +76,14 @@ func (m *Manager) CheckAllStationStatuses() ([]StationInfo, error) {
 				ptr := item.station
 				address := ptr.Snapshot().Address
 				readContext, cancelRead := context.WithTimeout(refreshContext, m.statusReadTimeoutDuration())
+				// Distinguish this station's own read budget from the fleet-wide
+				// refresh deadline: only when the refresh deadline is the binding
+				// constraint is a deadline failure fleet-wide. Otherwise it must go
+				// through the structured per-station handling below so backoff and
+				// failure accounting still run.
+				readDeadline, hasReadDeadline := readContext.Deadline()
+				refreshDeadline, hasRefreshDeadline := refreshContext.Deadline()
+				ownBudget := hasReadDeadline && hasRefreshDeadline && readDeadline.Before(refreshDeadline)
 				if err := m.beginStationOperationKindContext(address, deviceOperationStatus, cancelRead); err != nil {
 					cancelRead()
 					if errors.Is(err, ErrOperationInProgress) {
@@ -100,7 +108,7 @@ func (m *Manager) CheckAllStationStatuses() ([]StationInfo, error) {
 							m.trackStatusRefreshPending(address)
 							return
 						}
-						if errors.Is(refreshContext.Err(), context.DeadlineExceeded) &&
+						if !ownBudget && errors.Is(refreshContext.Err(), context.DeadlineExceeded) &&
 							errors.Is(workerErr, context.DeadlineExceeded) {
 							m.trackStatusRefreshPending(address)
 							statusErrors[item.index] = fmt.Errorf("%s: status refresh deadline exceeded: %w", address, workerErr)

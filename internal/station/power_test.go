@@ -830,3 +830,37 @@ func TestShutdownCancelsCapabilityDiscoveryBeforePowerWrite(t *testing.T) {
 	}
 	manager.Shutdown()
 }
+
+// TestShutdownDuringPowerCacheVerificationReturnsShuttingDown guards the
+// operation-budget checkpoint after the cache verification read: a shutdown
+// cancellation observed there must surface as ErrShuttingDown (503) rather
+// than leaking a raw context.Canceled (500).
+func TestShutdownDuringPowerCacheVerificationReturnsShuttingDown(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	address := "11:22:33:44:88:02"
+	manager.stations[address] = &internalbluetooth.BaseStation{
+		Name: "LHB-CACHE-CANCEL", Address: mustAddress(t, address), Present: true,
+	}
+	readStarted := make(chan struct{})
+	manager.bluetoothOps.fetchInitialPowerState = func(ctx context.Context, _ *internalbluetooth.BaseStation) error {
+		close(readStarted)
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	result := make(chan error, 1)
+	go func() {
+		_, err := manager.SetStationPower(address, "on")
+		result <- err
+	}()
+	<-readStarted
+	manager.BeginShutdown()
+	select {
+	case err := <-result:
+		if !errors.Is(err, ErrShuttingDown) {
+			t.Fatalf("SetStationPower() error = %v, want ErrShuttingDown", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cache verification read did not observe shutdown cancellation")
+	}
+	manager.Shutdown()
+}

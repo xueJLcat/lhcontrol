@@ -314,6 +314,10 @@ func disconnectInternal(s *BaseStation) error {
 	s.LastPowerReadAt = time.Time{}
 	s.LastChannelReadAt = time.Time{}
 	s.bootRawTrustedOn = false
+	// The boot fallback window is connection-scoped: a disconnect can outlast
+	// the window, and carrying the old timestamp would fast-forward the first
+	// boot-like read after reconnect to a trusted On.
+	s.bootingSince = time.Time{}
 
 	connectedStationsMutex.Lock()
 	newConnectedStations := make([]*BaseStation, 0, len(connectedStations))
@@ -337,11 +341,16 @@ func cleanupPendingInternal(s *BaseStation) error {
 		if bluetooth.IsDisconnectCleanupComplete(err) {
 			log.Printf("Bluetooth: Pending disconnect cleanup completed for %s with warning: %v", s.Name, err)
 			s.pendingCleanup = nil
+			removePendingCleanupStation(s)
 			return nil
 		}
 		return err
 	}
 	s.pendingCleanup = nil
+	// A reconnect that completes the pending cleanup must also leave the
+	// global tracking list; otherwise a healthy station keeps a stale entry
+	// until an explicit disconnect removes it.
+	removePendingCleanupStation(s)
 	return nil
 }
 

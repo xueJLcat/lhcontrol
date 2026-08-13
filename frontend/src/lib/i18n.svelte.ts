@@ -310,6 +310,7 @@ const zhCN = {
   'Occupied by {names}': '已被 {names} 占用',
   'Channel {channel}': '频道 {channel}',
   'Struck-through channels are occupied by a visible station. The dot marks the current channel.': '带删除线的频道已被可见基站占用，圆点表示当前频道。',
+  'All 16 channels are occupied by visible stations, so there is no free channel to switch to.': '全部 16 个频道均已被可见基站占用，没有可切换的空闲频道。',
   'I understand that a visible station has an unknown channel, so a conflict cannot be fully ruled out.': '我了解某个可见基站的频道未知，因此无法完全排除冲突。',
   'Writing channel and verifying the readback...': '正在写入频道并验证回读…',
   'The value is only accepted after the base station reads back the requested channel. Failure will not trigger an automatic rollback.': '仅在基站回读到请求的频道后才会接受该值。失败不会触发自动回滚。',

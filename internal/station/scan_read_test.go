@@ -194,6 +194,41 @@ func TestScanInitialReadClassifiesPartialFailures(t *testing.T) {
 	}
 }
 
+func TestScanInitialReadPerStationBudgetNotMisclassifiedAsPhase(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	manager.statusRecoveryStart.Do(func() {})
+	manager.initialReadTimeout = 25 * time.Millisecond
+	manager.initialReadPhaseTimeout = time.Hour
+	address := "11:22:33:44:55:77"
+	manager.bluetoothOps.scanForDurationContext = func(context.Context, time.Duration) ([]internalbluetooth.DiscoveredStation, error) {
+		return []internalbluetooth.DiscoveredStation{{
+			Name: "LHB-OWNBUDGET", Address: mustAddress(t, address),
+		}}, nil
+	}
+	manager.bluetoothOps.fetchInitialPowerState = func(ctx context.Context, _ *internalbluetooth.BaseStation) error {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+
+	if _, err := manager.ScanAndFetchStations(); err != nil {
+		t.Fatalf("ScanAndFetchStations() error = %v", err)
+	}
+	manager.statusRetryMutex.Lock()
+	retry, tracked := manager.statusRetries[address]
+	failures := retry.failures
+	manager.statusRetryMutex.Unlock()
+	if !tracked {
+		t.Fatalf("per-station budget expiry for %s was not tracked", address)
+	}
+	if failures == 0 {
+		t.Fatalf("per-station budget expiry was folded into the phase deadline (no failure recorded): %+v", retry)
+	}
+	if effectiveStatusRetryKinds(retry)&statusRetryConnection == 0 {
+		t.Fatalf("per-station budget expiry did not record a connection retry: %+v", retry)
+	}
+	manager.Shutdown()
+}
+
 func TestScanContinuesAndReportsConnectionReleaseWarnings(t *testing.T) {
 	manager := NewManager(config.NewConfig())
 	address := "11:22:33:44:55:83"

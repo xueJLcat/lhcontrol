@@ -235,11 +235,12 @@ func TestWatcherContinuesCarriedCountdown(t *testing.T) {
 		IsRunning: func(string) (bool, error) { return false, nil },
 		Monitor:   monitor,
 		Now:       func() time.Time { return base.Add(2 * time.Minute) },
-		Trigger: func(_ context.Context, closedAt time.Time) {
+		Trigger: func(_ context.Context, closedAt time.Time) bool {
 			select {
 			case triggered <- closedAt:
 			default:
 			}
+			return true
 		},
 	}
 
@@ -282,7 +283,7 @@ func TestWatcherReplacementPreservesRunningSessionAcrossCancelledPoll(t *testing
 			<-releaseCheck
 			return false, nil
 		},
-		Trigger: func(context.Context, time.Time) {},
+		Trigger: func(context.Context, time.Time) bool { return true },
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -360,10 +361,11 @@ func TestWatcherCancelsActiveTriggerWhenProcessRelaunches(t *testing.T) {
 		Now: func() time.Time {
 			return base.Add(time.Duration(ticks.Add(1)) * time.Minute)
 		},
-		Trigger: func(ctx context.Context, _ time.Time) {
+		Trigger: func(ctx context.Context, _ time.Time) bool {
 			close(triggerStarted)
 			<-ctx.Done()
 			close(triggerCancelled)
+			return false
 		},
 	}
 
@@ -426,14 +428,15 @@ func TestWatcherDefersTriggerUntilPreviousActionStops(t *testing.T) {
 		Now: func() time.Time {
 			return base.Add(time.Duration(step.Load()) * time.Minute)
 		},
-		Trigger: func(ctx context.Context, _ time.Time) {
+		Trigger: func(ctx context.Context, _ time.Time) bool {
 			n := calls.Add(1)
 			if n == 1 {
 				firstOnce.Do(func() { close(firstStarted) })
 				<-release
-				return
+				return true
 			}
 			close(secondFired)
+			return true
 		},
 	}
 
@@ -509,11 +512,13 @@ func TestWatcherOwesTriggerWhileActionInFlight(t *testing.T) {
 		IsRunning: func(string) (bool, error) { return running.Load(), nil },
 		Now:       func() time.Time { return base.Add(time.Duration(ticks.Add(1)) * time.Minute) },
 		Monitor:   NewMonitor(time.Minute),
-		Trigger: func(ctx context.Context, _ time.Time) {
+		Trigger: func(ctx context.Context, _ time.Time) bool {
 			startOnce.Do(func() { close(triggerStarted) })
 			select {
 			case <-release:
+				return true
 			case <-ctx.Done():
+				return false
 			}
 		},
 	}
@@ -563,19 +568,48 @@ func TestWatcherTriggerDebtUsesCompletionGeneration(t *testing.T) {
 	watcher := &Watcher{}
 
 	first := watcher.markTriggerOwed(true)
-	watcher.finishTrigger(first)
+	watcher.finishTrigger(first, true)
 	if watcher.OwesTrigger() {
 		t.Fatal("completed action remained owed before the watcher loop observed its done channel")
 	}
 
 	older := watcher.markTriggerOwed(true)
 	newer := watcher.markTriggerOwed(true)
-	watcher.finishTrigger(older)
+	watcher.finishTrigger(older, true)
 	if !watcher.OwesTrigger() {
 		t.Fatal("older action completion cleared a newer pending trigger")
 	}
-	watcher.finishTrigger(newer)
+	watcher.finishTrigger(newer, true)
 	if watcher.OwesTrigger() {
 		t.Fatal("newest action completion did not clear its trigger debt")
+	}
+}
+
+// TestCancelledActionKeepsOwedTriggerForReplacement guards the owed-trigger
+// race: when a settings change cancels a running sleep action before it
+// settles, the action's trigger debt must survive so the replacement watcher
+// re-arms the session instead of silently dropping the owed sleep.
+func TestCancelledActionKeepsOwedTriggerForReplacement(t *testing.T) {
+	base := time.Now()
+	monitor := NewMonitor(time.Minute)
+	monitor.Poll(true, base)
+	monitor.Poll(false, base.Add(time.Second))
+	if got := monitor.Poll(false, base.Add(2*time.Minute)); got != ActionTrigger {
+		t.Fatalf("source monitor = %v, want ActionTrigger", got)
+	}
+	watcher := &Watcher{Settings: Settings{Target: string(TargetSteamVR), DelaySeconds: 60}, Monitor: monitor}
+	generation := watcher.markTriggerOwed(true)
+
+	// The in-flight action is cancelled before settling.
+	watcher.finishTrigger(generation, false)
+	if !watcher.OwesTrigger() {
+		t.Fatal("cancelled (unsettled) action cleared its trigger debt")
+	}
+
+	// The replacement watcher must re-arm the owed session.
+	replacement := watcher.ReplacementMonitor(3 * time.Minute)
+	active, closedAt := replacement.Countdown()
+	if !active || !closedAt.Equal(base.Add(time.Second)) {
+		t.Fatalf("replacement after cancelled action = active %v closedAt %v, want armed at %v", active, closedAt, base.Add(time.Second))
 	}
 }

@@ -27,7 +27,7 @@ func (m *Manager) SetStationPower(address, state string) (PowerActionResult, err
 	operationContext, cancelOperation := m.newStationOperationContext(m.lifecycleContext)
 	defer cancelOperation()
 	if err := m.beginForegroundStationOperationContext(operationContext, canonicalAddress); err != nil {
-		return PowerActionResult{}, stationOperationContextError(err)
+		return PowerActionResult{}, m.stationOperationContextError(err)
 	}
 	defer m.endStationOperation(canonicalAddress)
 	snapshot := stationPtr.Snapshot()
@@ -35,7 +35,7 @@ func (m *Manager) SetStationPower(address, state string) (PowerActionResult, err
 		return PowerActionResult{}, err
 	}
 	if err := operationContext.Err(); err != nil {
-		return PowerActionResult{}, stationOperationContextError(err)
+		return PowerActionResult{}, m.stationOperationContextError(err)
 	}
 	// A display can legitimately remain fresh longer than the fixed write
 	// safety window. Always attempt a current read before acting on an expired
@@ -77,7 +77,7 @@ func (m *Manager) SetStationPower(address, state string) (PowerActionResult, err
 		}
 		m.recordPowerVerificationResult(stationPtr, canonicalAddress, snapshot, readErr)
 		if err := operationContext.Err(); err != nil {
-			return PowerActionResult{}, stationOperationContextError(err)
+			return PowerActionResult{}, m.stationOperationContextError(err)
 		}
 		snapshot = stationPtr.Snapshot()
 	}
@@ -146,7 +146,7 @@ func (m *Manager) SetStationPower(address, state string) (PowerActionResult, err
 		if bluetooth.IsUnsupportedCapabilityError(err) {
 			return PowerActionResult{}, fmt.Errorf("%w: %v", ErrUnsupported, err)
 		}
-		return PowerActionResult{}, stationOperationContextError(err)
+		return PowerActionResult{}, m.stationOperationContextError(err)
 	}
 	info, err := m.stationInfoByAddress(address)
 	if err != nil {

@@ -62,6 +62,7 @@
   const unchanged = $derived(station.isPresent && station.scanFresh && station.channelFresh &&
     station.channel > 0 && station.channel === targetChannel);
   const blockedReason = $derived(channelChangeBlockedReason(station));
+  const allChannelsOccupied = $derived(occupiedChannels.size >= 16);
   const saveDisabled = $derived(Boolean(blockedReason) || unchanged || occupiedChannels.has(targetChannel) ||
     (hasUnknownVisibleChannel && !confirmUnknownChannelRisk) || busy || locked);
 
@@ -115,6 +116,9 @@
       {/each}
     </div>
     <p class="hint ch-hint">{t('Struck-through channels are occupied by a visible station. The dot marks the current channel.')}</p>
+    {#if allChannelsOccupied}
+      <div class="alert warning ch-all-occupied" role="status">{t('All 16 channels are occupied by visible stations, so there is no free channel to switch to.')}</div>
+    {/if}
   </fieldset>
   {#if hasUnknownVisibleChannel}
     <label class="risk"><input type="checkbox" bind:checked={confirmUnknownChannelRisk} disabled={busy || locked} /> {t('I understand that a visible station has an unknown channel, so a conflict cannot be fully ruled out.')}</label>
@@ -223,6 +227,7 @@
     box-shadow: 0 0 5px color-mix(in srgb, var(--color-primary) 75%, transparent);
   }
   .ch-hint { margin: 0.5rem 0 0; }
+  .ch-all-occupied { margin-top: 0.6rem; }
 
   .busy-note {
     display: flex;

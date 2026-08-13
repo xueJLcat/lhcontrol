@@ -245,6 +245,9 @@ func invalidateDisconnectedDevice(station *BaseStation, disconnected bluetooth.D
 	station.LastPowerReadAt = time.Time{}
 	station.LastChannelReadAt = time.Time{}
 	station.bootRawTrustedOn = false
+	// Match disconnectInternal: the boot fallback observation window must not
+	// survive an OS disconnect, or the next connection inherits a fast-forward.
+	station.bootingSince = time.Time{}
 	station.setConnectionErrorInternal(errors.New("Bluetooth device disconnected"))
 	station.mutex.Unlock()
 

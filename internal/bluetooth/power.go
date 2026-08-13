@@ -386,6 +386,7 @@ func SetPowerStateContext(ctx context.Context, station *BaseStation, target Powe
 	// station. Re-arm boot-state observation before writing so the previous
 	// connection's compatibility inference cannot hide that transition.
 	station.bootRawTrustedOn = false
+	station.bootingSince = time.Time{}
 	maxRetries := CurrentTiming().WriteAttempts
 	var err error
 	var ambiguousWrite error

@@ -17,8 +17,12 @@ type IsRunningFunc func(processName string) (bool, error)
 
 // TriggerFunc runs the configured action when the monitor fires. closedAt
 // identifies the watched process session that ended, allowing replacement
-// watchers to serialize and de-duplicate the same owed action.
-type TriggerFunc func(ctx context.Context, closedAt time.Time)
+// watchers to serialize and de-duplicate the same owed action. The returned
+// settled flag reports that the action reached a terminal outcome (completed,
+// failed, skipped, or timed out); false means the action was cancelled before
+// settling, so the owed sleep must stay owed for a replacement watcher to
+// re-arm instead of being cleared by finishTrigger.
+type TriggerFunc func(ctx context.Context, closedAt time.Time) (settled bool)
 
 // Watcher polls the target process on an interval and fires Trigger once a
 // session (running, then closed) stays closed for the configured delay.
@@ -86,12 +90,17 @@ func (w *Watcher) markTriggerOwed(owed bool) uint64 {
 
 // finishTrigger clears only the debt consumed by this action. A new session
 // can close while an older action is still stopping; its newer generation must
-// remain owed so the watcher runs it afterwards.
-func (w *Watcher) finishTrigger(generation uint64) {
+// remain owed so the watcher runs it afterwards. An action that was cancelled
+// before settling (settled false) never resolved its session's owed sleep, so
+// its debt stays owed: a replacement watcher re-arms the countdown, and a
+// relaunched process clears the debt through the next poll instead.
+func (w *Watcher) finishTrigger(generation uint64, settled bool) {
 	w.mutex.Lock()
 	if w.triggerGeneration == generation {
 		w.triggerGeneration++
-		w.triggerOwed = false
+		if settled {
+			w.triggerOwed = false
+		}
 	}
 	w.mutex.Unlock()
 }
@@ -146,11 +155,13 @@ func (w *Watcher) Run(ctx context.Context) {
 		triggerDone = done
 		go func() {
 			defer close(done)
-			// Clear the consumed debt before publishing completion. A settings
+			// Settle the consumed debt before publishing completion. A settings
 			// replacement can then observe the action as finished even if the
-			// watcher loop has not selected the closed done channel yet.
-			defer w.finishTrigger(generation)
-			w.Trigger(triggerContext, closedAt)
+			// watcher loop has not selected the closed done channel yet. A
+			// cancelled action reports settled=false and keeps the debt owed so
+			// the replacement re-arms it instead of dropping the session.
+			settled := w.Trigger(triggerContext, closedAt)
+			w.finishTrigger(generation, settled)
 		}()
 	}
 	poll := func(now time.Time) bool {

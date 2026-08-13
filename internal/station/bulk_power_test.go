@@ -923,3 +923,98 @@ func TestBulkPowerReportsCallerDeadline(t *testing.T) {
 		t.Fatalf("timed-out station result = %+v", result.Results)
 	}
 }
+
+// TestBulkPowerLateDeadlineAfterAllConfirmedNotMislabelled guards the race
+// where the bulk deadline lands the instant after the final worker confirms
+// its target. Every station reached its goal, so the operation must not be
+// flagged cancelled/timed out nor surface an expiry error.
+func TestBulkPowerLateDeadlineAfterAllConfirmedNotMislabelled(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	address := "11:22:33:44:AA:06"
+	manager.stations[address] = &internalbluetooth.BaseStation{
+		Name: "LHB-LATE-DEADLINE", Address: mustAddress(t, address), Present: true,
+		Capabilities: internalbluetooth.Capabilities{PowerRead: true, PowerWrite: true}, CapabilitiesKnown: true,
+	}
+	stubPowerVerificationRead(manager)
+	var enteredOnce sync.Once
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	manager.bluetoothOps.setPowerState = func(_ context.Context, _ *internalbluetooth.BaseStation, target internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
+		enteredOnce.Do(func() { close(entered) })
+		<-release
+		return internalbluetooth.PowerControlResult{State: target, Confirmed: true}, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	type outcome struct {
+		result BulkPowerResult
+		err    error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		result, err := manager.SetAllStationsPowerDetailedContext(ctx, "on")
+		done <- outcome{result: result, err: err}
+	}()
+	<-entered
+	// Let the caller deadline expire while the worker already holds a confirmed
+	// outcome, then release it to finish successfully.
+	time.Sleep(70 * time.Millisecond)
+	close(release)
+	select {
+	case got := <-done:
+		if got.err != nil {
+			t.Fatalf("late deadline after full success returned error = %v", got.err)
+		}
+		if got.result.Cancelled || got.result.TimedOut {
+			t.Fatalf("fully confirmed bulk was mislabelled: %+v", got.result)
+		}
+		if len(got.result.Results) != 1 || !got.result.Results[0].Success || !got.result.Results[0].Confirmed {
+			t.Fatalf("bulk result = %+v", got.result.Results)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("bulk operation did not finish after release")
+	}
+}
+
+// TestBulkCancelOwnsSkipWhenStationBudgetAlsoExpires verifies that a batch
+// cancellation is the reported skip reason even when a station's own budget
+// happens to expire in the same instant, instead of blaming the station.
+func TestBulkCancelOwnsSkipWhenStationBudgetAlsoExpires(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	address := "11:22:33:44:AA:07"
+	manager.stations[address] = &internalbluetooth.BaseStation{
+		Name: "LHB-CANCEL-RACE", Address: mustAddress(t, address), Present: true,
+		Capabilities: internalbluetooth.Capabilities{PowerWrite: true}, CapabilitiesKnown: true,
+	}
+	stubPowerVerificationRead(manager)
+	started := make(chan struct{})
+	manager.bluetoothOps.setPowerState = func(ctx context.Context, _ *internalbluetooth.BaseStation, _ internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
+		close(started)
+		<-ctx.Done()
+		return internalbluetooth.PowerControlResult{}, context.DeadlineExceeded
+	}
+	type outcome struct {
+		result BulkPowerResult
+		err    error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		result, err := manager.SetAllStationsPowerDetailed("on")
+		done <- outcome{result: result, err: err}
+	}()
+	<-started
+	if err := manager.CancelBulkPower(); err != nil {
+		t.Fatalf("CancelBulkPower() error = %v", err)
+	}
+	select {
+	case actual := <-done:
+		if len(actual.result.Results) != 1 ||
+			actual.result.Results[0].Reason != ReasonOperationCancelled {
+			t.Fatalf("cancelled-race station result = %+v, want reason %q", actual.result.Results, ReasonOperationCancelled)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("bulk operation did not finish after cancellation")
+	}
+}
