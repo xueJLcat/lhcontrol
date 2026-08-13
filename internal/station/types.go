@@ -47,34 +47,44 @@ const (
 
 // StationInfo is a simplified representation of a BaseStation for the frontend.
 type StationInfo struct {
-	Name                string                   `json:"name"`
-	OriginalName        string                   `json:"originalName"`
-	Address             string                   `json:"address"`
-	PowerState          int                      `json:"powerState"`
-	PowerStateName      string                   `json:"powerStateName"`
-	PowerStateConfirmed bool                     `json:"powerStateConfirmed"`
-	RawPowerState       int                      `json:"rawPowerState"`
-	Channel             int                      `json:"channel"`
-	ChannelConflict     bool                     `json:"channelConflict"`
-	IsPresent           bool                     `json:"isPresent"`
-	PresenceUncertain   bool                     `json:"presenceUncertain"`
-	SeenInLatestScan    bool                     `json:"seenInLatestScan"`
-	ScanFresh           bool                     `json:"scanFresh"`
-	MissedScans         int                      `json:"missedScans"`
-	LastSeenAt          string                   `json:"lastSeenAt"`
-	LastReadAt          string                   `json:"lastReadAt"`
-	LastPowerReadAt     string                   `json:"lastPowerReadAt"`
-	LastChannelReadAt   string                   `json:"lastChannelReadAt"`
-	MetadataReadAt      string                   `json:"metadataReadAt"`
-	LastError           string                   `json:"lastError"`
-	StatusFresh         bool                     `json:"statusFresh"`
-	PowerFresh          bool                     `json:"powerFresh"`
-	ChannelFresh        bool                     `json:"channelFresh"`
-	MetadataFresh       bool                     `json:"metadataFresh"`
-	ConnectionState     string                   `json:"connectionState"`
-	CapabilitiesKnown   bool                     `json:"capabilitiesKnown"`
-	Capabilities        bluetooth.Capabilities   `json:"capabilities"`
-	Metadata            bluetooth.DeviceMetadata `json:"metadata"`
+	Name                string `json:"name"`
+	OriginalName        string `json:"originalName"`
+	Address             string `json:"address"`
+	PowerState          int    `json:"powerState"`
+	PowerStateName      string `json:"powerStateName"`
+	PowerStateConfirmed bool   `json:"powerStateConfirmed"`
+	RawPowerState       int    `json:"rawPowerState"`
+	Channel             int    `json:"channel"`
+	ChannelConflict     bool   `json:"channelConflict"`
+	IsPresent           bool   `json:"isPresent"`
+	PresenceUncertain   bool   `json:"presenceUncertain"`
+	SeenInLatestScan    bool   `json:"seenInLatestScan"`
+	ScanFresh           bool   `json:"scanFresh"`
+	MissedScans         int    `json:"missedScans"`
+	LastSeenAt          string `json:"lastSeenAt"`
+	LastReadAt          string `json:"lastReadAt"`
+	LastPowerReadAt     string `json:"lastPowerReadAt"`
+	LastChannelReadAt   string `json:"lastChannelReadAt"`
+	MetadataReadAt      string `json:"metadataReadAt"`
+	LastError           string `json:"lastError"`
+	StatusFresh         bool   `json:"statusFresh"`
+	PowerFresh          bool   `json:"powerFresh"`
+	// PowerOperationallyFresh is the fixed-window counterpart of PowerFresh
+	// used before commands. It can be false while a slow polling cadence still
+	// permits the same observation to remain visible.
+	PowerOperationallyFresh    bool   `json:"powerOperationallyFresh"`
+	PowerOperationalFreshUntil string `json:"powerOperationalFreshUntil"`
+	ChannelFresh               bool   `json:"channelFresh"`
+	// ChannelOperationallyFresh is intentionally stricter than ChannelFresh.
+	// ChannelFresh follows the configured polling cadence for display, while
+	// this flag mirrors the fixed write-safety window used by conflict checks.
+	ChannelOperationallyFresh    bool                     `json:"channelOperationallyFresh"`
+	ChannelOperationalFreshUntil string                   `json:"channelOperationalFreshUntil"`
+	MetadataFresh                bool                     `json:"metadataFresh"`
+	ConnectionState              string                   `json:"connectionState"`
+	CapabilitiesKnown            bool                     `json:"capabilitiesKnown"`
+	Capabilities                 bluetooth.Capabilities   `json:"capabilities"`
+	Metadata                     bluetooth.DeviceMetadata `json:"metadata"`
 }
 type PowerActionResult struct {
 	Station           StationInfo `json:"station"`

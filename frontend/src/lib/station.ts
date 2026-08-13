@@ -21,6 +21,11 @@ export function hasVerifiedPowerState(station: StationInfo, state: PowerTarget):
   return station.powerFresh && station.powerStateConfirmed && station.powerState === powerStateValue(state);
 }
 
+function hasOperationallyVerifiedPowerState(station: StationInfo, state: PowerTarget): boolean {
+  return station.powerOperationallyFresh && station.powerStateConfirmed &&
+    station.powerState === powerStateValue(state);
+}
+
 // Stable raw values per protocol: sleep 0x00, standby 0x02, on 0x09/0x0B.
 const STABLE_POWER_RAW: Record<PowerTarget, readonly number[]> = {
   on: [0x09, 0x0b],
@@ -37,7 +42,7 @@ export function hasStableConfirmedPowerState(station: StationInfo, state: PowerT
 }
 
 export function isFreshBooting(station: StationInfo): boolean {
-  return station.powerFresh && station.powerState === 3;
+  return station.powerOperationallyFresh && station.powerState === 3;
 }
 
 export function channelChangeBlockedReason(station: StationInfo): string {
@@ -64,7 +69,7 @@ export function canSetPower(station: StationInfo, state: PowerTarget): boolean {
   // A stale confirmed value remains actionable: the backend re-reads expired
   // power state before deciding whether this is a no-op or needs a command.
   return maySetPower(station, state) &&
-    !hasVerifiedPowerState(station, state);
+    !hasOperationallyVerifiedPowerState(station, state);
 }
 
 export function stateLabel(station: StationInfo): string {
@@ -136,7 +141,11 @@ export function sameStationInfo(left: StationInfo, right: StationInfo): boolean 
     left.lastError === right.lastError &&
     left.statusFresh === right.statusFresh &&
     left.powerFresh === right.powerFresh &&
+    left.powerOperationallyFresh === right.powerOperationallyFresh &&
+    left.powerOperationalFreshUntil === right.powerOperationalFreshUntil &&
     left.channelFresh === right.channelFresh &&
+    left.channelOperationallyFresh === right.channelOperationallyFresh &&
+    left.channelOperationalFreshUntil === right.channelOperationalFreshUntil &&
     left.metadataFresh === right.metadataFresh &&
     left.connectionState === right.connectionState &&
     left.capabilitiesKnown === right.capabilitiesKnown &&

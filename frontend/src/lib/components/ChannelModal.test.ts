@@ -97,8 +97,10 @@ describe('ChannelModal channel grid', () => {
     expect(screen.getByRole('button', { name: 'Confirm change' })).toBeEnabled();
   });
 
-  it('allows a stale current channel to be submitted for confirmation', async () => {
-    const onSave = renderModal({ station: station({ channelFresh: false }) });
+  it('allows an operationally stale current channel to be submitted for confirmation', async () => {
+    const onSave = renderModal({
+      station: station({ channelFresh: true, channelOperationallyFresh: false })
+    });
     const confirm = screen.getByRole('button', { name: 'Confirm change' });
     expect(confirm).toBeEnabled();
     await fireEvent.click(confirm);

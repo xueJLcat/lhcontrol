@@ -58,6 +58,8 @@ describe('sameStationInfo', () => {
       { lastPowerReadAt: '2026-01-02T00:00:00Z' },
       { lastError: 'read failed' },
       { powerFresh: false },
+      { powerOperationallyFresh: false },
+      { channelOperationallyFresh: false },
       { connectionState: 'disconnected' },
       { capabilitiesKnown: false }
     ] as Partial<StationInfo>[]) {
@@ -105,5 +107,19 @@ describe('canSetPower', () => {
   it('blocks a fresh confirmed target but allows its stale cache to be revalidated', () => {
     expect(canSetPower(station({ powerFresh: true }), 'on')).toBe(false);
     expect(canSetPower(station({ powerFresh: false }), 'on')).toBe(true);
+  });
+
+  it('revalidates display-fresh state after the fixed operation window expires', () => {
+    expect(canSetPower(station({
+      powerFresh: true,
+      powerOperationallyFresh: false
+    }), 'on')).toBe(true);
+    expect(canSetPower(station({
+      powerState: 3,
+      powerStateName: 'booting',
+      rawPowerState: 0x01,
+      powerFresh: true,
+      powerOperationallyFresh: false
+    }), 'on')).toBe(true);
   });
 });

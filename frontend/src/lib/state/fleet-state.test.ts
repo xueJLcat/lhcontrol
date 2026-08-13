@@ -59,3 +59,69 @@ describe('FleetState channel memory', () => {
     }
   });
 });
+
+describe('FleetState channel conflict risk', () => {
+  it('treats a display-fresh but operationally stale peer channel as unknown', () => {
+    const fleet = new FleetState();
+    fleet.replace([
+      createStation({ address: 'AA', channel: 3 }),
+      createStation({ address: 'BB', channel: 4, channelFresh: true, channelOperationallyFresh: false })
+    ]);
+
+    expect(fleet.hasUnknownVisibleChannelExcluding('AA')).toBe(true);
+  });
+
+  it('expires operation freshness between slow backend polls without aging the display', async () => {
+    vi.useFakeTimers();
+    const fleet = new FleetState();
+    try {
+      fleet.replace([
+        createStation({ address: 'AA', channel: 3 }),
+        createStation({ address: 'BB', channel: 4 })
+      ]);
+
+      expect(fleet.actionableSleep).toHaveLength(0);
+      expect(fleet.hasUnknownVisibleChannelExcluding('AA')).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(45_001);
+
+      expect(fleet.stations.every((station) => station.powerFresh && station.channelFresh)).toBe(true);
+      expect(fleet.stations.every((station) =>
+        !station.powerOperationallyFresh && !station.channelOperationallyFresh
+      )).toBe(true);
+      expect(fleet.actionableSleep).toHaveLength(2);
+      expect(fleet.hasUnknownVisibleChannelExcluding('AA')).toBe(true);
+    } finally {
+      fleet.stopChannelMemoryExpiry();
+      vi.useRealTimers();
+    }
+  });
+
+  it('rearms the expiry timer when a newer read extends the operation window', async () => {
+    vi.useFakeTimers();
+    const fleet = new FleetState();
+    try {
+      const initial = createStation({
+        powerOperationalFreshUntil: new Date(Date.now() + 45_000).toISOString(),
+        channelOperationalFreshUntil: new Date(Date.now() + 45_000).toISOString()
+      });
+      fleet.replace([initial]);
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      fleet.commit([createStation({
+        powerOperationalFreshUntil: new Date(Date.now() + 45_000).toISOString(),
+        channelOperationalFreshUntil: new Date(Date.now() + 45_000).toISOString()
+      })]);
+      await vi.advanceTimersByTimeAsync(15_001);
+      expect(fleet.stations[0].powerOperationallyFresh).toBe(true);
+      expect(fleet.stations[0].channelOperationallyFresh).toBe(true);
+
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(fleet.stations[0].powerOperationallyFresh).toBe(false);
+      expect(fleet.stations[0].channelOperationallyFresh).toBe(false);
+    } finally {
+      fleet.stopChannelMemoryExpiry();
+      vi.useRealTimers();
+    }
+  });
+});

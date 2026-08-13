@@ -198,10 +198,10 @@ describe('StationCard channel memory', () => {
   });
 });
 
-describe('StationCard stale power revalidation', () => {
-  it('keeps the cached target selected while allowing it to be verified again', async () => {
+describe('StationCard expired power revalidation', () => {
+  it('keeps a display-fresh target selected while allowing its operation cache to be verified again', async () => {
     const stale = station();
-    stale.powerFresh = false;
+    stale.powerOperationallyFresh = false;
     const onPower = vi.fn();
     render(StationCard, {
       props: { ...cardProps({ onPower }), renaming: false, station: stale }

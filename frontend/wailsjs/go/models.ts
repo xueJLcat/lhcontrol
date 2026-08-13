@@ -172,7 +172,11 @@ export namespace station {
 	    lastError: string;
 	    statusFresh: boolean;
 	    powerFresh: boolean;
+	    powerOperationallyFresh: boolean;
+	    powerOperationalFreshUntil: string;
 	    channelFresh: boolean;
+	    channelOperationallyFresh: boolean;
+	    channelOperationalFreshUntil: string;
 	    metadataFresh: boolean;
 	    connectionState: string;
 	    capabilitiesKnown: boolean;
@@ -207,7 +211,11 @@ export namespace station {
 	        this.lastError = source["lastError"];
 	        this.statusFresh = source["statusFresh"];
 	        this.powerFresh = source["powerFresh"];
+	        this.powerOperationallyFresh = source["powerOperationallyFresh"];
+	        this.powerOperationalFreshUntil = source["powerOperationalFreshUntil"];
 	        this.channelFresh = source["channelFresh"];
+	        this.channelOperationallyFresh = source["channelOperationallyFresh"];
+	        this.channelOperationalFreshUntil = source["channelOperationalFreshUntil"];
 	        this.metadataFresh = source["metadataFresh"];
 	        this.connectionState = source["connectionState"];
 	        this.capabilitiesKnown = source["capabilitiesKnown"];
@@ -424,4 +432,3 @@ export namespace station {
 	}
 
 }
-

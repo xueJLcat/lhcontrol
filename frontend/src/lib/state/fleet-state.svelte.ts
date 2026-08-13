@@ -17,6 +17,7 @@ export class FleetState {
   // Date.now() alone is not one.
   private channelMemoryTick = $state(0);
   private channelMemoryTimer: ReturnType<typeof setTimeout> | null = null;
+  private operationalFreshnessTimer: ReturnType<typeof setTimeout> | null = null;
 
   channelDisplayByAddress = $derived.by(() => {
     void this.channelMemoryTick;
@@ -107,10 +108,15 @@ export class FleetState {
       clearTimeout(this.channelMemoryTimer);
       this.channelMemoryTimer = null;
     }
+    if (this.operationalFreshnessTimer !== null) {
+      clearTimeout(this.operationalFreshnessTimer);
+      this.operationalFreshnessTimer = null;
+    }
   }
 
   replace(stations: StationInfo[]) {
     this.stations = stations;
+    this.scheduleOperationalFreshnessExpiry();
   }
 
   commit(updated: StationInfo[]) {
@@ -119,6 +125,7 @@ export class FleetState {
       const previous = previousByAddress.get(station.address);
       return previous && sameStationInfo(previous, station) ? previous : station;
     });
+    this.scheduleOperationalFreshnessExpiry();
   }
 
   merge(updated: StationInfo[]) {
@@ -139,6 +146,61 @@ export class FleetState {
     return stationModels.StationInfo.createFrom({ ...current, ...changes });
   }
 
+  // Operation freshness is deliberately shorter than display freshness. A
+  // long polling interval can therefore cross the write-safety deadline
+  // without receiving another backend snapshot. Expire the projected flags
+  // at the backend-provided timestamps so buttons and channel-risk prompts
+  // stay aligned with the command validators between polls.
+  private scheduleOperationalFreshnessExpiry() {
+    if (this.operationalFreshnessTimer !== null) {
+      clearTimeout(this.operationalFreshnessTimer);
+      this.operationalFreshnessTimer = null;
+    }
+    let nearest = Number.POSITIVE_INFINITY;
+    for (const station of this.stations) {
+      if (station.powerOperationallyFresh) {
+        nearest = Math.min(nearest, this.parseOperationalFreshUntil(station.powerOperationalFreshUntil));
+      }
+      if (station.channelOperationallyFresh) {
+        nearest = Math.min(nearest, this.parseOperationalFreshUntil(station.channelOperationalFreshUntil));
+      }
+    }
+    if (nearest === Number.POSITIVE_INFINITY) return;
+    const delay = Math.max(0, nearest - Date.now());
+    this.operationalFreshnessTimer = setTimeout(() => {
+      this.operationalFreshnessTimer = null;
+      this.expireOperationalFreshnessThrough(nearest);
+    }, delay);
+  }
+
+  private parseOperationalFreshUntil(value: string): number {
+    const parsed = value ? Date.parse(value) : Number.NaN;
+    // A true flag without a usable deadline cannot be kept alive safely. Use
+    // -Infinity so the next zero-delay expiry pass downgrades it immediately.
+    return Number.isFinite(parsed) ? parsed : Number.NEGATIVE_INFINITY;
+  }
+
+  private expireOperationalFreshnessThrough(deadline: number) {
+    let changed = false;
+    const updated = this.stations.map((station) => {
+      const expirePower = station.powerOperationallyFresh &&
+        this.parseOperationalFreshUntil(station.powerOperationalFreshUntil) <= deadline;
+      const expireChannel = station.channelOperationallyFresh &&
+        this.parseOperationalFreshUntil(station.channelOperationalFreshUntil) <= deadline;
+      if (!expirePower && !expireChannel) return station;
+      changed = true;
+      return this.patch(station, {
+        powerOperationallyFresh: expirePower ? false : station.powerOperationallyFresh,
+        channelOperationallyFresh: expireChannel ? false : station.channelOperationallyFresh
+      });
+    });
+    if (changed) {
+      this.commit(updated);
+    } else {
+      this.scheduleOperationalFreshnessExpiry();
+    }
+  }
+
   occupiedChannelsExcluding(selectedAddress: string | null): Map<number, string[]> {
     const occupied = new Map<number, string[]>();
     const candidates = this.stations
@@ -153,7 +215,8 @@ export class FleetState {
   hasUnknownVisibleChannelExcluding(selectedAddress: string | null): boolean {
     return this.stations.some(
       (station) => station.isPresent && station.address !== selectedAddress &&
-        (station.presenceUncertain || !station.scanFresh || !station.channelFresh || station.channel === 0)
+        (station.presenceUncertain || !station.scanFresh ||
+          !station.channelOperationallyFresh || station.channel === 0)
     );
   }
 

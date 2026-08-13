@@ -59,7 +59,7 @@
     }
   });
 
-  const unchanged = $derived(station.isPresent && station.scanFresh && station.channelFresh &&
+  const unchanged = $derived(station.isPresent && station.scanFresh && station.channelOperationallyFresh &&
     station.channel > 0 && station.channel === targetChannel);
   const blockedReason = $derived(channelChangeBlockedReason(station));
   const allChannelsOccupied = $derived(occupiedChannels.size >= 16);

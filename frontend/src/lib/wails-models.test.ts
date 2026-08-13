@@ -27,8 +27,12 @@ describe('generated Wails result models', () => {
         powerState: 1,
         powerStateName: 'on',
         powerStateConfirmed: false,
+        powerOperationallyFresh: false,
+        powerOperationalFreshUntil: '2026-08-13T12:00:45Z',
         rawPowerState: 1,
         channel: 3,
+        channelOperationallyFresh: false,
+        channelOperationalFreshUntil: '2026-08-13T12:00:45Z',
         capabilities: { powerRead: true, powerWrite: true },
         metadata: { model: '2.0' }
       }
@@ -39,6 +43,10 @@ describe('generated Wails result models', () => {
     expect(result.confirmationError).toBe('readback timed out');
     expect(result.station).toBeInstanceOf(station.StationInfo);
     expect(result.station.address).toBe('11:22:33:44:55:66');
+    expect(result.station.powerOperationallyFresh).toBe(false);
+    expect(result.station.powerOperationalFreshUntil).toBe('2026-08-13T12:00:45Z');
+    expect(result.station.channelOperationallyFresh).toBe(false);
+    expect(result.station.channelOperationalFreshUntil).toBe('2026-08-13T12:00:45Z');
     expect(result.station.capabilities.powerWrite).toBe(true);
     expect(result.station.metadata.model).toBe('2.0');
   });

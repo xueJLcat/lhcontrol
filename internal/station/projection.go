@@ -55,7 +55,19 @@ func (m *Manager) GetStationInfo() []StationInfo {
 			connectionState = "connected"
 		}
 		powerFresh := snapshot.RawPowerState != bluetooth.RawPowerStateUnknown && isRecent(snapshot.LastPowerReadAt, now, displayFreshnessWindow)
+		powerOperationallyFresh := snapshot.RawPowerState != bluetooth.RawPowerStateUnknown &&
+			isOperationallyFresh(snapshot.LastPowerReadAt, now)
+		powerOperationalFreshUntil := ""
+		if snapshot.RawPowerState != bluetooth.RawPowerStateUnknown && !snapshot.LastPowerReadAt.IsZero() {
+			powerOperationalFreshUntil = formatTimestamp(snapshot.LastPowerReadAt.Add(operationSafetyFreshnessWindow))
+		}
 		channelFresh := snapshot.Channel != bluetooth.ChannelUnknown && isRecent(snapshot.LastChannelReadAt, now, displayFreshnessWindow)
+		channelOperationallyFresh := snapshot.Channel != bluetooth.ChannelUnknown &&
+			isOperationallyFresh(snapshot.LastChannelReadAt, now)
+		channelOperationalFreshUntil := ""
+		if snapshot.Channel != bluetooth.ChannelUnknown && !snapshot.LastChannelReadAt.IsZero() {
+			channelOperationalFreshUntil = formatTimestamp(snapshot.LastChannelReadAt.Add(operationSafetyFreshnessWindow))
+		}
 		seenInLatestScan := snapshot.MissedScans == 0 &&
 			!snapshot.PresenceUncertain &&
 			!snapshot.LastSeenAt.IsZero()
@@ -73,25 +85,29 @@ func (m *Manager) GetStationInfo() []StationInfo {
 			Channel:             snapshot.Channel,
 			ChannelConflict: snapshot.Present && scanFresh && channelFresh &&
 				channelCounts[snapshot.Channel] > 1,
-			IsPresent:         snapshot.Present,
-			PresenceUncertain: snapshot.PresenceUncertain,
-			SeenInLatestScan:  seenInLatestScan,
-			ScanFresh:         scanFresh,
-			MissedScans:       snapshot.MissedScans,
-			LastSeenAt:        formatTimestamp(snapshot.LastSeenAt),
-			LastReadAt:        formatTimestamp(snapshot.LastReadAt),
-			LastPowerReadAt:   formatTimestamp(snapshot.LastPowerReadAt),
-			LastChannelReadAt: formatTimestamp(snapshot.LastChannelReadAt),
-			MetadataReadAt:    formatTimestamp(snapshot.MetadataReadAt),
-			LastError:         snapshot.LastError,
-			StatusFresh:       powerFresh || channelFresh,
-			PowerFresh:        powerFresh,
-			ChannelFresh:      channelFresh,
-			MetadataFresh:     metadataFresh,
-			ConnectionState:   connectionState,
-			CapabilitiesKnown: snapshot.CapabilitiesKnown,
-			Capabilities:      snapshot.Capabilities,
-			Metadata:          snapshot.Metadata,
+			IsPresent:                    snapshot.Present,
+			PresenceUncertain:            snapshot.PresenceUncertain,
+			SeenInLatestScan:             seenInLatestScan,
+			ScanFresh:                    scanFresh,
+			MissedScans:                  snapshot.MissedScans,
+			LastSeenAt:                   formatTimestamp(snapshot.LastSeenAt),
+			LastReadAt:                   formatTimestamp(snapshot.LastReadAt),
+			LastPowerReadAt:              formatTimestamp(snapshot.LastPowerReadAt),
+			LastChannelReadAt:            formatTimestamp(snapshot.LastChannelReadAt),
+			MetadataReadAt:               formatTimestamp(snapshot.MetadataReadAt),
+			LastError:                    snapshot.LastError,
+			StatusFresh:                  powerFresh || channelFresh,
+			PowerFresh:                   powerFresh,
+			PowerOperationallyFresh:      powerOperationallyFresh,
+			PowerOperationalFreshUntil:   powerOperationalFreshUntil,
+			ChannelFresh:                 channelFresh,
+			ChannelOperationallyFresh:    channelOperationallyFresh,
+			ChannelOperationalFreshUntil: channelOperationalFreshUntil,
+			MetadataFresh:                metadataFresh,
+			ConnectionState:              connectionState,
+			CapabilitiesKnown:            snapshot.CapabilitiesKnown,
+			Capabilities:                 snapshot.Capabilities,
+			Metadata:                     snapshot.Metadata,
 		})
 	}
 	sort.Slice(stationInfos, func(i, j int) bool {
