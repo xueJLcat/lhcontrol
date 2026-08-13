@@ -204,7 +204,13 @@ func handleAdapterConnectionChange(device bluetooth.Device, connected bool) {
 // station instead of accumulating one goroutine per OS notification.
 func (bs *BaseStation) queueDeviceInvalidation(device bluetooth.Device) {
 	bs.invalidationMutex.Lock()
-	bs.pendingInvalidation = &device
+	for _, pending := range bs.pendingInvalidations {
+		if pending == device {
+			bs.invalidationMutex.Unlock()
+			return
+		}
+	}
+	bs.pendingInvalidations = append(bs.pendingInvalidations, device)
 	if bs.invalidationRunning {
 		bs.invalidationMutex.Unlock()
 		return
@@ -217,15 +223,17 @@ func (bs *BaseStation) queueDeviceInvalidation(device bluetooth.Device) {
 func (bs *BaseStation) drainDeviceInvalidations() {
 	for {
 		bs.invalidationMutex.Lock()
-		device := bs.pendingInvalidation
-		bs.pendingInvalidation = nil
-		if device == nil {
+		if len(bs.pendingInvalidations) == 0 {
+			bs.pendingInvalidations = nil
 			bs.invalidationRunning = false
 			bs.invalidationMutex.Unlock()
 			return
 		}
+		device := bs.pendingInvalidations[0]
+		bs.pendingInvalidations[0] = bluetooth.Device{}
+		bs.pendingInvalidations = bs.pendingInvalidations[1:]
 		bs.invalidationMutex.Unlock()
-		invalidateDisconnectedDevice(bs, *device)
+		invalidateDisconnectedDevice(bs, device)
 	}
 }
 

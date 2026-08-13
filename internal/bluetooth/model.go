@@ -42,17 +42,19 @@ type BaseStation struct {
 	// Add Mutex for thread-safe access
 	mutex             sync.RWMutex
 	invalidationMutex sync.Mutex
-	// pendingInvalidation coalesces OS disconnect notifications into at most
-	// one in-flight invalidation goroutine per station; only the latest
-	// disconnected device is kept because invalidation is identity-checked.
-	pendingInvalidation *bluetooth.Device
-	invalidationRunning bool
-	LastStateUpdate     time.Time // Track when state was last read
-	LastSeenAt          time.Time
-	LastReadAt          time.Time
-	LastPowerReadAt     time.Time
-	LastChannelReadAt   time.Time
-	MetadataReadAt      time.Time
+	// pendingInvalidations coalesces OS disconnect notifications into one
+	// worker per station without discarding distinct device identities. An old
+	// connection callback can be delivered after the current connection's
+	// callback, so a last-value-only slot could overwrite the disconnect that
+	// actually matches station.device.
+	pendingInvalidations []bluetooth.Device
+	invalidationRunning  bool
+	LastStateUpdate      time.Time // Track when state was last read
+	LastSeenAt           time.Time
+	LastReadAt           time.Time
+	LastPowerReadAt      time.Time
+	LastChannelReadAt    time.Time
+	MetadataReadAt       time.Time
 	// MetadataReadRevision advances after every completed GATT discovery that
 	// reconciles optional device information, including partial failures. The
 	// successful-read timestamp can stay zero across repeated failures, so it

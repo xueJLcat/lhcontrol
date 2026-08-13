@@ -3,10 +3,12 @@ package bluetooth
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 	tinybluetooth "tinygo.org/x/bluetooth"
+	"unsafe"
 )
 
 type sleepFinalBlockingCharacteristic struct {
@@ -366,6 +368,63 @@ func TestStaleAdapterDisconnectDoesNotInvalidateReplacementDevice(t *testing.T) 
 		t.Fatal("stale disconnect callback invalidated the replacement connection")
 	}
 }
+
+func TestQueuedStaleDisconnectCannotReplaceCurrentDisconnect(t *testing.T) {
+	mac, err := tinybluetooth.ParseMAC("11:22:33:44:55:66")
+	if err != nil {
+		t.Fatalf("ParseMAC() error = %v", err)
+	}
+	address := tinybluetooth.Address{MACAddress: tinybluetooth.MACAddress{MAC: mac}}
+	currentDevice := concreteDeviceWithTestIdentity(t, address)
+	staleDevice := concreteDeviceWithTestIdentity(t, address)
+	station := connectedFakeStation(&fakeCharacteristic{}, nil, nil, Capabilities{PowerWrite: true})
+	station.Address = currentDevice.Address
+	station.device = currentDevice
+
+	connectedStationsMutex.Lock()
+	previousConnected := connectedStations
+	previousPending := pendingCleanupStations
+	connectedStations = []*BaseStation{station}
+	pendingCleanupStations = nil
+	connectedStationsMutex.Unlock()
+	t.Cleanup(func() {
+		connectedStationsMutex.Lock()
+		connectedStations = previousConnected
+		pendingCleanupStations = previousPending
+		connectedStationsMutex.Unlock()
+	})
+
+	// Hold the worker in its already-running state so both notifications are
+	// queued deterministically. The second value represents an older callback
+	// that was dispatched late and must not replace the current disconnect.
+	station.invalidationMutex.Lock()
+	station.invalidationRunning = true
+	station.invalidationMutex.Unlock()
+	station.queueDeviceInvalidation(currentDevice)
+	station.queueDeviceInvalidation(staleDevice)
+	station.drainDeviceInvalidations()
+
+	if station.Snapshot().Connected || station.characteristic != nil {
+		t.Fatal("late stale callback replaced the current disconnect notification")
+	}
+}
+
+// concreteDeviceWithTestIdentity creates the same shape that two TinyGo
+// Connect calls return for one address: equal addresses backed by distinct,
+// private connection-state pointers. Only identity comparison is exercised;
+// the zero-valued state is never used for transport operations.
+func concreteDeviceWithTestIdentity(t *testing.T, address tinybluetooth.Address) tinybluetooth.Device {
+	t.Helper()
+	device := tinybluetooth.Device{Address: address}
+	state := reflect.ValueOf(&device).Elem().FieldByName("state")
+	if !state.IsValid() || state.Kind() != reflect.Pointer {
+		t.Fatal("tinygo bluetooth Device no longer exposes the expected connection identity")
+	}
+	writableState := reflect.NewAt(state.Type(), unsafe.Pointer(state.UnsafeAddr())).Elem()
+	writableState.Set(reflect.New(state.Type().Elem()))
+	return device
+}
+
 func TestDisconnectAllStationsRetriesAdapterDisconnectedCleanup(t *testing.T) {
 	mac, err := tinybluetooth.ParseMAC("11:22:33:44:55:67")
 	if err != nil {
