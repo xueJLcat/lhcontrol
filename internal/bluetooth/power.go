@@ -394,19 +394,13 @@ func SetPowerStateContext(ctx context.Context, station *BaseStation, target Powe
 	station.mutex.Lock()
 	defer station.mutex.Unlock()
 	// Cancellation can land while another station operation owns the lock.
-	// Re-check before rearming boot-state inference so an operation that never
-	// starts cannot change the cached interpretation of compatibility firmware.
+	// Re-check so an operation that never starts cannot change station state.
 	if err := ctx.Err(); err != nil {
 		return PowerControlResult{}, err
 	}
-	// A new command can legitimately reboot or transition an already-on
-	// station. Re-arm boot-state observation before writing so the previous
-	// connection's compatibility inference cannot hide that transition.
-	station.bootRawTrustedOn = false
-	station.bootingSince = time.Time{}
 	maxRetries := CurrentTiming().WriteAttempts
 	var err error
-	var ambiguousWrite error
+	var unconfirmedCommand error
 	ambiguousSleepPrepare := false
 	command := byte(0x00)
 	switch target {
@@ -446,6 +440,15 @@ func SetPowerStateContext(ctx context.Context, station *BaseStation, target Powe
 		if !station.Capabilities.PowerWrite {
 			return PowerControlResult{}, unsupportedCapability("power control", nil)
 		}
+		// A command can legitimately reboot or transition an already-on station,
+		// but connection/discovery and capability checks do not. Re-arm the
+		// compatibility inference only when a write can actually be attempted,
+		// and retain the previous inference in case the transport explicitly
+		// rejects that first write before applying it.
+		previousBootRawTrustedOn := station.bootRawTrustedOn
+		previousBootingSince := station.bootingSince
+		station.bootRawTrustedOn = false
+		station.bootingSince = time.Time{}
 		log.Printf("Bluetooth: Sending %s command to %s", target, station.Name)
 		if target == PowerStateSleep {
 			// Some Lighthouse 2.0 firmware expects wake/prepare then sleep.
@@ -489,10 +492,21 @@ func SetPowerStateContext(ctx context.Context, station *BaseStation, target Powe
 		// sleep prepare write succeeds, however, the paired sequence has begun
 		// and the final-write outcome must still be handled as command state.
 		if !sleepFinalAttempted && isDefinitelyUnsentContextError(ctx, err) {
+			station.bootRawTrustedOn = previousBootRawTrustedOn
+			station.bootingSince = previousBootingSince
 			return PowerControlResult{}, ctx.Err()
 		}
+		// A successful sleep prepare is itself an applied power command. Even
+		// when the final write is explicitly rejected (and therefore was not
+		// sent), report the paired operation as sent but unconfirmed. Retrying or
+		// downgrading all power-write support would hide and potentially replay
+		// the already-applied prepare command.
+		if target == PowerStateSleep && sleepFinalAttempted {
+			unconfirmedCommand = fmt.Errorf("sleep prepare command was sent but final sleep write failed: %w", err)
+			break
+		}
 		if IsPossiblySent(err) {
-			ambiguousWrite = err
+			unconfirmedCommand = err
 			ambiguousSleepPrepare = target == PowerStateSleep && !sleepFinalAttempted
 			if ambiguousSleepPrepare {
 				// The final sleep command was not attempted, so observing the old
@@ -505,11 +519,15 @@ func SetPowerStateContext(ctx context.Context, station *BaseStation, target Powe
 		if target == PowerStateStandby &&
 			errors.As(err, &protocolErr) &&
 			protocolErr == bluetooth.ErrAttValueNotAllowed {
+			station.bootRawTrustedOn = previousBootRawTrustedOn
+			station.bootingSince = previousBootingSince
 			station.Capabilities.Standby = false
 			station.setOperationErrorInternal(err)
 			return PowerControlResult{}, unsupportedCapability("standby", err)
 		}
 		if IsCapabilityUnsupported(err) {
+			station.bootRawTrustedOn = previousBootRawTrustedOn
+			station.bootingSince = previousBootingSince
 			station.Capabilities.PowerWrite = false
 			station.Capabilities.Standby = false
 			station.setOperationErrorInternal(err)
@@ -527,19 +545,19 @@ func SetPowerStateContext(ctx context.Context, station *BaseStation, target Powe
 		}
 	}
 	if err != nil {
-		if ambiguousWrite != nil {
+		if unconfirmedCommand != nil {
 			if station.Capabilities.PowerRead && !ambiguousSleepPrepare {
 				if confirmationErr := confirmPowerStateInternalContext(ctx, station, target); confirmationErr == nil {
 					station.setPowerErrorInternal(nil)
 					station.setOperationErrorInternal(nil)
 					return PowerControlResult{State: target, Confirmed: true}, nil
 				} else {
-					err = errors.Join(ambiguousWrite, confirmationErr)
+					err = errors.Join(unconfirmedCommand, confirmationErr)
 				}
 			} else if !station.Capabilities.PowerRead {
-				err = errors.Join(ambiguousWrite, unsupportedCapability("power confirmation read", nil))
+				err = errors.Join(unconfirmedCommand, unsupportedCapability("power confirmation read", nil))
 			} else {
-				err = errors.Join(ambiguousWrite, fmt.Errorf("sleep prepare write was ambiguous before the final sleep command"))
+				err = errors.Join(unconfirmedCommand, fmt.Errorf("sleep prepare write was ambiguous before the final sleep command"))
 			}
 			station.setPowerErrorInternal(err)
 			station.setOperationErrorInternal(nil)
@@ -547,7 +565,7 @@ func SetPowerStateContext(ctx context.Context, station *BaseStation, target Powe
 				Target: target,
 				Actual: station.PowerState,
 				Raw:    station.RawPowerState,
-				Err:    fmt.Errorf("possibly-sent command could not be confirmed for %s: %w", station.Name, err),
+				Err:    fmt.Errorf("command outcome could not be confirmed for %s: %w", station.Name, err),
 			}
 		}
 		station.setOperationErrorInternal(err)

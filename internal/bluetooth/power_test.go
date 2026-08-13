@@ -317,6 +317,35 @@ func TestSleepDoesNotReplayAfterAmbiguousFinalWrite(t *testing.T) {
 		t.Fatalf("sleep write attempts = %d, want exactly 2", power.writeWithoutResponseAttempts)
 	}
 }
+func TestSleepFinalRejectionAfterPrepareReportsCommandSentWithoutReplay(t *testing.T) {
+	originalTiming := CurrentTiming()
+	ConfigureTiming(TimingPolicy{
+		ConfirmAttemptsOff:  1,
+		ConfirmPollInterval: time.Millisecond,
+		WriteAttempts:       3,
+	})
+	t.Cleanup(func() { ConfigureTiming(originalTiming) })
+
+	power := &fakeCharacteristic{
+		value:                      []byte{0x00},
+		writeWithoutResponseErrors: []error{nil, tinybluetooth.ErrAttWriteNotPermitted},
+	}
+	station := connectedFakeStation(power, nil, nil, Capabilities{PowerRead: true, PowerWrite: true})
+	result, err := SetPowerState(station, PowerStateSleep)
+	var confirmationErr *PowerConfirmationError
+	if !errors.As(err, &confirmationErr) || result.Confirmed {
+		t.Fatalf("SetPowerState() result=%+v error=%v, want sent but unconfirmed partial sleep command", result, err)
+	}
+	if power.writeWithoutResponseAttempts != 2 {
+		t.Fatalf("sleep write attempts = %d, want prepare and one final attempt", power.writeWithoutResponseAttempts)
+	}
+	if len(power.writes) != 1 || len(power.writes[0]) != 1 || power.writes[0][0] != 0x01 {
+		t.Fatalf("applied sleep writes = %v, want only the prepare command", power.writes)
+	}
+	if !station.Snapshot().Capabilities.PowerWrite {
+		t.Fatal("final sleep rejection disabled power writes even though the prepare write succeeded")
+	}
+}
 func TestAdapterDisconnectAsynchronouslyInvalidatesMatchingDevice(t *testing.T) {
 	originalAdapter := adapter
 	fake := newFakeBLEAdapter()
@@ -543,6 +572,29 @@ func TestStandbyValueNotAllowedOnlyDisablesStandby(t *testing.T) {
 	}
 	if !snapshot.Connected || device.disconnected {
 		t.Fatal("standby value rejection discarded a healthy connection")
+	}
+}
+func TestStandbyRejectionPreservesCompatibilityBootInference(t *testing.T) {
+	power := &fakeCharacteristic{
+		value:    []byte{0x01},
+		writeErr: tinybluetooth.ErrAttValueNotAllowed,
+	}
+	station := connectedFakeStation(power, nil, nil, Capabilities{PowerRead: true, PowerWrite: true, Standby: true})
+	station.setPowerStateInternal(PowerStateOn, 0x01)
+	station.bootRawTrustedOn = true
+
+	if _, err := SetPowerState(station, PowerStateStandby); !IsUnsupportedCapabilityError(err) {
+		t.Fatalf("SetPowerState() error = %v, want unsupported standby", err)
+	}
+	if err := ReadPowerState(station); err != nil {
+		t.Fatalf("ReadPowerState() error = %v", err)
+	}
+	if station.PowerState != PowerStateOn || !station.bootRawTrustedOn {
+		t.Fatalf(
+			"state after rejected command = %v trusted=%v, want compatibility On to remain trusted",
+			station.PowerState,
+			station.bootRawTrustedOn,
+		)
 	}
 }
 func TestSetPowerStateContextRejectsCancelledContext(t *testing.T) {
