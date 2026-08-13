@@ -188,7 +188,11 @@ func writeCharacteristicValueInternal(ctx context.Context, characteristic charac
 		n, err = writeWithoutResponse()
 		if err != nil && properties.Write() && IsCapabilityUnsupported(err) {
 			n, err = writeWithResponse()
-		} else if err != nil && !isDefiniteWriteRejection(err) {
+		} else if err != nil && !isDefiniteWriteRejection(err) &&
+			!isDefinitelyUnsentContextError(ctx, err) {
+			// A bare cancellation from a contextual writer means the transport
+			// never submitted the write. Preserve that classification so the
+			// caller does not report an unsent command as sent-but-unconfirmed.
 			_, classified := possiblySentClassification(err)
 			if !classified {
 				err = &PossiblySentError{Err: err}

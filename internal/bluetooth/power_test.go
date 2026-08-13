@@ -16,6 +16,21 @@ type sleepFinalBlockingCharacteristic struct {
 	contextWrites int
 }
 
+type cancelBeforeSubmitCharacteristic struct {
+	*fakeCharacteristic
+	cancel context.CancelFunc
+}
+
+func (f *cancelBeforeSubmitCharacteristic) WriteContext(ctx context.Context, _ []byte) (int, error) {
+	f.cancel()
+	return 0, ctx.Err()
+}
+
+func (f *cancelBeforeSubmitCharacteristic) WriteWithoutResponseContext(ctx context.Context, _ []byte) (int, error) {
+	f.cancel()
+	return 0, ctx.Err()
+}
+
 func (f *sleepFinalBlockingCharacteristic) WriteContext(ctx context.Context, value []byte) (int, error) {
 	return f.WriteWithoutResponseContext(ctx, value)
 }
@@ -94,6 +109,31 @@ func TestSetPowerStateContextDoesNotDisconnectWhenCancelledBeforeWrite(t *testin
 	}
 	if snapshot := station.Snapshot(); device.disconnects != 0 || !snapshot.Connected {
 		t.Fatalf("pre-write cancellation changed the healthy connection: disconnects=%d snapshot=%+v", device.disconnects, snapshot)
+	}
+}
+
+func TestSetPowerStateContextKeepsCancellationBeforeSubmissionUnsent(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	power := &cancelBeforeSubmitCharacteristic{
+		fakeCharacteristic: &fakeCharacteristic{properties: characteristicPropertyWriteWithoutResponse},
+		cancel:             cancel,
+	}
+	station := connectedFakeStation(power, nil, nil, Capabilities{PowerWrite: true})
+
+	result, err := SetPowerStateContext(ctx, station, PowerStateOn)
+	var confirmationErr *PowerConfirmationError
+	if !errors.Is(err, context.Canceled) || errors.As(err, &confirmationErr) || IsPossiblySent(err) {
+		t.Fatalf(
+			"SetPowerStateContext() = %+v, %v; want a definitely-unsent context cancellation",
+			result,
+			err,
+		)
+	}
+	if result != (PowerControlResult{}) {
+		t.Fatalf("SetPowerStateContext() result = %+v, want zero result", result)
+	}
+	if snapshot := station.Snapshot(); !snapshot.Connected {
+		t.Fatalf("pre-submission cancellation disconnected the healthy station: %+v", snapshot)
 	}
 }
 
