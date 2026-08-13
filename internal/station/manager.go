@@ -527,6 +527,23 @@ func (m *Manager) recordMetadataReadResult(address string, metadataErr error) {
 	}
 	m.noteMetadataFailure(address)
 }
+
+// reconcileMetadataReadResult observes a discovery side effect without
+// mistaking an old cached metadata error for a new failure. Successful-read
+// timestamps are unsuitable here because they remain zero on partial reads;
+// the Bluetooth layer's monotonic revision changes for every completed
+// metadata reconciliation instead.
+func (m *Manager) reconcileMetadataReadResult(
+	address string,
+	previousRevision uint64,
+	after bluetooth.BaseStationSnapshot,
+) {
+	if after.MetadataReadRevision == previousRevision {
+		return
+	}
+	m.recordMetadataReadResult(address, after.MetadataReadError)
+}
+
 func (m *Manager) recordUnstructuredStationFailure(
 	station *bluetooth.BaseStation,
 	address string,

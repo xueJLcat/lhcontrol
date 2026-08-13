@@ -199,9 +199,6 @@ func ScanForDurationContext(ctx context.Context, duration time.Duration) ([]Disc
 		}
 		localMutex.Lock()
 		previous, found := localStations[addressString]
-		if !found {
-			// log.Printf("[BT] Scan: Discovered %s (%s)", result.LocalName(), result.Address.String())
-		}
 		if localName == "" && found {
 			localName = previous.Name
 		}

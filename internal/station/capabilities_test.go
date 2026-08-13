@@ -105,3 +105,68 @@ func TestIdentifyUnsupportedClearsOnlyConnectionRecovery(t *testing.T) {
 		})
 	}
 }
+
+func TestIdentifyReconcilesMetadataRetryAfterReconnect(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	manager.statusRecoveryStart.Do(func() {})
+	address := "11:22:33:44:55:A4"
+	manager.stations[address] = &internalbluetooth.BaseStation{
+		Name:                 "LHB-IDENTIFY-METADATA",
+		Address:              mustAddress(t, address),
+		Capabilities:         internalbluetooth.Capabilities{Identify: true},
+		CapabilitiesKnown:    true,
+		MetadataReadRevision: 5,
+	}
+	manager.noteMetadataFailure(address)
+	manager.bluetoothOps.identify = func(_ context.Context, station *internalbluetooth.BaseStation) error {
+		station.MetadataReadRevision++
+		station.MetadataReadAt = time.Now()
+		return nil
+	}
+
+	if err := manager.IdentifyStation(address); err != nil {
+		t.Fatalf("IdentifyStation() error = %v", err)
+	}
+	manager.statusRetryMutex.Lock()
+	retry, tracked := manager.statusRetries[address]
+	manager.statusRetryMutex.Unlock()
+	if tracked && effectiveStatusRetryKinds(retry)&statusRetryMetadata != 0 {
+		t.Fatalf("metadata retry survived identify reconnect discovery: %+v", retry)
+	}
+}
+
+func TestCapabilityRefreshReconcilesMetadataBeforeLaterStatusFailure(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	manager.statusRecoveryStart.Do(func() {})
+	address := "11:22:33:44:55:A5"
+	manager.stations[address] = &internalbluetooth.BaseStation{
+		Name:                 "LHB-REFRESH-METADATA",
+		Address:              mustAddress(t, address),
+		MetadataReadRevision: 7,
+	}
+	manager.noteMetadataFailure(address)
+	manager.bluetoothOps.refreshCapabilities = func(
+		_ context.Context,
+		station *internalbluetooth.BaseStation,
+	) (internalbluetooth.Capabilities, error) {
+		station.MetadataReadRevision++
+		station.MetadataReadAt = time.Now()
+		return internalbluetooth.Capabilities{DeviceInformation: true}, nil
+	}
+	manager.bluetoothOps.fetchInitialPowerState = func(context.Context, *internalbluetooth.BaseStation) error {
+		return errors.New("status read failed after metadata refresh")
+	}
+	manager.bluetoothOps.disconnectStation = func(*internalbluetooth.BaseStation) error { return nil }
+
+	if _, err := manager.RefreshStationCapabilities(address); err == nil {
+		t.Fatal("RefreshStationCapabilities() succeeded despite status read failure")
+	}
+	manager.statusRetryMutex.Lock()
+	retry, tracked := manager.statusRetries[address]
+	manager.statusRetryMutex.Unlock()
+	if tracked && effectiveStatusRetryKinds(retry)&statusRetryMetadata != 0 {
+		t.Fatalf("metadata retry survived successful refresh discovery: %+v", retry)
+	}
+}

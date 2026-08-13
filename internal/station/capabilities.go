@@ -22,6 +22,10 @@ func (m *Manager) IdentifyStation(address string) error {
 		return m.stationOperationContextError(err)
 	}
 	defer m.endStationOperation(canonicalAddress)
+	metadataReadRevision := stationPtr.Snapshot().MetadataReadRevision
+	defer func() {
+		m.reconcileMetadataReadResult(canonicalAddress, metadataReadRevision, stationPtr.Snapshot())
+	}()
 	if err := m.ensureReady(); err != nil {
 		return err
 	}
@@ -81,6 +85,10 @@ func (m *Manager) RefreshStationCapabilities(address string) (StationInfo, error
 		return StationInfo{}, m.stationOperationContextError(err)
 	}
 	defer m.endStationOperation(canonicalAddress)
+	metadataReadRevision := stationPtr.Snapshot().MetadataReadRevision
+	defer func() {
+		m.reconcileMetadataReadResult(canonicalAddress, metadataReadRevision, stationPtr.Snapshot())
+	}()
 	if err := m.ensureReady(); err != nil {
 		return StationInfo{}, err
 	}
@@ -114,7 +122,6 @@ func (m *Manager) RefreshStationCapabilities(address string) (StationInfo, error
 			return StationInfo{}, m.stationOperationContextError(err)
 		}
 		m.recordStructuredReadResult(stationPtr, canonicalAddress, readErr.Power, readErr.Channel)
-		m.recordMetadataReadResult(canonicalAddress, readErr.Metadata)
 		// Capability discovery succeeded. Keep the refreshed station visible and
 		// expose any unavailable state values through freshness and LastError
 		// instead of turning a structured partial read into a total refresh

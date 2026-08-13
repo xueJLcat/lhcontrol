@@ -53,9 +53,14 @@ type BaseStation struct {
 	LastPowerReadAt     time.Time
 	LastChannelReadAt   time.Time
 	MetadataReadAt      time.Time
-	LastError           string
-	MissedScans         int
-	bootingSince        time.Time
+	// MetadataReadRevision advances after every completed GATT discovery that
+	// reconciles optional device information, including partial failures. The
+	// successful-read timestamp can stay zero across repeated failures, so it
+	// cannot by itself tell higher layers that a fresh attempt occurred.
+	MetadataReadRevision uint64
+	LastError            string
+	MissedScans          int
+	bootingSince         time.Time
 	// bootRawTrustedOn remembers that this connection has continuously
 	// reported a boot-like raw value for long enough to use the compatibility
 	// fallback. It is cleared on disconnect and before a power command so a
@@ -223,21 +228,22 @@ func (bs *BaseStation) ClearOperationError() {
 }
 
 type BaseStationSnapshot struct {
-	Name              string
-	Address           string
-	PowerState        PowerState
-	RawPowerState     int
-	Channel           int
-	Present           bool
-	Capabilities      Capabilities
-	CapabilitiesKnown bool
-	Metadata          DeviceMetadata
-	LastStateUpdate   time.Time
-	LastSeenAt        time.Time
-	LastReadAt        time.Time
-	LastPowerReadAt   time.Time
-	LastChannelReadAt time.Time
-	MetadataReadAt    time.Time
+	Name                 string
+	Address              string
+	PowerState           PowerState
+	RawPowerState        int
+	Channel              int
+	Present              bool
+	Capabilities         Capabilities
+	CapabilitiesKnown    bool
+	Metadata             DeviceMetadata
+	LastStateUpdate      time.Time
+	LastSeenAt           time.Time
+	LastReadAt           time.Time
+	LastPowerReadAt      time.Time
+	LastChannelReadAt    time.Time
+	MetadataReadAt       time.Time
+	MetadataReadRevision uint64
 	// MetadataReadError exposes the most recent metadata read failure so
 	// operation layers can reconcile background metadata recovery after a
 	// reconnect that re-read device information as a side effect.
@@ -252,26 +258,27 @@ func (bs *BaseStation) Snapshot() BaseStationSnapshot {
 	bs.mutex.RLock()
 	defer bs.mutex.RUnlock()
 	return BaseStationSnapshot{
-		Name:              bs.Name,
-		Address:           bs.Address.String(),
-		PowerState:        bs.PowerState,
-		RawPowerState:     bs.RawPowerState,
-		Channel:           bs.Channel,
-		Present:           bs.Present,
-		Capabilities:      bs.Capabilities,
-		CapabilitiesKnown: bs.CapabilitiesKnown,
-		Metadata:          bs.Metadata,
-		LastStateUpdate:   bs.LastStateUpdate,
-		LastSeenAt:        bs.LastSeenAt,
-		LastReadAt:        bs.LastReadAt,
-		LastPowerReadAt:   bs.LastPowerReadAt,
-		LastChannelReadAt: bs.LastChannelReadAt,
-		MetadataReadAt:    bs.MetadataReadAt,
-		MetadataReadError: bs.metadataReadError,
-		LastError:         bs.LastError,
-		MissedScans:       bs.MissedScans,
-		Connected:         bs.isConnected && bs.device != nil,
-		PresenceUncertain: bs.presenceUncertain,
+		Name:                 bs.Name,
+		Address:              bs.Address.String(),
+		PowerState:           bs.PowerState,
+		RawPowerState:        bs.RawPowerState,
+		Channel:              bs.Channel,
+		Present:              bs.Present,
+		Capabilities:         bs.Capabilities,
+		CapabilitiesKnown:    bs.CapabilitiesKnown,
+		Metadata:             bs.Metadata,
+		LastStateUpdate:      bs.LastStateUpdate,
+		LastSeenAt:           bs.LastSeenAt,
+		LastReadAt:           bs.LastReadAt,
+		LastPowerReadAt:      bs.LastPowerReadAt,
+		LastChannelReadAt:    bs.LastChannelReadAt,
+		MetadataReadAt:       bs.MetadataReadAt,
+		MetadataReadRevision: bs.MetadataReadRevision,
+		MetadataReadError:    bs.metadataReadError,
+		LastError:            bs.LastError,
+		MissedScans:          bs.MissedScans,
+		Connected:            bs.isConnected && bs.device != nil,
+		PresenceUncertain:    bs.presenceUncertain,
 	}
 }
 

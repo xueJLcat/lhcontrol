@@ -274,13 +274,14 @@ func TestSetStationChannelReconcilesMetadataRetryAfterReread(t *testing.T) {
 	now := time.Now()
 	address := "AA:BB:CC:DD:EE:0B"
 	manager.stations[address] = &internalbluetooth.BaseStation{
-		Address:           mustAddress(t, address),
-		Name:              "LHB-META",
-		Channel:           3,
-		Present:           true,
-		LastSeenAt:        now,
-		LastChannelReadAt: now,
-		MetadataReadAt:    now.Add(-time.Minute),
+		Address:              mustAddress(t, address),
+		Name:                 "LHB-META",
+		Channel:              3,
+		Present:              true,
+		LastSeenAt:           now,
+		LastChannelReadAt:    now,
+		MetadataReadAt:       now.Add(-time.Minute),
+		MetadataReadRevision: 1,
 		Capabilities: internalbluetooth.Capabilities{
 			ChannelRead: true, ChannelWrite: true,
 		},
@@ -292,6 +293,7 @@ func TestSetStationChannelReconcilesMetadataRetryAfterReread(t *testing.T) {
 		station.LastChannelReadAt = time.Now()
 		// Discovery re-read the device metadata successfully as a side effect.
 		station.MetadataReadAt = time.Now()
+		station.MetadataReadRevision++
 		return internalbluetooth.ChannelWriteResult{PreviousChannel: 3, Channel: 6, CommandSent: true}, nil
 	}
 

@@ -124,7 +124,6 @@ func connectAndDiscoverInternalContext(ctx context.Context, station *BaseStation
 			metadataServiceFound := false
 			metadataRecognized := 0
 			metadataSuccessful := 0
-			metadataFailure := false
 			metadataErrors := make([]error, 0)
 			controlServiceFound := false
 
@@ -147,7 +146,6 @@ func connectAndDiscoverInternalContext(ctx context.Context, station *BaseStation
 						break
 					}
 					log.Printf("Bluetooth: Optional device information discovery failed for %s: %v", station.Name, characteristicErr)
-					metadataFailure = true
 					metadataErrors = append(metadataErrors, fmt.Errorf("discover device information characteristics: %w", characteristicErr))
 					continue
 				}
@@ -194,7 +192,6 @@ func connectAndDiscoverInternalContext(ctx context.Context, station *BaseStation
 							return readErr
 						}
 						log.Printf("Bluetooth: Optional metadata read failed for %s (%s): %v", station.Name, current.UUID(), readErr)
-						metadataFailure = true
 						metadataErrors = append(metadataErrors, fmt.Errorf("read %s: %w", current.UUID(), readErr))
 						continue
 					}
@@ -240,20 +237,14 @@ func connectAndDiscoverInternalContext(ctx context.Context, station *BaseStation
 				station.Channel = ChannelUnknown
 				station.LastChannelReadAt = time.Time{}
 			}
-			station.Metadata, station.MetadataReadAt = reconcileMetadata(
-				station.Metadata,
+			station.applyMetadataDiscovery(
 				metadata,
 				metadataServiceFound,
 				metadataRecognized,
 				metadataSuccessful,
-				metadataFailure,
+				errors.Join(metadataErrors...),
 				time.Now(),
 			)
-			if metadataFailure {
-				station.setMetadataErrorInternal(errors.Join(metadataErrors...))
-			} else {
-				station.setMetadataErrorInternal(nil)
-			}
 			station.setConnectionErrorInternal(nil)
 			err = nil
 			break

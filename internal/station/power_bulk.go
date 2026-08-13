@@ -301,6 +301,10 @@ func (m *Manager) setAllStationsPowerDetailed(ctx context.Context, state string)
 			stationResult := BulkPowerStationResult{
 				Address: s.Address.String(),
 			}
+			metadataReadRevision := s.Snapshot().MetadataReadRevision
+			defer func() {
+				m.reconcileMetadataReadResult(stationResult.Address, metadataReadRevision, s.Snapshot())
+			}()
 			cachedSkip := false
 			workerErr := runSafely("bulk power worker", func() error {
 				snapshot := s.Snapshot()

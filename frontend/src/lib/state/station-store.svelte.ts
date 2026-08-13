@@ -168,7 +168,7 @@ export class StationStore {
       // Disabling automatic station polling must not freeze time-derived
       // freshness flags forever. Re-project the cached snapshots alongside
       // the lightweight API-health poll without performing any Bluetooth I/O.
-      if (!this.statusPollingEnabled) void this.refreshStationProjection();
+      if (!this.statusPollingEnabled) void this.refreshStationProjection(false);
     },
     commitFailure: (error) => {
       this.apiRunning = false;
@@ -454,6 +454,7 @@ export class StationStore {
       if (this.projectionRefreshTimer !== null) clearTimeout(this.projectionRefreshTimer);
       this.projectionRefreshTimer = null;
     }
+    if (!resetFailureBackoff && this.projectionRefreshFailures >= PROJECTION_REFRESH_GIVE_UP_AFTER) return;
     // A setting can be saved while a scan, command, or external operation is
     // active. Coalesce those requests and retry once the authoritative work
     // settles instead of dropping the projection update permanently.

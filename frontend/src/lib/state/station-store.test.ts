@@ -103,19 +103,31 @@ describe('StationStore projection settings', () => {
     expect(store.stations[0].powerFresh).toBe(false);
   });
 
-  it('stops self-retrying a persistently failing projection refresh', async () => {
+  it('bounds passive projection retries until an explicit refresh resets the backoff', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
     backend.GetCurrentStationInfo.mockRejectedValue(new Error('read failed'));
     store = new StationStore(createUi());
     store.startupPending = false;
 
-    for (let attempt = 0; attempt < 7; attempt += 1) {
+    for (let attempt = 0; attempt < 6; attempt += 1) {
       await store.refreshStationProjection(false);
     }
 
-    // Six failures reach the give-up threshold; the pending flag must clear so
-    // the backoff loop stops scheduling further backend reads on its own.
+    // Six failures reach the give-up threshold. A passive caller and the
+    // disabled-polling health snapshot must not silently reset that bound.
     const pending = (store as unknown as { projectionRefreshPending: boolean }).projectionRefreshPending;
     expect(pending).toBe(false);
+    expect(backend.GetCurrentStationInfo).toHaveBeenCalledTimes(6);
+    await store.refreshStationProjection(false);
+    expect(backend.GetCurrentStationInfo).toHaveBeenCalledTimes(6);
+    (store as unknown as { statusPollingEnabled: boolean }).statusPollingEnabled = false;
+    await store.apiStatus.refresh();
+    await Promise.resolve();
+    expect(backend.GetCurrentStationInfo).toHaveBeenCalledTimes(6);
+
+    await store.refreshStationProjection();
+    expect(backend.GetCurrentStationInfo).toHaveBeenCalledTimes(7);
+    consoleError.mockRestore();
   });
 
   it('defers a projection refresh until an authoritative operation settles', async () => {

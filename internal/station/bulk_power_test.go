@@ -362,6 +362,52 @@ func TestBulkPowerReportsConfirmedUnsupportedCapabilitiesAsSkipped(t *testing.T)
 	}
 }
 
+func TestBulkPowerReconcilesMetadataRetryAfterReconnect(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	manager.statusRecoveryStart.Do(func() {})
+	now := time.Now()
+	address := "11:22:33:44:55:8B"
+	manager.stations[address] = &internalbluetooth.BaseStation{
+		Name:                 "LHB-BULK-METADATA",
+		Address:              mustAddress(t, address),
+		Present:              true,
+		PowerState:           internalbluetooth.PowerStateSleep,
+		RawPowerState:        0x00,
+		LastPowerReadAt:      now,
+		Capabilities:         internalbluetooth.Capabilities{PowerWrite: true},
+		CapabilitiesKnown:    true,
+		MetadataReadRevision: 2,
+	}
+	manager.noteMetadataFailure(address)
+	manager.bluetoothOps.setPowerState = func(
+		_ context.Context,
+		station *internalbluetooth.BaseStation,
+		_ internalbluetooth.PowerState,
+	) (internalbluetooth.PowerControlResult, error) {
+		station.MetadataReadRevision++
+		station.MetadataReadAt = time.Now()
+		station.PowerState = internalbluetooth.PowerStateOn
+		station.RawPowerState = 0x0B
+		station.LastPowerReadAt = time.Now()
+		return internalbluetooth.PowerControlResult{State: internalbluetooth.PowerStateOn, Confirmed: true}, nil
+	}
+
+	result, err := manager.SetAllStationsPowerDetailed("on")
+	if err != nil {
+		t.Fatalf("SetAllStationsPowerDetailed() error = %v", err)
+	}
+	if len(result.Results) != 1 || !result.Results[0].Success || !result.Results[0].Confirmed {
+		t.Fatalf("bulk power result = %+v", result)
+	}
+	manager.statusRetryMutex.Lock()
+	retry, tracked := manager.statusRetries[address]
+	manager.statusRetryMutex.Unlock()
+	if tracked && effectiveStatusRetryKinds(retry)&statusRetryMetadata != 0 {
+		t.Fatalf("metadata retry survived bulk reconnect discovery: %+v", retry)
+	}
+}
+
 func TestBulkPowerKeepsCapabilityConnectionFailuresAsFailed(t *testing.T) {
 	manager := NewManager(config.NewConfig())
 	address := "11:22:33:44:55:66"

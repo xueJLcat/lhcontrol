@@ -224,6 +224,48 @@ func TestUnsupportedMetadataFailureDoesNotScheduleRecovery(t *testing.T) {
 	}
 }
 
+func TestMetadataReadRevisionReconcilesOnlyFreshDiscoveryResult(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	manager.statusRecoveryStart.Do(func() {})
+	address := "11:22:33:44:55:8A"
+	firstErr := errors.New("metadata unavailable")
+
+	manager.reconcileMetadataReadResult(address, 0, internalbluetooth.BaseStationSnapshot{
+		MetadataReadRevision: 1,
+		MetadataReadError:    firstErr,
+	})
+	manager.statusRetryMutex.Lock()
+	retry, tracked := manager.statusRetries[address]
+	manager.statusRetryMutex.Unlock()
+	if !tracked || effectiveStatusRetryKinds(retry) != statusRetryMetadata || retry.metadataFailures != 1 {
+		t.Fatalf("fresh failed discovery retry = %+v tracked=%v", retry, tracked)
+	}
+
+	// The same revision carries only cached evidence and must not advance the
+	// backoff or relight an exhausted retry.
+	manager.reconcileMetadataReadResult(address, 1, internalbluetooth.BaseStationSnapshot{
+		MetadataReadRevision: 1,
+		MetadataReadError:    errors.New("cached metadata error"),
+	})
+	manager.statusRetryMutex.Lock()
+	retry = manager.statusRetries[address]
+	manager.statusRetryMutex.Unlock()
+	if retry.metadataFailures != 1 {
+		t.Fatalf("cached metadata error advanced failures to %d", retry.metadataFailures)
+	}
+
+	manager.reconcileMetadataReadResult(address, 1, internalbluetooth.BaseStationSnapshot{
+		MetadataReadRevision: 2,
+	})
+	manager.statusRetryMutex.Lock()
+	retry, tracked = manager.statusRetries[address]
+	manager.statusRetryMutex.Unlock()
+	if tracked && effectiveStatusRetryKinds(retry)&statusRetryMetadata != 0 {
+		t.Fatalf("successful fresh discovery retained metadata retry: %+v", retry)
+	}
+}
+
 func TestMetadataRecoveryStopsAfterBoundedFailures(t *testing.T) {
 	manager := NewManager(config.NewConfig())
 	manager.statusRecoveryStart.Do(func() {})

@@ -1042,3 +1042,40 @@ func TestReconcileMetadataInvalidatesFreshnessWithoutUsableService(t *testing.T)
 		})
 	}
 }
+
+func TestApplyMetadataDiscoveryAdvancesRevisionForFailureAndRecovery(t *testing.T) {
+	station := &BaseStation{}
+	firstAttempt := time.Now()
+	readErr := errors.New("firmware revision unavailable")
+
+	station.applyMetadataDiscovery(
+		DeviceMetadata{},
+		true,
+		1,
+		0,
+		readErr,
+		firstAttempt,
+	)
+	if station.MetadataReadRevision != 1 {
+		t.Fatalf("metadata revision after failed discovery = %d, want 1", station.MetadataReadRevision)
+	}
+	if !station.MetadataReadAt.IsZero() {
+		t.Fatalf("failed metadata discovery was marked fresh at %v", station.MetadataReadAt)
+	}
+	if !errors.Is(station.metadataReadError, readErr) {
+		t.Fatalf("metadata error after failed discovery = %v, want %v", station.metadataReadError, readErr)
+	}
+
+	secondAttempt := firstAttempt.Add(time.Second)
+	metadata := DeviceMetadata{FirmwareRevision: "2.0"}
+	station.applyMetadataDiscovery(metadata, true, 1, 1, nil, secondAttempt)
+	if station.MetadataReadRevision != 2 {
+		t.Fatalf("metadata revision after recovery = %d, want 2", station.MetadataReadRevision)
+	}
+	if station.Metadata != metadata || !station.MetadataReadAt.Equal(secondAttempt) {
+		t.Fatalf("metadata after recovery = %+v at %v", station.Metadata, station.MetadataReadAt)
+	}
+	if station.metadataReadError != nil {
+		t.Fatalf("metadata recovery retained error %v", station.metadataReadError)
+	}
+}

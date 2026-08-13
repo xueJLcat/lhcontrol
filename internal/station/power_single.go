@@ -31,6 +31,10 @@ func (m *Manager) SetStationPower(address, state string) (PowerActionResult, err
 	}
 	defer m.endStationOperation(canonicalAddress)
 	snapshot := stationPtr.Snapshot()
+	metadataReadRevision := snapshot.MetadataReadRevision
+	defer func() {
+		m.reconcileMetadataReadResult(canonicalAddress, metadataReadRevision, stationPtr.Snapshot())
+	}()
 	if err := m.ensureReady(); err != nil {
 		return PowerActionResult{}, err
 	}
@@ -49,8 +53,7 @@ func (m *Manager) SetStationPower(address, state string) (PowerActionResult, err
 		return PowerActionResult{}, fmt.Errorf("station is booting; retry after transition: %w", ErrStationTransitioning)
 	}
 	if disposition == cachedPowerAtTarget || !isOperationallyFresh(snapshot.LastPowerReadAt, time.Now()) {
-		var readErr error
-		readErr = runSafely("power cache verification", func() error {
+		readErr := runSafely("power cache verification", func() error {
 			readContext, cancelRead := context.WithTimeout(operationContext, m.initialReadTimeoutDuration())
 			defer cancelRead()
 			return m.bluetoothOps.fetchInitialPowerState(readContext, stationPtr)

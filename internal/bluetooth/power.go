@@ -189,11 +189,9 @@ func writeCharacteristicValueInternal(ctx context.Context, characteristic charac
 		if err != nil && properties.Write() && IsCapabilityUnsupported(err) {
 			n, err = writeWithResponse()
 		} else if err != nil && !isDefiniteWriteRejection(err) {
-			possiblySent, classified := possiblySentClassification(err)
+			_, classified := possiblySentClassification(err)
 			if !classified {
 				err = &PossiblySentError{Err: err}
-			} else if !possiblySent {
-				// A transport-provided definite classification preserves retry safety.
 			}
 		}
 	case properties.Write():

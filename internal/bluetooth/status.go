@@ -284,6 +284,31 @@ func reconcileMetadata(
 	return mergeMetadata(previous, discovered), time.Time{}
 }
 
+// applyMetadataDiscovery commits one completed optional device-information
+// discovery. The caller holds the station write lock. A revision is recorded
+// even when the read is partial, because a zero freshness timestamp otherwise
+// makes the first failure indistinguishable from no attempt at all.
+func (bs *BaseStation) applyMetadataDiscovery(
+	discovered DeviceMetadata,
+	serviceFound bool,
+	recognized int,
+	successful int,
+	metadataErr error,
+	now time.Time,
+) {
+	bs.Metadata, bs.MetadataReadAt = reconcileMetadata(
+		bs.Metadata,
+		discovered,
+		serviceFound,
+		recognized,
+		successful,
+		metadataErr != nil,
+		now,
+	)
+	bs.setMetadataErrorInternal(metadataErr)
+	bs.MetadataReadRevision++
+}
+
 // connectAndDiscoverInternal handles connection and discovery.
 // Assumes caller holds the write lock (station.mutex.Lock()).
 func connectAndDiscoverInternal(station *BaseStation) error {

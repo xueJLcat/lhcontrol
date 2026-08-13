@@ -54,6 +54,48 @@ func TestSinglePowerOperationHasHardTimeoutAndReleasesOperation(t *testing.T) {
 	}
 }
 
+func TestSinglePowerReconcilesMetadataRetryAfterReconnect(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	manager.statusRecoveryStart.Do(func() {})
+	now := time.Now()
+	address := "11:22:33:44:55:8A"
+	manager.stations[address] = &internalbluetooth.BaseStation{
+		Name:                 "LHB-POWER-METADATA",
+		Address:              mustAddress(t, address),
+		Present:              true,
+		PowerState:           internalbluetooth.PowerStateSleep,
+		RawPowerState:        0x00,
+		LastPowerReadAt:      now,
+		Capabilities:         internalbluetooth.Capabilities{PowerWrite: true},
+		CapabilitiesKnown:    true,
+		MetadataReadRevision: 3,
+	}
+	manager.noteMetadataFailure(address)
+	manager.bluetoothOps.setPowerState = func(
+		_ context.Context,
+		station *internalbluetooth.BaseStation,
+		_ internalbluetooth.PowerState,
+	) (internalbluetooth.PowerControlResult, error) {
+		station.MetadataReadRevision++
+		station.MetadataReadAt = time.Now()
+		station.PowerState = internalbluetooth.PowerStateOn
+		station.RawPowerState = 0x0B
+		station.LastPowerReadAt = time.Now()
+		return internalbluetooth.PowerControlResult{State: internalbluetooth.PowerStateOn, Confirmed: true}, nil
+	}
+
+	if _, err := manager.SetStationPower(address, "on"); err != nil {
+		t.Fatalf("SetStationPower() error = %v", err)
+	}
+	manager.statusRetryMutex.Lock()
+	retry, tracked := manager.statusRetries[address]
+	manager.statusRetryMutex.Unlock()
+	if tracked && effectiveStatusRetryKinds(retry)&statusRetryMetadata != 0 {
+		t.Fatalf("metadata retry survived power reconnect discovery: %+v", retry)
+	}
+}
+
 func TestStationOperationTimeoutSentinelWhenBudgetExpiresWaitingForSlot(t *testing.T) {
 	manager := NewManager(config.NewConfig())
 	defer manager.Shutdown()
