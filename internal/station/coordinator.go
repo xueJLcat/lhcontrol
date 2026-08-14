@@ -31,9 +31,15 @@ func (m *Manager) beginOperation() error {
 		m.unregisterOperation()
 		return ErrOperationInProgress
 	}
+	m.globalOperationMutex.Lock()
+	m.exclusiveOperationActive = true
+	m.globalOperationMutex.Unlock()
 	return nil
 }
 func (m *Manager) endOperation() {
+	m.globalOperationMutex.Lock()
+	m.exclusiveOperationActive = false
+	m.globalOperationMutex.Unlock()
 	m.operationMutex.Unlock()
 	m.unregisterOperation()
 }
@@ -406,11 +412,9 @@ func (m *Manager) cancelRecoveryForForeground() {
 // as status refreshes, single-station commands, and configuration writes
 // does not make it return true.
 func (m *Manager) IsBusy() bool {
-	if !m.operationMutex.TryLock() {
-		return true
-	}
-	m.operationMutex.Unlock()
-	return false
+	m.globalOperationMutex.Lock()
+	defer m.globalOperationMutex.Unlock()
+	return m.exclusiveOperationActive
 }
 
 // GetStationInfo returns the current state of the stations map.

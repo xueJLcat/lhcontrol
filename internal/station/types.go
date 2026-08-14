@@ -188,10 +188,11 @@ type Manager struct {
 	stations                map[string]*bluetooth.BaseStation
 	stationsMutex           sync.RWMutex
 	config                  *config.Config
-	operationMutex          sync.RWMutex
-	globalOperationMutex    sync.Mutex
-	foregroundGlobalActive  bool
-	foregroundSharedActive  int
+	operationMutex           sync.RWMutex
+	globalOperationMutex     sync.Mutex
+	exclusiveOperationActive bool
+	foregroundGlobalActive   bool
+	foregroundSharedActive   int
 	scanTransitionMutex     sync.Mutex
 	statusOperationMutex    sync.Mutex
 	statusLifecycleMutex    sync.Mutex

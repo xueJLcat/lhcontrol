@@ -12,6 +12,39 @@ import (
 	"lhcontrol/internal/config"
 )
 
+func TestIsBusyIgnoresSharedWork(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+
+	if err := manager.beginSharedOperation(); err != nil {
+		t.Fatalf("shared operation should start: %v", err)
+	}
+	if manager.IsBusy() {
+		t.Fatal("IsBusy reported busy while only shared work held the coordinator")
+	}
+	if err := manager.beginStationOperation("AA"); err != nil {
+		t.Fatalf("station operation should start alongside shared work: %v", err)
+	}
+	if manager.IsBusy() {
+		t.Fatal("IsBusy reported busy while only shared and station work were active")
+	}
+	manager.endStationOperation("AA")
+	manager.endSharedOperation()
+	if manager.IsBusy() {
+		t.Fatal("IsBusy reported busy after all shared work ended")
+	}
+
+	if err := manager.beginForegroundGlobalOperation(); err != nil {
+		t.Fatalf("exclusive operation should start: %v", err)
+	}
+	if !manager.IsBusy() {
+		t.Fatal("IsBusy should report busy while an exclusive operation owns the coordinator")
+	}
+	manager.endForegroundGlobalOperation()
+	if manager.IsBusy() {
+		t.Fatal("IsBusy reported busy after the exclusive operation ended")
+	}
+}
+
 func TestOperationCoordinator(t *testing.T) {
 	manager := NewManager(config.NewConfig())
 
