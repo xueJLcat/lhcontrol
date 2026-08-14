@@ -150,12 +150,14 @@ func (m *Manager) CancelBulkPower() error {
 	if lifecycle == nil {
 		return nil
 	}
+	waitLimit := time.NewTimer(bulkCancelWaitLimit)
+	defer waitLimit.Stop()
 	select {
 	case <-lifecycle.done:
 		return nil
 	case <-m.shutdownCh:
 		return ErrShuttingDown
-	case <-time.After(bulkCancelWaitLimit):
+	case <-waitLimit.C:
 		return fmt.Errorf("bulk operation did not stop within %s after cancellation", bulkCancelWaitLimit)
 	}
 }

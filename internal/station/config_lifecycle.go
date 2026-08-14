@@ -110,9 +110,11 @@ func (m *Manager) Shutdown() {
 	if limit <= 0 {
 		limit = shutdownDrainLimit
 	}
+	drainTimer := time.NewTimer(limit)
+	defer drainTimer.Stop()
 	select {
 	case <-drained:
-	case <-time.After(limit):
+	case <-drainTimer.C:
 		log.Printf("Bluetooth shutdown drain exceeded %s; exiting without complete cleanup", limit)
 	}
 }

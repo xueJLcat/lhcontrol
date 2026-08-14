@@ -208,11 +208,14 @@ func (a *App) stopAutoSleep() {
 		limit = autoSleepStopLimit
 	}
 
+	stopTimer := time.NewTimer(limit)
+	defer stopTimer.Stop()
+
 	select {
 
 	case <-waited:
 
-	case <-time.After(limit):
+	case <-stopTimer.C:
 
 		log.Printf("Auto-sleep shutdown wait exceeded %s; exiting without the running action", limit)
 
