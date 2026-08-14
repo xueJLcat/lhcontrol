@@ -326,11 +326,15 @@ export class ExternalScanCoordinator {
     if (!scanStatus || !isTerminalScanState(scanStatus.state)) {
       return;
     }
-    this.recoveryEpoch = null;
     const canWriteTerminalStatus = this.recoveryStatusEpoch === statusOperation &&
       this.host.canCommitStatus(statusOperation);
-    this.recoveryStatusEpoch = null;
     if (!canWriteTerminalStatus) return;
+    // Clear the recovery epochs only once the terminal status is committed.
+    // Clearing them when the commit is rejected would drop the outcome with
+    // nothing left for the periodic check to retry, contradicting the
+    // terminal event handlers.
+    this.recoveryEpoch = null;
+    this.recoveryStatusEpoch = null;
     const found = scanStatus?.found ?? this.host.seenInLatestScanCount();
     this.host.setStatusMessage(formatTerminalScanResult({
       state: scanStatus?.state ?? 'completed',
@@ -374,10 +378,13 @@ export class ExternalScanCoordinator {
     // A non-terminal status belongs to a scan that started after the stop;
     // aborting keeps the recovery epochs pending for the periodic check.
     if (!scanStatus || !isTerminalScanState(scanStatus.state)) return 'aborted';
-    this.recoveryEpoch = null;
     const canWriteTerminalStatus = this.recoveryStatusEpoch === this.host.statusEpoch();
-    this.recoveryStatusEpoch = null;
     if (canWriteTerminalStatus) {
+      // Clear the recovery epochs only once the terminal status is committed;
+      // a rejected commit must leave them pending so the periodic check can
+      // retry instead of silently dropping the stop outcome.
+      this.recoveryEpoch = null;
+      this.recoveryStatusEpoch = null;
       const found = scanStatus?.found ?? this.host.seenInLatestScanCount();
       this.host.setStatusMessage(formatTerminalScanResult({
         state: scanStatus?.state ?? 'cancelled', found, known: this.host.knownStationCount(),

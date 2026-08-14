@@ -252,6 +252,40 @@ describe('ExternalScanCoordinator', () => {
     expect(coordinator.hasPendingRecovery()).toBe(true);
   });
 
+  it('keeps a tracked terminal recovery pending when its status commit is rejected', async () => {
+    const { host, state } = createHost();
+    const coordinator = new ExternalScanCoordinator(host);
+    coordinator.markRecoveryPending();
+    expect(coordinator.hasPendingRecovery()).toBe(true);
+    // Another status owner claims the epoch while the terminal reads are in
+    // flight, so the terminal status commit must be rejected.
+    (host.getScanStatus as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      host.beginStatusOperation();
+      return { state: 'cancelled', found: 1, warnings: [] };
+    });
+
+    await coordinator.recoverTrackedTerminal(1, state.statusEpoch, new Map());
+
+    // The commit was rejected before clearing the recovery epochs, so the
+    // periodic check can still retry instead of dropping the outcome forever.
+    expect(coordinator.hasPendingRecovery()).toBe(true);
+    expect(state.statusMessages).toEqual([]);
+  });
+
+  it('clears the recovery epochs once the tracked terminal status commits', async () => {
+    const { host, state } = createHost();
+    const coordinator = new ExternalScanCoordinator(host);
+    coordinator.markRecoveryPending();
+    (host.getScanStatus as ReturnType<typeof vi.fn>).mockResolvedValue({
+      state: 'cancelled', found: 1, warnings: []
+    });
+
+    await coordinator.recoverTrackedTerminal(1, state.statusEpoch, new Map());
+
+    expect(coordinator.hasPendingRecovery()).toBe(false);
+    expect(state.statusMessages[state.statusMessages.length - 1]).toContain('External scan stopped');
+  });
+
   it('finishes a stop whose scan already ended and writes the terminal status', async () => {
     const { host, state } = createHost();
     const coordinator = new ExternalScanCoordinator(host);
