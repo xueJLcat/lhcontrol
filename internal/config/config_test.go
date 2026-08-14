@@ -73,6 +73,29 @@ func TestRenameRollsBackInMemoryWhenPersistenceFails(t *testing.T) {
 	}
 }
 
+func TestAddressRenameRollbackSurvivesDuplicateAddresses(t *testing.T) {
+	t.Setenv("AppData", t.TempDir())
+	cfg := NewConfig()
+	if err := cfg.SetRenamedStationForAddresses("LHB-DUP", "Before", []string{"11:22:33:44:55:66"}); err != nil {
+		t.Fatalf("initial rename failed: %v", err)
+	}
+	originalWriter := configFileWriter
+	configFileWriter = func(string, []byte, os.FileMode) error {
+		return errors.New("disk full")
+	}
+	t.Cleanup(func() { configFileWriter = originalWriter })
+
+	// A duplicate address must not corrupt the rollback snapshot: the second
+	// occurrence may only capture the original persisted value, not the one
+	// the first occurrence just wrote.
+	if err := cfg.SetRenamedStationForAddresses("LHB-DUP", "After", []string{"11:22:33:44:55:66", "11:22:33:44:55:66"}); err == nil {
+		t.Fatal("SetRenamedStationForAddresses() unexpectedly succeeded")
+	}
+	if got, ok := cfg.GetStationDisplayName("11:22:33:44:55:66", "LHB-DUP"); !ok || got != "Before" {
+		t.Fatalf("in-memory alias = %q (found=%v), want rollback value Before", got, ok)
+	}
+}
+
 func TestSuccessfulSaveClearsPreviousPersistenceFailure(t *testing.T) {
 	t.Setenv("AppData", t.TempDir())
 	originalWriter := configFileWriter

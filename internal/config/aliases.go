@@ -33,12 +33,24 @@ func (c *Config) SetRenamedStation(originalName string, newName string) error {
 func (c *Config) SetRenamedStationForAddresses(originalName, newName string, addresses []string) error {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
+	if c.RenamedStationsByAddress == nil {
+		c.RenamedStationsByAddress = make(map[string]string)
+	}
 
 	previousLegacy, legacyExisted := c.RenamedStations[originalName]
+	// Snapshot every original value before mutating anything. An interleaved
+	// snapshot/mutation loop would capture the value written by a previous
+	// iteration when addresses repeat, and a failed save would then roll back
+	// to that mutated value instead of the persisted one.
 	previousAddresses := make(map[string]string, len(addresses))
 	existingAddresses := make(map[string]bool, len(addresses))
 	for _, address := range addresses {
+		if _, snapshotted := existingAddresses[address]; snapshotted {
+			continue
+		}
 		previousAddresses[address], existingAddresses[address] = c.RenamedStationsByAddress[address]
+	}
+	for _, address := range addresses {
 		if newName == "" {
 			delete(c.RenamedStationsByAddress, address)
 		} else {
