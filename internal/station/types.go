@@ -19,6 +19,12 @@ var ErrChannelConflict = errors.New("channel conflicts with another visible stat
 var ErrScanRequired = errors.New("a recent successful scan is required")
 var ErrShuttingDown = errors.New("application is shutting down")
 
+// ErrScanStopTimeout reports that the scan cancellation was delivered but scan
+// processing had not finished within the bounded wait. The cancellation stays
+// in effect; status polling observes the terminal state once the blocked
+// adapter call returns.
+var ErrScanStopTimeout = errors.New("scan stop timed out waiting for scan processing to finish")
+
 // ErrBulkOperationTimeout reports that the whole bulk operation exceeded its
 // configured timeout. ErrStationOperationTimeout reports that a single
 // station's operation budget expired while the bulk deadline had not.
@@ -239,6 +245,10 @@ type Manager struct {
 	statusRefreshTimeout    time.Duration
 	stationOperationTimeout time.Duration
 	shutdownDrainTimeout    time.Duration
+	// Tunable wait limits; tests pin them directly. Production runs leave
+	// them at zero and follow the package defaults.
+	stopScanTimeout   time.Duration
+	adapterCleanupWait time.Duration
 	shuttingDown            atomic.Bool
 	shutdownOnce            sync.Once
 	shutdownCh              chan struct{}

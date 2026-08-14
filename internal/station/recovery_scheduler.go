@@ -143,23 +143,22 @@ func (m *Manager) nextStatusRecoveryDelay() (time.Duration, bool) {
 	if len(retries) == 0 {
 		return 0, false
 	}
-	disconnected := make(map[string]struct{}, len(retries))
+	eligible := make(map[string]struct{}, len(retries))
 	m.stationsMutex.RLock()
 	for _, station := range m.stations {
 		if station == nil {
 			continue
 		}
-		snapshot := station.Snapshot()
-		kinds := effectiveStatusRetryKinds(retries[snapshot.Address])
-		if kinds&(statusRetryChannel|statusRetryMetadata|statusRetryRefresh) != 0 || !snapshot.Connected {
-			disconnected[snapshot.Address] = struct{}{}
+		address := station.Snapshot().Address
+		if _, tracked := retries[address]; tracked {
+			eligible[address] = struct{}{}
 		}
 	}
 	m.stationsMutex.RUnlock()
 	now := time.Now()
 	var earliest time.Time
 	for address, retry := range retries {
-		if _, eligible := disconnected[address]; !eligible {
+		if _, eligibleAddress := eligible[address]; !eligibleAddress {
 			continue
 		}
 		_, _, nextAt := statusRetryOrder(retry)
@@ -226,10 +225,12 @@ func (m *Manager) runStatusRecoveryRound() time.Duration {
 		if !tracked || now.Before(nextAt) {
 			continue
 		}
-		kinds := effectiveStatusRetryKinds(retry)
-		if snapshot.Connected && kinds&(statusRetryChannel|statusRetryMetadata|statusRetryRefresh) == 0 {
-			continue
-		}
+		// Connection retries are deliberately not filtered by Connected.
+		// Deadline-only read failures record a connection retry without
+		// disconnecting a possibly-healthy station, and a disconnect whose
+		// cleanup stays pending can leave a stale connection flag behind;
+		// recovery must still run so its read either clears the retry or
+		// turns the stale connection into a real disconnect.
 		candidates = append(candidates, recoveryCandidate{
 			station: station,
 			address: snapshot.Address,

@@ -16,6 +16,12 @@ import { OperationGate } from '../operation-gate';
 import { RevisionGate } from '../revision-gate';
 import { t, withDetail } from '../i18n.svelte';
 
+// A stop whose StopScan settled while the backend scan was still finishing has
+// nothing else driving it: the next periodic poll may be minutes away with a
+// long user-tuned interval. Actively recheck whether the scan ended so the
+// header leaves the disabled "Stopping..." state promptly.
+const STOP_RECHECK_DELAY_MS = 1500;
+
 export interface StationScanHost {
   stations: StationInfo[];
   statusMessage: string;
@@ -49,7 +55,40 @@ export interface StationScanHost {
 }
 
 export class StationScanController {
+  private stopRecheckTimer: ReturnType<typeof setTimeout> | null = null;
+
   constructor(private host: StationScanHost) {}
+
+  dispose() {
+    this.cancelStopRecheck();
+  }
+
+  private cancelStopRecheck() {
+    if (this.stopRecheckTimer !== null) clearTimeout(this.stopRecheckTimer);
+    this.stopRecheckTimer = null;
+  }
+
+  // The backend accepted the stop but the scan had not finished when finishStop
+  // checked; schedule a short recheck chain until the terminal outcome lands or
+  // the stop request is superseded. Without this, only the periodic status poll
+  // (up to a user-tuned minutes-long interval) would clear the stopping state.
+  private scheduleStopRecheck(operationEpoch: number, requestGeneration: number) {
+    this.cancelStopRecheck();
+    if (this.host.disposed) return;
+    this.stopRecheckTimer = setTimeout(() => {
+      this.stopRecheckTimer = null;
+      void this.retryStopFinish(operationEpoch, requestGeneration);
+    }, STOP_RECHECK_DELAY_MS);
+  }
+
+  private async retryStopFinish(operationEpoch: number, requestGeneration: number) {
+    const host = this.host;
+    if (host.disposed || !host.stoppingScan || host.stopRequestGeneration !== requestGeneration) return;
+    if (!host.gates.canCommitOperation(operationEpoch)) return;
+    const outcome = await host.externalScan.finishStop(operationEpoch, () => host.stopRequestGeneration === requestGeneration);
+    if (outcome === 'still-scanning') this.scheduleStopRecheck(operationEpoch, requestGeneration);
+  }
+
   async periodicStatusCheck() {
     // External HTTP operations hold the backend's global operation lock, so a
     // status poll started in that window can only fail with "operation in
@@ -206,7 +245,8 @@ export class StationScanController {
       this.host.stopRequestPending = false;
       if (!this.host.stoppingScan) return;
       if (this.host.externalScanning) {
-        await this.host.externalScan.finishStop(operationEpoch, () => this.host.stopRequestGeneration === requestGeneration);
+        const outcome = await this.host.externalScan.finishStop(operationEpoch, () => this.host.stopRequestGeneration === requestGeneration);
+        if (outcome === 'still-scanning') this.scheduleStopRecheck(operationEpoch, requestGeneration);
       } else {
         if (this.host.globalOperation !== 'scanning') this.host.stoppingScan = false;
         if (this.host.gates.canCommitStatus(statusOperation)) {

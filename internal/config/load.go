@@ -42,11 +42,17 @@ func (c *Config) Load() error {
 		return loadErr
 	}
 
+	// Hold the lock across the whole read-parse-assign sequence: a concurrent
+	// Set* that completes between reading the file and assigning the fields
+	// would otherwise be overwritten in memory by the older file contents and
+	// silently persisted back on the next save.
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+
 	log.Printf("Loading config from: %s", configFilePath)
 	configFile, err := configFileReader(configFilePath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			c.mutex.Lock()
 			defaults := NewConfig()
 			c.RenamedStations = defaults.RenamedStations
 			c.RenamedStationsByAddress = defaults.RenamedStationsByAddress
@@ -86,7 +92,6 @@ func (c *Config) Load() error {
 			c.BluetoothInitRetrySeconds = defaults.BluetoothInitRetrySeconds
 			c.persistenceBlockedErr = nil
 			c.lastPersistenceErr = nil
-			c.mutex.Unlock()
 			return nil // No config file yet, which is fine
 		}
 		// The in-memory state is empty or stale here. Block persistence so
@@ -94,10 +99,8 @@ func (c *Config) Load() error {
 		// partial config and destroy previously stored aliases; a later
 		// successful Load clears the block.
 		loadErr := fmt.Errorf("error reading config file '%s': %w", configFilePath, err)
-		c.mutex.Lock()
 		c.persistenceBlockedErr = loadErr
 		c.lastPersistenceErr = loadErr
-		c.mutex.Unlock()
 		return loadErr
 	}
 
@@ -112,13 +115,10 @@ func (c *Config) Load() error {
 			renameErr = nil
 		}
 		if renameErr != nil {
-			c.mutex.Lock()
 			c.persistenceBlockedErr = fmt.Errorf("invalid config could not be preserved: %w", renameErr)
 			c.lastPersistenceErr = c.persistenceBlockedErr
-			c.mutex.Unlock()
 			return fmt.Errorf("error unmarshalling config (failed to preserve invalid file: %v): %w", renameErr, err)
 		}
-		c.mutex.Lock()
 		defaults := NewConfig()
 		c.RenamedStations = defaults.RenamedStations
 		c.RenamedStationsByAddress = defaults.RenamedStationsByAddress
@@ -158,7 +158,6 @@ func (c *Config) Load() error {
 		c.BluetoothInitRetrySeconds = defaults.BluetoothInitRetrySeconds
 		c.persistenceBlockedErr = nil
 		c.lastPersistenceErr = nil
-		c.mutex.Unlock()
 		return fmt.Errorf("error unmarshalling config; invalid file preserved as '%s': %w", invalidPath, err)
 	}
 	if loaded.RenamedStations == nil {
@@ -167,7 +166,6 @@ func (c *Config) Load() error {
 	if loaded.RenamedStationsByAddress == nil {
 		loaded.RenamedStationsByAddress = make(map[string]string)
 	}
-	c.mutex.Lock()
 	c.RenamedStations = loaded.RenamedStations
 	c.RenamedStationsByAddress = loaded.RenamedStationsByAddress
 	c.AutoSleep = sanitizeAutoSleep(loaded.AutoSleep)
@@ -207,7 +205,6 @@ func (c *Config) Load() error {
 	c.repairCrossItemInvariants()
 	c.persistenceBlockedErr = nil
 	c.lastPersistenceErr = nil
-	c.mutex.Unlock()
 	return nil
 }
 

@@ -153,9 +153,11 @@ type externalOperationEvent struct {
 var fallbackExternalOperationID atomic.Uint64
 
 func beginExternalOperation(events scanEventCallbacks, kind string) func() {
-	id := fallbackExternalOperationID.Add(1)
+	var id uint64
 	if events.nextOperationID != nil {
 		id = events.nextOperationID()
+	} else {
+		id = fallbackExternalOperationID.Add(1)
 	}
 	if events.operation != nil {
 		events.operation(externalOperationEvent{ID: id, Phase: "started", Kind: kind})

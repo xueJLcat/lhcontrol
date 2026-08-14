@@ -66,8 +66,13 @@ export class AsyncSetting<T> {
           try {
             const persisted = await this.options.getter();
             this.value = this.options.map ? this.options.map(persisted) : persisted;
+            this.error = null;
           } catch {
+            // The compensating re-read failed as well, so the rolled-back value
+            // may not match the backend. Surface the error instead of silently
+            // showing a possibly stale value; retrying the load recovers it.
             this.value = previous;
+            this.error = String(error);
           }
           pushToast(withDetail(this.options.saveMessage, error));
           return;

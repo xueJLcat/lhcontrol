@@ -59,6 +59,49 @@ func (m *Manager) newStationOperationContext(parent context.Context) (context.Co
 	}
 	return context.WithTimeout(parent, timeout)
 }
+// adapterCleanupWaitLimit bounds how long error-cleanup paths block on the
+// contextless disconnect/release calls. WinRT cleanup of an unresponsive
+// device can stretch past the surrounding operation timeout, and the caller
+// (which may already be past its deadline) must not be held indefinitely.
+const adapterCleanupWaitLimit = 15 * time.Second
+
+// runBoundedAdapterCleanup runs a contextless adapter cleanup call but gives
+// up waiting once the limit expires. The cleanup itself keeps running: the
+// bluetooth package serializes per-station work on the station lock, so any
+// later operation on the same station queues behind the abandoned cleanup
+// instead of racing it.
+func (m *Manager) runBoundedAdapterCleanup(cleanup func() error) error {
+	done := make(chan error, 1)
+	go func() {
+		done <- runSafely("adapter cleanup", cleanup)
+	}()
+	limit := m.adapterCleanupWait
+	if limit <= 0 {
+		limit = adapterCleanupWaitLimit
+	}
+	cleanupTimer := time.NewTimer(limit)
+	defer cleanupTimer.Stop()
+	select {
+	case err := <-done:
+		return err
+	case <-cleanupTimer.C:
+		log.Printf("Bluetooth adapter cleanup exceeded %s; cleanup continues in the background", limit)
+		return fmt.Errorf("bluetooth adapter cleanup exceeded %s", limit)
+	}
+}
+
+func (m *Manager) disconnectStationBounded(station *bluetooth.BaseStation) error {
+	return m.runBoundedAdapterCleanup(func() error {
+		return m.bluetoothOps.disconnectStation(station)
+	})
+}
+
+func (m *Manager) releaseStationForScanBounded(station *bluetooth.BaseStation) error {
+	return m.runBoundedAdapterCleanup(func() error {
+		return m.bluetoothOps.releaseStationForScan(station)
+	})
+}
+
 func (m *Manager) noteStatusFailure(address string) {
 	m.noteStatusFailureKind(address, statusRetryConnection)
 }
@@ -501,7 +544,7 @@ func (m *Manager) recordObservedReadResult(
 		if powerErr == nil || bluetooth.IsUnsupportedCapabilityError(powerErr) {
 			m.clearStatusFailureKind(address, statusRetryConnection)
 		} else {
-			_ = m.bluetoothOps.disconnectStation(station)
+			_ = m.disconnectStationBounded(station)
 			m.noteStatusFailure(address)
 			connectionNoted = true
 		}
@@ -513,7 +556,7 @@ func (m *Manager) recordObservedReadResult(
 			m.noteChannelFailure(address)
 			if bluetooth.RequiresReconnect(channelErr) || bluetooth.IsAdapterUnavailable(channelErr) {
 				if !connectionNoted {
-					_ = m.bluetoothOps.disconnectStation(station)
+					_ = m.disconnectStationBounded(station)
 					m.noteStatusFailure(address)
 				}
 			}
@@ -553,7 +596,7 @@ func (m *Manager) recordUnstructuredStationFailure(
 		m.clearStatusFailureKind(address, statusRetryConnection)
 		return
 	}
-	_ = m.bluetoothOps.disconnectStation(station)
+	_ = m.disconnectStationBounded(station)
 	m.noteStatusFailure(address)
 }
 
@@ -631,7 +674,7 @@ func (m *Manager) observeStationBluetoothError(station *bluetooth.BaseStation, a
 		return err
 	}
 	if err != nil && (bluetooth.RequiresReconnect(err) || bluetooth.IsAdapterUnavailable(err)) {
-		_ = m.bluetoothOps.disconnectStation(station)
+		_ = m.disconnectStationBounded(station)
 		m.noteStatusFailure(address)
 	}
 	return err

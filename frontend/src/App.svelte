@@ -127,8 +127,13 @@
 
   async function confirmBulkPower() {
     const state = bulkConfirmTarget;
-    bulkConfirmTarget = null;
-    if (state) await store.runBulkPower(state);
+    if (!state) return;
+    const started = await store.runBulkPower(state);
+    // Close once the operation starts, or when the rejection means there is
+    // nothing to confirm (no actionable stations). A lock that landed between
+    // the modal opening and the click rejects the start; keep the modal up so
+    // the confirm click is not silently dropped — it renders busy while locked.
+    if (started || !store.bulkLocked) bulkConfirmTarget = null;
   }
 
   function handleGlobalKeydown(event: KeyboardEvent) {

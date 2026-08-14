@@ -160,4 +160,24 @@ describe('AsyncSetting', () => {
     expect(persisted).toBe(10);
     expect(second.value).toBe(10);
   });
+
+  it('surfaces an error when a failed save cannot re-read the persisted value', async () => {
+    const getter = vi.fn()
+      .mockResolvedValueOnce(5)
+      .mockRejectedValueOnce(new Error('backend unreadable'));
+    const setter = vi.fn(async () => {
+      throw new Error('save rejected');
+    });
+    const { setting } = createSetting(getter, setter);
+    await setting.load();
+    expect(setting.error).toBeNull();
+
+    await setting.change(10);
+
+    // The rolled-back value may not match the backend; the error flag must say
+    // so instead of silently displaying the stale value.
+    expect(setting.value).toBe(5);
+    expect(setting.error).toContain('save rejected');
+    expect(setting.busy).toBe(false);
+  });
 });

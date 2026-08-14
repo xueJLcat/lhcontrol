@@ -47,6 +47,12 @@ export interface StationStoreUi {
   requestBulkConfirmation(target: PowerTarget): void;
 }
 
+// A startup scan deferred by a boot-time lock normally retries when the lock's
+// terminal event or snapshot arrives. A lost event leaves the health poll as the
+// only retry path, and its interval is user-tunable up to several minutes; a
+// dedicated short timer keeps the configured startup scan from stalling that long.
+const DEFERRED_STARTUP_SCAN_RETRY_MS = 3000;
+
 // All fleet state and backend orchestration. Held in one rune-backed class so
 // App.svelte stays a pure composition + overlay-switching shell. Effects are
 // deliberately absent here ($effect cannot run outside components); App wires
@@ -107,6 +113,7 @@ export class StationStore {
   // external HTTP operation already running at boot). Retry it once the lock
   // releases instead of skipping the configured startup scan for the session.
   private startupScanDeferred = false;
+  private deferredStartupScanTimer: ReturnType<typeof setInterval> | null = null;
   private mounted = false;
 
   readonly powerFeedback = new PowerFeedbackRegistry((next) => {
@@ -576,7 +583,7 @@ export class StationStore {
     // A deferred scan belongs to the startup preference that requested it.
     // Turning that preference off must also cancel work queued behind a
     // startup lock; enabling it again applies to the next application start.
-    if (!enabled) this.startupScanDeferred = false;
+    if (!enabled) this.setStartupScanDeferred(false);
   }
 
   refreshAPIStatus() {
@@ -748,7 +755,7 @@ export class StationStore {
           // running). Defer and retry once the lock releases. Re-check the
           // preference after await so a concurrent settings save cannot
           // recreate a deferred scan that it just cancelled.
-          this.startupScanDeferred = true;
+          this.setStartupScanDeferred(true);
         }
       }
     })();
@@ -760,12 +767,37 @@ export class StationStore {
   private maybeRunDeferredStartupScan() {
     if (this.disposed || !this.startupScanDeferred) return;
     if (!this.scanOnStartupEnabled) {
-      this.startupScanDeferred = false;
+      this.setStartupScanDeferred(false);
       return;
     }
-    if (this.scanLocked || this.isLoading) return;
-    this.startupScanDeferred = false;
-    void this.startScan();
+    if (this.scanLocked || this.isLoading) {
+      this.armDeferredStartupScanRetry();
+      return;
+    }
+    this.setStartupScanDeferred(false);
+    void this.startScan().then((started) => {
+      // A lock can land between the guard above and the scan start; re-arm so
+      // the configured startup scan is not silently dropped by the race.
+      if (!started && !this.disposed && this.scanOnStartupEnabled) this.setStartupScanDeferred(true);
+    });
+  }
+
+  private setStartupScanDeferred(deferred: boolean) {
+    this.startupScanDeferred = deferred;
+    if (deferred) this.armDeferredStartupScanRetry();
+    else this.disarmDeferredStartupScanRetry();
+  }
+
+  private armDeferredStartupScanRetry() {
+    if (this.disposed || this.deferredStartupScanTimer !== null) return;
+    this.deferredStartupScanTimer = setInterval(() => {
+      this.maybeRunDeferredStartupScan();
+    }, DEFERRED_STARTUP_SCAN_RETRY_MS);
+  }
+
+  private disarmDeferredStartupScanRetry() {
+    if (this.deferredStartupScanTimer !== null) clearInterval(this.deferredStartupScanTimer);
+    this.deferredStartupScanTimer = null;
   }
 
   dispose() {
@@ -775,7 +807,10 @@ export class StationStore {
     this.listRevisions.dispose();
     this.apiStatus.dispose();
     this.scanTimer.dispose();
+    this.scans.dispose();
     this.fleet.stopChannelMemoryExpiry();
+    this.disarmDeferredStartupScanRetry();
+    this.startupScanDeferred = false;
     if (this.statusCheckInterval) clearInterval(this.statusCheckInterval);
     if (this.projectionRefreshTimer !== null) clearTimeout(this.projectionRefreshTimer);
     this.projectionRefreshTimer = null;

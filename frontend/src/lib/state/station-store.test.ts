@@ -432,6 +432,31 @@ describe('StationStore startup', () => {
     expect(backend.ScanAndFetchStations).not.toHaveBeenCalled();
   });
 
+  it('retries a lock-deferred startup scan on a short timer instead of the poll interval', async () => {
+    const { store } = mountStore();
+    await vi.waitFor(() => expect(store.stations).toHaveLength(1));
+    backend.ScanAndFetchStations.mockClear();
+    // The boot-time lock has lifted only via this deferred flag in scenarios
+    // where no terminal event arrives; the dedicated retry timer must drive it.
+    vi.useFakeTimers();
+    const internals = store as unknown as {
+      setStartupScanDeferred(deferred: boolean): void;
+      startupScanDeferred: boolean;
+      deferredStartupScanTimer: ReturnType<typeof setInterval> | null;
+    };
+    internals.setStartupScanDeferred(true);
+    expect(internals.deferredStartupScanTimer).not.toBeNull();
+
+    await vi.advanceTimersByTimeAsync(2999);
+    expect(backend.ScanAndFetchStations).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    await vi.advanceTimersByTimeAsync(50);
+
+    expect(backend.ScanAndFetchStations).toHaveBeenCalledOnce();
+    expect(internals.startupScanDeferred).toBe(false);
+    expect(internals.deferredStartupScanTimer).toBeNull();
+  });
+
   it('waits for the restarted health poll before classifying a startup scan', async () => {
     backend.IsScanning.mockResolvedValue(true);
     backend.GetStatusPollIntervalSeconds.mockResolvedValue(30);
@@ -493,6 +518,29 @@ describe('StationStore startup', () => {
     await vi.waitFor(() => expect(store.scanError?.kind).toBe('unknown'));
     expect(store.statusMessage).toBe('Scan failed.');
     expect(store.scanError?.detail).toBe('mystery backend failure');
+  });
+});
+
+describe('StationStore external scan stop', () => {
+  it('actively clears a stop that settles while the backend scan is still finishing', async () => {
+    backend.IsScanning.mockResolvedValue(true);
+    const { store } = mountStore();
+    await vi.waitFor(() => expect(store.externalScanning).toBe(true));
+    backend.ScanAndFetchStations.mockClear();
+    // The stop is accepted while the scan is still winding down; only the
+    // recheck (not the long periodic poll) observes the backend finishing.
+    backend.IsScanning.mockResolvedValueOnce(true).mockResolvedValue(false);
+
+    await store.stopScan();
+
+    expect(store.stoppingScan).toBe(true);
+    expect(store.externalScanning).toBe(true);
+    expect(store.scanRunning).toBe(true);
+
+    await vi.waitFor(() => expect(store.externalScanning).toBe(false), { timeout: 8000 });
+    expect(store.stoppingScan).toBe(false);
+    expect(store.scanRunning).toBe(false);
+    expect(backend.ScanAndFetchStations).not.toHaveBeenCalled();
   });
 });
 
@@ -710,6 +758,33 @@ describe('StationStore bulk power', () => {
     await pendingCancellation;
     expect(store.cancellingBulk).toBe(false);
     expect(store.bulkLocked).toBe(false);
+  });
+
+  it('reports a rejected bulk start so the confirmation modal can stay visible', async () => {
+    const bulk = deferred<{ target: string; results: never[] }>();
+    backend.SetAllStationsPowerDetailed.mockReturnValueOnce(bulk.promise);
+    const { store } = mountStore();
+    await vi.waitFor(() => expect(store.stations).toHaveLength(1));
+
+    const runningBulk = store.runBulkPower('on');
+    await vi.waitFor(() => expect(backend.SetAllStationsPowerDetailed).toHaveBeenCalledOnce());
+
+    // The running bulk holds the lock. A confirm click that lands now must be
+    // reported as rejected (so the modal stays up) instead of starting a second
+    // operation or silently disappearing.
+    await expect(store.runBulkPower('sleep')).resolves.toBe(false);
+    expect(backend.SetAllStationsPowerDetailed).toHaveBeenCalledOnce();
+
+    bulk.resolve({ target: 'on', results: [] });
+    await runningBulk;
+  });
+
+  it('reports a started bulk operation', async () => {
+    backend.SetAllStationsPowerDetailed.mockResolvedValue({ target: 'on', results: [] });
+    const { store } = mountStore();
+    await vi.waitFor(() => expect(store.stations).toHaveLength(1));
+
+    await expect(store.runBulkPower('on')).resolves.toBe(true);
   });
 });
 

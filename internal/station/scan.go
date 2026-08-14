@@ -231,7 +231,7 @@ func (m *Manager) scanAndFetchStations(ctx context.Context) ([]StationInfo, int,
 			return m.GetStationInfo(), 0, err
 		}
 		address := stationPtr.Snapshot().Address
-		if releaseErr := m.bluetoothOps.releaseStationForScan(stationPtr); releaseErr != nil {
+		if releaseErr := m.releaseStationForScanBounded(stationPtr); releaseErr != nil {
 			m.observeBluetoothError(releaseErr)
 			releaseErrors = append(releaseErrors, fmt.Errorf("%s: %w", address, releaseErr))
 			unreliablePresence[strings.ToLower(address)] = struct{}{}
@@ -420,12 +420,21 @@ func (m *Manager) currentScanContext() context.Context {
 	return m.scanLifecycle.ctx
 }
 
+// stopScanWaitLimit bounds the StopScan wait. Scan processing can stall in an
+// adapter call that ignores cancellation (adapter initialization before the
+// platform scan starts, in particular); the caller must receive a result even
+// then. The cancellation stays in effect and status polling observes the
+// terminal state once the blocked call returns.
+const stopScanWaitLimit = 30 * time.Second
+
 // StopScan cancels the active scan and waits until scan processing has
 // finished. Terminal callbacks are delivered afterwards so callbacks can
 // safely call StopScan themselves. Repeated and no-op calls are safe.
 // The scan's own outcome is reported through GetScanStatus and the scan
 // callbacks; StopScan only reports whether the stop completed, so a scan
-// that already failed on its own is not surfaced as a stop failure.
+// that already failed on its own is not surfaced as a stop failure. When
+// scan processing does not finish within the bounded wait, StopScan reports
+// ErrScanStopTimeout instead of hanging indefinitely.
 func (m *Manager) StopScan() error {
 	m.scanLifecycleMutex.Lock()
 	lifecycle := m.scanLifecycle
@@ -447,8 +456,19 @@ func (m *Manager) StopScan() error {
 	} else {
 		lifecycle.cancel()
 	}
-	<-lifecycle.done
-	return nil
+	limit := m.stopScanTimeout
+	if limit <= 0 {
+		limit = stopScanWaitLimit
+	}
+	stopTimer := time.NewTimer(limit)
+	defer stopTimer.Stop()
+	select {
+	case <-lifecycle.done:
+		return nil
+	case <-stopTimer.C:
+		log.Printf("Scan stop waited %s without scan processing finishing; cancellation remains pending", limit)
+		return ErrScanStopTimeout
+	}
 }
 func (m *Manager) IsScanning() bool {
 	return m.isScanning.Load()

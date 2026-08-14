@@ -179,9 +179,11 @@ func (a *App) applyAutoSleep(settings autosleep.Settings) {
 
 func (a *App) stopAutoSleep() {
 
-	a.autoSleepMutex.Lock()
+	// Detach the watcher under the lock, then join outside it: the wait can
+	// take up to the stop limit, and settings calls that only need
+	// autoSleepMatches must not queue behind a draining sleep action.
 
-	defer a.autoSleepMutex.Unlock()
+	a.autoSleepMutex.Lock()
 
 	if a.autoSleepCancel != nil {
 
@@ -192,6 +194,8 @@ func (a *App) stopAutoSleep() {
 		a.autoSleepWatcher = nil
 
 	}
+
+	a.autoSleepMutex.Unlock()
 
 	waited := make(chan struct{})
 

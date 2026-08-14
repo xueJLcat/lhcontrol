@@ -256,6 +256,18 @@ func confirmPowerStateInternalContext(ctx context.Context, station *BaseStation,
 	attempts := timing.ConfirmAttemptsOff
 	if expectedState == PowerStateOn {
 		attempts = timing.ConfirmAttemptsOn
+		if timing.ConfirmPollInterval > 0 {
+			// Firmware that keeps reporting boot-like raw values only decodes to
+			// a trusted On once the boot fallback window has elapsed. The poll
+			// must cover that window regardless of the configured attempt count,
+			// otherwise every power-on is reported unconfirmed even when the
+			// station actually turned on. The surrounding context still bounds
+			// the real wait.
+			fallbackAttempts := int(timing.BootFallbackAfter/timing.ConfirmPollInterval) + 1
+			if fallbackAttempts > attempts {
+				attempts = fallbackAttempts
+			}
+		}
 	}
 	var lastErr error
 	consecutiveReadErrors := 0
@@ -446,6 +458,13 @@ func SetPowerStateContext(ctx context.Context, station *BaseStation, target Powe
 		}
 		if !station.Capabilities.PowerWrite {
 			return PowerControlResult{}, unsupportedCapability("power control", nil)
+		}
+		if target == PowerStateStandby && !station.Capabilities.Standby {
+			// A previous write was rejected with Value Not Allowed, which
+			// downgraded standby while keeping the connection. Refuse the
+			// command up front instead of replaying the rejected write and
+			// collecting the same ATT rejection again.
+			return PowerControlResult{}, unsupportedCapability("standby", nil)
 		}
 		// A command can legitimately reboot or transition an already-on station,
 		// but connection/discovery and capability checks do not. Re-arm the

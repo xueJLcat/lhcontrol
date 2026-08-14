@@ -191,12 +191,21 @@ export class StationActionController {
     void this.runBulkPower(state);
   }
 
-  async runBulkPower(state: PowerTarget) {
+  // Returns whether the bulk operation actually started. The confirmation
+  // modal needs the distinction: a lock that lands between the modal opening
+  // and the confirm click rejects the start, and the modal must stay visible
+  // instead of the click disappearing without feedback.
+  async runBulkPower(state: PowerTarget): Promise<boolean> {
     // requestBulkPower performs this check, but the confirmation modal calls
     // runBulkPower directly; re-check so a lock (external scan/operation or
     // auto-sleep) that lands between the modal opening and the confirm click
     // cannot start a bulk operation against a busy backend.
-    if (this.host.bulkLocked || this.actionablePowerStations(state).length === 0) return;
+    if (this.host.bulkLocked || this.actionablePowerStations(state).length === 0) return false;
+    await this.executeBulkPower(state);
+    return true;
+  }
+
+  private async executeBulkPower(state: PowerTarget) {
     this.host.globalOperation = 'bulk-power';
     this.host.cancellingBulk = false;
     const statusOperation = this.host.gates.beginStatusOperation();
