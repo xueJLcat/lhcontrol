@@ -200,6 +200,32 @@ func TestSetChannelAmbiguousWriteAndFailedReadbackReportsCommandSent(t *testing.
 		t.Fatalf("result = %+v, want ambiguous command sent after channel 3", result)
 	}
 }
+func TestSetChannelSentWriteAndExpiredReadbackRetainConnection(t *testing.T) {
+	// A write submitted before the operation budget expired fails with a
+	// possibly-sent classification; the following readback then dies on the
+	// same expired context. Neither outcome proves the link is broken, so the
+	// healthy connection must survive, matching the initial-read and
+	// post-confirmation readback paths.
+	device := &trackingConnectedDevice{}
+	mode := &fakeCharacteristic{
+		value:             []byte{0x03},
+		writeErr:          &PossiblySentError{Err: context.DeadlineExceeded},
+		readErrAfterWrite: context.DeadlineExceeded,
+	}
+	station := connectedFakeStation(&fakeCharacteristic{}, mode, nil, Capabilities{ChannelRead: true, ChannelWrite: true})
+	station.device = device
+	result, err := SetChannel(station, 5)
+	if err == nil {
+		t.Fatal("SetChannel() unexpectedly succeeded")
+	}
+	if !result.CommandSent {
+		t.Fatalf("result = %+v, want the submitted command reported", result)
+	}
+	if device.disconnects != 0 || !station.Snapshot().Connected {
+		t.Fatalf("expired readback after a submitted write discarded a healthy connection: disconnects=%d snapshot=%+v", device.disconnects, station.Snapshot())
+	}
+}
+
 func TestSetChannelUnsupportedConfirmationReportsCommandSent(t *testing.T) {
 	device := &trackingConnectedDevice{}
 	mode := &fakeCharacteristic{

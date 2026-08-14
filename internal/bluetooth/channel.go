@@ -159,8 +159,14 @@ func SetChannelContext(ctx context.Context, station *BaseStation, channel int) (
 				channel,
 			)
 		} else {
+			// Match the initial-read and post-confirmation readback paths: only
+			// a genuine transport failure invalidates the cached GATT handles. A
+			// capability rejection or an expired read budget is not evidence the
+			// link is broken and must not discard an otherwise healthy session.
+			if RequiresReconnect(writeErr) || RequiresReconnect(readErr) {
+				_ = disconnectInternal(station)
+			}
 			writeErr = errors.Join(writeErr, fmt.Errorf("final channel read failed: %w", readErr))
-			_ = disconnectInternal(station)
 		}
 		station.setOperationErrorInternal(writeErr)
 		return result, fmt.Errorf("failed to write channel %d for %s: %w", channel, station.Name, writeErr)
