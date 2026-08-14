@@ -261,19 +261,23 @@ func ScanForDurationContext(ctx context.Context, duration time.Duration) ([]Disc
 	if session.durationStopIssuedFlag() && session.stopErr == nil {
 		return results, nil
 	}
-	if scanErr != nil {
-		if err := scanCompletionError(scanErr); err != nil {
-			return nil, err
-		}
-	}
 	// A watcher that failed to stop or timed out after a cancellation
 	// request must be reported as a failure so callers (HTTP, Wails,
-	// status) agree the scan did not complete cleanly.
+	// status) agree the scan did not complete cleanly. Checked before the
+	// scanErr early return: the adapter commonly reports its own tail error
+	// (radio disabled or removed mid-stop) while a cancellation is already
+	// recorded, and that error must not reclassify the requested stop as a
+	// hard scan failure.
 	if reason == scanStopCancelled || ctx.Err() != nil {
 		if session.stopErr != nil {
 			return nil, fmt.Errorf("failed to stop Bluetooth scan after cancellation: %w", session.stopErr)
 		}
 		return nil, ErrScanCancelled
+	}
+	if scanErr != nil {
+		if err := scanCompletionError(scanErr); err != nil {
+			return nil, err
+		}
 	}
 	if reason != scanStopDuration {
 		return nil, errors.New("scan stopped before the requested duration completed")

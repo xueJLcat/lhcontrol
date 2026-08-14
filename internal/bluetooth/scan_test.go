@@ -235,6 +235,49 @@ func TestScanForDurationContextKeepsResultsWhenCancelledDuringStopHandshake(t *t
 		t.Fatal("scan did not return after the stop handshake")
 	}
 }
+func TestScanForDurationContextCancelledScanWinsOverAdapterError(t *testing.T) {
+	originalAdapter := adapter
+	adapterErr := errors.New("radio dropped mid-scan")
+	fake := newFakeBLEAdapter()
+	fake.scanErr = adapterErr
+	fake.startDelay = make(chan struct{})
+	adapter = fake
+	t.Cleanup(func() { adapter = originalAdapter })
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		_, err := ScanForDurationContext(ctx, time.Hour)
+		result <- err
+	}()
+	deadline := time.Now().Add(time.Second)
+	for {
+		activeScanMutex.Lock()
+		active := activeScan != nil
+		activeScanMutex.Unlock()
+		if active {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("scan session was not registered")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	// Record the cancellation before the watcher is allowed to start so the
+	// session has reason=scanStopCancelled while the adapter independently
+	// fails: the requested stop must keep its classification instead of being
+	// shadowed by the adapter error.
+	cancel()
+	close(fake.startDelay)
+	select {
+	case err := <-result:
+		if !errors.Is(err, ErrScanCancelled) {
+			t.Fatalf("ScanForDurationContext() error = %v, want ErrScanCancelled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cancelled scan did not return after adapter failure")
+	}
+}
 func TestScanForDurationContextDoesNotStartWithCancelledContext(t *testing.T) {
 	originalAdapter := adapter
 	fake := newFakeBLEAdapter()
