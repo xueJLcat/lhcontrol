@@ -78,10 +78,12 @@ func connectAndDiscoverInternalContext(ctx context.Context, station *BaseStation
 				if cleanupErr := disconnectInternal(station); cleanupErr != nil {
 					return transportError("cleanup before discovery retry", cleanupErr)
 				}
+				retryDelay := time.NewTimer(discoveryTiming.DiscoveryRetryDelay)
 				select {
 				case <-ctx.Done():
+					retryDelay.Stop()
 					return ctx.Err()
-				case <-time.After(discoveryTiming.DiscoveryRetryDelay):
+				case <-retryDelay.C:
 				}
 				device, connectErr := connectContext(ctx, station.Address)
 				if connectErr != nil {
