@@ -1,6 +1,7 @@
 build/bin
 build/windows/installer
 build/verification
+build/used_keys.json
 node_modules
 frontend/dist
 .vscode
