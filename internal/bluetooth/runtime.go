@@ -370,6 +370,14 @@ func RequiresReconnect(err error) bool {
 		return false
 	}
 	if protocolErr, ok := err.(bluetooth.AttributeProtocolError); ok {
+		// A Value Not Allowed response is a protocol decision about the
+		// requested value and proves the peer processed the request; the link
+		// itself is healthy, so it must not pay a reconnect. It stays outside
+		// IsCapabilityUnsupported so power writes keep their dedicated standby
+		// downgrade instead of disabling every power write.
+		if protocolErr == bluetooth.ErrAttValueNotAllowed {
+			return false
+		}
 		return !IsCapabilityUnsupported(protocolErr)
 	}
 	if _, ok := err.(*UnsupportedCapabilityError); ok {
@@ -391,6 +399,11 @@ func RequiresReconnect(err error) bool {
 			return false
 		}
 		if IsUnsupportedCapabilityError(transportErr.Err) {
+			return false
+		}
+		if errors.Is(transportErr.Err, bluetooth.ErrAttValueNotAllowed) {
+			// A peer rejection of the requested value is a protocol decision,
+			// never a broken link; the bare-code branch above documents why.
 			return false
 		}
 		return true
