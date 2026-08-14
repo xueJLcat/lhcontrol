@@ -220,6 +220,10 @@ export class ExternalScanCoordinator {
       this.host.applyStationList(updated, revision, capturedStationRevisions);
     }
     if (!this.host.canCommitStatus(statusOperation)) return;
+    // The recovery epochs intentionally stay pending: the periodic check's
+    // recoverTrackedTerminal rewrites this plain message as the richer
+    // terminal result once the backend scan status read succeeds, and drops
+    // the recovery when a newer owner supersedes it.
     this.host.setStatusMessage(t('Scan stopped.'));
   }
 
@@ -245,16 +249,22 @@ export class ExternalScanCoordinator {
     }
     const scanStatus = await this.host.getScanStatus().catch(() => null);
     if (this.host.isDisposed() || !this.host.isListRevisionCurrent(revision)) return;
-    if (updated && scanStatus && isTerminalScanState(scanStatus.state)) {
-      this.recoveryEpoch = null;
-      this.recoveryStatusEpoch = null;
+    if (!this.host.canCommitStatus(statusOperation)) {
+      // A newer status owner rejected the commit; leave the recovery epochs
+      // pending so the periodic check retries instead of dropping the outcome.
+      return;
     }
-    if (!this.host.canCommitStatus(statusOperation)) return;
     if (!scanStatus || !isTerminalScanState(scanStatus.state)) {
       // A non-terminal status belongs to a scan that started after the
       // untracked one ended. Leave the recovery epochs pending so the next
       // poll retries instead of rendering the wrong scan's state.
       return;
+    }
+    // Clear the recovery epochs only once the terminal status is committed,
+    // matching the other terminal paths.
+    if (updated) {
+      this.recoveryEpoch = null;
+      this.recoveryStatusEpoch = null;
     }
     const found = scanStatus?.found ?? this.host.seenInLatestScanCount();
     this.host.setStatusMessage(formatTerminalScanResult({
@@ -326,13 +336,22 @@ export class ExternalScanCoordinator {
     if (!scanStatus || !isTerminalScanState(scanStatus.state)) {
       return;
     }
-    const canWriteTerminalStatus = this.recoveryStatusEpoch === statusOperation &&
-      this.host.canCommitStatus(statusOperation);
-    if (!canWriteTerminalStatus) return;
+    if (this.recoveryStatusEpoch !== statusOperation) {
+      // The status line moved to a newer owner after this recovery was
+      // claimed. Status epochs only advance, so the terminal message can
+      // never commit again; drop the recovery instead of re-running it every
+      // poll. The authoritative list was already applied above.
+      this.recoveryEpoch = null;
+      this.recoveryStatusEpoch = null;
+      return;
+    }
+    if (!this.host.canCommitStatus(statusOperation)) {
+      // A newer owner claimed the line while this tick's reads were in
+      // flight. Keep the recovery epochs pending so the periodic check
+      // retries, matching the terminal event handlers.
+      return;
+    }
     // Clear the recovery epochs only once the terminal status is committed.
-    // Clearing them when the commit is rejected would drop the outcome with
-    // nothing left for the periodic check to retry, contradicting the
-    // terminal event handlers.
     this.recoveryEpoch = null;
     this.recoveryStatusEpoch = null;
     const found = scanStatus?.found ?? this.host.seenInLatestScanCount();
