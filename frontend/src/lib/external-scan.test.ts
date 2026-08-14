@@ -286,6 +286,27 @@ describe('ExternalScanCoordinator', () => {
     expect(state.statusMessages[state.statusMessages.length - 1]).toContain('External scan stopped');
   });
 
+  it('keeps a tracked recovery pending when its epoch is ahead of the poll capture', async () => {
+    const { host, state } = createHost();
+    const coordinator = new ExternalScanCoordinator(host);
+    coordinator.markRecoveryPending();
+    // A terminal event claims the status line after this poll captured its
+    // epoch; the recovery still owns the line and must not be dropped.
+    state.statusEpoch += 2;
+    coordinator.markRecoveryPending();
+
+    await coordinator.recoverTrackedTerminal(1, state.statusEpoch - 2, new Map());
+
+    expect(coordinator.hasPendingRecovery()).toBe(true);
+    expect(state.statusMessages).toEqual([]);
+
+    // The next tick captures the current epoch and commits the terminal.
+    await coordinator.recoverTrackedTerminal(1, state.statusEpoch, new Map());
+
+    expect(coordinator.hasPendingRecovery()).toBe(false);
+    expect(state.statusMessages[state.statusMessages.length - 1]).toContain('External scan completed');
+  });
+
   it('keeps an untracked recovery pending when its status commit is rejected', async () => {
     const { host, state } = createHost();
     const coordinator = new ExternalScanCoordinator(host);

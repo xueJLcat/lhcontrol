@@ -336,19 +336,21 @@ export class ExternalScanCoordinator {
     if (!scanStatus || !isTerminalScanState(scanStatus.state)) {
       return;
     }
-    if (this.recoveryStatusEpoch !== statusOperation) {
-      // The status line moved to a newer owner after this recovery was
-      // claimed. Status epochs only advance, so the terminal message can
+    if (this.recoveryStatusEpoch === null || this.recoveryStatusEpoch < statusOperation) {
+      // The status line moved to a strictly newer owner after this recovery
+      // was claimed. Status epochs only advance, so the terminal message can
       // never commit again; drop the recovery instead of re-running it every
       // poll. The authoritative list was already applied above.
       this.recoveryEpoch = null;
       this.recoveryStatusEpoch = null;
       return;
     }
-    if (!this.host.canCommitStatus(statusOperation)) {
-      // A newer owner claimed the line while this tick's reads were in
-      // flight. Keep the recovery epochs pending so the periodic check
-      // retries, matching the terminal event handlers.
+    if (this.recoveryStatusEpoch !== statusOperation || !this.host.canCommitStatus(statusOperation)) {
+      // The recovery epoch is ahead of this poll's captured epoch (a terminal
+      // event claimed the line after the poll started) or a newer owner took
+      // the line while this tick's reads were in flight. Keep the recovery
+      // epochs pending so a later tick commits or supersedes them, matching
+      // the terminal event handlers.
       return;
     }
     // Clear the recovery epochs only once the terminal status is committed.
