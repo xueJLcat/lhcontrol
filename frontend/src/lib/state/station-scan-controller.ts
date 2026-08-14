@@ -192,6 +192,10 @@ export class StationScanController {
   async stopScan() {
     if (!this.host.scanningActive || this.host.stoppingScan) return;
     const operationEpoch = this.host.gates.currentScanEpoch;
+    // Own the status line for the stop so the terminal message can be gated
+    // against newer owners (an auto-sleep or HTTP event that lands while
+    // StopScan is in flight must not be clobbered by this late write).
+    const statusOperation = this.host.gates.beginStatusOperation();
     const requestGeneration = ++this.host.stopRequestGeneration;
     this.host.stoppingScan = true;
     this.host.stopRequestPending = true;
@@ -205,15 +209,22 @@ export class StationScanController {
         await this.host.externalScan.finishStop(operationEpoch, () => this.host.stopRequestGeneration === requestGeneration);
       } else {
         if (this.host.globalOperation !== 'scanning') this.host.stoppingScan = false;
-        this.host.statusMessage = t('Scan stopped.');
+        if (this.host.gates.canCommitStatus(statusOperation)) {
+          this.host.statusMessage = t('Scan stopped.');
+        }
         this.host.maybeEndScanTimer();
       }
     } catch (error) {
       if (!this.host.gates.canCommitOperation(operationEpoch)) return;
       this.host.stopRequestPending = false;
       this.host.stoppingScan = false;
-      this.host.statusMessage = withDetail('Unable to stop scan', error);
-      pushToast(this.host.statusMessage);
+      const failureMessage = withDetail('Unable to stop scan', error);
+      if (this.host.gates.canCommitStatus(statusOperation)) {
+        this.host.statusMessage = failureMessage;
+      }
+      // As with other action failures, the toast must not be gated by
+      // status-line ownership.
+      pushToast(failureMessage);
     } finally {
       // Terminal scan events can advance scanEpoch before StopScan settles.
       // Clear this request by identity rather than treating it as stale.
