@@ -204,6 +204,83 @@ func TestRegisteredPowerRoutePreservesConfirmationResult(t *testing.T) {
 
 }
 
+func TestPowerResultForWailsPreservesSentUnconfirmedResult(t *testing.T) {
+
+	confirmationErr := &bluetooth.PowerConfirmationError{
+
+		Target: bluetooth.PowerStateOn,
+
+		Actual: bluetooth.PowerStateBooting,
+
+		Raw: 0x01,
+
+		Err: errors.New("readback timed out"),
+	}
+
+	expected := station.PowerActionResult{
+
+		Station: station.StationInfo{
+			Address: "AA:BB:CC:DD:EE:FF",
+		},
+
+		CommandSent: true,
+
+		Confirmed: false,
+
+		ConfirmationError: confirmationErr.Error(),
+	}
+
+	result, err := powerResultForWails(expected, confirmationErr)
+
+	if err != nil || !result.CommandSent || result.Confirmed ||
+
+		result.ConfirmationError != expected.ConfirmationError ||
+
+		result.Station.Address != expected.Station.Address {
+
+		t.Fatalf("powerResultForWails() = %+v, %v; want %+v, nil", result, err, expected)
+
+	}
+
+}
+
+func TestPowerResultForWailsKeepsErrorWhenCommandWasNotSent(t *testing.T) {
+
+	confirmationErr := &bluetooth.PowerConfirmationError{
+
+		Target: bluetooth.PowerStateOn,
+
+		Actual: bluetooth.PowerStateUnknown,
+
+		Raw: -1,
+
+		Err: errors.New("readback timed out"),
+	}
+
+	result, err := powerResultForWails(station.PowerActionResult{}, confirmationErr)
+
+	if !errors.Is(err, confirmationErr) {
+
+		t.Fatalf("powerResultForWails() error = %v, want %v", err, confirmationErr)
+
+	}
+
+	if result.CommandSent || result.Confirmed || result.Station.Address != "" {
+
+		t.Fatalf("powerResultForWails() result = %+v, want an empty unstructured result", result)
+
+	}
+
+	preWriteErr := errors.New("write failed")
+
+	if _, err := powerResultForWails(station.PowerActionResult{}, preWriteErr); !errors.Is(err, preWriteErr) {
+
+		t.Fatalf("pre-write error = %v, want %v", err, preWriteErr)
+
+	}
+
+}
+
 func TestChannelResultForWailsPreservesSentUnconfirmedResult(t *testing.T) {
 
 	expected := station.ChannelChangeResult{

@@ -373,10 +373,17 @@ func legacyPowerActionError(state, address string, result station.PowerActionRes
 func (a *App) SetStationPower(address, state string) (station.PowerActionResult, error) {
 	log.Printf("Requesting power state %s for address %s", state, address)
 	result, err := a.stationManager.SetStationPower(address, state)
+	return powerResultForWails(result, err)
+}
+
+func powerResultForWails(result station.PowerActionResult, err error) (station.PowerActionResult, error) {
 	var confirmationErr *bluetooth.PowerConfirmationError
-	if errors.As(err, &confirmationErr) {
+	if errors.As(err, &confirmationErr) && result.CommandSent {
 		// Wails discards return values when a Go error is returned. Preserve the
-		// structured command-sent/readback-failed result for the desktop UI.
+		// structured command-sent/readback-failed result for the desktop UI. A
+		// confirmation error without a sent command carries no structured state
+		// to preserve; surfacing it keeps the UI from treating an empty result
+		// as a successful operation, matching the HTTP response rule.
 		return result, nil
 	}
 	return result, err
