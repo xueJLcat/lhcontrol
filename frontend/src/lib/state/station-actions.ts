@@ -333,10 +333,13 @@ export class StationActionController {
       if (this.host.editingAddress === station.address) this.cancelRename();
     } catch (error) {
       if (!this.host.gates.canCommitStationOperation(operationEpoch, station.address, operationRevision)) return;
+      const failureMessage = withDetail('Error renaming', error);
       if (this.host.gates.canCommitStatus(statusOperation)) {
-        this.host.statusMessage = withDetail('Error renaming', error);
-        pushToast(this.host.statusMessage);
+        this.host.statusMessage = failureMessage;
       }
+      // As with power failures, the toast must not be gated by status-line
+      // ownership or a concurrent owner swallows the only failure notice.
+      pushToast(failureMessage);
     } finally {
       this.host.apiStatus.refresh();
       if (this.host.gates.canCleanupStationOperation(station.address, operationRevision)) {
@@ -361,10 +364,13 @@ export class StationActionController {
       if (!this.host.gates.canCommitStationOperation(operationEpoch, station.address, operationRevision)) return;
       await this.fetchStationUpdate(station.address, operationEpoch, operationRevision);
       if (!this.host.gates.canCommitStationOperation(operationEpoch, station.address, operationRevision)) return;
+      const failureMessage = `${t('Identify failed for {name}', { name: station.name })}: ${String(error)}`;
       if (this.host.gates.canCommitStatus(statusOperation)) {
-        this.host.statusMessage = `${t('Identify failed for {name}', { name: station.name })}: ${String(error)}`;
-        pushToast(this.host.statusMessage);
+        this.host.statusMessage = failureMessage;
       }
+      // As with power failures, the toast must not be gated by status-line
+      // ownership or a concurrent owner swallows the only failure notice.
+      pushToast(failureMessage);
     } finally {
       if (this.host.gates.canCleanupStationOperation(station.address, operationRevision)) {
         this.host.setGattBusy(station.address, false);
@@ -395,10 +401,13 @@ export class StationActionController {
       if (!this.host.gates.canCommitStationOperation(operationEpoch, station.address, operationRevision)) return;
       await this.fetchStationUpdate(station.address, operationEpoch, operationRevision);
       if (!this.host.gates.canCommitStationOperation(operationEpoch, station.address, operationRevision)) return;
+      const failureMessage = `${t('Capability refresh failed for {name}', { name: station.name })}: ${String(error)}`;
       if (this.host.gates.canCommitStatus(statusOperation)) {
-        this.host.statusMessage = `${t('Capability refresh failed for {name}', { name: station.name })}: ${String(error)}`;
-        pushToast(this.host.statusMessage);
+        this.host.statusMessage = failureMessage;
       }
+      // As with power failures, the toast must not be gated by status-line
+      // ownership or a concurrent owner swallows the only failure notice.
+      pushToast(failureMessage);
     } finally {
       if (this.host.gates.canCleanupStationOperation(station.address, operationRevision)) {
         this.host.setGattBusy(station.address, false);
@@ -465,10 +474,13 @@ export class StationActionController {
       if (!this.host.gates.canCommitStationOperation(operationEpoch, address, operationRevision)) return;
       this.host.channelError = `${String(error)} ${t('Readback')}: ${this.channelReadbackLabel(actual)}.`;
       this.host.channelWarning = false;
+      const failureMessage = `${t('Channel change failed')}: ${this.host.channelError}`;
       if (this.host.gates.canCommitStatus(statusOperation)) {
-        this.host.statusMessage = `${t('Channel change failed')}: ${this.host.channelError}`;
-        pushToast(this.host.statusMessage);
+        this.host.statusMessage = failureMessage;
       }
+      // As with power failures, the toast must not be gated by status-line
+      // ownership or a concurrent owner swallows the only failure notice.
+      pushToast(failureMessage);
     } finally {
       if (this.host.gates.canCleanupStationOperation(address, operationRevision)) {
         this.host.setGattBusy(address, false);

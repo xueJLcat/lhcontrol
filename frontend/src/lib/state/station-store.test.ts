@@ -571,6 +571,44 @@ describe('StationStore power operations', () => {
   });
 });
 
+describe('StationStore failure notifications', () => {
+  it('toasts an identify failure even after a newer owner takes the status line', async () => {
+    let rejectIdentify!: (reason: unknown) => void;
+    backend.IdentifyStation.mockReturnValue(new Promise((_, reject) => { rejectIdentify = reject; }));
+    const { store } = mountStore();
+    await vi.waitFor(() => expect(store.stations).toHaveLength(1));
+
+    void store.identify(store.stations[0]);
+    await vi.waitFor(() => expect(backend.IdentifyStation).toHaveBeenCalledOnce());
+    // A concurrent owner (for example an auto-sleep event) takes the footer
+    // while the identify call is in flight; the failure toast must survive it.
+    store.gates.beginStatusOperation();
+    rejectIdentify(new Error('adapter lost'));
+
+    await vi.waitFor(() => expect(pushToast).toHaveBeenCalledWith(expect.stringContaining('Identify failed')));
+    expect(store.statusMessage).not.toContain('Identify failed');
+    expect(store.gattOperations.size).toBe(0);
+  });
+
+  it('toasts a rename failure even after a newer owner takes the status line', async () => {
+    let rejectRename!: (reason: unknown) => void;
+    backend.RenameStationByAddress.mockReturnValue(new Promise((_, reject) => { rejectRename = reject; }));
+    const { store } = mountStore();
+    await vi.waitFor(() => expect(store.stations).toHaveLength(1));
+    const station = store.stations[0];
+    store.startRename(station);
+
+    void store.saveRename(station, 'LHB-NEW');
+    await vi.waitFor(() => expect(backend.RenameStationByAddress).toHaveBeenCalledOnce());
+    store.gates.beginStatusOperation();
+    rejectRename(new Error('config read-only'));
+
+    await vi.waitFor(() => expect(pushToast).toHaveBeenCalledWith(expect.stringContaining('Error renaming')));
+    expect(store.statusMessage).not.toContain('Error renaming');
+    expect(store.configOperations.size).toBe(0);
+  });
+});
+
 describe('StationStore bulk power', () => {
   it('demands UI confirmation when part of the fleet is untrusted', async () => {
     backend.ScanAndFetchStations.mockResolvedValue([
