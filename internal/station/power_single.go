@@ -133,15 +133,19 @@ func (m *Manager) SetStationPower(address, state string) (PowerActionResult, err
 			if !bluetooth.RequiresReconnect(err) && !bluetooth.IsAdapterUnavailable(err) {
 				m.clearStatusFailureKind(canonicalAddress, statusRetryConnection)
 			}
-			info, infoErr := m.stationInfoByAddress(address)
-			if infoErr == nil {
-				return PowerActionResult{
-					Station:           info,
-					CommandSent:       true,
-					Confirmed:         false,
-					ConfirmationError: err.Error(),
-				}, err
+			// The write reached the station, so the structured sent/unconfirmed
+			// result must survive even when the post-error snapshot lookup fails:
+			// dropping it would make the HTTP and desktop clients report a hard
+			// failure for a command that actually landed.
+			result := PowerActionResult{
+				CommandSent:       true,
+				Confirmed:         false,
+				ConfirmationError: err.Error(),
 			}
+			if info, infoErr := m.stationInfoByAddress(address); infoErr == nil {
+				result.Station = info
+			}
+			return result, err
 		}
 		if m.shuttingDown.Load() && errors.Is(err, context.Canceled) {
 			return PowerActionResult{}, ErrShuttingDown

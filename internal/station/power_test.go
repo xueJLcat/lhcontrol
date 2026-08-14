@@ -381,6 +381,41 @@ func TestSinglePowerConfirmationUnsupportedReadPreservesCommandSent(t *testing.T
 	}
 }
 
+func TestSinglePowerConfirmationPreservesCommandSentWithoutSnapshot(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	address := "11:22:33:44:55:77"
+	// The station is registered by key but its snapshot carries no matching
+	// address, so the post-confirmation snapshot lookup fails while the write
+	// path itself succeeds.
+	manager.stations[address] = &internalbluetooth.BaseStation{
+		Name: "LHB-CONFIRM-NO-SNAPSHOT", Present: true,
+		Capabilities:      internalbluetooth.Capabilities{PowerRead: true, PowerWrite: true},
+		CapabilitiesKnown: true,
+	}
+	stubPowerVerificationRead(manager)
+	manager.bluetoothOps.ensureCapabilities = func(context.Context, *internalbluetooth.BaseStation) (internalbluetooth.Capabilities, error) {
+		return internalbluetooth.Capabilities{PowerRead: true, PowerWrite: true}, nil
+	}
+	confirmationErr := &internalbluetooth.PowerConfirmationError{
+		Target: internalbluetooth.PowerStateOn,
+		Err:    errors.New("readback timed out"),
+	}
+	manager.bluetoothOps.setPowerState = func(context.Context, *internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
+		return internalbluetooth.PowerControlResult{State: internalbluetooth.PowerStateUnknown}, confirmationErr
+	}
+
+	result, err := manager.SetStationPower(address, "on")
+	if !errors.Is(err, confirmationErr) {
+		t.Fatalf("SetStationPower() error = %v, want %v", err, confirmationErr)
+	}
+	// The command landed on the station, so the structured sent/unconfirmed
+	// result must survive the failed snapshot lookup instead of degrading to a
+	// bare failure that the UI would report as "power change failed".
+	if !result.CommandSent || result.Confirmed || result.ConfirmationError == "" {
+		t.Fatalf("power result = %+v, want sent but unconfirmed", result)
+	}
+}
+
 func TestSinglePowerAlreadyAtConfirmedTargetIsNoOp(t *testing.T) {
 	manager := NewManager(config.NewConfig())
 	address := "11:22:33:44:55:78"
