@@ -607,6 +607,52 @@ describe('StationStore failure notifications', () => {
     expect(store.statusMessage).not.toContain('Error renaming');
     expect(store.configOperations.size).toBe(0);
   });
+
+  it('toasts a partial capability refresh warning even after a newer owner takes the status line', async () => {
+    let resolveRefresh!: (value: unknown) => void;
+    backend.RefreshStationCapabilities.mockReturnValue(new Promise((resolve) => { resolveRefresh = resolve; }));
+    const { store } = mountStore();
+    await vi.waitFor(() => expect(store.stations).toHaveLength(1));
+
+    void store.refreshCapabilities(store.stations[0]);
+    await vi.waitFor(() => expect(backend.RefreshStationCapabilities).toHaveBeenCalledOnce());
+    // A concurrent owner (for example an auto-sleep event) takes the footer
+    // while the refresh is in flight; the warning has no other visible
+    // surface, so the toast must survive it.
+    store.gates.beginStatusOperation();
+    resolveRefresh(createStation({ lastError: 'metadata read unavailable' }));
+
+    await vi.waitFor(() => expect(pushToast).toHaveBeenCalledWith(
+      expect.stringContaining('some values are unavailable'), 'warning'
+    ));
+    expect(store.statusMessage).not.toContain('some values are unavailable');
+    expect(store.gattOperations.size).toBe(0);
+  });
+
+  it('toasts a failed bulk summary even after a newer owner takes the status line', async () => {
+    const bulk = deferred<{ target: string; results: unknown[] }>();
+    backend.SetAllStationsPowerDetailed.mockReturnValue(bulk.promise);
+    const { store } = mountStore();
+    await vi.waitFor(() => expect(store.stations).toHaveLength(1));
+
+    const runningBulk = store.runBulkPower('on');
+    await vi.waitFor(() => expect(backend.SetAllStationsPowerDetailed).toHaveBeenCalledOnce());
+    store.gates.beginStatusOperation();
+    bulk.resolve({
+      target: 'on',
+      results: [{
+        address: '11:22:33:44:55:66', name: 'LHB-TEST', skipped: false, reason: '',
+        commandSent: true, success: false, confirmed: false, error: 'write failed',
+        station: createStation()
+      }]
+    });
+    await runningBulk;
+
+    // The summary's error toast is the only attentive notice of the partial
+    // failure and must not be swallowed by the concurrent status owner.
+    expect(pushToast).toHaveBeenCalledWith(expect.stringContaining('1 failed'), 'error');
+    expect(store.statusMessage).not.toContain('1 failed');
+  });
 });
 
 describe('StationStore bulk power', () => {

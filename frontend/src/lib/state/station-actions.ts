@@ -227,9 +227,8 @@ export class StationActionController {
         });
       }
       const summary = summarizeBulkResult(result.results);
-      if (!this.host.gates.canCommitStatus(statusOperation)) return;
       const summaryText = formatBulkResult(targetLabel, summary);
-      this.host.statusMessage = result.timedOut
+      const statusText = result.timedOut
         ? `${t('Bulk {target} timed out', { target: targetLabel })}: ${summaryText}`
         : result.cancelled
           ? `${t('Bulk {target} cancelled', { target: targetLabel })}: ${summaryText}`
@@ -239,9 +238,14 @@ export class StationActionController {
           : summary.unconfirmed || summary.skipped ? 'warning'
             : 'success';
       const toastMessage = result.timedOut || result.cancelled
-        ? this.host.statusMessage
+        ? statusText
         : t('Bulk {target}: {summary}', { target: targetLabel, summary: summaryText });
+      // The summary toast must not be gated by status-line ownership: a
+      // partial failure's error toast would otherwise be swallowed by a
+      // concurrent owner, leaving only the per-card feedback.
       pushToast(toastMessage, toastKind);
+      if (!this.host.gates.canCommitStatus(statusOperation)) return;
+      this.host.statusMessage = statusText;
     } catch (error) {
       if (!this.host.gates.canCommitOperation(operationEpoch)) return;
       await this.fetchLatestList();
@@ -390,13 +394,15 @@ export class StationActionController {
       // Use the same commit path as every other device read so a newer power
       // observation also retires settled feedback from an older command.
       this.host.mergeStationUpdates([updated]);
+      const message = updated.lastError
+        ? `${t('Capabilities refreshed for {name}, but some values are unavailable', { name: station.name })}: ${updated.lastError}`
+        : t('Capabilities refreshed for {name}.', { name: station.name });
       if (this.host.gates.canCommitStatus(statusOperation)) {
-        const message = updated.lastError
-          ? `${t('Capabilities refreshed for {name}, but some values are unavailable', { name: station.name })}: ${updated.lastError}`
-          : t('Capabilities refreshed for {name}.', { name: station.name });
         this.host.statusMessage = message;
-        if (updated.lastError) pushToast(message, 'warning');
       }
+      // As with failure toasts, the partial-success warning must not be gated
+      // by status-line ownership; it has no other visible surface.
+      if (updated.lastError) pushToast(message, 'warning');
     } catch (error) {
       if (!this.host.gates.canCommitStationOperation(operationEpoch, station.address, operationRevision)) return;
       await this.fetchStationUpdate(station.address, operationEpoch, operationRevision);
