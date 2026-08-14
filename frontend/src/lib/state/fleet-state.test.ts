@@ -17,6 +17,17 @@ describe('FleetState merge', () => {
     expect(fleet.stations.find((station) => station.address === 'AA')?.name).toBe('dup-last');
   });
 
+  it('ignores snapshots without an address instead of adding a ghost card', () => {
+    const fleet = new FleetState();
+    fleet.replace([createStation({ address: 'AA', name: 'known' })]);
+
+    fleet.merge([createStation({ address: '', name: 'ghost' }), createStation({ address: 'BB', name: 'new' })]);
+
+    expect(fleet.stations.map((station) => station.address)).toEqual(['AA', 'BB']);
+    expect(fleet.visibleCount).toBe(2);
+    expect(fleet.fleetUnverified + fleet.fleetOn + fleet.fleetStandby + fleet.fleetSleep).toBe(2);
+  });
+
   it('merges updates for existing stations without duplication', () => {
     const fleet = new FleetState();
     fleet.replace([createStation({ address: 'AA', name: 'first' })]);

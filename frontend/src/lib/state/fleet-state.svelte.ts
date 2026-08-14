@@ -130,10 +130,14 @@ export class FleetState {
 
   merge(updated: StationInfo[]) {
     if (!updated.length) return;
+    // A degraded result can carry an empty station snapshot; merging it
+    // would add a ghost card without an address and skew fleet aggregates.
+    const valid = updated.filter((station) => Boolean(station?.address));
+    if (!valid.length) return;
     // The map dedupes by address (last wins) so a payload containing the same
     // new address twice cannot append duplicate cards and double-count them in
     // the fleet aggregates.
-    const byAddress = new Map(updated.map((station) => [station.address, station]));
+    const byAddress = new Map(valid.map((station) => [station.address, station]));
     const existingAddresses = new Set(this.stations.map((station) => station.address));
     const newStations = [...byAddress.values()].filter((station) => !existingAddresses.has(station.address));
     this.commit([
