@@ -1079,3 +1079,53 @@ func TestApplyMetadataDiscoveryAdvancesRevisionForFailureAndRecovery(t *testing.
 		t.Fatalf("metadata recovery retained error %v", station.metadataReadError)
 	}
 }
+
+// mismatchThenUnsupportedPower reports a stable On value once so the confirm
+// loop records a state-mismatch diagnostic, then rejects every later read as
+// unsupported so the loop exits through its early-return path.
+type mismatchThenUnsupportedPower struct {
+	calls int
+}
+
+func (c *mismatchThenUnsupportedPower) Read(destination []byte) (int, error) {
+	c.calls++
+	if c.calls == 1 {
+		destination[0] = 0x09
+		return 1, nil
+	}
+	return 0, tinybluetooth.ErrAttReadNotPermitted
+}
+func (c *mismatchThenUnsupportedPower) Write(value []byte) (int, error) { return len(value), nil }
+func (c *mismatchThenUnsupportedPower) WriteWithoutResponse(value []byte) (int, error) {
+	return len(value), nil
+}
+func (c *mismatchThenUnsupportedPower) Properties() uint32 {
+	return uint32(tinybluetooth.CharacteristicReadPermission)
+}
+
+// TestPowerConfirmationEarlyExitKeepsMismatchDiagnostic verifies that an early
+// confirmation exit (unsupported read) still carries the state mismatch an
+// earlier attempt observed. Losing it left PowerConfirmationError unable to
+// explain what the device actually reported.
+func TestPowerConfirmationEarlyExitKeepsMismatchDiagnostic(t *testing.T) {
+	ConfigureTiming(TimingPolicy{ConfirmPollInterval: time.Millisecond})
+	t.Cleanup(func() { ConfigureTiming(TimingPolicy{}) })
+
+	power := &mismatchThenUnsupportedPower{}
+	station := connectedFakeStation(power, nil, nil, Capabilities{PowerRead: true})
+	station.PowerState = PowerStateSleep
+
+	station.mutex.Lock()
+	err := confirmPowerStateInternalContext(context.Background(), station, PowerStateSleep)
+	station.mutex.Unlock()
+
+	if err == nil {
+		t.Fatal("confirmation unexpectedly succeeded against a mismatched, then unsupported, read")
+	}
+	if !IsUnsupportedCapabilityError(err) {
+		t.Fatalf("confirmation error = %v, want the unsupported read classification", err)
+	}
+	if !strings.Contains(err.Error(), "expected a confirmed sleep state") {
+		t.Fatalf("early exit dropped the earlier mismatch diagnostic: %v", err)
+	}
+}

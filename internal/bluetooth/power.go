@@ -278,13 +278,16 @@ func confirmPowerStateInternalContext(ctx context.Context, station *BaseStation,
 			}
 		}
 		if err := readPowerStateInternalContext(ctx, station); err != nil {
-			lastErr = err
+			// Keep the diagnostic recorded before this failure (for example a
+			// state mismatch observed by an earlier attempt) instead of
+			// dropping it, matching the loop's other early exits.
 			if IsUnsupportedCapabilityError(err) {
-				return err
+				return errors.Join(lastErr, err)
 			}
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				return err
+				return errors.Join(lastErr, err)
 			}
+			lastErr = err
 			consecutiveReadErrors++
 			if consecutiveReadErrors >= timing.ConfirmReconnectThreshold && attempt < attempts-1 {
 				_ = disconnectInternal(station)
