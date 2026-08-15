@@ -16,8 +16,9 @@ func (c *Config) RecoveryRetryBase() time.Duration {
 func (c *Config) SetRecoveryRetryBaseSeconds(baseSeconds int) error {
 	return c.setRanged("recovery retry base", baseSeconds, MinRecoveryRetryBaseSeconds, MaxRecoveryRetryBaseSeconds, &c.RecoveryRetryBaseSeconds,
 		func(c *Config, value int) error {
-			if value > c.RecoveryRetryMaxSeconds {
-				return fmt.Errorf("recovery retry base must not exceed the recovery retry maximum of %d seconds, got %d", c.RecoveryRetryMaxSeconds, value)
+			retryMax := sanitizeRangedInt(&c.RecoveryRetryMaxSeconds, MinRecoveryRetryMaxSeconds, MaxRecoveryRetryMaxSeconds, DefaultRecoveryRetryMaxSeconds)
+			if value > retryMax {
+				return fmt.Errorf("recovery retry base must not exceed the recovery retry maximum of %d seconds, got %d", retryMax, value)
 			}
 			return nil
 		})
@@ -34,8 +35,9 @@ func (c *Config) RecoveryRetryMax() time.Duration {
 func (c *Config) SetRecoveryRetryMaxSeconds(maxSeconds int) error {
 	return c.setRanged("recovery retry maximum", maxSeconds, MinRecoveryRetryMaxSeconds, MaxRecoveryRetryMaxSeconds, &c.RecoveryRetryMaxSeconds,
 		func(c *Config, value int) error {
-			if value < c.RecoveryRetryBaseSeconds {
-				return fmt.Errorf("recovery retry maximum must not fall below the recovery retry base of %d seconds, got %d", c.RecoveryRetryBaseSeconds, value)
+			retryBase := sanitizeRangedInt(&c.RecoveryRetryBaseSeconds, MinRecoveryRetryBaseSeconds, MaxRecoveryRetryBaseSeconds, DefaultRecoveryRetryBaseSeconds)
+			if value < retryBase {
+				return fmt.Errorf("recovery retry maximum must not fall below the recovery retry base of %d seconds, got %d", retryBase, value)
 			}
 			return nil
 		})
@@ -60,11 +62,13 @@ func (c *Config) InitialReadTimeout() time.Duration {
 func (c *Config) SetInitialReadTimeoutSeconds(timeoutSeconds int) error {
 	return c.setRanged("initial read timeout", timeoutSeconds, MinInitialReadTimeoutSeconds, MaxInitialReadTimeoutSeconds, &c.InitialReadTimeoutSeconds,
 		func(c *Config, value int) error {
-			if value > c.StationOperationTimeoutSeconds {
-				return fmt.Errorf("initial read timeout must not exceed the station operation timeout of %d seconds, got %d", c.StationOperationTimeoutSeconds, value)
+			stationTimeout := sanitizeStationOperationTimeout(&c.StationOperationTimeoutSeconds)
+			if value > stationTimeout {
+				return fmt.Errorf("initial read timeout must not exceed the station operation timeout of %d seconds, got %d", stationTimeout, value)
 			}
-			if value > c.ScanReadPhaseTimeoutSeconds {
-				return fmt.Errorf("initial read timeout must not exceed the scan read phase timeout of %d seconds, got %d", c.ScanReadPhaseTimeoutSeconds, value)
+			scanReadPhaseTimeout := sanitizeRangedInt(&c.ScanReadPhaseTimeoutSeconds, MinScanReadPhaseTimeoutSeconds, MaxScanReadPhaseTimeoutSeconds, DefaultScanReadPhaseTimeoutSeconds)
+			if value > scanReadPhaseTimeout {
+				return fmt.Errorf("initial read timeout must not exceed the scan read phase timeout of %d seconds, got %d", scanReadPhaseTimeout, value)
 			}
 			return nil
 		})
@@ -81,8 +85,9 @@ func (c *Config) ScanReadPhaseTimeout() time.Duration {
 func (c *Config) SetScanReadPhaseTimeoutSeconds(timeoutSeconds int) error {
 	return c.setRanged("scan read phase timeout", timeoutSeconds, MinScanReadPhaseTimeoutSeconds, MaxScanReadPhaseTimeoutSeconds, &c.ScanReadPhaseTimeoutSeconds,
 		func(c *Config, value int) error {
-			if value < c.InitialReadTimeoutSeconds {
-				return fmt.Errorf("scan read phase timeout must cover the initial read timeout of %d seconds, got %d", c.InitialReadTimeoutSeconds, value)
+			initialReadTimeout := sanitizeRangedInt(&c.InitialReadTimeoutSeconds, MinInitialReadTimeoutSeconds, MaxInitialReadTimeoutSeconds, DefaultInitialReadTimeoutSeconds)
+			if value < initialReadTimeout {
+				return fmt.Errorf("scan read phase timeout must cover the initial read timeout of %d seconds, got %d", initialReadTimeout, value)
 			}
 			return nil
 		})
@@ -99,8 +104,9 @@ func (c *Config) StatusReadTimeout() time.Duration {
 func (c *Config) SetStatusReadTimeoutSeconds(timeoutSeconds int) error {
 	return c.setRanged("status read timeout", timeoutSeconds, MinStatusReadTimeoutSeconds, MaxStatusReadTimeoutSeconds, &c.StatusReadTimeoutSeconds,
 		func(c *Config, value int) error {
-			if value > c.StatusRefreshTimeoutSeconds {
-				return fmt.Errorf("status read timeout must not exceed the status refresh timeout of %d seconds, got %d", c.StatusRefreshTimeoutSeconds, value)
+			statusRefreshTimeout := sanitizeRangedInt(&c.StatusRefreshTimeoutSeconds, MinStatusRefreshTimeoutSeconds, MaxStatusRefreshTimeoutSeconds, DefaultStatusRefreshTimeoutSeconds)
+			if value > statusRefreshTimeout {
+				return fmt.Errorf("status read timeout must not exceed the status refresh timeout of %d seconds, got %d", statusRefreshTimeout, value)
 			}
 			return nil
 		})
@@ -117,8 +123,9 @@ func (c *Config) StatusRefreshTimeout() time.Duration {
 func (c *Config) SetStatusRefreshTimeoutSeconds(timeoutSeconds int) error {
 	return c.setRanged("status refresh timeout", timeoutSeconds, MinStatusRefreshTimeoutSeconds, MaxStatusRefreshTimeoutSeconds, &c.StatusRefreshTimeoutSeconds,
 		func(c *Config, value int) error {
-			if value < c.StatusReadTimeoutSeconds {
-				return fmt.Errorf("status refresh timeout must cover the status read timeout of %d seconds, got %d", c.StatusReadTimeoutSeconds, value)
+			statusReadTimeout := sanitizeRangedInt(&c.StatusReadTimeoutSeconds, MinStatusReadTimeoutSeconds, MaxStatusReadTimeoutSeconds, DefaultStatusReadTimeoutSeconds)
+			if value < statusReadTimeout {
+				return fmt.Errorf("status refresh timeout must cover the status read timeout of %d seconds, got %d", statusReadTimeout, value)
 			}
 			return nil
 		})

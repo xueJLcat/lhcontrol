@@ -96,6 +96,28 @@ func TestAddressRenameRollbackSurvivesDuplicateAddresses(t *testing.T) {
 	}
 }
 
+// TestRenameInitializesNilAliasMaps covers a Config whose alias maps were
+// never initialized (a zero-value Config created outside NewConfig): writes
+// must allocate the maps instead of panicking on a nil-map assignment.
+func TestRenameInitializesNilAliasMaps(t *testing.T) {
+	useTemporaryConfigDirectory(t)
+	cfg := &Config{}
+	if err := cfg.SetRenamedStation("LHB-OLD", "Desk"); err != nil {
+		t.Fatalf("SetRenamedStation() on a zero-value config error = %v", err)
+	}
+	if got, ok := cfg.GetRenamedStation("LHB-OLD"); !ok || got != "Desk" {
+		t.Fatalf("GetRenamedStation() = %q, %v; want Desk, true", got, ok)
+	}
+
+	cfg = &Config{}
+	if err := cfg.SetRenamedStationForAddresses("LHB-OLD", "Desk", []string{"11:22:33:44:55:66"}); err != nil {
+		t.Fatalf("SetRenamedStationForAddresses() on a zero-value config error = %v", err)
+	}
+	if got, ok := cfg.GetStationDisplayName("11:22:33:44:55:66", "LHB-OLD"); !ok || got != "Desk" {
+		t.Fatalf("GetStationDisplayName() = %q, %v; want Desk, true", got, ok)
+	}
+}
+
 func TestSuccessfulSaveClearsPreviousPersistenceFailure(t *testing.T) {
 	t.Setenv("AppData", t.TempDir())
 	originalWriter := configFileWriter

@@ -11,6 +11,9 @@ func (c *Config) GetRenamedStation(originalName string) (string, bool) {
 func (c *Config) SetRenamedStation(originalName string, newName string) error {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
+	if c.RenamedStations == nil {
+		c.RenamedStations = make(map[string]string)
+	}
 	previous, existed := c.RenamedStations[originalName]
 	if newName == "" {
 		delete(c.RenamedStations, originalName)
@@ -33,6 +36,9 @@ func (c *Config) SetRenamedStation(originalName string, newName string) error {
 func (c *Config) SetRenamedStationForAddresses(originalName, newName string, addresses []string) error {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
+	if c.RenamedStations == nil {
+		c.RenamedStations = make(map[string]string)
+	}
 	if c.RenamedStationsByAddress == nil {
 		c.RenamedStationsByAddress = make(map[string]string)
 	}
