@@ -119,6 +119,21 @@ func TestScanInitialReadClassifiesPartialFailures(t *testing.T) {
 			wantRetry:      true,
 		},
 		{
+			// The Bluetooth layer reports a power read stopped by its own
+			// budget as a structured InitialReadError wrapping the deadline.
+			// The deadline rule must apply to that shape too: no disconnect,
+			// only backoff.
+			name: "power structured read budget deadline",
+			readErr: &internalbluetooth.InitialReadError{
+				Power: &internalbluetooth.DeviceTransportError{
+					Operation: "read power characteristic",
+					Err:       context.DeadlineExceeded,
+				},
+			},
+			wantDisconnect: false,
+			wantRetry:      true,
+		},
+		{
 			name: "channel transport failure",
 			readErr: &internalbluetooth.InitialReadError{
 				Channel: &internalbluetooth.DeviceTransportError{

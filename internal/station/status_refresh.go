@@ -62,11 +62,9 @@ func (m *Manager) CheckAllStationStatuses() ([]StationInfo, error) {
 	statusErrors := make([]error, len(stationsToRead))
 	work := make(chan statusReadWork)
 	// Keep one GATT slot available for foreground commands while the periodic
-	// refresh reads connected stations.
-	workerCount := 1
-	if len(stationsToRead) < workerCount {
-		workerCount = len(stationsToRead)
-	}
+	// refresh reads connected stations. The early return above guarantees at
+	// least one station reaches the workers.
+	const workerCount = 1
 	var wg sync.WaitGroup
 	for worker := 0; worker < workerCount; worker++ {
 		wg.Add(1)

@@ -97,6 +97,42 @@ func TestCombinedStructuredReadFailureRecordsConnectionFailureOnce(t *testing.T)
 		t.Fatalf("disconnects = %d, want exactly 1", disconnects.Load())
 	}
 }
+
+// TestStructuredPowerReadDeadlineDoesNotDisconnectStation covers a power read
+// whose own budget expired: the Bluetooth layer reports that as a structured
+// InitialReadError whose Power error wraps context.DeadlineExceeded. Like the
+// bare-deadline branches in scan, recovery, and status refresh, the outcome
+// must back off without discarding a possibly-healthy session.
+func TestStructuredPowerReadDeadlineDoesNotDisconnectStation(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	manager.statusRetryBase = time.Hour
+	defer manager.Shutdown()
+	var disconnects atomic.Int32
+	manager.bluetoothOps.disconnectStation = func(*internalbluetooth.BaseStation) error {
+		disconnects.Add(1)
+		return nil
+	}
+	address := "AA:BB:CC:DD:EE:02"
+	powerErr := &internalbluetooth.DeviceTransportError{
+		Operation: "read power characteristic",
+		Err:       context.DeadlineExceeded,
+	}
+	manager.recordStructuredReadResult(
+		&internalbluetooth.BaseStation{Address: mustAddress(t, address)},
+		address,
+		powerErr,
+		nil,
+	)
+	if disconnects.Load() != 0 {
+		t.Fatalf("disconnects after a structured read-budget deadline = %d, want 0", disconnects.Load())
+	}
+	manager.statusRetryMutex.Lock()
+	retry, tracked := manager.statusRetries[address]
+	manager.statusRetryMutex.Unlock()
+	if !tracked || retry.failures == 0 || effectiveStatusRetryKinds(retry)&statusRetryConnection == 0 {
+		t.Fatalf("deadline retry = %+v tracked=%v, want a connection backoff", retry, tracked)
+	}
+}
 func TestPermanentUnsupportedDiscoveryDoesNotRemainInBackgroundRecovery(t *testing.T) {
 	manager := NewManager(config.NewConfig())
 	manager.statusRetryBase = time.Hour

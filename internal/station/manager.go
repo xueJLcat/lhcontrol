@@ -547,6 +547,14 @@ func (m *Manager) recordObservedReadResult(
 			// repaired by reconnecting; discarding the session here would start
 			// a disconnect/reconnect cycle that fails the same way on every poll.
 			m.clearStatusFailureKind(address, statusRetryConnection)
+		} else if errors.Is(powerErr, context.DeadlineExceeded) && !bluetooth.RequiresReconnect(powerErr) {
+			// A power read stopped by its own budget is not evidence the link
+			// is broken, matching the bare-deadline rule used by scan initial
+			// reads, recovery, and status refreshes. Structured reads surface
+			// the deadline inside InitialReadError/StatusReadError, so the same
+			// backoff-without-disconnect handling applies here: a slow but
+			// reachable station must not pay a disconnect/reconnect cycle.
+			m.noteStatusFailure(address)
 		} else {
 			_ = m.disconnectStationBounded(station)
 			m.noteStatusFailure(address)
