@@ -284,33 +284,32 @@ func connectAndDiscoverInternalContext(ctx context.Context, station *BaseStation
 // discovery succeeded. Callers can keep the station visible while showing the
 // affected values as unknown.
 
+// disconnectInternal disconnects a station. It must be called with s.mutex
+// held and returns with s.mutex held; the WinRT cleanup itself runs outside
+// the lock because an unresponsive device can stretch it far past every
+// caller deadline, and every observable field already describes a
+// disconnected station by then.
 func disconnectInternal(s *BaseStation) error {
 	if cleanupErr := cleanupPendingInternal(s); cleanupErr != nil {
 		return cleanupErr
 	}
 	var disconnectErr error
 	if s.device != nil {
+		device := s.device
 		log.Printf("Bluetooth: Disconnecting internal for %s", s.Name)
-		disconnectErr = s.device.Disconnect()
+		detachConnectionStateInternal(s)
+		s.mutex.Unlock()
+		disconnectErr = device.Disconnect()
+		s.mutex.Lock()
 		if bluetooth.IsDisconnectCleanupComplete(disconnectErr) {
 			log.Printf("Bluetooth: Disconnect cleanup warning for %s: %v", s.Name, disconnectErr)
 			disconnectErr = nil
-		} else if disconnectErr != nil {
-			s.pendingCleanup = s.device
+		} else if disconnectErr != nil && s.pendingCleanup == nil {
+			s.pendingCleanup = device
 		}
+	} else {
+		detachConnectionStateInternal(s)
 	}
-	s.isConnected = false
-	s.device = nil
-	s.characteristic = nil
-	s.modeCharacteristic = nil
-	s.identifyCharacteristic = nil
-	s.LastPowerReadAt = time.Time{}
-	s.LastChannelReadAt = time.Time{}
-	s.bootRawTrustedOn = false
-	// The boot fallback window is connection-scoped: a disconnect can outlast
-	// the window, and carrying the old timestamp would fast-forward the first
-	// boot-like read after reconnect to a trusted On.
-	s.bootingSince = time.Time{}
 
 	connectedStationsMutex.Lock()
 	newConnectedStations := make([]*BaseStation, 0, len(connectedStations))
@@ -324,22 +323,50 @@ func disconnectInternal(s *BaseStation) error {
 	return disconnectErr
 }
 
+// detachConnectionStateInternal clears every connection-owned field so the
+// station reads as disconnected before the (possibly long) WinRT cleanup
+// runs. Callers must hold s.mutex for writing.
+func detachConnectionStateInternal(s *BaseStation) {
+	s.isConnected = false
+	s.device = nil
+	s.characteristic = nil
+	s.modeCharacteristic = nil
+	s.identifyCharacteristic = nil
+	s.LastPowerReadAt = time.Time{}
+	s.LastChannelReadAt = time.Time{}
+	s.bootRawTrustedOn = false
+	// The boot fallback window is connection-scoped: a disconnect can outlast
+	// the window, and carrying the old timestamp would fast-forward the first
+	// boot-like read after reconnect to a trusted On.
+	s.bootingSince = time.Time{}
+}
+
 // cleanupPendingInternal completes a previously failed synchronous Disconnect.
-// It must run before a replacement device is connected.
+// It must run before a replacement device is connected. Called with s.mutex
+// held; returns with s.mutex held. The WinRT cleanup runs outside the lock
+// for the same reason as disconnectInternal.
 func cleanupPendingInternal(s *BaseStation) error {
 	if s.pendingCleanup == nil {
 		return nil
 	}
-	if err := s.pendingCleanup.Disconnect(); err != nil {
+	pending := s.pendingCleanup
+	s.pendingCleanup = nil
+	s.mutex.Unlock()
+	err := pending.Disconnect()
+	s.mutex.Lock()
+	if err != nil {
 		if bluetooth.IsDisconnectCleanupComplete(err) {
 			log.Printf("Bluetooth: Pending disconnect cleanup completed for %s with warning: %v", s.Name, err)
-			s.pendingCleanup = nil
 			removePendingCleanupStation(s)
 			return nil
 		}
+		// Keep the handle around for a later retry unless an interleaved
+		// disconnect recorded a newer pending handle meanwhile.
+		if s.pendingCleanup == nil {
+			s.pendingCleanup = pending
+		}
 		return err
 	}
-	s.pendingCleanup = nil
 	// A reconnect that completes the pending cleanup must also leave the
 	// global tracking list; otherwise a healthy station keeps a stale entry
 	// until an explicit disconnect removes it.

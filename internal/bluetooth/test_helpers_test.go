@@ -209,7 +209,9 @@ func TestReconnectDoesNotReplaceStationBeforeStaleCleanupSucceeds(t *testing.T) 
 	fake := newFakeBLEAdapter()
 	adapter = fake
 	t.Cleanup(func() { adapter = originalAdapter })
+	station.mutex.Lock()
 	err := connectAndDiscoverInternal(station)
+	station.mutex.Unlock()
 	if !errors.Is(err, cleanupErr) {
 		t.Fatalf("connectAndDiscoverInternal() error = %v, want %v", err, cleanupErr)
 	}

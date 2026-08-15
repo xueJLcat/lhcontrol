@@ -247,6 +247,3 @@ func SetChannelContext(ctx context.Context, station *BaseStation, channel int) (
 	station.setOperationErrorInternal(nil)
 	return result, fmt.Errorf("channel %d was written but could not be confirmed for %s: %w", channel, station.Name, confirmationErr)
 }
-
-// disconnectInternal performs disconnection without locking (must be called within locked context).
-// Also removes station from the global tracking list.
