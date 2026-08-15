@@ -1,3 +1,5 @@
+import { t } from './i18n.svelte';
+
 export type ScanErrorKind =
   | 'bluetooth-off'
   | 'adapter-missing'
@@ -82,4 +84,3 @@ export function scanErrorCopy(info: ScanErrorInfo): ScanErrorCopy {
       };
   }
 }
-import { t } from './i18n.svelte';
