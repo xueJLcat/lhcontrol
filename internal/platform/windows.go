@@ -116,10 +116,17 @@ func firstOwnedWindow(
 	owner func(syscall.Handle) (string, error),
 ) (syscall.Handle, error) {
 	var after syscall.Handle
+	var fallback syscall.Handle
 	for {
 		hwnd, err := next(after)
-		if err != nil || hwnd == 0 {
-			return hwnd, err
+		if err != nil {
+			if fallback != 0 {
+				return fallback, nil
+			}
+			return 0, err
+		}
+		if hwnd == 0 {
+			break
 		}
 		actual, ownerErr := owner(hwnd)
 		if ownerErr != nil || expected == "" || strings.EqualFold(actual, expected) {
@@ -127,8 +134,20 @@ func firstOwnedWindow(
 			// unavailable; refusing every window would make the instance unusable.
 			return hwnd, nil
 		}
+		if fallback == 0 {
+			fallback = hwnd
+		}
 		after = hwnd
 	}
+	// No window was owned by a matching executable name. The already-held
+	// single-instance mutex proves that this application is running, so its
+	// window must be one of the same-titled candidates even when the running
+	// instance has a different executable base name (a wails-dev build next
+	// to an installed copy, or a renamed portable exe). Prefer the exact
+	// owner match above; only fall back here instead of reporting the window
+	// as missing, which would make the second launch exit without focusing
+	// the instance it just detected.
+	return fallback, nil
 }
 
 // FindWindowW documents "not found" with a zero HWND. Its last-error value is
@@ -321,13 +340,11 @@ func BringWindowToFront(appTitle string) bool {
 		return false
 	}
 
-	if expected, nameErr := ownProcessImageBaseName(); nameErr == nil {
-		if actual, ownerErr := windowOwnerProcessName(hwnd); ownerErr == nil &&
-			!strings.EqualFold(actual, expected) {
-			log.Printf("Window titled %q belongs to %q, not %q; leaving the foreign window alone", appTitle, actual, expected)
-			return false
-		}
-	}
+	// Ownership was already decided by findWindow: an exact executable-name
+	// match wins, and a fallback to the first same-titled window only happens
+	// when the single-instance mutex proves this application is running. A
+	// second owner check here would reject exactly that mutex-backed fallback
+	// (a running instance with a different executable base name).
 
 	if !activateWindow(hwnd, showWindow, setForegroundWindow, flashWindowEx) {
 		log.Println("SetForegroundWindow failed (maybe window is not allowed to take focus?). Flashing instead.")

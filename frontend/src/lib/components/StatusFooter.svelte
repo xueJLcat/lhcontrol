@@ -2,6 +2,7 @@
   import { fade } from 'svelte/transition';
   import { Activity } from 'lucide-svelte';
   import { dur } from '../motion';
+  import { backendCopy } from '../backend-copy';
   import { t } from '../i18n.svelte';
 
   let {
@@ -25,7 +26,8 @@
   let detail = $state<'config' | 'api' | null>(null);
 
   const apiTitle = $derived(apiError || (apiAddress ? `HTTP API ${apiAddress}` : t('HTTP API unavailable')));
-  const configTitle = $derived(configWarnings.join('\n') || t('Configuration changes cannot be saved'));
+  const translatedWarnings = $derived(configWarnings.map((warning) => backendCopy(warning)));
+  const configTitle = $derived(translatedWarnings.join('\n') || t('Configuration changes cannot be saved'));
 
   // Forget hidden detail state while an overlay owns the UI, and when the
   // config pill's own visibility condition disappears. Otherwise a panel can
@@ -78,7 +80,7 @@
        layer cannot remain visible above a drawer or modal. -->
   {#if !inactive && detail === 'config' && apiRunning && (configWarnings.length > 0 || !configWritable)}
     <div class="footer-detail" transition:fade={dur({ duration: 140 })}>
-      {#each configWarnings as warning}<p>{warning}</p>{/each}
+      {#each translatedWarnings as warning}<p>{warning}</p>{/each}
       {#if !configWritable}<p>{t('Configuration changes cannot be saved.')}</p>{/if}
     </div>
   {:else if !inactive && detail === 'api'}

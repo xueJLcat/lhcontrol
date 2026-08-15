@@ -23,6 +23,13 @@ describe('classifyScanError', () => {
   it('classifies timeouts', () => {
     expect(classifyScanError('operation timed out').kind).toBe('timeout');
     expect(classifyScanError('context deadline exceeded').kind).toBe('timeout');
+    expect(classifyScanError('Bluetooth scan stop did not complete within 10s').kind).toBe('timeout');
+  });
+
+  it('classifies starts rejected because the adapter is busy', () => {
+    expect(classifyScanError('another Bluetooth operation is already in progress').kind).toBe('busy');
+    expect(classifyScanError('Bluetooth scan is already active').kind).toBe('busy');
+    expect(classifyScanError('bluetooth resource is in use (WinRT error code 2)').kind).toBe('busy');
   });
 
   it('falls back to unknown and preserves the detail text', () => {
@@ -39,12 +46,12 @@ describe('classifyScanError', () => {
 
 describe('scanErrorCopy', () => {
   it('gives every kind an actionable heading and steps', () => {
-    const kinds = ['bluetooth-off', 'adapter-missing', 'permission', 'timeout', 'unknown'] as const;
+    const kinds = ['bluetooth-off', 'adapter-missing', 'permission', 'busy', 'timeout', 'unknown'] as const;
     for (const kind of kinds) {
       const copy = scanErrorCopy({ kind, detail: 'detail' });
       expect(copy.heading).not.toBe('');
       expect(copy.explanation).not.toBe('');
-      expect(copy.steps.length).toBeGreaterThanOrEqual(2);
+      expect(copy.steps.length).toBeGreaterThanOrEqual(1);
     }
   });
 

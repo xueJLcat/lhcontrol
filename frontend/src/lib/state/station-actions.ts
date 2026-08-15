@@ -16,6 +16,7 @@ import {
   powerTargetLabel,
   stateLabel
 } from '../station';
+import { backendCopy, backendCopyOr, joinBackendCopy } from '../backend-copy';
 import { formatBulkResult, summarizeBulkResult } from '../result-format';
 import { pushToast } from '../toast';
 import type { GlobalOperation } from '../operation-state';
@@ -273,12 +274,12 @@ export class StationActionController {
         const feedback: Pick<PowerFeedback, 'kind' | 'text'> = item.skipped
           ? item.success && item.confirmed
             ? { kind: 'success', text: t('Already {target}', { target: targetLabel }) }
-            : { kind: 'warning', text: t('Skipped · {reason}', { reason: item.reason || t('not actionable') }) }
+            : { kind: 'warning', text: t('Skipped · {reason}', { reason: backendCopyOr(item.reason, 'not actionable') }) }
             : item.success && item.confirmed
               ? { kind: 'success', text: t('{target} confirmed', { target: targetLabel }) }
               : item.success && item.commandSent
-              ? { kind: 'warning', text: t('{target} sent · {detail}', { target: targetLabel, detail: item.error || t('status unavailable') }) }
-              : { kind: 'error', text: item.error || t('Failed to set {target}', { target: targetLabel }) };
+              ? { kind: 'warning', text: t('{target} sent · {detail}', { target: targetLabel, detail: backendCopyOr(item.error, 'status unavailable') }) }
+              : { kind: 'error', text: backendCopy(item.error) || t('Failed to set {target}', { target: targetLabel }) };
         this.host.powerFeedback.set(item.address, {
           ...feedback,
           target: state,
@@ -539,8 +540,8 @@ export class StationActionController {
       }
       this.host.ui.forceCloseChannelEditor();
       if (this.host.gates.canCommitStatus(statusOperation)) this.host.statusMessage = result.commandSent
-        ? t('Channel changed from {previous} to {channel}. {warnings}', { previous: result.previousChannel || t('unknown'), channel: result.channel, warnings: result.warnings.join(' ') })
-        : t('Channel already set to {channel}; no command was sent. {warnings}', { channel: result.channel, warnings: result.warnings.join(' ') });
+        ? t('Channel changed from {previous} to {channel}. {warnings}', { previous: result.previousChannel || t('unknown'), channel: result.channel, warnings: joinBackendCopy(result.warnings) })
+        : t('Channel already set to {channel}; no command was sent. {warnings}', { channel: result.channel, warnings: joinBackendCopy(result.warnings) });
     } catch (error) {
       if (!this.host.gates.canCommitStationOperation(operationEpoch, address, operationRevision)) return;
       const actual = await this.fetchStationUpdate(address, operationEpoch, operationRevision);

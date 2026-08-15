@@ -4,6 +4,7 @@
   import { fly } from 'svelte/transition';
   import { CircleCheck, Eye, LoaderCircle, RefreshCw, Settings2, X } from 'lucide-svelte';
   import type { Capabilities, StationInfo } from '../types';
+  import { backendCopy } from '../backend-copy';
   import { channelChangeBlockedReason, stateClass, stateLabel } from '../station';
   import { relativeTime } from '../relative-time';
   import { focusTrap } from '../actions';
@@ -98,13 +99,13 @@
     <dl class="def-list">
       <dt>{t('Power')}</dt><dd><span class="state-text state-text-{stateClass(station)}">{stateLabel(station)}</span> · {t(station.powerFresh ? station.powerStateConfirmed ? 'confirmed' : 'unverified' : 'last known, stale')} ({t('raw {value}', { value: rawPowerLabel })})</dd>
       <dt>{t('Channel')}</dt><dd class="mono">{station.channel || t('Unable to verify')}</dd>
-      <dt>{t('Connection')}</dt><dd>{station.connectionState === 'connected' ? t('connected') : station.connectionState === 'disconnected' ? t('disconnected') : station.connectionState}</dd>
+      <dt>{t('Connection')}</dt><dd>{station.connectionState === 'connected' ? t('connected') : station.connectionState === 'disconnected' ? t('disconnected') : t('Unknown')}</dd>
       <dt>{t('Last seen')}</dt><dd title={station.lastSeenAt || undefined}>{relativeTime(station.lastSeenAt, now) || '—'}</dd>
       <dt>{t('Last status read')}</dt><dd title={station.lastReadAt || undefined}>{relativeTime(station.lastReadAt, now) || '—'}</dd>
       <dt>{t('Power data')}</dt><dd title={station.lastPowerReadAt || undefined}>{t(station.powerFresh ? 'fresh' : 'stale or unavailable')} · {relativeTime(station.lastPowerReadAt, now) || t('never')}</dd>
       <dt>{t('Channel data')}</dt><dd title={station.lastChannelReadAt || undefined}>{t(station.channelFresh ? 'fresh' : 'stale or unavailable')} · {relativeTime(station.lastChannelReadAt, now) || t('never')}</dd>
     </dl>
-    {#if station.lastError}<div class="alert danger">{station.lastError}</div>{/if}
+    {#if station.lastError}<div class="alert danger">{backendCopy(station.lastError)}</div>{/if}
     {#if !station.capabilitiesKnown}
       <div class="alert">{t('Capabilities could not be verified. Power commands will retry discovery; unsupported operations will be reported.')}</div>
     {/if}

@@ -32,11 +32,16 @@ func TestInvalidateAllConnectionsDropsCachedHandles(t *testing.T) {
 	station.mutex.Unlock()
 	connectedStationsMutex.Lock()
 	previous := connectedStations
+	previousPending := pendingCleanupStations
 	connectedStations = []*BaseStation{station}
+	// Isolate from cleanup registrations left by unrelated failure-path tests:
+	// InvalidateAllConnections walks both tracking lists.
+	pendingCleanupStations = nil
 	connectedStationsMutex.Unlock()
 	t.Cleanup(func() {
 		connectedStationsMutex.Lock()
 		connectedStations = previous
+		pendingCleanupStations = previousPending
 		connectedStationsMutex.Unlock()
 	})
 	if err := InvalidateAllConnections(); err != nil {
@@ -68,11 +73,14 @@ func TestInvalidateAllConnectionsRetainsFailedCleanupForRetry(t *testing.T) {
 	station.device = device
 	connectedStationsMutex.Lock()
 	previous := connectedStations
+	previousPending := pendingCleanupStations
 	connectedStations = []*BaseStation{station}
+	pendingCleanupStations = nil
 	connectedStationsMutex.Unlock()
 	t.Cleanup(func() {
 		connectedStationsMutex.Lock()
 		connectedStations = previous
+		pendingCleanupStations = previousPending
 		connectedStationsMutex.Unlock()
 	})
 	if err := InvalidateAllConnections(); !errors.Is(err, cleanupErr) {

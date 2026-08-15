@@ -125,11 +125,20 @@ func (m *Manager) SetStationChannel(
 	}
 	hasUnknown := false
 	conflictCheckTime := time.Now()
+	// Copy only the pointers under the map lock and snapshot them afterwards:
+	// Snapshot takes each station's own mutex, which a wedged WinRT cleanup on
+	// another station can hold far longer than this operation's budget. This
+	// mirrors GetStationInfo's pattern; station pointers are never removed.
 	m.stationsMutex.RLock()
+	otherStations := make([]*bluetooth.BaseStation, 0, len(m.stations))
 	for _, other := range m.stations {
 		if other == nil || other == stationPtr {
 			continue
 		}
+		otherStations = append(otherStations, other)
+	}
+	m.stationsMutex.RUnlock()
+	for _, other := range otherStations {
 		snapshot := other.Snapshot()
 		if !snapshot.Present {
 			continue
@@ -145,16 +154,23 @@ func (m *Manager) SetStationChannel(
 			continue
 		}
 		if snapshot.Channel == channel {
-			m.stationsMutex.RUnlock()
 			return result, fmt.Errorf("%w: channel %d is used by %s (%s)", ErrChannelConflict, channel, snapshot.Name, snapshot.Address)
 		}
 	}
-	m.stationsMutex.RUnlock()
 	if hasUnknown {
 		result.Warnings = append(result.Warnings, "One or more visible stations have an unknown channel; conflicts cannot be fully verified.")
 		if !allowUnknownConflictRisk {
 			return result, fmt.Errorf("%w: one or more visible stations have an unknown channel", ErrScanRequired)
 		}
+	}
+	// The conflict check above can take several seconds; a boot transition
+	// landing in that window must still block the write, matching the guard
+	// before the capability refresh and the power paths' pre-write re-check.
+	if isFreshBootingPower(stationPtr.Snapshot(), time.Now()) {
+		return result, fmt.Errorf(
+			"station is booting; retry channel change after transition: %w",
+			ErrStationTransitioning,
+		)
 	}
 	var writeResult bluetooth.ChannelWriteResult
 	err = runSafely("channel operation", func() error {

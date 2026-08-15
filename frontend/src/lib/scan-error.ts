@@ -4,6 +4,7 @@ export type ScanErrorKind =
   | 'bluetooth-off'
   | 'adapter-missing'
   | 'permission'
+  | 'busy'
   | 'timeout'
   | 'unknown';
 
@@ -24,7 +25,10 @@ const PATTERNS: Array<[ScanErrorKind, RegExp]> = [
   ['bluetooth-off', /bluetooth is (off|disabled|unavailable|not enabled|not ready)|radio (is )?(off|disabled|unavailable)|turn on bluetooth/i],
   ['adapter-missing', /no (bluetooth |bt )?(radio )?adapter|adapter (is )?(missing|not found|unavailable)|no such device|device (was )?not found|adapter not present/i],
   ['permission', /permission denied|access (is )?denied|unauthorized|insufficient privileges|not authorized/i],
-  ['timeout', /timed? ?out|deadline exceeded|context deadline/i]
+  // A rejected start because another operation holds the adapter is transient
+  // and self-explanatory; it deserves its own guidance instead of "unknown".
+  ['busy', /already in progress|already active|resource is in use/i],
+  ['timeout', /timed? ?out|deadline exceeded|context deadline|did not complete within|did not stop before/i]
 ];
 
 export function classifyScanError(error: unknown): ScanErrorInfo {
@@ -62,6 +66,14 @@ export function scanErrorCopy(info: ScanErrorInfo): ScanErrorCopy {
         steps: [
           t('Grant Bluetooth permission to the app (or run it with the required rights).'),
           t('Retry the scan once access is allowed.')
+        ]
+      };
+    case 'busy':
+      return {
+        heading: t('Bluetooth is busy'),
+        explanation: t('Another Bluetooth operation is still running, so the scan could not start.'),
+        steps: [
+          t('Wait for the current operation to finish, then retry the scan.')
         ]
       };
     case 'timeout':

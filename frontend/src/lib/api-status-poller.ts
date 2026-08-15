@@ -80,6 +80,10 @@ export class ApiStatusPoller {
 
     let request: Promise<void>;
     try {
+      // catch() must follow the fulfilled handler: a host callback throwing
+      // inside it is not a rejection of GetAPIStatus and would otherwise
+      // escape every handler as an unobserved failure, leaving this poll
+      // neither committed nor marked failed.
       request = GetAPIStatus().then((status) => {
         if (this.host.isDisposed() || !this.revisions.isCurrent(revision)) return;
         this.host.commitStatus(status);
@@ -92,7 +96,7 @@ export class ApiStatusPoller {
           this.reportedWarnings.add(warning);
           this.host.reportConfigWarning(warning);
         }
-      }, commitFailure);
+      }).catch(commitFailure);
     } catch (error) {
       request = Promise.resolve().then(() => commitFailure(error));
     }

@@ -113,13 +113,13 @@ func (m *Manager) attemptForegroundGlobalOperation(ctx context.Context) (<-chan 
 	return backgroundDone, nil
 }
 
-// foregroundDrainDeadline returns the channel bounding background-drain waits
-// for a ctx that carries no deadline of its own. Callers with an explicit
-// deadline already bound the wait through their context.
+// foregroundDrainDeadline returns the channel bounding background-drain waits.
+// It applies even when the caller ctx carries its own deadline: a bulk context
+// always has the bulk timeout, and without this cap a wedged background worker
+// would consume the entire bulk budget waiting (surfacing as a bulk timeout)
+// instead of failing fast as retryable Busy. The effective wait is the minimum
+// of this limit and the ctx deadline, both selected in the caller's loop.
 func (m *Manager) foregroundDrainDeadline(ctx context.Context) (<-chan time.Time, func()) {
-	if _, hasDeadline := ctx.Deadline(); hasDeadline {
-		return nil, func() {}
-	}
 	limit := m.foregroundDrainWait
 	if limit <= 0 {
 		limit = foregroundDrainWaitLimit

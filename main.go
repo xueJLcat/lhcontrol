@@ -297,6 +297,20 @@ func (writer *rotatingLogFile) Close() error {
 	return err
 }
 
+// consoleMirrorWriter writes every record to both the console and the log
+// file without coupling their failures. The console mirror is best-effort
+// (its write result is discarded), so an invalid stderr handle in a GUI build
+// cannot interrupt the file side; the file write decides the returned error.
+type consoleMirrorWriter struct {
+	console io.Writer
+	file    io.Writer
+}
+
+func (w consoleMirrorWriter) Write(p []byte) (int, error) {
+	_, _ = w.console.Write(p)
+	return w.file.Write(p)
+}
+
 // setupLogging always keeps a bounded diagnostic log in the user config
 // directory. Production GUI builds have no reliable console, so file logging
 // preserves the evidence needed to diagnose an intermittent crash.
@@ -317,10 +331,13 @@ func setupLogging(mirrorConsole bool) (*rotatingLogFile, error) {
 	}
 
 	if mirrorConsole {
-		// Stderr first: MultiWriter stops at the first failing writer, so the
-		// console mirror still receives a message even when the rotating file
-		// write fails (precisely the situation diagnostics must not lose).
-		log.SetOutput(io.MultiWriter(os.Stderr, logFile))
+		// io.MultiWriter stops at the first failing writer. Ordering the
+		// console first to keep it alive on a file failure would instead kill
+		// file logging entirely in production GUI builds (no console, so the
+		// stderr write fails) — exactly when the file is the only evidence.
+		// Fan out independently: the console is best-effort and the file
+		// write alone decides the returned error.
+		log.SetOutput(consoleMirrorWriter{console: os.Stderr, file: logFile})
 	} else {
 		log.SetOutput(logFile)
 	}

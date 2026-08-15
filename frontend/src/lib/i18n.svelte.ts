@@ -408,7 +408,45 @@ const zhCN = {
   'Channel readback is unavailable.': '无法获取频道回读。',
   'Readback': '回读',
   'connected': '已连接',
-  'disconnected': '已断开'
+  'disconnected': '已断开',
+  // Backend result strings mapped by lib/backend-copy.ts (bulk skip reasons,
+  // sentinel errors, auto-sleep lifecycle errors, scan/channel/config
+  // warnings). Keys match the backend constants verbatim.
+  'bulk operation timed out': '批量操作超时',
+  'station operation timed out': '单站操作超时',
+  'operation cancelled': '操作已取消',
+  'application is shutting down': '应用正在关闭',
+  'station is booting': '基站正在启动',
+  'already at target state': '已处于目标状态',
+  'power control is not supported': '不支持电源控制',
+  'standby is not supported': '不支持待机',
+  'another Bluetooth operation is already in progress': '已有另一个蓝牙操作正在进行',
+  'another Bluetooth operation is in progress': '另一个蓝牙操作正在进行',
+  'Bluetooth scan is already active': '蓝牙扫描已在进行中',
+  'station not found': '未找到基站',
+  'channel conflicts with another visible station': '频道与另一个可见基站冲突',
+  'a recent successful scan is required': '需要先完成一次有效扫描',
+  'station is transitioning between power states': '基站正在电源状态切换中',
+  'cancelled before power commands were sent': '已在发送电源命令前取消',
+  'cancelled after scanning and before power commands were sent': '已在扫描后、发送电源命令前取消',
+  'watched process restarted or automatic sleep was reconfigured': '被监视进程已重新启动，或自动休眠设置已更改',
+  'bulk power timeout reached': '已达到批量电源操作超时',
+  'One or more visible stations have an unknown channel; conflicts cannot be fully verified.': '一个或多个可见基站的频道未知，无法完全排除冲突。',
+  'The channel command was sent, but its result could not be confirmed.': '频道命令已发送，但结果无法确认。',
+  'scan.warning.connectionsNotReleased': '扫描前有 {count} 个基站连接未能完全释放：{detail}',
+  'scan.warning.initialReadFailures': '已发现 {count} 个基站，但部分初始值读取失败：{detail}',
+  'channel.warning.confirmedByFinalReadback': '频道 {channel} 已由最终回读确认',
+  'channel.warning.notSentButObserved': '写入报告为未发送，但回读观察到频道 {channel}：{detail}',
+  'channel.warning.errorButConfirmed': '写入调用报告错误，但回读确认了频道 {channel}：{detail}',
+  'Configuration could not be loaded: {detail}': '配置无法加载：{detail}',
+  'Configuration changes could not be saved: {detail}': '配置更改无法保存：{detail}',
+  '{capability} is not supported': '不支持{capability}',
+  // Scan-error recovery card: busy classification.
+  'Bluetooth is busy': '蓝牙正忙',
+  'Another Bluetooth operation is still running, so the scan could not start.': '另一个蓝牙操作仍在进行，扫描无法开始。',
+  'Wait for the current operation to finish, then retry the scan.': '等待当前操作完成后重试扫描。',
+  // Scan elapsed suffix.
+  '{count}s': '{count} 秒'
 } as const;
 
 export type TranslationKey = keyof typeof zhCN;

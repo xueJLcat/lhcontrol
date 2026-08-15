@@ -112,7 +112,7 @@
 {:else if isLoading || externalScanning}
   <div class="empty scan" in:fade={dur({ duration: 180 })}>
     <div class="empty-icon"><Radar size={40} /></div>
-    <p>{t(isLoading ? 'Scanning for base stations...' : 'External scan in progress...')}{scanElapsed >= 1 ? ` ${scanElapsed}s` : ''}</p>
+    <p>{t(isLoading ? 'Scanning for base stations...' : 'External scan in progress...')}{scanElapsed >= 1 ? ` ${t('{count}s', { count: scanElapsed })}` : ''}</p>
     <p class="scan-sub">{t(scanElapsed >= 6 ? 'Reading station states...' : 'Discovering nearby stations...')}</p>
   </div>
 {:else if !scanError}

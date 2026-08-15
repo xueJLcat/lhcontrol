@@ -1,4 +1,5 @@
 import type { station } from '../../wailsjs/go/models';
+import { backendCopy } from './backend-copy';
 import { formatTerminalScanResult, isTerminalScanState } from './result-format';
 import { t } from './i18n.svelte';
 import type { StationInfo } from './types';
@@ -216,7 +217,7 @@ export class ExternalScanCoordinator {
       return;
     }
     const statusOperation = this.host.beginStatusOperation();
-    const message = event.error || t('unknown error');
+    const message = backendCopy(event.error) || t('unknown error');
     const operationEpoch = this.host.beginScanEpoch();
     const revision = this.host.nextListRevision();
     this.host.prepareForScan();

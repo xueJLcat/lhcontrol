@@ -67,6 +67,31 @@ func TestFirstOwnedWindowSkipsSameTitledForeignWindow(t *testing.T) {
 	}
 }
 
+// TestFirstOwnedWindowFallsBackToTitleMatchWhenOwnerDiffers covers a running
+// instance whose executable base name differs from the second launch (wails
+// dev build next to an installed copy, or a renamed portable exe). The
+// single-instance mutex already proves the application is running, so the
+// same-titled window must be focused instead of being reported as missing.
+func TestFirstOwnedWindowFallsBackToTitleMatchWhenOwnerDiffers(t *testing.T) {
+	renamed := syscall.Handle(0x3000)
+	sequence := []syscall.Handle{renamed, 0}
+	index := 0
+	got, err := firstOwnedWindow(
+		"lhcontrol.exe",
+		func(syscall.Handle) (syscall.Handle, error) {
+			value := sequence[index]
+			index++
+			return value, nil
+		},
+		func(syscall.Handle) (string, error) {
+			return "lhcontrol-dev.exe", nil
+		},
+	)
+	if err != nil || got != renamed {
+		t.Fatalf("firstOwnedWindow() = (%v, %v), want (%v, nil)", got, err, renamed)
+	}
+}
+
 func TestWaitForWindowRetriesUntilWindowAppears(t *testing.T) {
 	var attempts int
 	var sleeps int

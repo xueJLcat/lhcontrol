@@ -9,6 +9,7 @@ import {
 } from '../backend';
 import type { PowerFeedback, PowerTarget, StationInfo } from '../types';
 import { scanErrorCopy, type ScanErrorInfo } from '../scan-error';
+import { backendCopy } from '../backend-copy';
 import { isTerminalScanState } from '../result-format';
 import { pushToast } from '../toast';
 import { deriveOperationLocks, type GlobalOperation } from '../operation-state';
@@ -220,7 +221,7 @@ export class StationStore {
       this.apiRunning = false;
       this.apiError = error;
     },
-    reportConfigWarning: (warning) => pushToast(warning, 'warning')
+    reportConfigWarning: (warning) => pushToast(backendCopy(warning), 'warning')
   });
 
   private externalStationUpdates = new ExternalStationUpdateCoordinator({
@@ -240,7 +241,11 @@ export class StationStore {
     },
     beginStatusOperation: () => { this.gates.beginStatusOperation(); },
     setStatusMessage: (message) => { this.statusMessage = message; },
-    applyStations: (updateId, stations) => this.externalStationUpdates.apply(updateId, stations)
+    applyStations: (updateId, stations) => this.externalStationUpdates.apply(updateId, stations),
+    // A periodic status refresh is not interactive and does not write a
+    // terminal summary on success, so it does not own the line here.
+    foregroundOwnsStatusLine: () => this.globalOperation === 'scanning' ||
+      this.globalOperation === 'bulk-power' || this.stoppingScan || this.cancellingBulk
   });
 
   private actions: StationActionController;

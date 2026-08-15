@@ -31,8 +31,13 @@ func (c *Config) SetRenamedStation(originalName string, newName string) error {
 	return nil
 }
 
-// SetRenamedStationForAddresses keeps the legacy name-based API effective for
-// stations that already have a more specific address alias.
+// SetRenamedStationForAddresses keeps the legacy name-based API effective
+// without clobbering per-device choices. A per-address entry that differs
+// from the previous legacy alias is an explicit user decision (a dedicated
+// alias or an explicit reset tombstone) and is left untouched; entries that
+// mirror the previous legacy alias (or do not exist) follow the rename, and
+// a legacy clear removes those mirrors so the affected devices fall back to
+// their factory names.
 func (c *Config) SetRenamedStationForAddresses(originalName, newName string, addresses []string) error {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
@@ -57,6 +62,11 @@ func (c *Config) SetRenamedStationForAddresses(originalName, newName string, add
 		previousAddresses[address], existingAddresses[address] = c.RenamedStationsByAddress[address]
 	}
 	for _, address := range addresses {
+		previousAddress, hasAddress := c.RenamedStationsByAddress[address]
+		explicitChoice := hasAddress && previousAddress != previousLegacy
+		if explicitChoice {
+			continue
+		}
 		if newName == "" {
 			delete(c.RenamedStationsByAddress, address)
 		} else {
@@ -109,7 +119,7 @@ func (c *Config) SetRenamedStationByAddress(address, originalName, newName strin
 		c.RenamedStationsByAddress = make(map[string]string)
 	}
 	previousAddressName, addressExisted := c.RenamedStationsByAddress[address]
-	previousLegacyName, legacyExisted := c.RenamedStations[originalName]
+	_, legacyExisted := c.RenamedStations[originalName]
 	if newName == "" {
 		if legacyExisted {
 			// An empty address entry is a tombstone for this device only. It
@@ -123,15 +133,12 @@ func (c *Config) SetRenamedStationByAddress(address, originalName, newName strin
 		c.RenamedStationsByAddress[address] = newName
 	}
 	if err := c.saveLocked(); err != nil {
+		// The legacy map is read but never mutated here, so the rollback only
+		// needs to restore the address entry.
 		if addressExisted {
 			c.RenamedStationsByAddress[address] = previousAddressName
 		} else {
 			delete(c.RenamedStationsByAddress, address)
-		}
-		if legacyExisted {
-			c.RenamedStations[originalName] = previousLegacyName
-		} else {
-			delete(c.RenamedStations, originalName)
 		}
 		return err
 	}

@@ -1,4 +1,5 @@
 import type { StationInfo } from '../types';
+import { backendCopy } from '../backend-copy';
 import { pushToast } from '../toast';
 import { t } from '../i18n.svelte';
 
@@ -22,6 +23,11 @@ export interface AutoSleepEventDependencies {
   beginStatusOperation(): void;
   setStatusMessage(message: string): void;
   applyStations(updateId: number, stations: StationInfo[]): void;
+  // True while an interactive foreground operation (a scan, a bulk command,
+  // or a stop of either) owns the status line. Its own terminal summary must
+  // not be overwritten by an auto-sleep lifecycle message; the toast still
+  // surfaces the auto-sleep outcome.
+  foregroundOwnsStatusLine(): boolean;
 }
 
 export class AutoSleepEventCoordinator {
@@ -87,6 +93,8 @@ export class AutoSleepEventCoordinator {
 
     switch (event.phase) {
       case 'started':
+        // The backend only starts an action after acquiring its serialized
+        // slot, so no user operation can be mid-message here; claim the line.
         this.dependencies.beginStatusOperation();
         this.setMessage(t('Auto sleep: scanning and putting all stations to sleep...'));
         pushToast(t('Session ended — scanning and putting all stations to sleep.'), 'info');
@@ -100,21 +108,37 @@ export class AutoSleepEventCoordinator {
       case 'timed-out':
         this.handleTimedOut(event);
         break;
-      case 'skipped':
-        this.dependencies.beginStatusOperation();
-        this.setMessage(`${t('Auto sleep skipped')}: ${event.error || t('Bluetooth busy')}.`);
-        pushToast(`${t('Auto sleep skipped')}: ${event.error || t('Bluetooth busy')}.`, 'info');
+      case 'skipped': {
+        const reason = backendCopy(event.error) || t('Bluetooth busy');
+        const message = `${t('Auto sleep skipped')}: ${reason}.`;
+        if (this.claimStatusLine()) this.setMessage(message);
+        pushToast(message, 'info');
         break;
-      case 'failed':
-        this.dependencies.beginStatusOperation();
-        this.setMessage(`${t('Auto sleep failed')}: ${event.error || t('unknown error')}.`);
-        pushToast(`${t('Auto sleep failed')}: ${event.error || t('unknown error')}.`);
+      }
+      case 'failed': {
+        const reason = backendCopy(event.error) || t('unknown error');
+        const message = `${t('Auto sleep failed')}: ${reason}.`;
+        if (this.claimStatusLine()) this.setMessage(message);
+        pushToast(message);
         break;
+      }
     }
   }
 
-  private handleCompleted(event: AutoSleepEvent) {
+  // Claims the status line for a terminal lifecycle message unless an
+  // interactive foreground operation owns it. A scan or bulk finishing in
+  // the same window writes its own completion summary; an auto-sleep message
+  // (most often "skipped", produced precisely because that operation held the
+  // backend busy) must not clobber it. The toast below each handler keeps the
+  // auto-sleep outcome visible regardless.
+  private claimStatusLine(): boolean {
+    if (this.dependencies.foregroundOwnsStatusLine()) return false;
     this.dependencies.beginStatusOperation();
+    return true;
+  }
+
+  private handleCompleted(event: AutoSleepEvent) {
+    const claimed = this.claimStatusLine();
     const success = event.success ?? 0;
     const unconfirmed = event.unconfirmed ?? 0;
     const failed = event.failed ?? 0;
@@ -122,7 +146,7 @@ export class AutoSleepEventCoordinator {
     const message = t('Auto sleep finished: {success} confirmed, {unconfirmed} unconfirmed, {failed} failed, {skipped} skipped.', {
       success, unconfirmed, failed, skipped
     });
-    this.setMessage(message);
+    if (claimed) this.setMessage(message);
     if (failed > 0 || unconfirmed > 0 || skipped > 0) {
       pushToast(message, 'warning');
     } else {
@@ -131,7 +155,7 @@ export class AutoSleepEventCoordinator {
   }
 
   private handleCancelled(event: AutoSleepEvent) {
-    this.dependencies.beginStatusOperation();
+    const claimed = this.claimStatusLine();
     const success = event.success ?? 0;
     const unconfirmed = event.unconfirmed ?? 0;
     const failed = event.failed ?? 0;
@@ -140,12 +164,12 @@ export class AutoSleepEventCoordinator {
       ? t('{success} confirmed, {unconfirmed} unconfirmed, {failed} failed, {skipped} skipped', { success, unconfirmed, failed, skipped })
       : t('no station commands completed');
     const message = t('Auto sleep cancelled: {details}.', { details });
-    this.setMessage(message);
+    if (claimed) this.setMessage(message);
     pushToast(message, success || failed || unconfirmed || skipped ? 'warning' : 'info');
   }
 
   private handleTimedOut(event: AutoSleepEvent) {
-    this.dependencies.beginStatusOperation();
+    const claimed = this.claimStatusLine();
     const success = event.success ?? 0;
     const unconfirmed = event.unconfirmed ?? 0;
     const failed = event.failed ?? 0;
@@ -157,7 +181,7 @@ export class AutoSleepEventCoordinator {
     if (skipped > 0) {
       message += ` ${t('{skipped} more skipped.', { skipped })}`;
     }
-    this.setMessage(message);
+    if (claimed) this.setMessage(message);
     pushToast(message, 'warning');
   }
 

@@ -54,6 +54,20 @@ func (m *Manager) SetAllStationsPowerDetailed(state string) (BulkPowerResult, er
 		(result.Cancelled || result.TimedOut) {
 		return result, nil
 	}
+	// A shutdown that interrupted a batch mid-flight has two shapes whose
+	// top-level error depends only on when the shutdown's AfterFunc
+	// cancellation reached the bulk context — a race callers cannot act on.
+	// Per-station results already describe every affected station, so swallow
+	// the noise once the batch actually performed work. A bulk rejected at
+	// its entry (nothing performed) keeps ErrShuttingDown so callers still
+	// learn the operation never ran.
+	if errors.Is(err, ErrShuttingDown) && result.Cancelled {
+		for _, stationResult := range result.Results {
+			if stationResult.Success || stationResult.CommandSent {
+				return result, nil
+			}
+		}
+	}
 	return result, err
 }
 
@@ -75,7 +89,9 @@ func (m *Manager) SetAllStationsPowerDetailedContext(ctx context.Context, state 
 		m.bulkLifecycleMutex.Unlock()
 		stopLifecycleCancellation()
 		cancelOperation()
-		return BulkPowerResult{Target: busyTarget}, ErrOperationInProgress
+		// Keep the Results contract consistent with every other path: an empty
+		// list, not a nil slice (JSON [] rather than null).
+		return BulkPowerResult{Target: busyTarget, Results: []BulkPowerStationResult{}}, ErrOperationInProgress
 	}
 	m.bulkLifecycle = lifecycle
 	m.bulkLifecycleMutex.Unlock()
@@ -437,8 +453,14 @@ func (m *Manager) setAllStationsPowerDetailed(ctx context.Context, state string)
 				} else {
 					m.observeStationBluetoothError(s, stationResult.Address, workerErr)
 					if bluetooth.IsUnsupportedCapabilityError(workerErr) {
+						// Reason is a closed public contract: classify through the
+						// constants instead of leaking the raw error string.
 						stationResult.Skipped = true
-						stationResult.Reason = workerErr.Error()
+						stationResult.Reason = ReasonUnsupportedCapability
+						var unsupported *bluetooth.UnsupportedCapabilityError
+						if errors.As(workerErr, &unsupported) && unsupported.Capability == "standby" {
+							stationResult.Reason = ReasonUnsupportedStandby
+						}
 					}
 					if !stationResult.Skipped {
 						stationResult.Error = workerErr.Error()

@@ -18,7 +18,8 @@ describe('AutoSleepEventCoordinator', () => {
       setRunning: vi.fn(),
       beginStatusOperation: vi.fn(),
       setStatusMessage: vi.fn(),
-      applyStations: vi.fn()
+      applyStations: vi.fn(),
+      foregroundOwnsStatusLine: vi.fn(() => false)
     };
     const coordinator = new AutoSleepEventCoordinator(dependencies);
 
@@ -44,7 +45,8 @@ describe('AutoSleepEventCoordinator', () => {
       setRunning: vi.fn(),
       beginStatusOperation: vi.fn(),
       setStatusMessage: vi.fn(),
-      applyStations: vi.fn()
+      applyStations: vi.fn(),
+      foregroundOwnsStatusLine: vi.fn(() => false)
     };
     const coordinator = new AutoSleepEventCoordinator(dependencies);
 
@@ -73,7 +75,8 @@ describe('AutoSleepEventCoordinator', () => {
       setRunning: vi.fn(),
       beginStatusOperation: vi.fn(),
       setStatusMessage: vi.fn(),
-      applyStations: vi.fn()
+      applyStations: vi.fn(),
+      foregroundOwnsStatusLine: vi.fn(() => false)
     };
     const coordinator = new AutoSleepEventCoordinator(dependencies);
 
@@ -95,7 +98,8 @@ describe('AutoSleepEventCoordinator', () => {
       setRunning: vi.fn(),
       beginStatusOperation: vi.fn(),
       setStatusMessage: vi.fn(),
-      applyStations: vi.fn()
+      applyStations: vi.fn(),
+      foregroundOwnsStatusLine: vi.fn(() => false)
     };
     const coordinator = new AutoSleepEventCoordinator(dependencies);
     const event = { id: 9, phase: 'failed' as const, error: 'adapter unavailable' };
@@ -118,7 +122,8 @@ describe('AutoSleepEventCoordinator', () => {
       setRunning: vi.fn(),
       beginStatusOperation: vi.fn(),
       setStatusMessage: vi.fn(),
-      applyStations: vi.fn()
+      applyStations: vi.fn(),
+      foregroundOwnsStatusLine: vi.fn(() => false)
     };
     const coordinator = new AutoSleepEventCoordinator(dependencies);
 
@@ -138,7 +143,8 @@ describe('AutoSleepEventCoordinator', () => {
       setRunning: vi.fn(),
       beginStatusOperation: vi.fn(),
       setStatusMessage: vi.fn(),
-      applyStations: vi.fn()
+      applyStations: vi.fn(),
+      foregroundOwnsStatusLine: vi.fn(() => false)
     };
     const coordinator = new AutoSleepEventCoordinator(dependencies);
 
@@ -160,7 +166,8 @@ describe('AutoSleepEventCoordinator', () => {
       setRunning: vi.fn(),
       beginStatusOperation: vi.fn(),
       setStatusMessage: vi.fn(),
-      applyStations: vi.fn()
+      applyStations: vi.fn(),
+      foregroundOwnsStatusLine: vi.fn(() => false)
     };
     const coordinator = new AutoSleepEventCoordinator(dependencies);
 
@@ -173,5 +180,50 @@ describe('AutoSleepEventCoordinator', () => {
     coordinator.handle({ id: 2, phase: 'completed', success: 1 });
 
     expect(dependencies.setRunning).toHaveBeenLastCalledWith(false);
+  });
+
+  it('keeps a foreground operation status line when auto sleep skips while it runs', () => {
+    const dependencies = {
+      isDisposed: vi.fn(() => false),
+      setRunning: vi.fn(),
+      beginStatusOperation: vi.fn(),
+      setStatusMessage: vi.fn(),
+      applyStations: vi.fn(),
+      foregroundOwnsStatusLine: vi.fn(() => true)
+    };
+    const coordinator = new AutoSleepEventCoordinator(dependencies);
+
+    coordinator.handle({ id: 3, phase: 'skipped', error: 'another Bluetooth operation is in progress' });
+
+    // The skip is produced exactly because the foreground operation holds the
+    // backend busy; its completion summary must win the status line. The toast
+    // still reports the skipped auto sleep.
+    expect(dependencies.beginStatusOperation).not.toHaveBeenCalled();
+    expect(dependencies.setStatusMessage).not.toHaveBeenCalled();
+    expect(pushToast).toHaveBeenCalledWith(
+      'Auto sleep skipped: another Bluetooth operation is in progress.',
+      'info'
+    );
+  });
+
+  it('keeps a foreground operation status line for terminal outcomes as well', () => {
+    const dependencies = {
+      isDisposed: vi.fn(() => false),
+      setRunning: vi.fn(),
+      beginStatusOperation: vi.fn(),
+      setStatusMessage: vi.fn(),
+      applyStations: vi.fn(),
+      foregroundOwnsStatusLine: vi.fn(() => true)
+    };
+    const coordinator = new AutoSleepEventCoordinator(dependencies);
+
+    coordinator.handle({ id: 4, phase: 'completed', success: 2 });
+
+    expect(dependencies.beginStatusOperation).not.toHaveBeenCalled();
+    expect(dependencies.setStatusMessage).not.toHaveBeenCalled();
+    expect(pushToast).toHaveBeenCalledWith(
+      'Auto sleep finished: 2 station(s) put to sleep.',
+      'success'
+    );
   });
 });

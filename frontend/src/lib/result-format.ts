@@ -1,4 +1,5 @@
 import type { station } from '../../wailsjs/go/models';
+import { backendCopy, backendCopyOr, joinBackendCopy } from './backend-copy';
 import { locale, t } from './i18n.svelte';
 
 export interface TerminalScanResult {
@@ -19,13 +20,14 @@ export function isTerminalScanState(state: string | null | undefined): boolean {
 
 export function formatTerminalScanResult(result: TerminalScanResult): string {
   const prefix = t(result.external ? 'External scan' : 'Scan');
-  const warnings = result.warnings?.filter(Boolean).join(' ') ?? '';
+  const warnings = joinBackendCopy(result.warnings);
 
   switch (result.state) {
     case 'cancelled':
       return `${t('{prefix} stopped.', { prefix })}${warnings ? ` ${warnings}` : ''}`;
     case 'failed': {
-      const err = result.error ? `: ${result.error}` : '';
+      const detail = backendCopy(result.error);
+      const err = detail ? `: ${detail}` : '';
       const base = `${t('{prefix} failed', { prefix })}${err}`;
       return warnings ? `${base} ${warnings}` : base;
     }
@@ -71,6 +73,6 @@ export function formatBulkResult(target: string, summary: BulkResultSummary): st
     skipped: summary.skipped
   });
   return summary.failed.length
-    ? `${t('{counts}; {failed} failed for {target}', { counts, failed: summary.failed.length, target })}: ${summary.failed.map((item) => `${item.name || item.address}: ${item.error || t('command failed')}`).join(' | ')}`
+    ? `${t('{counts}; {failed} failed for {target}', { counts, failed: summary.failed.length, target })}: ${summary.failed.map((item) => `${item.name || item.address}: ${backendCopyOr(item.error, 'command failed')}`).join(' | ')}`
     : t('{counts} for {target}.', { counts, target });
 }
