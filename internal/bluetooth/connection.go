@@ -20,9 +20,21 @@ func connectAndDiscoverInternalContext(ctx context.Context, station *BaseStation
 	}
 	if station.isConnected && station.device != nil && station.characteristic != nil {
 		connected, err := station.device.Connected()
-		if err == nil && connected {
-			station.setConnectionErrorInternal(nil)
-			return nil // Already good
+		if err == nil {
+			if connected {
+				station.setConnectionErrorInternal(nil)
+				return nil // Already good
+			}
+		} else {
+			// A status-query failure (a transient COM/RPC error around
+			// GetConnectionStatus) is not proof the link dropped; keep the
+			// cached session and let the next operation's own error
+			// classification decide whether a reconnect is needed. Tearing the
+			// session down here would make every transient query blip pay a
+			// full reconnect and rediscovery. Do not record it as a connection
+			// error either: nothing observed the link itself failing.
+			log.Printf("Bluetooth: Connection status query failed for %s, keeping cached session: %v", station.Name, err)
+			return nil
 		}
 		if err := disconnectInternal(station); err != nil {
 			return transportError("disconnect stale station connection", err)

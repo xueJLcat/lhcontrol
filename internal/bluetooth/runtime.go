@@ -307,6 +307,39 @@ func transportError(operation string, err error) error {
 	return &DeviceTransportError{Operation: operation, Err: err}
 }
 
+// DeviceValueError reports a value that the transport delivered intact but
+// that violates the protocol's format rules (for example a characteristic
+// reporting an unexpected byte length). The link itself worked, so cached
+// GATT handles must not be discarded: reconnecting cannot change what the
+// device reports, and treating the value as a transport failure would turn
+// every read into a disconnect/reconnect cycle.
+type DeviceValueError struct {
+	Operation string
+	Err       error
+}
+
+func (e *DeviceValueError) Error() string {
+	return fmt.Sprintf("%s: %v", e.Operation, e.Err)
+}
+
+func (e *DeviceValueError) Unwrap() error {
+	return e.Err
+}
+
+func deviceValueError(operation string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return &DeviceValueError{Operation: operation, Err: err}
+}
+
+// IsDeviceValueError reports failures caused by malformed device data rather
+// than a broken link.
+func IsDeviceValueError(err error) bool {
+	var valueErr *DeviceValueError
+	return errors.As(err, &valueErr)
+}
+
 // UnsupportedCapabilityError reports that the device explicitly rejected an
 // operation as unsupported. It is intentionally distinct from a transport
 // failure so callers do not discard an otherwise healthy GATT connection.
@@ -387,6 +420,10 @@ func RequiresReconnect(err error) bool {
 		// transport failures and make healthy connections pay a reconnect.
 		return false
 	}
+	if IsDeviceValueError(err) {
+		// Malformed device data is a property of the device, not the link.
+		return false
+	}
 	if transportErr, ok := err.(*DeviceTransportError); ok {
 		if RequiresReconnect(transportErr.Err) {
 			return true
@@ -399,6 +436,9 @@ func RequiresReconnect(err error) bool {
 			return false
 		}
 		if IsUnsupportedCapabilityError(transportErr.Err) {
+			return false
+		}
+		if IsDeviceValueError(transportErr.Err) {
 			return false
 		}
 		if errors.Is(transportErr.Err, bluetooth.ErrAttValueNotAllowed) {

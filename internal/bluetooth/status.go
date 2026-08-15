@@ -9,13 +9,21 @@ import (
 	"time"
 )
 
+// statusValueReadSize generously exceeds any plausible value of the power
+// and mode characteristics so a device reporting an overlong value surfaces
+// as application-level validation (a DeviceValueError) instead of a transport
+// buffer error. Classifying the latter as a transport failure would discard a
+// healthy connection and reconnect on every read without ever changing the
+// value the device reports.
+const statusValueReadSize = 64
+
 func readPowerStateInternalContext(ctx context.Context, station *BaseStation) error {
 	if station.characteristic == nil {
 		return transportError("read power characteristic", fmt.Errorf("power characteristic is nil for %s", station.Name))
 	}
 
 	log.Printf("Bluetooth: Reading power state for %s (%s)", station.Name, station.Address)
-	buf := make([]byte, 1)
+	buf := make([]byte, statusValueReadSize)
 	n, err := readCharacteristicContext(ctx, station.characteristic, buf)
 	if err != nil {
 		station.LastPowerReadAt = time.Time{}
@@ -28,7 +36,7 @@ func readPowerStateInternalContext(ctx context.Context, station *BaseStation) er
 	}
 	if n != 1 {
 		station.LastPowerReadAt = time.Time{}
-		return transportError("read power characteristic", fmt.Errorf("unexpected bytes read (%d) for %s", n, station.Name))
+		return deviceValueError("read power characteristic", fmt.Errorf("unexpected value length %d for %s", n, station.Name))
 	}
 
 	rawState := int(buf[0])
@@ -84,9 +92,10 @@ func readChannelInternalContext(ctx context.Context, station *BaseStation) error
 		return transportError("read channel characteristic", fmt.Errorf("mode characteristic is nil for %s", station.Name))
 	}
 
-	// Read one extra byte so an overlong value is rejected instead of being
-	// silently truncated to a seemingly valid four-byte integer.
-	buf := make([]byte, 5)
+	// Read well past the expected four-byte maximum so an overlong value is
+	// rejected by the length validation below instead of being truncated to a
+	// seemingly valid integer or surfacing as a transport buffer error.
+	buf := make([]byte, statusValueReadSize)
 	n, err := readCharacteristicContext(ctx, station.modeCharacteristic, buf)
 	if err != nil {
 		station.LastChannelReadAt = time.Time{}
@@ -99,7 +108,7 @@ func readChannelInternalContext(ctx context.Context, station *BaseStation) error
 	}
 	if n < 1 || n > 4 {
 		station.LastChannelReadAt = time.Time{}
-		return transportError("read channel characteristic", fmt.Errorf("unexpected bytes read (%d) for %s", n, station.Name))
+		return deviceValueError("read channel characteristic", fmt.Errorf("unexpected value length %d for %s", n, station.Name))
 	}
 
 	channel, err := DecodeChannel(buf[:n])

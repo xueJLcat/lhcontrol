@@ -125,15 +125,20 @@
     bulkConfirmTarget = null;
   }
 
-  async function confirmBulkPower() {
+  function confirmBulkPower() {
     const state = bulkConfirmTarget;
     if (!state) return;
-    const started = await store.runBulkPower(state);
-    // Close once the operation starts, or when the rejection means there is
-    // nothing to confirm (no actionable stations). A lock that landed between
-    // the modal opening and the click rejects the start; keep the modal up so
-    // the confirm click is not silently dropped — it renders busy while locked.
-    if (started || !store.bulkLocked) bulkConfirmTarget = null;
+    // The dialog closes before the bulk starts (see BulkConfirmModal):
+    // awaiting the whole operation here would keep the main UI inert behind
+    // the modal for the bulk's full duration. The synchronous start guards run
+    // in this tick and runBulkPower repeats them before its first await, so an
+    // accepted start cannot flip to rejected below. When the guards reject
+    // (a lock landed between the modal opening and the click, or nothing is
+    // actionable), keep the modal up so the confirm click is not silently
+    // dropped — it renders busy while locked.
+    if (!store.canStartBulkPower(state)) return;
+    void store.runBulkPower(state);
+    bulkConfirmTarget = null;
   }
 
   function handleGlobalKeydown(event: KeyboardEvent) {

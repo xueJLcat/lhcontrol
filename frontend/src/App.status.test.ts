@@ -264,6 +264,32 @@ describe('App asynchronous operations', () => {
     await waitFor(() => expect(api.SetAllStationsPowerDetailed).toHaveBeenCalledWith('on'));
   });
 
+  it('closes the bulk confirmation when the operation starts, not when it finishes', async () => {
+    const trusted = createStation({ name: 'LHB-TRUSTED', address: 'AA' });
+    const stale = createStation({ name: 'LHB-STALE', address: 'BB', isPresent: false });
+    api.ScanAndFetchStations.mockResolvedValue([trusted, stale]);
+    api.GetCurrentStationInfo.mockResolvedValue([trusted, stale]);
+    let resolveBulk!: (result: unknown) => void;
+    api.SetAllStationsPowerDetailed.mockReturnValue(new Promise((resolve) => { resolveBulk = resolve; }));
+
+    render(App);
+    await screen.findByText('LHB-STALE');
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Scan' })).not.toBeDisabled());
+    await fireEvent.click(screen.getByTitle('Turn all known stations on'));
+    const dialog = await screen.findByRole('dialog', { name: 'Confirm bulk power' });
+    await fireEvent.click(within(dialog).getByRole('button', { name: /Turn on/ }));
+
+    // The dialog closes the moment the bulk starts. Waiting for the whole
+    // operation would keep the main UI inert behind the modal for the bulk's
+    // full duration (up to the configured bulk timeout).
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Confirm bulk power' })).not.toBeInTheDocument());
+    expect(api.SetAllStationsPowerDetailed).toHaveBeenCalledWith('on');
+    expect(document.querySelector('.app-container')).toHaveProperty('inert', false);
+
+    resolveBulk({ target: 'on', results: [] });
+    await waitFor(() => expect(screen.getAllByText(/0 confirmed/).length).toBeGreaterThan(0));
+  });
+
   it('cancels the bulk confirmation through the dialog, scrim and Escape key', async () => {
     const trusted = createStation({ name: 'LHB-TRUSTED', address: 'AA' });
     const stale = createStation({ name: 'LHB-STALE', address: 'BB', isPresent: false });

@@ -559,6 +559,28 @@ func SetPowerStateContext(ctx context.Context, station *BaseStation, target Powe
 			station.setOperationErrorInternal(err)
 			return PowerControlResult{}, unsupportedCapability("power control", err)
 		}
+		if possiblySent, classified := possiblySentClassification(err); classified && !possiblySent {
+			// The transport explicitly reports the command never reached the
+			// device: WinRT never submitted the write, or the peer rejected the
+			// request. Neither outcome damaged the cached session (a peer
+			// rejection even proves the link), so keep the connection like the
+			// standby/unsupported branches above and restore the compatibility
+			// inference the write reset; the next attempt retries without paying
+			// a reconnect, and no read pays a fresh boot-fallback window for a
+			// command that never landed.
+			station.bootRawTrustedOn = previousBootRawTrustedOn
+			station.bootingSince = previousBootingSince
+			log.Printf("Bluetooth: Write %s was not applied for %s: %v. Retrying on the current connection...", target, station.Name, err)
+			if i < maxRetries-1 {
+				station.mutex.Unlock()
+				waitErr := sleepContext(ctx, CurrentTiming().OperationRetryDelay)
+				station.mutex.Lock()
+				if waitErr != nil {
+					return PowerControlResult{}, waitErr
+				}
+			}
+			continue
+		}
 		log.Printf("Bluetooth: Write %s failed for %s: %v. Retrying...", target, station.Name, err)
 		_ = disconnectInternal(station)
 		if i < maxRetries-1 {

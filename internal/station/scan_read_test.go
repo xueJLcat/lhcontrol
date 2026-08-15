@@ -529,3 +529,42 @@ func TestScanAndFetchStationsContextCancelsAndReleasesScan(t *testing.T) {
 		t.Fatalf("scan lock was not released after cancellation: %v", err)
 	}
 }
+
+// TestMalformedReadValueDoesNotDisconnectOrScheduleRecovery guards the value
+// classification: a device reporting an invalid value length must not discard
+// the healthy connection (reconnecting cannot change the reported value) and
+// must not schedule failure retries for the same reason.
+func TestMalformedReadValueDoesNotDisconnectOrScheduleRecovery(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	var disconnects atomic.Int32
+	manager.bluetoothOps.disconnectStation = func(*internalbluetooth.BaseStation) error {
+		disconnects.Add(1)
+		return nil
+	}
+	address := "11:22:33:44:55:6E"
+	station := &internalbluetooth.BaseStation{
+		Name: "LHB-VALUE", Address: mustAddress(t, address), Present: true,
+	}
+	manager.stations[address] = station
+
+	valueErr := &internalbluetooth.DeviceValueError{
+		Operation: "read channel characteristic",
+		Err:       errors.New("unexpected value length 5"),
+	}
+	manager.recordStructuredReadResult(station, address, nil, valueErr)
+	if disconnects.Load() != 0 {
+		t.Fatalf("disconnects after value error = %d, want 0", disconnects.Load())
+	}
+	manager.statusRetryMutex.Lock()
+	retry, tracked := manager.statusRetries[address]
+	manager.statusRetryMutex.Unlock()
+	if tracked {
+		t.Fatalf("value error scheduled recovery retries: %+v", retry)
+	}
+
+	manager.recordUnstructuredStationFailure(station, address, valueErr)
+	if disconnects.Load() != 0 {
+		t.Fatalf("disconnects after unstructured value error = %d, want 0", disconnects.Load())
+	}
+}

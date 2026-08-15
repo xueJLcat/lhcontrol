@@ -33,6 +33,10 @@ type scanSession struct {
 	stopStarted bool
 	stopDone    chan struct{}
 	stopErr     error
+	// stopWaitLimit is captured from scanStopWaitLimit at session creation so
+	// stop-handshake waiters (including timer goroutines that outlive the test
+	// that created them) never race a new scan's override of that variable.
+	stopWaitLimit time.Duration
 	// durationStopIssued records that the duration timer requested the stop
 	// before any cancellation was recorded. Cancellation overwrites reason
 	// afterwards, so this latch is what lets a scan that already ran its
@@ -41,8 +45,41 @@ type scanSession struct {
 	durationStopIssued bool
 }
 
+const defaultScanStopWait = 10 * time.Second
+
+// scanStopWaitLimit bounds every wait on the platform stop handshake. The
+// WinRT watcher stop can hang when the radio is removed or reset mid-scan;
+// without a budget one stuck StopScan would keep activeScan set, wedge every
+// later scan until a process restart, and block shutdown callers in
+// CancelScan. The stop attempt keeps running in its own goroutine; waiters
+// give up on it and the session records the stop as abandoned. It is a var so
+// tests can exercise the timeout without waiting out the production budget;
+// sessions snapshot it at creation for the reason documented on the field.
+var scanStopWaitLimit = defaultScanStopWait
+
 func newScanSession() *scanSession {
-	return &scanSession{stopDone: make(chan struct{})}
+	limit := scanStopWaitLimit
+	if limit <= 0 {
+		limit = defaultScanStopWait
+	}
+	return &scanSession{stopDone: make(chan struct{}), stopWaitLimit: limit}
+}
+
+// scanStopAbandonedError reports a stop handshake that was given up on after
+// the bounded wait. It is deliberately distinct from a stop failure reported
+// by the adapter so a scan that ran its full duration can keep its discovery
+// results even when the watcher teardown never finished.
+type scanStopAbandonedError struct {
+	budget time.Duration
+}
+
+func (e *scanStopAbandonedError) Error() string {
+	return fmt.Sprintf("Bluetooth scan stop did not complete within %s", e.budget)
+}
+
+func isScanStopAbandoned(err error) bool {
+	var abandoned *scanStopAbandonedError
+	return errors.As(err, &abandoned)
 }
 
 func (s *scanSession) requestStop(reason scanStopReason) error {
@@ -55,7 +92,33 @@ func (s *scanSession) requestStop(reason scanStopReason) error {
 	if pendingStart {
 		return nil
 	}
-	<-s.stopDone
+	return s.awaitStop(s.stopWaitLimit)
+}
+
+// awaitStop waits for the issued stop to finish, bounded by the budget. On a
+// timeout it records the abandonment and releases the waiters exactly once;
+// the hung platform call keeps running on its own goroutine but no longer
+// holds up the scan session.
+func (s *scanSession) awaitStop(budget time.Duration) error {
+	timer := time.NewTimer(budget)
+	defer timer.Stop()
+	select {
+	case <-s.stopDone:
+	case <-timer.C:
+		s.mutex.Lock()
+		if s.stopErr == nil {
+			s.stopErr = &scanStopAbandonedError{budget: budget}
+		}
+		s.mutex.Unlock()
+		s.doneOnce.Do(func() { close(s.stopDone) })
+	}
+	return s.stopError()
+}
+
+// stopError reads the recorded stop outcome under the session lock. A stop
+// abandoned after a wait timeout can still be racing the hung platform
+// goroutine, so lock-free reads are not safe.
+func (s *scanSession) stopError() error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 	return s.stopErr
@@ -98,7 +161,13 @@ func (s *scanSession) issueStop() {
 	go func() {
 		err := stopScanSafely()
 		s.mutex.Lock()
-		s.stopErr = err
+		// A bounded waiter can have recorded an abandonment first; whichever
+		// finalization lands first owns the outcome, so a late platform result
+		// cannot flip a classification that ScanForDurationContext already
+		// observed.
+		if s.stopErr == nil {
+			s.stopErr = err
+		}
 		s.mutex.Unlock()
 		s.doneOnce.Do(func() { close(s.stopDone) })
 	}()
@@ -129,7 +198,7 @@ func (s *scanSession) waitForIssuedStop() {
 	stopStarted := s.stopStarted
 	s.mutex.Unlock()
 	if stopStarted {
-		<-s.stopDone
+		_ = s.awaitStop(s.stopWaitLimit)
 	}
 }
 
@@ -229,8 +298,10 @@ func ScanForDurationContext(ctx context.Context, duration time.Duration) ([]Disc
 	timerStopped := stopTimer == nil || stopTimer.Stop()
 	if stopTimer != nil && !timerStopped {
 		// The timer callback has started. Wait for it so a late StopScan cannot
-		// accidentally stop a subsequent scan.
-		<-session.stopDone
+		// accidentally stop a subsequent scan. The wait is bounded like every
+		// other stop-handshake wait so a hung platform stop cannot wedge the
+		// scan subsystem.
+		_ = session.awaitStop(session.stopWaitLimit)
 	}
 
 	if scanErr != nil {
@@ -250,15 +321,20 @@ func ScanForDurationContext(ctx context.Context, duration time.Duration) ([]Disc
 	log.Printf("[BT] ScanForDuration (AfterFunc): Finished. Found %d stations.", len(results))
 
 	reason := session.stopReason()
+	stopErr := session.stopError()
+	abandonedStop := isScanStopAbandoned(stopErr)
 	// A scan whose duration elapsed and whose stop was accepted keeps its
 	// discovery results even when the watcher's stop tail reports a final
 	// error (for example the watcher lingered in Stopping past the stop
 	// budget, or the Stopped event arrived with an error code): the duration
 	// fully ran, so discarding valid stations would lose them for no reason.
-	// This also preserves results when a cancellation lands in the
-	// stop-handshake window after the duration already elapsed. Checked before
-	// the scanErr early return so that tail-of-stop errors cannot shadow it.
-	if session.durationStopIssuedFlag() && session.stopErr == nil {
+	// A stop that was abandoned after the bounded wait is treated the same
+	// way: the watcher teardown never finished, but the discovery data was
+	// collected during the completed duration. This also preserves results
+	// when a cancellation lands in the stop-handshake window after the
+	// duration already elapsed. Checked before the scanErr early return so
+	// that tail-of-stop errors cannot shadow it.
+	if session.durationStopIssuedFlag() && (stopErr == nil || abandonedStop) {
 		return results, nil
 	}
 	// A watcher that failed to stop or timed out after a cancellation
@@ -267,10 +343,11 @@ func ScanForDurationContext(ctx context.Context, duration time.Duration) ([]Disc
 	// scanErr early return: the adapter commonly reports its own tail error
 	// (radio disabled or removed mid-stop) while a cancellation is already
 	// recorded, and that error must not reclassify the requested stop as a
-	// hard scan failure.
+	// hard scan failure. An abandoned stop is swallowed by the cancellation:
+	// the stop attempt was given up on as part of honoring the cancel.
 	if reason == scanStopCancelled || ctx.Err() != nil {
-		if session.stopErr != nil {
-			return nil, fmt.Errorf("failed to stop Bluetooth scan after cancellation: %w", session.stopErr)
+		if stopErr != nil && !abandonedStop {
+			return nil, fmt.Errorf("failed to stop Bluetooth scan after cancellation: %w", stopErr)
 		}
 		return nil, ErrScanCancelled
 	}
@@ -282,8 +359,8 @@ func ScanForDurationContext(ctx context.Context, duration time.Duration) ([]Disc
 	if reason != scanStopDuration {
 		return nil, errors.New("scan stopped before the requested duration completed")
 	}
-	if session.stopErr != nil {
-		return nil, fmt.Errorf("failed to stop Bluetooth scan safely: %w", session.stopErr)
+	if stopErr != nil {
+		return nil, fmt.Errorf("failed to stop Bluetooth scan safely: %w", stopErr)
 	}
 	if err := scanCompletionError(scanErr); err != nil {
 		return nil, err

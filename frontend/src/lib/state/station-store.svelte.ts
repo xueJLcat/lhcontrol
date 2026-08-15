@@ -882,6 +882,10 @@ export class StationStore {
     return this.actions.requestBulkPower(state);
   }
 
+  canStartBulkPower(state: PowerTarget) {
+    return this.actions.canStartBulkPower(state);
+  }
+
   runBulkPower(state: PowerTarget) {
     return this.actions.runBulkPower(state);
   }

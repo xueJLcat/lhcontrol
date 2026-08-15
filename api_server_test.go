@@ -1009,3 +1009,153 @@ func TestConcurrentRestartsDoNotRaceTheWaitGroup(t *testing.T) {
 	}
 
 }
+
+type fakeAPIListener struct {
+	addr   net.Addr
+	closed chan struct{}
+	once   sync.Once
+}
+
+func (l *fakeAPIListener) Accept() (net.Conn, error) {
+	<-l.closed
+	return nil, errors.New("listener closed")
+}
+
+func (l *fakeAPIListener) Close() error {
+	l.once.Do(func() { close(l.closed) })
+	return nil
+}
+
+func (l *fakeAPIListener) Addr() net.Addr { return l.addr }
+
+func newFakeAPIListener(address string) *fakeAPIListener {
+	addr, err := net.ResolveTCPAddr("tcp", address)
+	if err != nil {
+		panic(err)
+	}
+	return &fakeAPIListener{addr: addr, closed: make(chan struct{})}
+}
+
+// TestSetAPIListenAddressSamePortHostChangeRestartsWithoutProbe guards the
+// same-port host change (for example 127.0.0.1:7575 -> 0.0.0.0:7575): the
+// bind probe would collide with this app's own listener on that port and
+// misreport it as occupied. The switch must restart the listener onto the new
+// address and verify the bind instead of rejecting a valid change.
+func TestSetAPIListenAddressSamePortHostChangeRestartsWithoutProbe(t *testing.T) {
+	t.Setenv("AppData", t.TempDir())
+	app := NewApp()
+	app.apiStatus.Address = "127.0.0.1:9000"
+	app.apiRetryDelay = 5 * time.Millisecond
+	app.apiBindVerifyWait = 2 * time.Second
+	var listenersMu sync.Mutex
+	listeners := make(map[string]*fakeAPIListener)
+	app.listen = func(_, address string) (net.Listener, error) {
+		listener := newFakeAPIListener(address)
+		listenersMu.Lock()
+		listeners[address] = listener
+		listenersMu.Unlock()
+		return listener, nil
+	}
+	app.serveListener = func(listener net.Listener) error {
+		fake := listener.(*fakeAPIListener)
+		<-fake.closed
+		return nil
+	}
+	app.startAPIServer()
+	t.Cleanup(func() {
+		app.apiLifecycleMutex.Lock()
+		cancel := app.apiCancel
+		app.apiCancel = nil
+		app.apiLifecycleMutex.Unlock()
+		if cancel != nil {
+			cancel()
+		}
+		_ = app.api.Shutdown()
+		app.apiWG.Wait()
+	})
+	deadline := time.Now().Add(2 * time.Second)
+	for !app.GetAPIStatus().Running && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if status := app.GetAPIStatus(); !status.Running || status.Address != "127.0.0.1:9000" {
+		t.Fatalf("initial API status = %+v, want running on 127.0.0.1:9000", status)
+	}
+
+	if err := app.SetAPIListenAddress("0.0.0.0:9000"); err != nil {
+		t.Fatalf("SetAPIListenAddress() same-port host change error = %v", err)
+	}
+	deadline = time.Now().Add(2 * time.Second)
+	for !(app.GetAPIStatus().Running && app.GetAPIStatus().Address == "0.0.0.0:9000") && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	status := app.GetAPIStatus()
+	if !status.Running || status.Address != "0.0.0.0:9000" {
+		t.Fatalf("API status after same-port change = %+v, want running on 0.0.0.0:9000", status)
+	}
+	if got := app.GetAPIListenAddress(); got != "0.0.0.0:9000" {
+		t.Fatalf("persisted API listen address = %q, want 0.0.0.0:9000", got)
+	}
+	listenersMu.Lock()
+	old := listeners["127.0.0.1:9000"]
+	listenersMu.Unlock()
+	select {
+	case <-old.closed:
+	default:
+		t.Fatal("previous listener was not closed during the same-port switch")
+	}
+}
+
+// TestSetAPIListenAddressSamePortRollsBackWhenBindFails covers the failed
+// same-port switch: the verification restart observes the bind failure, restores
+// the previous listener, and reports the error instead of persisting an
+// address the server cannot use.
+func TestSetAPIListenAddressSamePortRollsBackWhenBindFails(t *testing.T) {
+	t.Setenv("AppData", t.TempDir())
+	app := NewApp()
+	app.apiStatus.Address = "127.0.0.1:9001"
+	app.apiRetryDelay = 5 * time.Millisecond
+	app.apiBindVerifyWait = 2 * time.Second
+	bindErr := errors.New("address already in use by another process")
+	app.listen = func(_, address string) (net.Listener, error) {
+		if strings.HasPrefix(address, "0.0.0.0:") {
+			return nil, bindErr
+		}
+		return newFakeAPIListener(address), nil
+	}
+	app.serveListener = func(listener net.Listener) error {
+		fake := listener.(*fakeAPIListener)
+		<-fake.closed
+		return nil
+	}
+	app.startAPIServer()
+	t.Cleanup(func() {
+		app.apiLifecycleMutex.Lock()
+		cancel := app.apiCancel
+		app.apiCancel = nil
+		app.apiLifecycleMutex.Unlock()
+		if cancel != nil {
+			cancel()
+		}
+		_ = app.api.Shutdown()
+		app.apiWG.Wait()
+	})
+	deadline := time.Now().Add(2 * time.Second)
+	for !app.GetAPIStatus().Running && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+
+	err := app.SetAPIListenAddress("0.0.0.0:9001")
+	if err == nil || !strings.Contains(err.Error(), "cannot listen on 0.0.0.0:9001") {
+		t.Fatalf("SetAPIListenAddress() error = %v, want the bind failure", err)
+	}
+	if got := app.GetAPIListenAddress(); got != "127.0.0.1:7575" {
+		t.Fatalf("listen address after rollback = %q, want the default restored", got)
+	}
+	deadline = time.Now().Add(2 * time.Second)
+	for !app.GetAPIStatus().Running && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if status := app.GetAPIStatus(); !status.Running || status.Address != "127.0.0.1:9001" {
+		t.Fatalf("API status after rollback = %+v, want running on the previous address", status)
+	}
+}

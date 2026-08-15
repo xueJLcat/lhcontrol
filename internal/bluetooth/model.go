@@ -290,13 +290,19 @@ func (bs *BaseStation) SetPresent(present bool) {
 	bs.mutex.Unlock()
 }
 
-func (bs *BaseStation) MarkSeen(now time.Time) {
+// MarkSeen records a scan observation and reports whether the station
+// transitioned from absent to present. Callers use the transition to re-arm
+// recovery for a station whose retries were pruned or exhausted while it was
+// away.
+func (bs *BaseStation) MarkSeen(now time.Time) bool {
 	bs.mutex.Lock()
+	wasAbsent := !bs.Present
 	bs.Present = true
 	bs.MissedScans = 0
 	bs.LastSeenAt = now
 	bs.presenceUncertain = false
 	bs.mutex.Unlock()
+	return wasAbsent
 }
 
 // MarkMissed requires several consecutive successful scans to mark a station

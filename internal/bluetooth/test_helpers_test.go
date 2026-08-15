@@ -48,6 +48,11 @@ type fakeBLEAdapter struct {
 	stopCalls      atomic.Int32
 	startDelay     chan struct{}
 	stopHold       chan struct{}
+	// releaseOn, when set, ends the blocking Scan once closed instead of
+	// waiting for the stop handshake. It emulates the platform watcher whose
+	// Scan call returns on its own budget while StopScan is still running (or
+	// hung), which is exactly the state a removed or wedged radio produces.
+	releaseOn      chan struct{}
 	connectHandler func(tinybluetooth.Device, bool)
 }
 
@@ -87,6 +92,10 @@ func (a *fakeBLEAdapter) ScanWithStart(callback func(*tinybluetooth.Adapter, tin
 		return a.scanErr
 	}
 	if a.returnEarly {
+		return nil
+	}
+	if a.releaseOn != nil {
+		<-a.releaseOn
 		return nil
 	}
 	<-a.stopped

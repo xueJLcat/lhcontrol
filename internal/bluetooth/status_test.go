@@ -1129,3 +1129,63 @@ func TestPowerConfirmationEarlyExitKeepsMismatchDiagnostic(t *testing.T) {
 		t.Fatalf("early exit dropped the earlier mismatch diagnostic: %v", err)
 	}
 }
+
+// TestOverlongReadValuesAreDataErrorsAndPreserveTheLink guards the read value
+// validation: a characteristic reporting an unexpected byte length is malformed
+// device data, not a broken link. Classifying it as a transport failure would
+// discard the healthy GATT session and reconnect on every read without ever
+// changing what the device reports.
+func TestOverlongReadValuesAreDataErrorsAndPreserveTheLink(t *testing.T) {
+	station := connectedFakeStation(
+		&fakeCharacteristic{value: []byte{0x01, 0x02}},
+		&fakeCharacteristic{value: []byte{0x01, 0x00, 0x00, 0x00, 0x00}},
+		nil,
+		Capabilities{PowerRead: true, ChannelRead: true},
+	)
+
+	station.mutex.Lock()
+	powerErr := readPowerStateInternalContext(context.Background(), station)
+	channelErr := readChannelInternalContext(context.Background(), station)
+	station.mutex.Unlock()
+
+	for name, err := range map[string]error{"power": powerErr, "channel": channelErr} {
+		if !IsDeviceValueError(err) {
+			t.Fatalf("%s read error = %v, want a device value error", name, err)
+		}
+		if RequiresReconnect(err) {
+			t.Fatalf("%s value error requires a reconnect", name)
+		}
+		if RequiresReconnect(transportError("read "+name+" characteristic", err)) {
+			t.Fatalf("%s value error wrapped in a transport error requires a reconnect", name)
+		}
+	}
+	station.mutex.RLock()
+	connected := station.isConnected && station.device != nil
+	station.mutex.RUnlock()
+	if !connected {
+		t.Fatal("malformed read values discarded the healthy connection")
+	}
+	if !station.LastPowerReadAt.IsZero() || !station.LastChannelReadAt.IsZero() {
+		t.Fatal("malformed read values left fresh read timestamps behind")
+	}
+}
+
+// TestDecodeChannelStillRejectsInvalidPayload confirms the larger read buffer
+// did not change channel payload validation for correctly sized values.
+func TestDecodeChannelStillRejectsInvalidPayload(t *testing.T) {
+	station := connectedFakeStation(
+		nil,
+		&fakeCharacteristic{value: []byte{0x00}},
+		nil,
+		Capabilities{ChannelRead: true},
+	)
+	station.mutex.Lock()
+	err := readChannelInternalContext(context.Background(), station)
+	station.mutex.Unlock()
+	if err == nil {
+		t.Fatal("channel read accepted a zero channel value")
+	}
+	if RequiresReconnect(err) {
+		t.Fatalf("invalid channel value error = %v requires a reconnect", err)
+	}
+}

@@ -191,6 +191,15 @@ export class StationActionController {
     void this.runBulkPower(state);
   }
 
+  // Synchronous start-eligibility check for the confirmation modal. The modal
+  // must close the moment the bulk starts, not after it finishes, so App
+  // decides here and fires runBulkPower in the same tick; runBulkPower repeats
+  // these identical guards synchronously before its first await, so a start
+  // accepted here cannot be rejected by the run below.
+  canStartBulkPower(state: PowerTarget): boolean {
+    return !this.host.bulkLocked && this.actionablePowerStations(state).length > 0;
+  }
+
   // Returns whether the bulk operation actually started. The confirmation
   // modal needs the distinction: a lock that lands between the modal opening
   // and the confirm click rejects the start, and the modal must stay visible

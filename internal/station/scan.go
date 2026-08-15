@@ -166,6 +166,11 @@ func (m *Manager) clearScanLifecycle(lifecycle *scanLifecycle) {
 		m.scanLifecycle = nil
 	}
 	m.scanLifecycleMutex.Unlock()
+	// Release the scan's context tree on every terminal path. StopScan and
+	// BeginShutdown already cancel it, but a scan that completes on its own
+	// would otherwise leave the derived context (and anything attached to it)
+	// alive for the lifetime of the parent. Cancel is idempotent.
+	lifecycle.cancel()
 }
 func (m *Manager) finishScan(found int, err error, callbacks ScanCallbacks) func() {
 	m.scanTransitionMutex.Lock()
@@ -287,13 +292,16 @@ func (m *Manager) scanAndFetchStations(ctx context.Context) ([]StationInfo, int,
 			stationPtr.MarkMissed()
 		}
 	}
+	revivedStations := make([]*bluetooth.BaseStation, 0)
 	for _, currentScanStation := range discoveredValues {
 		addrStr := currentScanStation.Address.String()
 		if existingStation, found := m.stations[addrStr]; found {
 			if currentScanStation.Name != "" {
 				existingStation.UpdateName(currentScanStation.Name)
 			}
-			existingStation.MarkSeen(scanTime)
+			if existingStation.MarkSeen(scanTime) {
+				revivedStations = append(revivedStations, existingStation)
+			}
 			if !existingStation.Snapshot().Connected {
 				stationsToFetch = append(stationsToFetch, existingStation)
 			}
@@ -316,6 +324,17 @@ func (m *Manager) scanAndFetchStations(ctx context.Context) ([]StationInfo, int,
 		}
 	}
 	m.stationsMutex.Unlock()
+	// A station that returns after its absent recovery was pruned or exhausted
+	// has no retry entry left, and the initial read below can still be skipped
+	// (a cancellation landing in the merge window, or an already connected
+	// station). Re-arm recovery for a revived but disconnected station so it
+	// does not sit untracked until the next status poll or user action.
+	for _, stationPtr := range revivedStations {
+		snapshot := stationPtr.Snapshot()
+		if !snapshot.Connected {
+			m.rebaseRecoveryForRevivedStation(snapshot.Address)
+		}
+	}
 	if len(stationsToFetch) > 0 && scanContextError(ctx) == nil {
 		phaseContext, cancelPhase := context.WithTimeout(ctx, m.scanReadPhaseTimeoutDuration())
 		defer cancelPhase()

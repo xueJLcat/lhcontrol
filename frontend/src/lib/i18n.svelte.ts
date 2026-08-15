@@ -493,13 +493,27 @@ export async function saveLanguagePreference(next: LanguagePreference): Promise<
   }
 }
 
+// Wails bindings carry no timeout of their own. App mounting awaits this
+// initialization, so a hung language getter must fall back to the system
+// preference instead of leaving the window blank forever.
+const LANGUAGE_PROBE_TIMEOUT_MS = 5000;
+
 export async function initializeLocale(): Promise<Locale> {
   let preference: LanguagePreference = 'system';
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
   try {
-    const persisted = await GetLanguage();
+    const persisted = await Promise.race([
+      GetLanguage(),
+      new Promise<never>((_, reject) => {
+        timeoutHandle = setTimeout(() => reject(new Error('language preference read timed out')), LANGUAGE_PROBE_TIMEOUT_MS);
+      })
+    ]);
     if (isLocale(persisted)) preference = persisted;
   } catch {
-    // A missing WebView binding or unreadable config must not block startup.
+    // A missing WebView binding, an unreadable config, or a hung getter must
+    // not block startup.
+  } finally {
+    if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
   }
   return setLanguagePreference(preference);
 }

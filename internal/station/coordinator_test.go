@@ -720,3 +720,72 @@ func TestDuplicateForegroundStationOperationRejectsImmediately(t *testing.T) {
 	default:
 	}
 }
+
+// TestBulkOperationReleasesScanTransitionLockWhileDraining guards the scan
+// availability contract: a bulk waiting for background work must not hold the
+// scan transition lock, or every new scan, StopScan, and foreground station
+// or configuration action blocks behind the bulk's whole drain window (up to
+// the bulk timeout).
+func TestBulkOperationReleasesScanTransitionLockWhileDraining(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	if err := manager.beginRecoveryStationOperation("11:22:33:44:99:20"); err != nil {
+		t.Fatalf("beginRecoveryStationOperation() error = %v", err)
+	}
+	bulkDone := make(chan error, 1)
+	go func() { bulkDone <- manager.beginBulkGlobalOperation() }()
+	select {
+	case err := <-bulkDone:
+		t.Fatalf("bulk operation returned before recovery drained: %v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+	if !manager.scanTransitionMutex.TryLock() {
+		t.Fatal("bulk holds the scan transition lock while waiting for background work")
+	}
+	manager.scanTransitionMutex.Unlock()
+	manager.endRecoveryStationOperation("11:22:33:44:99:20")
+	select {
+	case err := <-bulkDone:
+		if err != nil {
+			t.Fatalf("bulk operation error after drain = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("bulk operation did not start after background work drained")
+	}
+	manager.endForegroundGlobalOperation()
+}
+
+// TestBulkOperationRejectsScanStartedDuringDrainWait covers the re-check after
+// a drained wait: a scan that started while the bulk waited must still reject
+// the bulk instead of running alongside it.
+func TestBulkOperationRejectsScanStartedDuringDrainWait(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	if err := manager.beginRecoveryStationOperation("11:22:33:44:99:21"); err != nil {
+		t.Fatalf("beginRecoveryStationOperation() error = %v", err)
+	}
+	bulkDone := make(chan error, 1)
+	go func() { bulkDone <- manager.beginBulkGlobalOperation() }()
+	select {
+	case err := <-bulkDone:
+		t.Fatalf("bulk operation returned before recovery drained: %v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+	// A scan publishes isScanning under the transition lock; simulate that
+	// publication while the bulk is still on its drain wait.
+	manager.scanTransitionMutex.Lock()
+	manager.isScanning.Store(true)
+	manager.scanTransitionMutex.Unlock()
+	manager.endRecoveryStationOperation("11:22:33:44:99:21")
+	select {
+	case err := <-bulkDone:
+		if !errors.Is(err, ErrOperationInProgress) {
+			t.Fatalf("bulk operation error = %v, want ErrOperationInProgress after a scan started", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("bulk operation did not return after the drain wait")
+	}
+	manager.scanTransitionMutex.Lock()
+	manager.isScanning.Store(false)
+	manager.scanTransitionMutex.Unlock()
+}

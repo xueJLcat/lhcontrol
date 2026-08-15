@@ -105,12 +105,68 @@ export class StationScanController {
     const host = this.host;
     if (host.disposed || !host.stoppingScan || host.stopRequestGeneration !== requestGeneration) return;
     if (!host.gates.canCommitOperation(operationEpoch)) return;
+    if (!host.externalScanning) {
+      await this.finishLocalStopRecheck(operationEpoch, statusOperation, requestGeneration, attempt);
+      return;
+    }
     const outcome = await host.externalScan.finishStop(
       operationEpoch,
       statusOperation,
       () => host.stopRequestGeneration === requestGeneration
     );
     if (outcome === 'still-scanning') this.scheduleStopRecheck(operationEpoch, statusOperation, requestGeneration, attempt + 1);
+  }
+
+  // A local scan's promise normally clears stoppingScan in its finally block.
+  // When StopScan timed out, that promise can stay pending behind the same
+  // stuck backend call, leaving the header pinned on "Stopping...". Probe
+  // the authoritative backend state and settle the stop once the scan is gone;
+  // the bounded chain gives up (restoring the header) when the backend stays
+  // wedged, matching the external-scan behavior.
+  private async finishLocalStopRecheck(
+    operationEpoch: number,
+    statusOperation: number,
+    requestGeneration: number,
+    attempt: number
+  ) {
+    const host = this.host;
+    const scanning = await IsScanning().catch(() => true);
+    if (host.disposed || !host.stoppingScan || host.stopRequestGeneration !== requestGeneration) return;
+    if (!host.gates.canCommitOperation(operationEpoch)) return;
+    if (scanning && host.globalOperation === 'scanning') {
+      this.scheduleStopRecheck(operationEpoch, statusOperation, requestGeneration, attempt + 1);
+      return;
+    }
+    host.stoppingScan = false;
+    if (host.gates.canCommitStatus(statusOperation)) {
+      const summary = await this.completedScanSummary();
+      if (!host.disposed && host.gates.canCommitStatus(statusOperation)) {
+        host.statusMessage = summary ?? t('Scan stopped.');
+      }
+    }
+  }
+
+  // Settles the status line on an early return when this scan still owns it.
+  // A superseding operation can take the station list or the scan epoch while
+  // no newer status owner exists; without this, "Scanning for base stations..."
+  // stays in the footer until the next message-writing action. Prefer the
+  // backend's real terminal outcome; when the scan is still running (another
+  // owner took over the adapter) report the takeover as a stopped scan.
+  private async settleSupersededScanStatus(statusOperation: number) {
+    if (this.host.disposed || !this.host.gates.canCommitStatus(statusOperation)) return;
+    const scanStatus = await GetScanStatus().catch(() => null);
+    if (this.host.disposed || !this.host.gates.canCommitStatus(statusOperation)) return;
+    if (scanStatus && isTerminalScanState(scanStatus.state)) {
+      this.host.statusMessage = formatTerminalScanResult({
+        state: scanStatus.state,
+        found: scanStatus.found ?? this.host.stations.filter((station) => station.seenInLatestScan).length,
+        known: this.host.stations.length,
+        error: scanStatus.error,
+        warnings: scanStatus.warnings
+      });
+      return;
+    }
+    this.host.statusMessage = t('Scan stopped.');
   }
 
   // Reads the backend scan status and renders its completion summary when the
@@ -220,9 +276,18 @@ export class StationScanController {
     const revision = this.host.listRevisions.next();
     this.host.statusMessage = t('Scanning for base stations...');
     try {
-      if (!this.host.applyStationList(await ScanAndFetchStations(), revision)) return true;
+      if (!this.host.applyStationList(await ScanAndFetchStations(), revision)) {
+        // The list was superseded mid-flight. Settle the status line when this
+        // scan still owns it, or "Scanning for base stations..." stays in the
+        // footer until the next message-writing action.
+        await this.settleSupersededScanStatus(statusOperation);
+        return true;
+      }
       const scanStatus = await GetScanStatus().catch(() => null);
-      if (!this.host.gates.canCommitOperation(operationEpoch) || !this.host.listRevisions.isCurrent(revision) || !this.host.gates.canCommitStatus(statusOperation)) return true;
+      if (!this.host.gates.canCommitOperation(operationEpoch) || !this.host.listRevisions.isCurrent(revision) || !this.host.gates.canCommitStatus(statusOperation)) {
+        await this.settleSupersededScanStatus(statusOperation);
+        return true;
+      }
       this.host.scanError = null;
       // A non-terminal status means another scan started while this read was
       // in flight; its own events own the status line from here on.
@@ -235,12 +300,21 @@ export class StationScanController {
         warnings: scanStatus?.warnings
       });
     } catch (error) {
-      if (!this.host.gates.canCommitOperation(operationEpoch) || !this.host.listRevisions.isCurrent(revision) || !this.host.gates.canCommitStatus(statusOperation)) return true;
+      if (!this.host.gates.canCommitOperation(operationEpoch) || !this.host.listRevisions.isCurrent(revision) || !this.host.gates.canCommitStatus(statusOperation)) {
+        await this.settleSupersededScanStatus(statusOperation);
+        return true;
+      }
       const updated = await GetCurrentStationInfo().catch(() => null);
-      if (!this.host.gates.canCommitOperation(operationEpoch) || !this.host.listRevisions.isCurrent(revision)) return true;
+      if (!this.host.gates.canCommitOperation(operationEpoch) || !this.host.listRevisions.isCurrent(revision)) {
+        await this.settleSupersededScanStatus(statusOperation);
+        return true;
+      }
       if (updated) this.host.applyStationList(updated, revision);
       const scanStatus = await GetScanStatus().catch(() => null);
-      if (!this.host.gates.canCommitOperation(operationEpoch) || !this.host.listRevisions.isCurrent(revision) || !this.host.gates.canCommitStatus(statusOperation)) return true;
+      if (!this.host.gates.canCommitOperation(operationEpoch) || !this.host.listRevisions.isCurrent(revision) || !this.host.gates.canCommitStatus(statusOperation)) {
+        await this.settleSupersededScanStatus(statusOperation);
+        return true;
+      }
       // A scan that ended while a newer scan is already running was stopped
       // (superseded); only a terminal status can tell failed from stopped.
       const supersededByNewScan = scanStatus !== null && !isTerminalScanState(scanStatus.state);
@@ -315,14 +389,15 @@ export class StationScanController {
       // A stop-timeout means the cancellation was accepted but scan processing
       // had not drained within the bounded wait; keep the stopping state and
       // let the recheck chain or the periodic poll observe the terminal
-      // outcome instead of reporting a hard stop failure.
+      // outcome instead of reporting a hard stop failure. Local scans need the
+      // chain too: when the scan promise itself stays pending behind the stuck
+      // backend call, nothing else clears the "Stopping..." header, and the
+      // periodic poll is blocked by isLoading.
       if (classifyScanError(error).kind === 'timeout') {
         if (this.host.gates.canCommitStatus(statusOperation)) {
           this.host.statusMessage = t('Stopping scan...');
         }
-        if (this.host.externalScanning) {
-          this.scheduleStopRecheck(operationEpoch, statusOperation, requestGeneration, 1);
-        }
+        this.scheduleStopRecheck(operationEpoch, statusOperation, requestGeneration, 1);
         return;
       }
       this.host.stoppingScan = false;

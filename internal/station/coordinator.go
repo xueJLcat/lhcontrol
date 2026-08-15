@@ -50,50 +50,69 @@ func (m *Manager) endOperation() {
 func (m *Manager) beginForegroundGlobalOperation() error {
 	return m.beginForegroundGlobalOperationContext(context.Background())
 }
-func (m *Manager) beginForegroundGlobalOperationContext(ctx context.Context) error {
-	if ctx == nil {
-		ctx = context.Background()
+
+// attemptForegroundGlobalOperation performs one acquisition attempt. It
+// returns (nil, nil) after acquiring the operation, a non-nil channel when
+// manager-owned background work must drain first, or an error for an
+// immediate rejection. Callers must never hold scanTransitionMutex across the
+// wait on the returned channel: the drain can stretch several seconds (a
+// background cleanup exiting a stuck adapter call among them), and holding the
+// lock would suspend every new scan, StopScan, and foreground station or
+// configuration action for the whole window.
+func (m *Manager) attemptForegroundGlobalOperation(ctx context.Context) (<-chan struct{}, error) {
+	if err := m.foregroundContextError(ctx); err != nil {
+		return nil, err
 	}
-	for {
-		if err := m.foregroundContextError(ctx); err != nil {
-			return err
-		}
-		err := m.beginOperation()
-		if err == nil {
-			if contextErr := m.foregroundContextError(ctx); contextErr != nil {
-				m.endOperation()
-				return contextErr
-			}
-			m.globalOperationMutex.Lock()
-			m.foregroundGlobalActive = true
-			m.globalOperationMutex.Unlock()
-			return nil
-		}
-		if !errors.Is(err, ErrOperationInProgress) {
-			return err
+	err := m.beginOperation()
+	if err == nil {
+		if contextErr := m.foregroundContextError(ctx); contextErr != nil {
+			m.endOperation()
+			return nil, contextErr
 		}
 		m.globalOperationMutex.Lock()
-		foregroundActive := m.foregroundGlobalActive
+		m.foregroundGlobalActive = true
 		m.globalOperationMutex.Unlock()
-		if foregroundActive {
+		return nil, nil
+	}
+	if !errors.Is(err, ErrOperationInProgress) {
+		return nil, err
+	}
+	m.globalOperationMutex.Lock()
+	foregroundActive := m.foregroundGlobalActive
+	m.globalOperationMutex.Unlock()
+	if foregroundActive {
+		return nil, err
+	}
+	m.recoveryOperationMutex.Lock()
+	recoveryDone := m.recoveryOperationDone
+	m.recoveryOperationMutex.Unlock()
+	m.statusLifecycleMutex.Lock()
+	statusDone := m.statusOperationDone
+	m.statusLifecycleMutex.Unlock()
+	var backgroundDone <-chan struct{}
+	if recoveryDone != nil {
+		backgroundDone = recoveryDone
+	} else if statusDone != nil {
+		backgroundDone = statusDone
+	}
+	if backgroundDone == nil {
+		return nil, err
+	}
+	m.cancelBackgroundReadsForForeground()
+	return backgroundDone, nil
+}
+
+// waitForForegroundGlobalOperation runs the attempt/wait loop shared by the
+// global foreground acquisitions.
+func (m *Manager) waitForForegroundGlobalOperation(ctx context.Context) error {
+	for {
+		backgroundDone, err := m.attemptForegroundGlobalOperation(ctx)
+		if err != nil {
 			return err
-		}
-		m.recoveryOperationMutex.Lock()
-		recoveryDone := m.recoveryOperationDone
-		m.recoveryOperationMutex.Unlock()
-		m.statusLifecycleMutex.Lock()
-		statusDone := m.statusOperationDone
-		m.statusLifecycleMutex.Unlock()
-		var backgroundDone <-chan struct{}
-		if recoveryDone != nil {
-			backgroundDone = recoveryDone
-		} else if statusDone != nil {
-			backgroundDone = statusDone
 		}
 		if backgroundDone == nil {
-			return err
+			return nil
 		}
-		m.cancelBackgroundReadsForForeground()
 		select {
 		case <-backgroundDone:
 		case <-ctx.Done():
@@ -102,6 +121,13 @@ func (m *Manager) beginForegroundGlobalOperationContext(ctx context.Context) err
 			return ErrShuttingDown
 		}
 	}
+}
+
+func (m *Manager) beginForegroundGlobalOperationContext(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return m.waitForForegroundGlobalOperation(ctx)
 }
 func (m *Manager) endForegroundGlobalOperation() {
 	m.globalOperationMutex.Lock()
@@ -380,13 +406,46 @@ func (m *Manager) foregroundContextError(ctx context.Context) error {
 func (m *Manager) beginBulkGlobalOperation() error {
 	return m.beginBulkGlobalOperationContext(context.Background())
 }
+
+// beginBulkGlobalOperationContext rejects a bulk while a scan runs, and
+// acquires the global operation once manager-owned background work has
+// drained. The scan check and each acquisition attempt run under the scan
+// transition lock (the same critical section reserveScan uses), but the wait
+// for background work deliberately runs outside it: the wait can reach the
+// bulk timeout when a background cleanup drains a stuck adapter call, and
+// holding the lock across it would suspend every new scan, StopScan, and
+// foreground station or configuration action for the whole window. The check
+// repeats after every drained wait so a scan that started meanwhile still
+// rejects the bulk instead of running alongside it.
 func (m *Manager) beginBulkGlobalOperationContext(ctx context.Context) error {
-	m.scanTransitionMutex.Lock()
-	defer m.scanTransitionMutex.Unlock()
-	if m.isScanning.Load() {
-		return ErrOperationInProgress
+	if ctx == nil {
+		ctx = context.Background()
 	}
-	return m.beginForegroundGlobalOperationContext(ctx)
+	for {
+		if err := m.foregroundContextError(ctx); err != nil {
+			return err
+		}
+		m.scanTransitionMutex.Lock()
+		if m.isScanning.Load() {
+			m.scanTransitionMutex.Unlock()
+			return ErrOperationInProgress
+		}
+		backgroundDone, err := m.attemptForegroundGlobalOperation(ctx)
+		m.scanTransitionMutex.Unlock()
+		if err != nil {
+			return err
+		}
+		if backgroundDone == nil {
+			return nil
+		}
+		select {
+		case <-backgroundDone:
+		case <-ctx.Done():
+			return m.foregroundContextError(ctx)
+		case <-m.shutdownCh:
+			return ErrShuttingDown
+		}
+	}
 }
 func (m *Manager) hasForegroundOperation() bool {
 	m.globalOperationMutex.Lock()

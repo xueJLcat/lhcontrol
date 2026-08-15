@@ -844,3 +844,35 @@ func TestIdentifyDoesNotRetryAmbiguousResponseWrite(t *testing.T) {
 		t.Fatalf("response write attempts = %d, want 1", identify.writeWithResponseAttempts)
 	}
 }
+
+// TestDefinitelyUnsentWritePreservesCompatibilityBootInference covers the
+// remaining definitely-unsent failure class (the transport never submitted the
+// write, or the peer rejected it outright): like the standby and unsupported
+// rejections, the compatibility boot inference must be restored so the next
+// read does not pay a fresh boot-fallback window for a command that never
+// landed.
+func TestDefinitelyUnsentWritePreservesCompatibilityBootInference(t *testing.T) {
+	ConfigureTiming(TimingPolicy{WriteAttempts: 1, OperationRetryDelay: time.Millisecond})
+	t.Cleanup(func() { ConfigureTiming(TimingPolicy{}) })
+	power := &fakeCharacteristic{
+		value:                    []byte{0x01},
+		writeWithoutResponseErr:  &classifiedWriteError{possiblySent: false},
+	}
+	station := connectedFakeStation(power, nil, nil, Capabilities{PowerRead: true, PowerWrite: true})
+	station.setPowerStateInternal(PowerStateOn, 0x01)
+	station.bootRawTrustedOn = true
+
+	if _, err := SetPowerState(station, PowerStateOn); err == nil {
+		t.Fatal("SetPowerState() unexpectedly succeeded against a rejected write")
+	}
+	if err := ReadPowerState(station); err != nil {
+		t.Fatalf("ReadPowerState() error = %v, want the definitely-unsent write to keep the connection", err)
+	}
+	if station.PowerState != PowerStateOn || !station.bootRawTrustedOn {
+		t.Fatalf(
+			"state after definitely-unsent command = %v trusted=%v, want compatibility On to remain trusted",
+			station.PowerState,
+			station.bootRawTrustedOn,
+		)
+	}
+}

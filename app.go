@@ -41,6 +41,7 @@ type App struct {
 	listen                    func(string, string) (net.Listener, error)
 	serveListener             func(net.Listener) error
 	apiRetryDelay             time.Duration
+	apiBindVerifyWait         time.Duration
 	apiShutdownWait           time.Duration
 	apiGeneration             uint64
 	externalScanID            atomic.Uint64

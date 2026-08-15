@@ -139,3 +139,36 @@ func TestReleaseStationForScanRemovesCompletedPendingCleanup(t *testing.T) {
 		t.Fatalf("completed cleanup remained tracked: count=%d pending=%v", remaining, station.pendingCleanup)
 	}
 }
+
+type errorReportingConnectedDevice struct {
+	trackingConnectedDevice
+	queryErr error
+}
+
+func (device *errorReportingConnectedDevice) Connected() (bool, error) {
+	return false, device.queryErr
+}
+
+// TestConnectedQueryFailureKeepsCachedSession guards the fast path: a
+// transient status-query failure (COM/RPC errors around GetConnectionStatus)
+// is not proof the link dropped, so the cached session must survive instead
+// of paying a full reconnect and rediscovery on every query blip.
+func TestConnectedQueryFailureKeepsCachedSession(t *testing.T) {
+	device := &errorReportingConnectedDevice{queryErr: errors.New("transient COM failure")}
+	station := connectedFakeStation(&fakeCharacteristic{value: []byte{0x09}}, nil, nil, Capabilities{PowerRead: true})
+	station.device = device
+
+	station.mutex.Lock()
+	err := connectAndDiscoverInternal(station)
+	station.mutex.Unlock()
+
+	if err != nil {
+		t.Fatalf("connectAndDiscoverInternalContext() error = %v, want the cached session kept", err)
+	}
+	if device.disconnected || device.disconnects != 0 {
+		t.Fatalf("status-query failure tore down the session: disconnected=%v disconnects=%d", device.disconnected, device.disconnects)
+	}
+	if station.device == nil || !station.isConnected {
+		t.Fatal("status-query failure cleared the cached connection state")
+	}
+}

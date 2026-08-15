@@ -542,7 +542,10 @@ func (m *Manager) recordObservedReadResult(
 ) {
 	connectionNoted := false
 	if powerObserved {
-		if powerErr == nil || bluetooth.IsUnsupportedCapabilityError(powerErr) {
+		if powerErr == nil || bluetooth.IsUnsupportedCapabilityError(powerErr) || bluetooth.IsDeviceValueError(powerErr) {
+			// Malformed device data (like an unsupported capability) cannot be
+			// repaired by reconnecting; discarding the session here would start
+			// a disconnect/reconnect cycle that fails the same way on every poll.
 			m.clearStatusFailureKind(address, statusRetryConnection)
 		} else {
 			_ = m.disconnectStationBounded(station)
@@ -551,7 +554,7 @@ func (m *Manager) recordObservedReadResult(
 		}
 	}
 	if channelObserved {
-		if channelErr == nil || bluetooth.IsUnsupportedCapabilityError(channelErr) {
+		if channelErr == nil || bluetooth.IsUnsupportedCapabilityError(channelErr) || bluetooth.IsDeviceValueError(channelErr) {
 			m.clearStatusFailureKind(address, statusRetryChannel)
 		} else if errors.Is(channelErr, context.Canceled) || errors.Is(channelErr, context.DeadlineExceeded) {
 			// A budget deadline or cancellation that interrupted the channel
@@ -600,6 +603,11 @@ func (m *Manager) recordUnstructuredStationFailure(
 	err error,
 ) {
 	if bluetooth.IsUnsupportedCapabilityError(err) && !bluetooth.RequiresReconnect(err) {
+		m.clearStatusFailureKind(address, statusRetryConnection)
+		return
+	}
+	if bluetooth.IsDeviceValueError(err) {
+		// A value formatting violation is device data, not a broken link.
 		m.clearStatusFailureKind(address, statusRetryConnection)
 		return
 	}

@@ -271,6 +271,63 @@ func TestScanCancellationAfterMergeKeepsFoundCount(t *testing.T) {
 	}
 }
 
+// TestScanRevivesRecoveryForReturningAbsentStation guards the revival hook: a
+// station whose absent recovery was pruned or exhausted must get a fresh
+// immediate recovery entry when a scan discovers it again, or it can sit
+// disconnected and untracked until the next status poll or user action.
+func TestScanRevivesRecoveryForReturningAbsentStation(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	address := "11:22:33:44:55:6D"
+	station := &internalbluetooth.BaseStation{
+		Name: "LHB-REVIVED", Address: mustAddress(t, address),
+		Present: false, MissedScans: 5,
+	}
+	manager.stations[address] = station
+	manager.bluetoothOps.scanForDurationContext = func(context.Context, time.Duration) ([]internalbluetooth.DiscoveredStation, error) {
+		return []internalbluetooth.DiscoveredStation{{
+			Name: "LHB-REVIVED", Address: mustAddress(t, address),
+		}}, nil
+	}
+	var readOnce sync.Once
+	readStarted := make(chan struct{})
+	releaseRead := make(chan struct{})
+	manager.bluetoothOps.fetchInitialPowerState = func(context.Context, *internalbluetooth.BaseStation) error {
+		readOnce.Do(func() { close(readStarted) })
+		<-releaseRead
+		return nil
+	}
+
+	scanDone := make(chan error, 1)
+	go func() { _, err := manager.ScanAndFetchStations(); scanDone <- err }()
+	select {
+	case <-readStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("initial read phase did not start")
+	}
+	if !station.Snapshot().Present {
+		t.Fatal("scan merge did not mark the returning station present")
+	}
+	manager.statusRetryMutex.Lock()
+	retry, tracked := manager.statusRetries[address]
+	manager.statusRetryMutex.Unlock()
+	if !tracked || retry.kinds&statusRetryConnection == 0 {
+		t.Fatalf("revived station recovery entry = %+v (tracked=%v), want an immediate connection retry", retry, tracked)
+	}
+	if time.Until(retry.nextAt) > time.Second {
+		t.Fatalf("revived station retry scheduled for %v, want an immediate attempt", retry.nextAt)
+	}
+	close(releaseRead)
+	select {
+	case err := <-scanDone:
+		if err != nil {
+			t.Fatalf("ScanAndFetchStations() error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("scan did not finish")
+	}
+}
+
 func TestStopScanFinishesBeforeCancelledCallbackAndIsIdempotent(t *testing.T) {
 	manager := NewManager(config.NewConfig())
 	scanStarted := make(chan struct{})

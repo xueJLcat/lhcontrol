@@ -480,6 +480,121 @@ func TestScanDurationStartsAfterWatcherReportsStarted(t *testing.T) {
 		t.Fatalf("StopScan calls = %d, want 1", got)
 	}
 }
+// TestScanForDurationAbandonsHungStopAndKeepsResults guards against a WinRT
+// StopScan that never returns (radio removed mid-scan): the scan must finish
+// within its bounded stop budget, keep the discovery results from the
+// completed duration, and leave the scan slot free for the next scan.
+func TestScanForDurationAbandonsHungStopAndKeepsResults(t *testing.T) {
+	originalAdapter := adapter
+	originalWait := scanStopWaitLimit
+	fake := newFakeBLEAdapter()
+	fake.stopHold = make(chan struct{}) // never closed: StopScan hangs
+	fake.releaseOn = make(chan struct{})
+	adapter = fake
+	scanStopWaitLimit = 50 * time.Millisecond
+	t.Cleanup(func() {
+		adapter = originalAdapter
+		scanStopWaitLimit = originalWait
+	})
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+	mac, err := tinybluetooth.ParseMAC("11:22:33:44:55:6B")
+	if err != nil {
+		t.Fatalf("ParseMAC() error = %v", err)
+	}
+	fake.results = []tinybluetooth.ScanResult{{
+		Address: tinybluetooth.Address{MACAddress: tinybluetooth.MACAddress{MAC: mac}},
+		AdvertisementPayload: &fakeAdvertisementPayload{
+			name:     "LHB-HUNG-STOP",
+			services: []tinybluetooth.UUID{powerControlServiceUUID},
+		},
+	}}
+	started := time.Now()
+	outcome := make(chan error, 1)
+	var results []DiscoveredStation
+	go func() {
+		var scanErr error
+		results, scanErr = ScanForDuration(10 * time.Millisecond)
+		outcome <- scanErr
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for fake.stopCalls.Load() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("duration stop was never issued")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	// The platform Scan call returns on its own budget while StopScan hangs.
+	close(fake.releaseOn)
+	select {
+	case scanErr := <-outcome:
+		if scanErr != nil {
+			t.Fatalf("ScanForDuration() error = %v, want abandoned stop to keep results", scanErr)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("scan did not return after the bounded stop budget")
+	}
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("scan took %v, want a bounded stop wait", elapsed)
+	}
+	if len(results) != 1 || results[0].Name != "LHB-HUNG-STOP" {
+		t.Fatalf("scan results = %+v, want the discovered station", results)
+	}
+	activeScanMutex.Lock()
+	stillRegistered := activeScan != nil
+	activeScanMutex.Unlock()
+	if stillRegistered {
+		t.Fatal("abandoned stop left the scan session registered")
+	}
+}
+
+// TestScanForDurationContextCancelButtonAbandonsHungStop covers the same hung
+// StopScan for a user cancellation: the scan reports ErrScanCancelled within
+// the bounded budget instead of blocking forever.
+func TestScanForDurationContextCancelButtonAbandonsHungStop(t *testing.T) {
+	originalAdapter := adapter
+	originalWait := scanStopWaitLimit
+	fake := newFakeBLEAdapter()
+	fake.stopHold = make(chan struct{}) // never closed: StopScan hangs
+	fake.releaseOn = make(chan struct{})
+	adapter = fake
+	scanStopWaitLimit = 50 * time.Millisecond
+	t.Cleanup(func() {
+		adapter = originalAdapter
+		scanStopWaitLimit = originalWait
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		_, err := ScanForDurationContext(ctx, time.Hour)
+		result <- err
+	}()
+	select {
+	case <-fake.started:
+	case <-time.After(time.Second):
+		t.Fatal("scan did not start")
+	}
+	cancel()
+	deadline := time.Now().Add(2 * time.Second)
+	for fake.stopCalls.Load() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("cancellation stop was never issued")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	close(fake.releaseOn)
+	select {
+	case err := <-result:
+		if !errors.Is(err, ErrScanCancelled) {
+			t.Fatalf("ScanForDurationContext() error = %v, want ErrScanCancelled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("cancelled scan did not return after the bounded stop budget")
+	}
+}
+
 func TestScanSessionStopAfterFinishedDoesNotRecordReason(t *testing.T) {
 	// A stop request that arrives after the scan ended on its own must not
 	// record a stop reason: doing so would misclassify a natural finish as a

@@ -835,6 +835,30 @@ describe('App asynchronous operations', () => {
     expect(await screen.findByRole('button', { name: 'Scan' })).toBeEnabled();
   });
 
+  it('recovers the header when a local StopScan times out and the scan promise stays pending', async () => {
+    vi.useFakeTimers();
+    // The scan promise never settles (the backend call is wedged), StopScan
+    // reports its bounded timeout, and the authoritative probe afterwards
+    // shows no scan running. Without the bounded recheck chain the header
+    // would stay pinned on "Stopping..." because the periodic poll is blocked
+    // by the still-loading local scan.
+    api.ScanAndFetchStations.mockReturnValue(new Promise(() => {}));
+    api.StopScan.mockRejectedValue(new Error('Scan stop timed out'));
+    api.IsScanning.mockResolvedValue(false);
+    api.GetScanStatus.mockResolvedValue({ state: 'cancelled', found: 0, warnings: [] });
+    render(App);
+
+    await fireEvent.click(await screen.findByRole('button', { name: 'Stop' }));
+    await vi.waitFor(() => expect(api.StopScan).toHaveBeenCalledOnce());
+    expect(screen.getByRole('status')).toHaveTextContent('Stopping scan...');
+
+    await vi.advanceTimersByTimeAsync(1600);
+    await vi.waitFor(() => expect(api.IsScanning).toHaveBeenCalled());
+    expect(await screen.findByRole('button', { name: 'Stop' })).toBeEnabled();
+    expect(screen.queryByRole('button', { name: 'Stopping...' })).not.toBeInTheDocument();
+    expect(screen.getByRole('status')).toHaveTextContent('Scan stopped.');
+  });
+
   it('keeps a scan started while a previous StopScan is settling stoppable', async () => {
     let rejectFirstScan!: (error: Error) => void;
     let resolveSecondScan!: (stations: StationInfo[]) => void;
