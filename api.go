@@ -34,6 +34,7 @@ func apiStatusForError(err error) int {
 		status = fiber.StatusServiceUnavailable
 	case errors.Is(err, station.ErrBulkOperationTimeout),
 		errors.Is(err, station.ErrStationOperationTimeout),
+		errors.Is(err, station.ErrScanStopTimeout),
 		errors.Is(err, context.DeadlineExceeded):
 		status = fiber.StatusRequestTimeout
 	}
@@ -128,8 +129,11 @@ type scanEventCallbacks struct {
 
 // scanEvent ties every external lifecycle notification to one scan request so
 // a delayed terminal event cannot replace a newer scan in the desktop UI.
+// StatusID carries the manager's scan-status identity so the frontend can
+// match the status record it reads back to this exact scan.
 type scanEvent struct {
 	ID       uint64                `json:"id"`
+	StatusID uint64                `json:"statusId,omitempty"`
 	Stations []station.StationInfo `json:"stations,omitempty"`
 	Error    string                `json:"error,omitempty"`
 }
@@ -261,19 +265,19 @@ func registerAPIRoutes(api *fiber.App, manager apiStationManager, events scanEve
 					events.started(scanEvent{ID: id})
 				}
 			},
-			Completed: func(stations []station.StationInfo) {
+			Completed: func(statusID uint64, stations []station.StationInfo) {
 				if events.completed != nil {
-					events.completed(scanEvent{ID: id, Stations: stations})
+					events.completed(scanEvent{ID: id, StatusID: statusID, Stations: stations})
 				}
 			},
-			Failed: func(err error) {
+			Failed: func(statusID uint64, err error) {
 				if events.failed != nil {
-					events.failed(scanEvent{ID: id, Error: err.Error()})
+					events.failed(scanEvent{ID: id, StatusID: statusID, Error: err.Error()})
 				}
 			},
-			Cancelled: func() {
+			Cancelled: func(statusID uint64) {
 				if events.cancelled != nil {
-					events.cancelled(scanEvent{ID: id})
+					events.cancelled(scanEvent{ID: id, StatusID: statusID})
 				}
 			},
 		})

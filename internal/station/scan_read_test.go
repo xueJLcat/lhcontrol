@@ -324,7 +324,7 @@ func TestStopScanDoesNotReportScanFailure(t *testing.T) {
 	}
 	failedEntered := make(chan struct{})
 	releaseFailed := make(chan struct{})
-	if err := manager.StartScan(ScanCallbacks{Failed: func(error) {
+	if err := manager.StartScan(ScanCallbacks{Failed: func(uint64, error) {
 		close(failedEntered)
 		<-releaseFailed
 	}}); err != nil {

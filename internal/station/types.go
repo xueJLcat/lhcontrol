@@ -128,6 +128,10 @@ type ChannelChangeResult struct {
 	Station           StationInfo `json:"station"`
 }
 type ScanStatus struct {
+	// ID identifies the scan this status describes. Every scan start assigns
+	// a fresh value, so consumers recovering a finished scan can reject a
+	// terminal status that a newer scan already overwrote.
+	ID          uint64   `json:"id,omitempty"`
 	State       string   `json:"state"`
 	StartedAt   string   `json:"startedAt"`
 	CompletedAt string   `json:"completedAt"`
@@ -137,9 +141,9 @@ type ScanStatus struct {
 }
 type ScanCallbacks struct {
 	Started   func()
-	Completed func([]StationInfo)
-	Failed    func(error)
-	Cancelled func()
+	Completed func(statusID uint64, stations []StationInfo)
+	Failed    func(statusID uint64, err error)
+	Cancelled func(statusID uint64)
 }
 type bluetoothOperations struct {
 	scanForDurationContext func(context.Context, time.Duration) ([]bluetooth.DiscoveredStation, error)
@@ -159,6 +163,10 @@ type scanLifecycle struct {
 	cancel      context.CancelFunc
 	done        chan struct{}
 	startedDone chan struct{}
+	// statusID is the ScanStatus identity assigned when this scan reserved
+	// the transition lock; terminal callbacks carry it so consumers can match
+	// the status record they read back to this exact scan.
+	statusID uint64
 }
 
 type bulkPowerLifecycle struct {
@@ -221,6 +229,7 @@ type Manager struct {
 	isScanning              atomic.Bool
 	scanStatusMutex         sync.RWMutex
 	scanStatus              ScanStatus
+	scanStatusID            uint64
 	scanLifecycleMutex      sync.Mutex
 	scanLifecycle           *scanLifecycle
 	initializeMutex         sync.Mutex

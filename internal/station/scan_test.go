@@ -3,6 +3,7 @@ package station
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -118,7 +119,7 @@ func TestAsyncScanEventsCannotOvertakePreviousCompletion(t *testing.T) {
 			events = append(events, "started")
 			eventsMutex.Unlock()
 		},
-		Completed: func([]StationInfo) {
+		Completed: func(uint64, []StationInfo) {
 			eventsMutex.Lock()
 			events = append(events, "completed")
 			completionNumber := 0
@@ -236,7 +237,7 @@ func TestStopScanFinishesBeforeCancelledCallbackAndIsIdempotent(t *testing.T) {
 		<-ctx.Done()
 		return nil, internalbluetooth.ErrScanCancelled
 	}
-	if err := manager.StartScan(ScanCallbacks{Cancelled: func() {
+	if err := manager.StartScan(ScanCallbacks{Cancelled: func(uint64) {
 		close(callbackEntered)
 		<-callbackRelease
 	}}); err != nil {
@@ -281,20 +282,20 @@ func TestStopScanFromScanCallbackDoesNotDeadlock(t *testing.T) {
 		{
 			name: "completed",
 			callbacks: func(manager *Manager, stopped chan<- error) ScanCallbacks {
-				return ScanCallbacks{Completed: func([]StationInfo) { stopped <- manager.StopScan() }}
+				return ScanCallbacks{Completed: func(uint64, []StationInfo) { stopped <- manager.StopScan() }}
 			},
 		},
 		{
 			name:    "failed",
 			scanErr: errors.New("scan failed"),
 			callbacks: func(manager *Manager, stopped chan<- error) ScanCallbacks {
-				return ScanCallbacks{Failed: func(error) { stopped <- manager.StopScan() }}
+				return ScanCallbacks{Failed: func(uint64, error) { stopped <- manager.StopScan() }}
 			},
 		},
 		{
 			name: "cancelled",
 			callbacks: func(manager *Manager, stopped chan<- error) ScanCallbacks {
-				return ScanCallbacks{Cancelled: func() { stopped <- manager.StopScan() }}
+				return ScanCallbacks{Cancelled: func(uint64) { stopped <- manager.StopScan() }}
 			},
 		},
 	} {
@@ -344,20 +345,20 @@ func TestShutdownFromScanCallbackDoesNotDeadlock(t *testing.T) {
 		{
 			name: "completed",
 			callbacks: func(manager *Manager, shutdownDone chan<- struct{}) ScanCallbacks {
-				return ScanCallbacks{Completed: func([]StationInfo) { manager.Shutdown(); close(shutdownDone) }}
+				return ScanCallbacks{Completed: func(uint64, []StationInfo) { manager.Shutdown(); close(shutdownDone) }}
 			},
 		},
 		{
 			name:    "failed",
 			scanErr: errors.New("scan failed"),
 			callbacks: func(manager *Manager, shutdownDone chan<- struct{}) ScanCallbacks {
-				return ScanCallbacks{Failed: func(error) { manager.Shutdown(); close(shutdownDone) }}
+				return ScanCallbacks{Failed: func(uint64, error) { manager.Shutdown(); close(shutdownDone) }}
 			},
 		},
 		{
 			name: "cancelled",
 			callbacks: func(manager *Manager, shutdownDone chan<- struct{}) ScanCallbacks {
-				return ScanCallbacks{Cancelled: func() { manager.Shutdown(); close(shutdownDone) }}
+				return ScanCallbacks{Cancelled: func(uint64) { manager.Shutdown(); close(shutdownDone) }}
 			},
 		},
 	} {
@@ -412,7 +413,7 @@ func TestScanCompletionCallbackUsesLatestAuthoritativeSnapshot(t *testing.T) {
 	deliver := manager.finishScan(
 		1,
 		nil,
-		ScanCallbacks{Completed: func(stations []StationInfo) { completed = stations }},
+		ScanCallbacks{Completed: func(_ uint64, stations []StationInfo) { completed = stations }},
 	)
 	deliver()
 
@@ -549,7 +550,7 @@ func TestStopScanCancelsBlockingInitialReadWithoutWarningsOrRecovery(t *testing.
 	}
 
 	completed := make(chan struct{})
-	if err := manager.StartScan(ScanCallbacks{Completed: func([]StationInfo) { close(completed) }}); err != nil {
+	if err := manager.StartScan(ScanCallbacks{Completed: func(uint64, []StationInfo) { close(completed) }}); err != nil {
 		t.Fatalf("second StartScan() error = %v", err)
 	}
 	select {
@@ -626,7 +627,7 @@ func TestAsyncScanReturnsWhileWaitingAndDeliversPreStartCancellation(t *testing.
 	go func() {
 		returned <- manager.StartScan(ScanCallbacks{
 			Started:   func() { close(started) },
-			Cancelled: func() { close(cancelled) },
+			Cancelled: func(uint64) { close(cancelled) },
 		})
 	}()
 	select {
@@ -660,7 +661,7 @@ func TestPreStartTerminalCallbackFinishesBeforeNextScanCanStart(t *testing.T) {
 	}
 	cancelledEntered := make(chan struct{})
 	releaseCancelled := make(chan struct{})
-	if err := manager.StartScan(ScanCallbacks{Cancelled: func() {
+	if err := manager.StartScan(ScanCallbacks{Cancelled: func(uint64) {
 		close(cancelledEntered)
 		<-releaseCancelled
 	}}); err != nil {
@@ -680,7 +681,7 @@ func TestPreStartTerminalCallbackFinishesBeforeNextScanCanStart(t *testing.T) {
 		return nil, nil
 	}
 	completed := make(chan struct{})
-	if err := manager.StartScan(ScanCallbacks{Completed: func([]StationInfo) { close(completed) }}); err != nil {
+	if err := manager.StartScan(ScanCallbacks{Completed: func(uint64, []StationInfo) { close(completed) }}); err != nil {
 		t.Fatalf("StartScan() after terminal callback error = %v", err)
 	}
 	select {
@@ -689,4 +690,55 @@ func TestPreStartTerminalCallbackFinishesBeforeNextScanCanStart(t *testing.T) {
 		t.Fatal("next scan did not complete")
 	}
 	manager.Shutdown()
+}
+
+// TestScanPreparationPanicPublishesTerminalState guards against a panic in
+// adapter preparation wedging the whole scan subsystem. Without recovery,
+// the async goroutine would die before publishing a terminal lifecycle state,
+// leaving isScanning set and scanLifecycle populated forever so every later
+// scan, StopScan, background recovery, and shared configuration operation is
+// rejected as busy.
+func TestScanPreparationPanicPublishesTerminalState(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	manager.scanReadyHook = func() {
+		panic("adapter enable exploded")
+	}
+
+	failed := make(chan error, 1)
+	if err := manager.StartScan(ScanCallbacks{Failed: func(_ uint64, err error) { failed <- err }}); err != nil {
+		t.Fatalf("StartScan() error = %v", err)
+	}
+	manager.scanCallbackWg.Wait()
+
+	select {
+	case err := <-failed:
+		if err == nil || !strings.Contains(err.Error(), "panicked") {
+			t.Fatalf("Failed callback error = %v, want a panic-derived error", err)
+		}
+	default:
+		t.Fatal("scan did not deliver a Failed callback after preparation panic")
+	}
+	if status := manager.GetScanStatus(); status.State != "failed" {
+		t.Fatalf("scan status = %+v, want failed", status)
+	}
+	if manager.IsScanning() {
+		t.Fatal("manager still reports scanning after preparation panic")
+	}
+
+	// The terminal publication must un-wedge the subsystem: a subsequent scan
+	// starts and completes normally.
+	manager.scanReadyHook = nil
+	manager.bluetoothOps.scanForDurationContext = func(context.Context, time.Duration) ([]internalbluetooth.DiscoveredStation, error) {
+		return nil, nil
+	}
+	completed := make(chan struct{})
+	if err := manager.StartScan(ScanCallbacks{Completed: func(uint64, []StationInfo) { close(completed) }}); err != nil {
+		t.Fatalf("StartScan() after panic error = %v, want the manager recovered", err)
+	}
+	select {
+	case <-completed:
+	case <-time.After(time.Second):
+		t.Fatal("scan did not recover after preparation panic")
+	}
 }

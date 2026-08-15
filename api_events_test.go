@@ -36,6 +36,8 @@ type fakeAPIStationManager struct {
 
 	scanErr error
 
+	scanStatusID uint64
+
 	stopScanErr error
 
 	stopCalls int
@@ -69,7 +71,7 @@ func (f *fakeAPIStationManager) StartScan(callbacks station.ScanCallbacks) error
 
 		if callbacks.Failed != nil {
 
-			callbacks.Failed(f.scanErr)
+			callbacks.Failed(f.scanStatusID, f.scanErr)
 
 		}
 
@@ -79,7 +81,7 @@ func (f *fakeAPIStationManager) StartScan(callbacks station.ScanCallbacks) error
 
 	if callbacks.Completed != nil {
 
-		callbacks.Completed([]station.StationInfo{})
+		callbacks.Completed(f.scanStatusID, []station.StationInfo{})
 
 	}
 
@@ -178,6 +180,77 @@ func TestScanEventsAreAlwaysStartedBeforeCompletion(t *testing.T) {
 			if len(order) != 2 || order[0] != "started" || order[1] != test.wantSecond {
 
 				t.Fatalf("event order = %v, want [started %s]", order, test.wantSecond)
+
+			}
+
+		})
+
+	}
+
+}
+
+// TestScanTerminalEventsCarryStatusIdentity pins the scan-status identity in
+// terminal events: a recovery read of GetScanStatus can only be matched to
+// the finished scan when the event carries the manager's status ID.
+func TestScanTerminalEventsCarryStatusIdentity(t *testing.T) {
+
+	for _, test := range []struct {
+		name string
+
+		scanErr error
+	}{
+
+		{name: "completed"},
+
+		{name: "failed", scanErr: errors.New("scan failed immediately")},
+	} {
+
+		t.Run(test.name, func(t *testing.T) {
+
+			manager := &fakeAPIStationManager{scanErr: test.scanErr, scanStatusID: 7}
+
+			var terminalEvent scanEvent
+
+			terminalSeen := false
+
+			api := fiber.New()
+
+			registerAPIRoutes(api, manager, scanEventCallbacks{
+
+				nextID: func() uint64 { return 42 },
+
+				completed: func(event scanEvent) {
+
+					terminalEvent, terminalSeen = event, true
+
+				},
+
+				failed: func(event scanEvent) {
+
+					terminalEvent, terminalSeen = event, true
+
+				},
+			}, func() APIStatus { return APIStatus{Running: true} })
+
+			response, err := api.Test(httptest.NewRequest(http.MethodPost, "/scan", nil))
+
+			if err != nil {
+
+				t.Fatal(err)
+
+			}
+
+			_ = response.Body.Close()
+
+			if !terminalSeen {
+
+				t.Fatal("no terminal scan event was emitted")
+
+			}
+
+			if terminalEvent.ID != 42 || terminalEvent.StatusID != 7 {
+
+				t.Fatalf("terminal event = %+v, want ID 42 and StatusID 7", terminalEvent)
 
 			}
 

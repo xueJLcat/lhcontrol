@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -45,6 +46,14 @@ func TestAPIStatusForError(t *testing.T) {
 		{station.ErrUnsupported, fiber.StatusUnprocessableEntity},
 
 		{station.ErrShuttingDown, fiber.StatusServiceUnavailable},
+
+		{station.ErrBulkOperationTimeout, fiber.StatusRequestTimeout},
+
+		{station.ErrStationOperationTimeout, fiber.StatusRequestTimeout},
+
+		{station.ErrScanStopTimeout, fiber.StatusRequestTimeout},
+
+		{context.DeadlineExceeded, fiber.StatusRequestTimeout},
 
 		{fmt.Errorf("BLE failure"), fiber.StatusInternalServerError},
 	}

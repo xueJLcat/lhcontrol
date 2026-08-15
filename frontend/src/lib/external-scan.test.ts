@@ -462,4 +462,59 @@ describe('ExternalScanCoordinator', () => {
     await coordinator.handleFailed({ id: 11, error: 'radio failure' });
     expect(coordinator.hasPendingTerminal()).toBe(true);
   });
+
+  it('keeps recovery pending when the terminal status belongs to a different scan', async () => {
+    const { host, state } = createHost();
+    // The status record was already overwritten by a newer scan (identity 4)
+    // that started and finished while this handler awaited the read.
+    (host.getScanStatus as ReturnType<typeof vi.fn>).mockResolvedValue({
+      id: 4, state: 'failed', found: 0, error: 'newer scan failure', warnings: []
+    });
+    const coordinator = new ExternalScanCoordinator(host);
+    coordinator.handleStarted({ id: 3 });
+
+    await coordinator.handleCompleted({ id: 3, statusId: 2, stations: [] });
+
+    // The foreign terminal must not clear the recovery epochs; the periodic
+    // check retries until the matching status is readable.
+    expect(coordinator.hasPendingRecovery()).toBe(true);
+    expect(state.externalScanning).toBe(false);
+    expect(state.statusMessages[state.statusMessages.length - 1]).not.toContain('newer scan failure');
+  });
+
+  it('commits the terminal status when its identity matches the recovered scan', async () => {
+    const { host, state } = createHost();
+    (host.getScanStatus as ReturnType<typeof vi.fn>).mockResolvedValue({
+      id: 2, state: 'completed', found: 5, warnings: []
+    });
+    const coordinator = new ExternalScanCoordinator(host);
+    coordinator.handleStarted({ id: 3 });
+
+    await coordinator.handleCompleted({ id: 3, statusId: 2, stations: [] });
+
+    expect(coordinator.hasPendingRecovery()).toBe(false);
+    expect(state.statusMessages[state.statusMessages.length - 1]).toContain('found 5');
+  });
+
+  it('retries tracked recovery while the status identity does not match', async () => {
+    const { host, state } = createHost();
+    const coordinator = new ExternalScanCoordinator(host);
+    coordinator.handleStarted({ id: 3 });
+    (host.getScanStatus as ReturnType<typeof vi.fn>).mockResolvedValue({
+      state: 'running', found: 0, warnings: []
+    });
+    await coordinator.handleCompleted({ id: 3, statusId: 2, stations: [] });
+    expect(coordinator.hasPendingRecovery()).toBe(true);
+
+    // The periodic check reads a foreign terminal identity first, then the
+    // matching one; only the latter commits the outcome.
+    (host.getScanStatus as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce({ id: 9, state: 'failed', found: 0, error: 'foreign', warnings: [] })
+      .mockResolvedValueOnce({ id: 2, state: 'completed', found: 4, warnings: [] });
+    await coordinator.recoverTrackedTerminal(1, state.statusEpoch, new Map<string, number>());
+    expect(coordinator.hasPendingRecovery()).toBe(true);
+    await coordinator.recoverTrackedTerminal(1, state.statusEpoch, new Map<string, number>());
+    expect(coordinator.hasPendingRecovery()).toBe(false);
+    expect(state.statusMessages[state.statusMessages.length - 1]).toContain('found 4');
+  });
 });

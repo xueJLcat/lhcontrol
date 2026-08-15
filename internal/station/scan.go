@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"lhcontrol/internal/bluetooth"
 	"log"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"sync"
@@ -82,17 +83,18 @@ func (m *Manager) reserveScan(parent context.Context) (*scanLifecycle, error) {
 		return nil, ErrOperationInProgress
 	}
 	ctx, cancel := context.WithCancel(parent)
+	statusID := m.markScanStarted()
 	lifecycle := &scanLifecycle{
 		ctx:         ctx,
 		cancel:      cancel,
 		done:        make(chan struct{}),
 		startedDone: make(chan struct{}),
+		statusID:    statusID,
 	}
 	m.scanLifecycleMutex.Lock()
 	m.scanLifecycle = lifecycle
 	m.scanLifecycleMutex.Unlock()
 	m.isScanning.Store(true)
-	m.markScanStarted()
 	// Publish the cancellable lifecycle before adapter initialization or any
 	// other potentially blocking start work. StopScan can then record the
 	// user's intent immediately instead of racing the platform scan goroutine.
@@ -102,11 +104,26 @@ func (m *Manager) reserveScan(parent context.Context) (*scanLifecycle, error) {
 	}
 	return lifecycle, nil
 }
-func (m *Manager) prepareScan(lifecycle *scanLifecycle) (bool, error) {
+// prepareScan reserves the global operation and readies the adapter for a
+// scan. A panic during adapter preparation is converted into a scan failure:
+// without a terminal error the callers would publish no terminal lifecycle
+// state, leaving isScanning set and scanLifecycle populated forever and
+// wedging every later scan, StopScan, background recovery, and shared
+// configuration operation. The named operationAcquired return lets the
+// deferred recover report whether the global operation was already acquired
+// so the abort path releases it.
+func (m *Manager) prepareScan(lifecycle *scanLifecycle) (operationAcquired bool, returnErr error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			returnErr = fmt.Errorf("scan preparation panicked: %v\n%s", recovered, debug.Stack())
+			log.Printf("Recovered panic: %v", returnErr)
+		}
+	}()
 	ctx := lifecycle.ctx
 	if err := m.beginForegroundGlobalOperationContext(ctx); err != nil {
 		return false, err
 	}
+	operationAcquired = true
 	if err := m.ensureReady(); err != nil {
 		return true, err
 	}
@@ -165,6 +182,7 @@ func (m *Manager) finishScan(found int, err error, callbacks ScanCallbacks) func
 	if lifecycle == nil {
 		return func() {}
 	}
+	statusID := lifecycle.statusID
 	return func() {
 		// StartScan begins scan processing before delivering Started. Keep terminal
 		// notifications behind that callback without making processing wait for it.
@@ -173,7 +191,7 @@ func (m *Manager) finishScan(found int, err error, callbacks ScanCallbacks) func
 		if errors.Is(err, bluetooth.ErrScanCancelled) || errors.Is(err, context.Canceled) {
 			if callbacks.Cancelled != nil {
 				if callbackErr := runSafely("scan cancelled callback", func() error {
-					callbacks.Cancelled()
+					callbacks.Cancelled(statusID)
 					return nil
 				}); callbackErr != nil {
 					log.Printf("Scan cancelled callback failed: %v", callbackErr)
@@ -182,7 +200,7 @@ func (m *Manager) finishScan(found int, err error, callbacks ScanCallbacks) func
 		} else if err != nil {
 			if callbacks.Failed != nil {
 				if callbackErr := runSafely("scan failure callback", func() error {
-					callbacks.Failed(err)
+					callbacks.Failed(statusID, err)
 					return nil
 				}); callbackErr != nil {
 					log.Printf("Scan failure callback failed: %v", callbackErr)
@@ -192,7 +210,7 @@ func (m *Manager) finishScan(found int, err error, callbacks ScanCallbacks) func
 			if callbackErr := runSafely("scan completion callback", func() error {
 				// Use the latest authoritative cache after releasing the scan
 				// lock instead of the snapshot captured before recovery could run.
-				callbacks.Completed(m.GetStationInfo())
+				callbacks.Completed(statusID, m.GetStationInfo())
 				return nil
 			}); callbackErr != nil {
 				log.Printf("Scan completion callback failed: %v", callbackErr)
@@ -473,14 +491,18 @@ func (m *Manager) StopScan() error {
 func (m *Manager) IsScanning() bool {
 	return m.isScanning.Load()
 }
-func (m *Manager) markScanStarted() {
+func (m *Manager) markScanStarted() uint64 {
 	m.scanStatusMutex.Lock()
+	m.scanStatusID++
+	statusID := m.scanStatusID
 	m.scanStatus = ScanStatus{
+		ID:        statusID,
 		State:     "starting",
 		StartedAt: time.Now().Format(time.RFC3339Nano),
 		Warnings:  []string{},
 	}
 	m.scanStatusMutex.Unlock()
+	return statusID
 }
 func (m *Manager) markScanRunning() {
 	m.scanStatusMutex.Lock()
@@ -545,7 +567,7 @@ func (m *Manager) StartScan(callbacks ScanCallbacks) error {
 			m.asyncScanWg.Done()
 			defer m.scanCallbackWg.Done()
 			<-lifecycle.startedDone
-			m.deliverAbortedScanCallback(prepareErr, cancelled, callbacks)
+			m.deliverAbortedScanCallback(lifecycle.statusID, prepareErr, cancelled, callbacks)
 			m.clearScanLifecycle(lifecycle)
 			return
 		}
@@ -567,11 +589,11 @@ func (m *Manager) StartScan(callbacks ScanCallbacks) error {
 	close(lifecycle.startedDone)
 	return nil
 }
-func (m *Manager) deliverAbortedScanCallback(err error, cancelled bool, callbacks ScanCallbacks) {
+func (m *Manager) deliverAbortedScanCallback(statusID uint64, err error, cancelled bool, callbacks ScanCallbacks) {
 	if cancelled {
 		if callbacks.Cancelled != nil {
 			if callbackErr := runSafely("scan cancelled callback", func() error {
-				callbacks.Cancelled()
+				callbacks.Cancelled(statusID)
 				return nil
 			}); callbackErr != nil {
 				log.Printf("Scan cancelled callback failed: %v", callbackErr)
@@ -581,7 +603,7 @@ func (m *Manager) deliverAbortedScanCallback(err error, cancelled bool, callback
 	}
 	if callbacks.Failed != nil {
 		if callbackErr := runSafely("scan failure callback", func() error {
-			callbacks.Failed(err)
+			callbacks.Failed(statusID, err)
 			return nil
 		}); callbackErr != nil {
 			log.Printf("Scan failure callback failed: %v", callbackErr)

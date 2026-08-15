@@ -409,6 +409,7 @@ export namespace station {
 		}
 	}
 	export class ScanStatus {
+	    id?: number;
 	    state: string;
 	    startedAt: string;
 	    completedAt: string;
@@ -422,6 +423,7 @@ export namespace station {
 	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
 	        this.state = source["state"];
 	        this.startedAt = source["startedAt"];
 	        this.completedAt = source["completedAt"];
