@@ -564,6 +564,17 @@ describe('SettingsDrawer auto sleep', () => {
     expect(input.value).toBe('120');
   });
 
+  it('clamps below-minimum delays up to the one-minute floor', async () => {
+    const props = defaultProps({ autoSleep: autoSleep({ enabled: true, delaySeconds: 300 }) });
+    render(SettingsDrawer, { props });
+    const input = screen.getByLabelText('Wait before sleeping') as HTMLInputElement;
+    await fireEvent.input(input, { target: { value: '0.5' } });
+    await fireEvent.change(input);
+    const next = props.onAutoSleepChange.mock.calls[0][0] as autosleep.Settings;
+    expect(next.delaySeconds).toBe(60);
+    expect(input.value).toBe('1');
+  });
+
   it('shows and preserves a hand-edited non-whole-minute delay exactly', async () => {
     const props = defaultProps({ autoSleep: autoSleep({ enabled: true, delaySeconds: 90 }) });
     render(SettingsDrawer, { props });

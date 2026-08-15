@@ -1201,6 +1201,24 @@ func TestLoadRepairsContradictoryAdvancedSettings(t *testing.T) {
 	}
 }
 
+func TestLoadRepairsBulkTimeoutBelowStationTimeout(t *testing.T) {
+	configDirectory := useTemporaryConfigDirectory(t)
+	if err := os.WriteFile(
+		filepath.Join(configDirectory, "config.json"),
+		[]byte(`{"stationOperationTimeoutSeconds":120,"bulkPowerTimeoutSeconds":30}`),
+		0o644,
+	); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	cfg := NewConfig()
+	if err := cfg.Load(); err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if got := cfg.GetBulkPowerTimeoutSeconds(); got != 120 {
+		t.Fatalf("repaired bulk power timeout = %d, want it raised to the station operation timeout 120", got)
+	}
+}
+
 func TestLoadSanitizesInvalidAPIListenAddress(t *testing.T) {
 	configDirectory := useTemporaryConfigDirectory(t)
 	if err := os.WriteFile(

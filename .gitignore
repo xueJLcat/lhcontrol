@@ -8,3 +8,5 @@ frontend/dist
 config.json
 .idea
 .exe
+# Wails build artifact (Windows resource object), regenerated on every build.
+lhcontrol-res.syso

@@ -92,6 +92,49 @@ describe('backendCopy', () => {
     expect(backendCopy(raw)).toBe(raw);
   });
 
+  it('keeps power confirmation errors byte-identical in English', () => {
+    const raw = 'on command sent but state confirmation failed (actual booting, raw 0x01): read power characteristic: connection reset';
+    expect(backendCopy(raw)).toBe(raw);
+  });
+
+  it('translates power confirmation errors under zh-CN', () => {
+    setLanguagePreference('zh-CN');
+    expect(backendCopy('sleep command sent but state confirmation failed (actual on, raw 0x0B): timeout'))
+      .toBe('休眠命令已发送，但状态确认失败（实际 开启，原始值 0x0B）：timeout');
+  });
+
+  it('translates aggregate read failures line by line under zh-CN', () => {
+    setLanguagePreference('zh-CN');
+    const raw = 'station status read was incomplete: read power characteristic: boom\nread channel characteristic: kaput';
+    expect(backendCopy(raw)).toBe('基站状态读取不完整：读取电源特征值：boom；读取频道特征值：kaput');
+    expect(backendCopy('initial station read was incomplete: read power characteristic: boom'))
+      .toBe('初始读取不完整：读取电源特征值：boom');
+  });
+
+  it('translates transport operation prefixes under zh-CN and recurses into the cause', () => {
+    setLanguagePreference('zh-CN');
+    expect(backendCopy('read power characteristic: some WinRT failure'))
+      .toBe('读取电源特征值：some WinRT failure');
+    expect(backendCopy('connect station: station is booting')).toBe('连接基站：基站正在启动');
+  });
+
+  it('keeps transport operation prefixes byte-identical in English', () => {
+    const raw = 'discover GATT services: the radio is gone';
+    expect(backendCopy(raw)).toBe(raw);
+  });
+
+  it('does not parse ordinary detail text as a transport operation', () => {
+    setLanguagePreference('zh-CN');
+    expect(backendCopy('mystery text: with a colon')).toBe('mystery text: with a colon');
+  });
+
+  it('translates per-station scan warning details line by line under zh-CN', () => {
+    setLanguagePreference('zh-CN');
+    const raw = '2 station(s) were discovered, but some initial values could not be read: AA:BB:CC:DD:EE:01: station is booting\nAA:BB:CC:DD:EE:02: station is booting';
+    expect(backendCopy(raw))
+      .toBe('已发现 2 个基站，但部分初始值读取失败：AA:BB:CC:DD:EE:01: 基站正在启动；AA:BB:CC:DD:EE:02: 基站正在启动');
+  });
+
   it('joins translated warnings with a locale-appropriate separator', () => {
     const warnings = ['station is booting', 'unknown detail stays raw'];
     expect(joinBackendCopy(warnings)).toBe('station is booting unknown detail stays raw');

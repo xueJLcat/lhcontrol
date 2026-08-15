@@ -34,10 +34,17 @@ describe('ScanRecovery', () => {
   });
 
   it('renders targeted copy for every error kind', () => {
-    for (const kind of ['adapter-missing', 'permission', 'timeout', 'unknown'] as const) {
+    for (const kind of ['adapter-missing', 'permission', 'busy', 'timeout', 'unknown'] as const) {
       cleanup();
       renderRecovery({ kind });
       expect(screen.getByRole('alert')).toBeInTheDocument();
     }
+  });
+
+  it('renders the busy guidance with its retry step', () => {
+    renderRecovery({ kind: 'busy', detail: 'another Bluetooth operation is already in progress' });
+    expect(screen.getByRole('heading', { name: 'Bluetooth is busy' })).toBeInTheDocument();
+    expect(screen.getAllByRole('listitem')).toHaveLength(1);
+    expect(screen.getByText('another Bluetooth operation is already in progress')).toBeInTheDocument();
   });
 });

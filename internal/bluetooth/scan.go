@@ -124,6 +124,18 @@ func (s *scanSession) stopError() error {
 	return s.stopErr
 }
 
+// clearStopError drops a recorded stop failure once the adapter-level stop
+// handshake proves the stop eventually succeeded. issueStop records the first
+// watcher.Stop() result, but the adapter layer can retry a failed stop and
+// reach a clean terminal state afterwards; keeping the stale first error
+// would discard a completed duration scan's results and misclassify a clean
+// cancellation as a stop failure.
+func (s *scanSession) clearStopError() {
+	s.mutex.Lock()
+	s.stopErr = nil
+	s.mutex.Unlock()
+}
+
 func (s *scanSession) requestStopAsync(reason scanStopReason) {
 	s.mutex.Lock()
 	if s.finished {
@@ -311,6 +323,12 @@ func ScanForDurationContext(ctx context.Context, duration time.Duration) ([]Disc
 		// other stop-handshake wait so a hung platform stop cannot wedge the
 		// scan subsystem.
 		_ = session.awaitStop(session.stopWaitLimit)
+	}
+	if scanErr == nil {
+		// The adapter-level handshake is authoritative: a clean finish means a
+		// failed first stop was repaired by the adapter's own retry, so the
+		// stale session record must not poison the classification below.
+		session.clearStopError()
 	}
 
 	if scanErr != nil {

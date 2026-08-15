@@ -475,6 +475,27 @@ func TestStopScanWithoutScanReportsNotScanningOnThreadFailure(t *testing.T) {
 	}
 }
 
+// TestStopScanTerminalScanReportsNotScanningOnThreadFailure guards the teardown
+// window: a late idempotent stop that cannot enter its WinRT thread after the
+// scan already finished cleanly must report not-scanning, not the unrelated
+// thread initialization error.
+func TestStopScanTerminalScanReportsNotScanningOnThreadFailure(t *testing.T) {
+	originalEnter := enterWinRTThread
+	enterWinRTThread = func() (func(), error) { return nil, errors.New("apartment unavailable") }
+	t.Cleanup(func() { enterWinRTThread = originalEnter })
+
+	control := &scanControl{
+		watcher:      &advertisement.BluetoothLEAdvertisementWatcher{},
+		stopRequests: make(chan error, 1),
+		started:      true,
+		terminal:     true,
+	}
+	adapter := &Adapter{scan: control}
+	if err := adapter.StopScan(); !errors.Is(err, ErrNotScanning) {
+		t.Fatalf("StopScan() error = %v, want ErrNotScanning for a finished scan", err)
+	}
+}
+
 func TestConnectHandlerAccessIsSynchronized(t *testing.T) {
 	adapter := &Adapter{}
 	handler := func(Device, bool) {}

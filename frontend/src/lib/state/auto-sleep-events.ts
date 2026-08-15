@@ -93,10 +93,13 @@ export class AutoSleepEventCoordinator {
 
     switch (event.phase) {
       case 'started':
-        // The backend only starts an action after acquiring its serialized
-        // slot, so no user operation can be mid-message here; claim the line.
-        this.dependencies.beginStatusOperation();
-        this.setMessage(t('Auto sleep: scanning and putting all stations to sleep...'));
+        // The started event is emitted before the action's scan acquires the
+        // station-manager operation lock, so an interactive scan or bulk can
+        // still own the status line; gate like the terminal phases. The toast
+        // reports the trigger regardless.
+        if (this.claimStatusLine()) {
+          this.setMessage(t('Auto sleep: scanning and putting all stations to sleep...'));
+        }
         pushToast(t('Session ended — scanning and putting all stations to sleep.'), 'info');
         break;
       case 'completed':

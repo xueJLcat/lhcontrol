@@ -204,6 +204,72 @@ func TestLateStopAfterWatcherEndedIsNotAStopFailure(t *testing.T) {
 		t.Fatalf("late-stop scan results = %+v", results)
 	}
 }
+
+// TestScanKeepsResultsWhenFirstStopFailsButHandshakeRecovers guards the
+// session/adapter reconciliation: the session records the first watcher.Stop()
+// failure, but when the adapter-level handshake still reaches a clean finish
+// (its own retry repaired the stop), the completed duration scan must keep its
+// results instead of reporting a stop failure.
+func TestScanKeepsResultsWhenFirstStopFailsButHandshakeRecovers(t *testing.T) {
+	originalAdapter := adapter
+	fake := newFakeBLEAdapter()
+	fake.stopErr = errors.New("transient stop failure")
+	adapter = fake
+	t.Cleanup(func() { adapter = originalAdapter })
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+	mac, err := tinybluetooth.ParseMAC("11:22:33:44:55:71")
+	if err != nil {
+		t.Fatalf("ParseMAC() error = %v", err)
+	}
+	fake.results = []tinybluetooth.ScanResult{{
+		Address: tinybluetooth.Address{MACAddress: tinybluetooth.MACAddress{MAC: mac}},
+		AdvertisementPayload: &fakeAdvertisementPayload{
+			name:     "LHB-RECOVERED-STOP",
+			services: []tinybluetooth.UUID{powerControlServiceUUID},
+		},
+	}}
+	results, err := ScanForDuration(10 * time.Millisecond)
+	if err != nil {
+		t.Fatalf("ScanForDuration() error = %v, want results kept after the adapter recovered the stop", err)
+	}
+	if len(results) != 1 || results[0].Name != "LHB-RECOVERED-STOP" {
+		t.Fatalf("recovered-stop scan results = %+v", results)
+	}
+}
+
+// TestCancelScanReportsCancellationWhenFirstStopFails guards the same
+// reconciliation for cancellations: a stale first-stop failure must not turn
+// a clean cancellation (the adapter handshake recovered) into a stop-failure
+// error.
+func TestCancelScanReportsCancellationWhenFirstStopFails(t *testing.T) {
+	originalAdapter := adapter
+	fake := newFakeBLEAdapter()
+	fake.stopErr = errors.New("transient stop failure")
+	adapter = fake
+	t.Cleanup(func() { adapter = originalAdapter })
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		_, err := ScanForDurationContext(ctx, time.Hour)
+		result <- err
+	}()
+	select {
+	case <-fake.started:
+	case <-time.After(time.Second):
+		t.Fatal("scan did not start")
+	}
+	cancel()
+	select {
+	case err := <-result:
+		if !errors.Is(err, ErrScanCancelled) {
+			t.Fatalf("ScanForDuration() after cancellation error = %v, want ErrScanCancelled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("active scan did not stop after cancellation")
+	}
+}
 func TestScanForDurationRepeatedLifecycle(t *testing.T) {
 	originalAdapter := adapter
 	t.Cleanup(func() { adapter = originalAdapter })

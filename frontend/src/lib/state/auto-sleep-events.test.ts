@@ -206,6 +206,31 @@ describe('AutoSleepEventCoordinator', () => {
     );
   });
 
+  it('keeps a foreground operation status line for the started phase as well', () => {
+    const dependencies = {
+      isDisposed: vi.fn(() => false),
+      setRunning: vi.fn(),
+      beginStatusOperation: vi.fn(),
+      setStatusMessage: vi.fn(),
+      applyStations: vi.fn(),
+      foregroundOwnsStatusLine: vi.fn(() => true)
+    };
+    const coordinator = new AutoSleepEventCoordinator(dependencies);
+
+    coordinator.handle({ id: 6, phase: 'started' });
+
+    // The started event is emitted before the action holds the operation
+    // lock, so an interactive scan/bulk can own the line; its summary must
+    // survive. The toast still reports the trigger.
+    expect(dependencies.setRunning).toHaveBeenCalledWith(true);
+    expect(dependencies.beginStatusOperation).not.toHaveBeenCalled();
+    expect(dependencies.setStatusMessage).not.toHaveBeenCalled();
+    expect(pushToast).toHaveBeenCalledWith(
+      'Session ended — scanning and putting all stations to sleep.',
+      'info'
+    );
+  });
+
   it('keeps a foreground operation status line for terminal outcomes as well', () => {
     const dependencies = {
       isDisposed: vi.fn(() => false),

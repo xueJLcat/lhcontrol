@@ -790,7 +790,14 @@ func (a *Adapter) StopScan() error {
 			a.watcherMutex.RUnlock()
 			return nil
 		}
+		terminal := control.terminal
 		control.mutex.Unlock()
+		if terminal {
+			// The scan already finished cleanly; a late stop that cannot enter
+			// its WinRT thread is an idempotent no-op, not a failure.
+			a.watcherMutex.RUnlock()
+			return ErrNotScanning
+		}
 		control.stopOnce.Do(func() { control.stopRequests <- err })
 		a.watcherMutex.RUnlock()
 		return err

@@ -50,6 +50,56 @@ const CAPABILITY_ZH: Record<string, string> = {
   'safe channel control': '安全频道控制'
 };
 
+// Power state names used by PowerConfirmationError ("actual <state>").
+const POWER_STATE_ZH: Record<string, string> = {
+  on: '开启',
+  standby: '待机',
+  sleep: '休眠',
+  booting: '启动中',
+  unknown: '未知'
+};
+
+// Closed set of transport operation prefixes used by DeviceTransportError
+// ("<operation>: <cause>"). Unmapped prefixes are not matched, so ordinary
+// English detail text is never misparsed as an operation label.
+const OPERATION_ZH: Record<string, string> = {
+  'read power characteristic': '读取电源特征值',
+  'read channel characteristic': '读取频道特征值',
+  'write characteristic': '写入特征值',
+  'write power characteristic': '写入电源特征值',
+  'connect station': '连接基站',
+  'retry station connection': '重试基站连接',
+  'discover GATT services': '发现 GATT 服务',
+  'discover control characteristics': '发现控制特征值',
+  'disconnect stale station connection': '断开过期的基站连接',
+  'cleanup before discovery retry': '发现重试前清理',
+  'cleanup before capability refresh': '能力刷新前清理',
+  'cleanup cancelled capability discovery': '清理已取消的能力发现',
+  'cleanup cancelled initial read': '清理已取消的初始读取',
+  'finish previous connection cleanup': '完成先前连接清理',
+  'cleanup unsupported station connection': '清理不支持的基站连接'
+};
+
+const TRANSPORT_PREFIX_PATTERN = new RegExp(
+  `^(${Object.keys(OPERATION_ZH).join('|')}): (.+)$`,
+  's'
+);
+
+// errors.Join renders joined errors on separate lines. Aggregate messages
+// embed such joins, so each line is mapped independently. Lines shaped like
+// "<MAC>: <error>" (per-station scan read failures) keep their address and
+// translate only the error half.
+function mapJoinedLines(detail: string): string {
+  return detail
+    .split('\n')
+    .map((line) => {
+      const stationLine = line.match(/^([0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5}): (.+)$/s);
+      if (stationLine) return `${stationLine[1]}: ${backendCopy(stationLine[2])}`;
+      return backendCopy(line);
+    })
+    .join(locale() === 'zh-CN' ? '；' : '\n');
+}
+
 // Setting names used by the config validation errors. Unmapped names fall
 // back to the English subject so messages stay readable.
 const SETTINGS_SUBJECT_ZH: Record<string, string> = {
@@ -90,14 +140,53 @@ interface CopyPattern {
 // Parameterized backend strings. More specific patterns come first.
 const PATTERNS: readonly CopyPattern[] = [
   {
-    // station/scan.go: connections not released before scanning.
+    // station/scan.go: connections not released before scanning. The detail
+    // is an errors.Join of "<MAC>: <error>" lines.
     pattern: /^(\d+) station connection\(s\) could not be fully released before scanning: (.+)$/s,
-    render: (m) => t('scan.warning.connectionsNotReleased', { count: m[1], detail: backendCopy(m[2]) })
+    render: (m) => t('scan.warning.connectionsNotReleased', { count: m[1], detail: mapJoinedLines(m[2]) })
   },
   {
-    // station/scan.go: initial read failures after discovery.
+    // station/scan.go: initial read failures after discovery. The detail is
+    // an errors.Join of "<MAC>: <error>" lines.
     pattern: /^(\d+) station\(s\) were discovered, but some initial values could not be read: (.+)$/s,
-    render: (m) => t('scan.warning.initialReadFailures', { count: m[1], detail: backendCopy(m[2]) })
+    render: (m) => t('scan.warning.initialReadFailures', { count: m[1], detail: mapJoinedLines(m[2]) })
+  },
+  {
+    // bluetooth/power.go PowerConfirmationError shape.
+    pattern: /^(on|standby|sleep) command sent but state confirmation failed \(actual (on|standby|sleep|booting|unknown), raw (0x[0-9A-Fa-f]{2}|unavailable)\): (.+)$/s,
+    render: (m) => {
+      if (locale() !== 'zh-CN') {
+        return `${m[1]} command sent but state confirmation failed (actual ${m[2]}, raw ${m[3]}): ${m[4]}`;
+      }
+      return t('power.confirmationError', {
+        target: POWER_STATE_ZH[m[1]],
+        actual: POWER_STATE_ZH[m[2]],
+        raw: m[3],
+        detail: backendCopy(m[4])
+      });
+    }
+  },
+  {
+    // bluetooth/status.go aggregate read failures; the detail is an
+    // errors.Join rendered on separate lines.
+    pattern: /^station status read was incomplete: (.+)$/s,
+    render: (m) => locale() === 'zh-CN'
+      ? t('status.readIncomplete', { detail: mapJoinedLines(m[1]) })
+      : `station status read was incomplete: ${m[1]}`
+  },
+  {
+    pattern: /^initial station read was incomplete: (.+)$/s,
+    render: (m) => locale() === 'zh-CN'
+      ? t('scan.initialReadIncomplete', { detail: mapJoinedLines(m[1]) })
+      : `initial station read was incomplete: ${m[1]}`
+  },
+  {
+    // bluetooth DeviceTransportError shape with a known operation prefix.
+    pattern: TRANSPORT_PREFIX_PATTERN,
+    render: (m) => {
+      if (locale() !== 'zh-CN') return `${m[1]}: ${m[2]}`;
+      return `${OPERATION_ZH[m[1]]}：${backendCopy(m[2])}`;
+    }
   },
   {
     // bluetooth/channel.go: final-readback confirmation warning.

@@ -246,6 +246,12 @@ dispatch:
 		for _, stationPtr := range stationsToRead {
 			m.trackStatusRefreshPending(stationPtr.Snapshot().Address)
 		}
+		// Stations first observed disconnected in this abandoned refresh still
+		// need recovery tracking; the normal path registers them after the
+		// worker join.
+		for _, address := range disconnectedAddresses {
+			m.ensureStatusRecoveryTracked(address)
+		}
 		m.scheduleStatusRecovery()
 		return m.GetStationInfo(), fmt.Errorf("status refresh did not finish within %s: %w", joinLimit, ErrOperationInProgress)
 	}
