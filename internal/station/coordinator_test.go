@@ -661,3 +661,62 @@ func TestPreemptedRecoveryMovesBehindOtherDueCandidates(t *testing.T) {
 		t.Fatalf("preempted candidate nextAt=%v, other nextAt=%v; want other candidate first", firstNext, secondNext)
 	}
 }
+
+// TestDuplicateForegroundStationOperationRejectsImmediately keeps the
+// per-station busy contract: when another foreground operation already owns
+// the station, the duplicate must be rejected right away instead of falling
+// through to the recovery wait, which would cancel and block on an unrelated
+// station's background recovery before still returning Busy.
+func TestDuplicateForegroundStationOperationRejectsImmediately(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+
+	recoveryAddress := "11:22:33:44:99:10"
+	manager.stations[recoveryAddress] = &internalbluetooth.BaseStation{
+		Name: "LHB-RECOVERY", Address: mustAddress(t, recoveryAddress), Present: true,
+	}
+	manager.statusRetryMutex.Lock()
+	manager.statusRetries[recoveryAddress] = statusRetry{nextAt: time.Now().Add(-time.Second)}
+	manager.statusRetryMutex.Unlock()
+	recoveryStarted := make(chan struct{})
+	recoveryRelease := make(chan struct{})
+	defer close(recoveryRelease)
+	manager.bluetoothOps.fetchInitialPowerState = func(context.Context, *internalbluetooth.BaseStation) error {
+		select {
+		case <-recoveryStarted:
+		default:
+			close(recoveryStarted)
+		}
+		<-recoveryRelease
+		return nil
+	}
+	manager.scheduleStatusRecovery()
+	select {
+	case <-recoveryStarted:
+	case <-time.After(time.Second):
+		t.Fatal("background recovery did not start")
+	}
+	manager.recoveryOperationMutex.Lock()
+	recoveryContext := manager.recoveryContext
+	manager.recoveryOperationMutex.Unlock()
+
+	target := "11:22:33:44:99:11"
+	if err := manager.beginStationOperation(target); err != nil {
+		t.Fatalf("first foreground operation error = %v", err)
+	}
+	defer manager.endStationOperation(target)
+
+	started := time.Now()
+	err := manager.beginForegroundStationOperation(target)
+	if !errors.Is(err, ErrOperationInProgress) {
+		t.Fatalf("duplicate foreground operation error = %v, want ErrOperationInProgress", err)
+	}
+	if elapsed := time.Since(started); elapsed > 250*time.Millisecond {
+		t.Fatalf("duplicate foreground operation waited %v, want immediate rejection", elapsed)
+	}
+	select {
+	case <-recoveryContext.Done():
+		t.Fatal("rejected duplicate operation cancelled an unrelated background recovery")
+	default:
+	}
+}

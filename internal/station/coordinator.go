@@ -318,7 +318,15 @@ func (m *Manager) beginForegroundStationOperationContext(ctx context.Context, ad
 			return err
 		}
 		var deviceBusy *deviceOperationBusyError
-		if errors.As(err, &deviceBusy) && deviceBusy.backgroundDone != nil {
+		if errors.As(err, &deviceBusy) {
+			if deviceBusy.backgroundDone == nil {
+				// Another foreground operation owns this station. Reject the
+				// duplicate immediately; falling through to the recovery wait
+				// would cancel and block on some unrelated station's
+				// background work before still returning Busy, contradicting
+				// the never-wait contract for per-station conflicts.
+				return err
+			}
 			if deviceBusy.cancelBackground != nil {
 				deviceBusy.cancelBackground()
 			} else {
