@@ -174,9 +174,10 @@ describe('AsyncSetting', () => {
 
     await setting.change(10);
 
-    // The rolled-back value may not match the backend; the error flag must say
-    // so instead of silently displaying the stale value.
-    expect(setting.value).toBe(5);
+    // The rolled-back value may not match the backend, so the value is dropped
+    // and the error flag drives the template's error branch with its Retry
+    // action instead of silently displaying a possibly stale value.
+    expect(setting.value).toBeNull();
     expect(setting.error).toContain('save rejected');
     expect(setting.busy).toBe(false);
   });

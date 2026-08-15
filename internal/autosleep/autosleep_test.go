@@ -585,6 +585,70 @@ func TestWatcherTriggerDebtUsesCompletionGeneration(t *testing.T) {
 	}
 }
 
+// TestWatcherRearmsOwedTriggerAfterUnsettledCancel covers an action cancelled
+// before settling while the same watcher keeps running (for example when an
+// external scan stop cancels the action's scan phase). The monitor already
+// consumed its trigger and returned to idle, so without a re-arm the owed
+// sleep would wait forever for a replacement watcher or a brand-new process
+// session that may never come.
+func TestWatcherRearmsOwedTriggerAfterUnsettledCancel(t *testing.T) {
+	var running atomic.Bool
+	running.Store(true)
+	var ticks atomic.Int64
+	base := time.Now()
+	firstCancelled := make(chan struct{})
+	var cancelOnce sync.Once
+	secondRan := make(chan struct{})
+	var secondOnce sync.Once
+	var calls atomic.Int32
+
+	watcher := &Watcher{
+		Settings:  Settings{Enabled: true, Target: string(TargetSteamVR), DelaySeconds: 60},
+		Interval:  time.Millisecond,
+		IsRunning: func(string) (bool, error) { return running.Load(), nil },
+		Now:       func() time.Time { return base.Add(time.Duration(ticks.Add(1)) * time.Minute) },
+		Monitor:   NewMonitor(time.Minute),
+		Trigger: func(ctx context.Context, _ time.Time) bool {
+			if calls.Add(1) == 1 {
+				cancelOnce.Do(func() { close(firstCancelled) })
+				return false // cancelled before settling: the debt stays owed
+			}
+			secondOnce.Do(func() { close(secondRan) })
+			return true
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		watcher.Run(ctx)
+	}()
+	defer func() {
+		cancel()
+		<-done
+	}()
+
+	time.Sleep(20 * time.Millisecond)
+	running.Store(false)
+	select {
+	case <-firstCancelled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("watcher did not start the automatic-sleep action")
+	}
+	// The process stays closed and no replacement watcher arrives; the owed
+	// sleep must still run exactly once.
+	select {
+	case <-secondRan:
+	case <-time.After(2 * time.Second):
+		t.Fatal("watcher did not re-arm the owed trigger after the unsettled cancel")
+	}
+	time.Sleep(30 * time.Millisecond)
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("trigger calls = %d, want exactly 2 (re-arm must not loop)", got)
+	}
+}
+
 // TestCancelledActionKeepsOwedTriggerForReplacement guards the owed-trigger
 // race: when a settings change cancels a running sleep action before it
 // settles, the action's trigger debt must survive so the replacement watcher

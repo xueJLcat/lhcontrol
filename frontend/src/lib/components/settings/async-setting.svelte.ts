@@ -51,7 +51,6 @@ export class AsyncSetting<T> {
 
   change = async (next: T): Promise<void> => {
     if (this.busy || this.value === null) return;
-    const previous = this.value;
     this.value = next;
     this.busy = true;
     try {
@@ -63,19 +62,20 @@ export class AsyncSetting<T> {
           // after this instance captured `previous`. Re-read inside the same
           // serialization slot so a failed later save rolls back to the value
           // that is actually persisted, not to an older local snapshot.
-          try {
-            const persisted = await this.options.getter();
-            this.value = this.options.map ? this.options.map(persisted) : persisted;
-            this.error = null;
-          } catch {
-            // The compensating re-read failed as well, so the rolled-back value
-            // may not match the backend. Surface the error instead of silently
-            // showing a possibly stale value; retrying the load recovers it.
-            this.value = previous;
-            this.error = String(error);
-          }
-          pushToast(withDetail(this.options.saveMessage, error));
-          return;
+           try {
+             const persisted = await this.options.getter();
+             this.value = this.options.map ? this.options.map(persisted) : persisted;
+             this.error = null;
+           } catch {
+             // The compensating re-read failed as well, so the rolled-back value
+             // may not match the backend. Drop the value so the template's
+             // error branch renders with the Retry action instead of silently
+             // showing a possibly stale value; retrying the load recovers it.
+             this.value = null;
+             this.error = String(error);
+           }
+           pushToast(withDetail(this.options.saveMessage, error));
+           return;
         }
 
         try {

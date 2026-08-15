@@ -39,7 +39,8 @@ var (
 	connectedStations      []*BaseStation
 	pendingCleanupStations []*BaseStation
 	connectedStationsMutex sync.Mutex
-	uuidInitOnce           sync.Once
+	uuidInitMutex          sync.Mutex
+	uuidInitDone           bool
 	uuidInitErr            error
 	activeScanMutex        sync.Mutex
 	activeScan             *scanSession
@@ -147,41 +148,52 @@ func readCharacteristicContext(ctx context.Context, characteristic characteristi
 
 // BaseStation represents a discovered SteamVR Base Station.
 
+// initProtocolUUIDs parses the protocol UUIDs once. A failed parse does not
+// consume the initialization: the next Initialize call retries instead of
+// caching the error for the lifetime of the process, matching the adapter
+// retry behavior around it.
+func initProtocolUUIDs() error {
+	uuidInitMutex.Lock()
+	defer uuidInitMutex.Unlock()
+	if uuidInitDone {
+		return uuidInitErr
+	}
+	parsedUUIDs := []struct {
+		name   string
+		value  string
+		target *bluetooth.UUID
+	}{
+		{"power control service", powerControlServiceUUIDString, &powerControlServiceUUID},
+		{"mode characteristic", modeCharacteristicUUIDString, &modeCharacteristicUUID},
+		{"power control characteristic", powerControlCharacteristicUUIDString, &powerControlCharacteristicUUID},
+		{"identify characteristic", identifyCharacteristicUUIDString, &identifyCharacteristicUUID},
+		{"device information service", deviceInformationServiceUUIDString, &deviceInformationServiceUUID},
+		{"manufacturer characteristic", manufacturerCharacteristicUUIDString, &manufacturerCharacteristicUUID},
+		{"model characteristic", modelCharacteristicUUIDString, &modelCharacteristicUUID},
+		{"serial characteristic", serialCharacteristicUUIDString, &serialCharacteristicUUID},
+		{"hardware characteristic", hardwareCharacteristicUUIDString, &hardwareCharacteristicUUID},
+		{"firmware characteristic", firmwareCharacteristicUUIDString, &firmwareCharacteristicUUID},
+	}
+	for _, item := range parsedUUIDs {
+		parsed, err := bluetooth.ParseUUID(item.value)
+		if err != nil {
+			uuidInitErr = fmt.Errorf("could not parse %s UUID: %w", item.name, err)
+			return uuidInitErr
+		}
+		*item.target = parsed
+	}
+	uuidInitErr = nil
+	uuidInitDone = true
+	return nil
+}
+
 func Initialize() error {
 	if err := adapter.Enable(); err != nil {
 		return fmt.Errorf("could not enable Bluetooth adapter: %w", err)
 	}
 	adapter.SetConnectHandler(handleAdapterConnectionChange)
 
-	uuidInitOnce.Do(func() {
-		parsedUUIDs := []struct {
-			name   string
-			value  string
-			target *bluetooth.UUID
-		}{
-			{"power control service", powerControlServiceUUIDString, &powerControlServiceUUID},
-			{"mode characteristic", modeCharacteristicUUIDString, &modeCharacteristicUUID},
-			{"power control characteristic", powerControlCharacteristicUUIDString, &powerControlCharacteristicUUID},
-			{"identify characteristic", identifyCharacteristicUUIDString, &identifyCharacteristicUUID},
-			{"device information service", deviceInformationServiceUUIDString, &deviceInformationServiceUUID},
-			{"manufacturer characteristic", manufacturerCharacteristicUUIDString, &manufacturerCharacteristicUUID},
-			{"model characteristic", modelCharacteristicUUIDString, &modelCharacteristicUUID},
-			{"serial characteristic", serialCharacteristicUUIDString, &serialCharacteristicUUID},
-			{"hardware characteristic", hardwareCharacteristicUUIDString, &hardwareCharacteristicUUID},
-			{"firmware characteristic", firmwareCharacteristicUUIDString, &firmwareCharacteristicUUID},
-		}
-		for _, item := range parsedUUIDs {
-			*item.target, uuidInitErr = bluetooth.ParseUUID(item.value)
-			if uuidInitErr != nil {
-				uuidInitErr = fmt.Errorf("could not parse %s UUID: %w", item.name, uuidInitErr)
-				return
-			}
-		}
-	})
-	if uuidInitErr != nil {
-		return uuidInitErr
-	}
-	return nil
+	return initProtocolUUIDs()
 }
 
 func handleAdapterConnectionChange(device bluetooth.Device, connected bool) {

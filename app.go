@@ -359,7 +359,8 @@ func (a *App) PowerOffStation(address string) error {
 }
 
 func legacyPowerActionError(state, address string, result station.PowerActionResult, err error) error {
-	if err != nil && result.CommandSent {
+	var confirmationErr *bluetooth.PowerConfirmationError
+	if errors.As(err, &confirmationErr) && result.CommandSent {
 		log.Printf(
 			"Legacy %s request for %s was accepted but could not be confirmed: %v",
 			state,

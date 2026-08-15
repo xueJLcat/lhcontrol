@@ -195,6 +195,11 @@ func SetChannelContext(ctx context.Context, station *BaseStation, channel int) (
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				break
 			}
+			if IsDeviceValueError(err) {
+				// A malformed channel value is device data, not a broken link;
+				// reconnecting cannot change what the device reports.
+				break
+			}
 			consecutiveReadErrors++
 			if consecutiveReadErrors >= confirmTiming.ConfirmReconnectThreshold && attempt < confirmAttempts-1 {
 				_ = disconnectInternal(station)

@@ -351,7 +351,8 @@ func (m *Manager) recoverOneStation(
 			if m.shuttingDown.Load() && errors.Is(refreshErr, context.Canceled) {
 				return 0
 			}
-			if errors.Is(refreshErr, context.Canceled) && m.lifecycleContext.Err() == nil {
+			if isPureContextError(refreshErr) && errors.Is(refreshErr, context.Canceled) &&
+				m.lifecycleContext.Err() == nil {
 				m.deferStatusRecovery(address, m.statusBusyRetry)
 				return m.statusBusyRetry
 			}
@@ -381,7 +382,7 @@ func (m *Manager) recoverOneStation(
 	if m.shuttingDown.Load() && errors.Is(err, context.Canceled) {
 		return 0
 	}
-	if errors.Is(err, context.Canceled) && m.lifecycleContext.Err() == nil {
+	if isPureContextError(err) && errors.Is(err, context.Canceled) && m.lifecycleContext.Err() == nil {
 		m.deferStatusRecovery(address, m.statusBusyRetry)
 		return m.statusBusyRetry
 	}

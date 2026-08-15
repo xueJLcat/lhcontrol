@@ -193,6 +193,18 @@ func (w *Watcher) Run(ctx context.Context) {
 			pendingTriggerGeneration = w.markTriggerOwed(true)
 			_, pendingTriggerClosedAt = monitor.Countdown()
 		}
+		// A cancelled action keeps its sleep debt owed, but the monitor has
+		// already consumed the trigger and returned to idle. Without re-arming
+		// here the owed sleep would wait forever for a brand-new process
+		// session that may never come (for example when an external scan stop
+		// cancelled the action's scan phase). Re-arm on the next quiet poll;
+		// the running branch above still clears the debt if the process
+		// relaunches first.
+		if !pendingTrigger && triggerDone == nil && !running && w.OwesTrigger() {
+			pendingTrigger = true
+			pendingTriggerGeneration = w.markTriggerOwed(true)
+			_, pendingTriggerClosedAt = monitor.Countdown()
+		}
 		// Fire when a trigger is owed and no action is currently running.
 		// If the previous action is still stopping, this stays pending and
 		// fires on a later tick once it completes; the running re-check on

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -138,6 +139,16 @@ func TestLegacyPowerActionAcceptsSentButUnconfirmedCommand(t *testing.T) {
 	if err := legacyPowerActionError("on", "AA", station.PowerActionResult{}, preWriteErr); !errors.Is(err, preWriteErr) {
 
 		t.Fatalf("pre-write legacy error = %v, want %v", err, preWriteErr)
+
+	}
+
+	// A post-send failure that is not a confirmation error (for example a
+	// cleanup failure after the write) must not be reported as success.
+	postSendErr := errors.New("post-send cleanup failed")
+
+	if err := legacyPowerActionError("on", "AA", station.PowerActionResult{CommandSent: true}, postSendErr); !errors.Is(err, postSendErr) {
+
+		t.Fatalf("post-send legacy error = %v, want %v", err, postSendErr)
 
 	}
 
@@ -616,4 +627,69 @@ func TestAPIBodyLimit(t *testing.T) {
 
 	}
 
+}
+
+// TestAPIPowerRoutesParseJSONRegardlessOfContentType verifies the JSON body is
+// decoded by content rather than by the request Content-Type. External callers
+// commonly POST valid JSON with a form content type (curl -d default) or
+// text/plain; those requests must decode the body instead of silently reading
+// zero values or being rejected.
+func TestAPIPowerRoutesParseJSONRegardlessOfContentType(t *testing.T) {
+	for _, contentType := range []string{
+		fiber.MIMEApplicationForm,
+		fiber.MIMETextPlain,
+		"",
+	} {
+		manager := &fakeAPIStationManager{}
+		request := httptest.NewRequest(http.MethodPost, "/stations/power", strings.NewReader(`{"state":"standby"}`))
+		if contentType != "" {
+			request.Header.Set(fiber.HeaderContentType, contentType)
+		}
+		response, err := testAPI(manager).Test(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = response.Body.Close()
+		if manager.lastBulkState != "standby" {
+			t.Fatalf("content-type %q: bulk state = %q, want standby (JSON body must be decoded)", contentType, manager.lastBulkState)
+		}
+
+		singleManager := &fakeAPIStationManager{}
+		singleRequest := httptest.NewRequest(http.MethodPost, "/stations/AA/power", strings.NewReader(`{"state":"sleep"}`))
+		if contentType != "" {
+			singleRequest.Header.Set(fiber.HeaderContentType, contentType)
+		}
+		singleResponse, err := testAPI(singleManager).Test(singleRequest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = singleResponse.Body.Close()
+		if singleManager.lastPowerState != "sleep" {
+			t.Fatalf("content-type %q: single power state = %q, want sleep (JSON body must be decoded)", contentType, singleManager.lastPowerState)
+		}
+
+		channelManager := &fakeAPIStationManager{}
+		channelRequest := httptest.NewRequest(http.MethodPut, "/stations/AA/channel", strings.NewReader(`{"channel":7,"allowUnknownConflictRisk":true}`))
+		if contentType != "" {
+			channelRequest.Header.Set(fiber.HeaderContentType, contentType)
+		}
+		channelResponse, err := testAPI(channelManager).Test(channelRequest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = channelResponse.Body.Close()
+		if channelManager.lastChannelRequest != 7 || !channelManager.lastAllowUnknownConflictRisk {
+			t.Fatalf("content-type %q: channel = %d allowUnknown = %v, want 7/true", contentType, channelManager.lastChannelRequest, channelManager.lastAllowUnknownConflictRisk)
+		}
+	}
+}
+
+func TestAPIStatusCanceledMapsToConflict(t *testing.T) {
+	if status := apiStatusForError(context.Canceled); status != fiber.StatusConflict {
+		t.Fatalf("apiStatusForError(context.Canceled) = %d, want %d", status, fiber.StatusConflict)
+	}
+	wrapped := fmt.Errorf("scan interrupted: %w", context.Canceled)
+	if status := apiStatusForError(wrapped); status != fiber.StatusConflict {
+		t.Fatalf("apiStatusForError(wrapped canceled) = %d, want %d", status, fiber.StatusConflict)
+	}
 }

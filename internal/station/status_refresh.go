@@ -10,6 +10,43 @@ import (
 	"sync"
 )
 
+// isPureContextError reports whether every leaf in the error tree is a context
+// cancellation or deadline. The bluetooth layer joins the stopping context
+// error with a real failure a read hit just before it stopped
+// (StatusReadError{Power: join(transport error, context.Canceled)}), and a
+// plain errors.Is(err, context.Canceled) matches those mixed errors too. Only
+// errors made exclusively of context errors justify the "interrupted, retry
+// the read" handling; anything else must run the normal failure path.
+func isPureContextError(err error) bool {
+	if err == nil {
+		return false
+	}
+	sawLeaf := false
+	pure := true
+	var walk func(current error)
+	walk = func(current error) {
+		if current == nil {
+			return
+		}
+		if joined, ok := current.(interface{ Unwrap() []error }); ok {
+			for _, nested := range joined.Unwrap() {
+				walk(nested)
+			}
+			return
+		}
+		if wrapped := errors.Unwrap(current); wrapped != nil {
+			walk(wrapped)
+			return
+		}
+		sawLeaf = true
+		if !errors.Is(current, context.Canceled) && !errors.Is(current, context.DeadlineExceeded) {
+			pure = false
+		}
+	}
+	walk(err)
+	return sawLeaf && pure
+}
+
 func (m *Manager) CheckAllStationStatuses() ([]StationInfo, error) {
 	if !m.statusOperationMutex.TryLock() {
 		return m.GetStationInfo(), fmt.Errorf("status refresh already in progress: %w", ErrOperationInProgress)
@@ -102,10 +139,15 @@ func (m *Manager) CheckAllStationStatuses() ([]StationInfo, error) {
 							statusErrors[item.index] = fmt.Errorf("%s: status read cancelled: %w", address, workerErr)
 							return
 						}
-						if errors.Is(workerErr, context.Canceled) && m.lifecycleContext.Err() == nil {
-							m.trackStatusRefreshPending(address)
-							return
-						}
+					if isPureContextError(workerErr) && errors.Is(workerErr, context.Canceled) &&
+						m.lifecycleContext.Err() == nil {
+						// Only an error made exclusively of context errors is a
+						// plain interruption: the bluetooth layer joins a real
+						// read failure with the cancelling context error, and
+						// that mixed outcome must take the failure path below.
+						m.trackStatusRefreshPending(address)
+						return
+					}
 						if !ownBudget && errors.Is(refreshContext.Err(), context.DeadlineExceeded) &&
 							errors.Is(workerErr, context.DeadlineExceeded) {
 							m.trackStatusRefreshPending(address)
@@ -159,7 +201,11 @@ dispatch:
 				address := stationsToRead[skippedIndex].Snapshot().Address
 				m.trackStatusRefreshPending(address)
 				if !errors.Is(refreshContext.Err(), context.Canceled) || m.lifecycleContext.Err() != nil {
-					statusErrors[skippedIndex] = fmt.Errorf("%s: status refresh deadline exceeded: %w", address, refreshContext.Err())
+					stopDescription := "status refresh stopped"
+					if errors.Is(refreshContext.Err(), context.DeadlineExceeded) {
+						stopDescription = "status refresh deadline exceeded"
+					}
+					statusErrors[skippedIndex] = fmt.Errorf("%s: %s: %w", address, stopDescription, refreshContext.Err())
 				}
 			}
 			break dispatch

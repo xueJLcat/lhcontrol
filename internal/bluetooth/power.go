@@ -240,7 +240,10 @@ func isDefinitelyUnsentContextError(ctx context.Context, err error) bool {
 
 func writePowerValueInternal(ctx context.Context, station *BaseStation, value byte) error {
 	if station.characteristic == nil {
-		return fmt.Errorf("power characteristic is unavailable")
+		// Match writeCharacteristicValueInternal's transport classification so
+		// callers relying on RequiresReconnect see the same semantics for a
+		// missing characteristic as for any other unusable handle.
+		return transportError("write power characteristic", fmt.Errorf("power characteristic is unavailable for %s", station.Name))
 	}
 	return writeCharacteristicValueInternal(ctx, station.characteristic, value)
 }
@@ -297,6 +300,12 @@ func confirmPowerStateInternalContext(ctx context.Context, station *BaseStation,
 				return errors.Join(lastErr, err)
 			}
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return errors.Join(lastErr, err)
+			}
+			if IsDeviceValueError(err) {
+				// Malformed device data cannot change with a reconnect; the
+				// disconnect/reconnect fallback would only repeat the same
+				// failure until the budget runs out.
 				return errors.Join(lastErr, err)
 			}
 			lastErr = err

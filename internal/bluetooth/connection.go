@@ -15,6 +15,9 @@ func connectAndDiscoverInternalContext(ctx context.Context, station *BaseStation
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if err := waitForInFlightDisconnect(ctx, station); err != nil {
+		return err
+	}
 	if err := cleanupPendingInternal(station); err != nil {
 		return transportError("finish previous connection cleanup", err)
 	}
@@ -302,6 +305,44 @@ func connectAndDiscoverInternalContext(ctx context.Context, station *BaseStation
 // discovery succeeded. Callers can keep the station visible while showing the
 // affected values as unknown.
 
+// beginInFlightDisconnect publishes the disconnect marker while the caller is
+// about to run device.Disconnect outside the station lock. It returns the
+// channel that waitForInFlightDisconnect blocks on. Callers must hold s.mutex.
+func beginInFlightDisconnect(s *BaseStation) chan struct{} {
+	wait := make(chan struct{})
+	s.disconnectInFlight = wait
+	return wait
+}
+
+// endInFlightDisconnect clears and closes the marker once the out-of-lock
+// Disconnect call has returned. Callers must hold s.mutex.
+func endInFlightDisconnect(s *BaseStation, wait chan struct{}) {
+	if s.disconnectInFlight == wait {
+		s.disconnectInFlight = nil
+	}
+	close(wait)
+}
+
+// waitForInFlightDisconnect blocks until a disconnect that released the
+// station lock has finished. Without this, a reconnect starting inside that
+// window would open a new GATT session while the old one is still being
+// released; single connection peripherals drop or corrupt such overlapping
+// sessions. Callers must hold s.mutex and keep it held on return.
+func waitForInFlightDisconnect(ctx context.Context, s *BaseStation) error {
+	for s.disconnectInFlight != nil {
+		wait := s.disconnectInFlight
+		s.mutex.Unlock()
+		select {
+		case <-wait:
+		case <-ctx.Done():
+			s.mutex.Lock()
+			return ctx.Err()
+		}
+		s.mutex.Lock()
+	}
+	return nil
+}
+
 // disconnectInternal disconnects a station. It must be called with s.mutex
 // held and returns with s.mutex held; the WinRT cleanup itself runs outside
 // the lock because an unresponsive device can stretch it far past every
@@ -316,9 +357,11 @@ func disconnectInternal(s *BaseStation) error {
 		device := s.device
 		log.Printf("Bluetooth: Disconnecting internal for %s", s.Name)
 		detachConnectionStateInternal(s)
+		wait := beginInFlightDisconnect(s)
 		s.mutex.Unlock()
 		disconnectErr = device.Disconnect()
 		s.mutex.Lock()
+		endInFlightDisconnect(s, wait)
 		if bluetooth.IsDisconnectCleanupComplete(disconnectErr) {
 			log.Printf("Bluetooth: Disconnect cleanup warning for %s: %v", s.Name, disconnectErr)
 			disconnectErr = nil
@@ -376,9 +419,11 @@ func cleanupPendingInternal(s *BaseStation) error {
 	}
 	pending := s.pendingCleanup
 	s.pendingCleanup = nil
+	wait := beginInFlightDisconnect(s)
 	s.mutex.Unlock()
 	err := pending.Disconnect()
 	s.mutex.Lock()
+	endInFlightDisconnect(s, wait)
 	if err != nil {
 		if bluetooth.IsDisconnectCleanupComplete(err) {
 			log.Printf("Bluetooth: Pending disconnect cleanup completed for %s with warning: %v", s.Name, err)

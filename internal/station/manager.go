@@ -547,13 +547,18 @@ func (m *Manager) recordObservedReadResult(
 			// repaired by reconnecting; discarding the session here would start
 			// a disconnect/reconnect cycle that fails the same way on every poll.
 			m.clearStatusFailureKind(address, statusRetryConnection)
-		} else if errors.Is(powerErr, context.DeadlineExceeded) && !bluetooth.RequiresReconnect(powerErr) {
-			// A power read stopped by its own budget is not evidence the link
-			// is broken, matching the bare-deadline rule used by scan initial
-			// reads, recovery, and status refreshes. Structured reads surface
-			// the deadline inside InitialReadError/StatusReadError, so the same
+		} else if (errors.Is(powerErr, context.DeadlineExceeded) || errors.Is(powerErr, context.Canceled)) &&
+			!bluetooth.RequiresReconnect(powerErr) {
+			// A power read stopped by its own budget or by a cancellation is
+			// not evidence the link is broken, matching the bare-deadline rule
+			// used by scan initial reads, recovery, and status refreshes.
+			// Structured reads surface the deadline inside
+			// InitialReadError/StatusReadError, so the same
 			// backoff-without-disconnect handling applies here: a slow but
 			// reachable station must not pay a disconnect/reconnect cycle.
+			// RequiresReconnect stays true for errors joined with a genuine
+			// transport failure, so mixed errors still take the disconnect
+			// branch below.
 			m.noteStatusFailure(address)
 		} else {
 			_ = m.disconnectStationBounded(station)
@@ -679,7 +684,12 @@ func (m *Manager) markBluetoothUnavailable(err error) {
 	m.initializeFailedAt = time.Now()
 	m.nextInitializeAt = m.initializeFailedAt.Add(m.initializeRetryCooldown())
 	m.initializeMutex.Unlock()
-	if cleanupErr := bluetooth.InvalidateAllConnections(); cleanupErr != nil {
+	// Run the contextless fleet cleanup with the same bounded wait as every
+	// other adapter cleanup: adapter loss is exactly when WinRT disconnect
+	// calls are most likely to stall, and this path is invoked synchronously
+	// from scan, refresh, recovery, and bulk workers that must not hang
+	// indefinitely behind a wedged adapter.
+	if cleanupErr := m.runBoundedAdapterCleanup(bluetooth.InvalidateAllConnections); cleanupErr != nil {
 		log.Printf("Bluetooth cleanup after adapter loss is pending: %v", cleanupErr)
 	}
 	m.wakeStatusRecovery()

@@ -859,6 +859,34 @@ describe('App asynchronous operations', () => {
     expect(screen.getByRole('status')).toHaveTextContent('Scan stopped.');
   });
 
+  it('force-settles a wedged local scan via the watchdog instead of staying stuck', async () => {
+    vi.useFakeTimers();
+    // The scan promise never settles (the backend call is wedged behind an
+    // adapter call that ignores cancellation). Without the watchdog the UI
+    // would stay in "Scanning..." forever: periodic polling is gated by the
+    // still-loading local scan and only the promise's finally clears it.
+    api.ScanAndFetchStations.mockReturnValue(new Promise(() => {}));
+    api.StopScan.mockResolvedValue(undefined);
+    // Startup probe sees no scan; the watchdog then sees the backend still
+    // scanning once (requests a stop), then finished (settles the UI).
+    api.IsScanning.mockResolvedValueOnce(false).mockResolvedValueOnce(true).mockResolvedValue(false);
+    api.GetScanStatus.mockResolvedValue({ state: 'completed', found: 1, warnings: [] });
+    render(App);
+    await vi.waitFor(() => expect(api.ScanAndFetchStations).toHaveBeenCalledOnce());
+    expect(screen.getByRole('status')).toHaveTextContent('Scanning for base stations...');
+
+    // Cross the watchdog window; it must request a stop of the wedged scan.
+    await vi.advanceTimersByTimeAsync(90_000);
+    await vi.waitFor(() => expect(api.StopScan).toHaveBeenCalledOnce());
+
+    // The next recheck observes no scan running and force-settles the state,
+    // restoring the Scan control and reporting the backend's real outcome.
+    await vi.advanceTimersByTimeAsync(5_000);
+    await vi.waitFor(() => expect(api.IsScanning).toHaveBeenCalledTimes(3));
+    expect(await screen.findByRole('button', { name: 'Scan' })).toBeEnabled();
+    expect(screen.queryByText('Scanning for base stations...')).not.toBeInTheDocument();
+  });
+
   it('keeps a scan started while a previous StopScan is settling stoppable', async () => {
     let rejectFirstScan!: (error: Error) => void;
     let resolveSecondScan!: (stations: StationInfo[]) => void;

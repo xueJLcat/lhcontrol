@@ -56,13 +56,17 @@ func (a *App) SetAPIListenAddress(address string) error {
 	}
 
 	previous := a.config.GetAPIListenAddress()
+	// The address the listener currently serves can differ from the persisted
+	// one while an earlier change is still settling; a failed switch restores
+	// each layer to its own previous value.
+	published := a.GetAPIStatus().Address
 	if err := a.config.SetAPIListenAddress(normalized); err != nil {
 		a.setConfigPersistenceStatus()
 		return err
 	}
 	a.setConfigPersistenceStatus()
 
-	if a.GetAPIStatus().Address != normalized {
+	if published != normalized {
 		// Verify that the new address can bind before the change is treated
 		// as applied: persisting an address that can never bind would leave the
 		// HTTP API down with no reachable endpoint left to correct it. On
@@ -85,6 +89,33 @@ func (a *App) SetAPIListenAddress(address string) error {
 		if a.GetAPIStatus().Address != normalized {
 			a.setAPIAddress(normalized)
 			a.restartAPIServer()
+			// The probe only proved the address could bind while the old
+			// listener was up. Wait for the restarted listener to actually
+			// bind before reporting success: the port could be grabbed between
+			// the probe and the rebind, which would otherwise leave the API
+			// down while the settings call claimed success. On failure restore
+			// the previously serving listener and the persisted address.
+			// During shutdown the restart is intentionally skipped, so there is
+			// no server to bind and waiting would only time out spuriously.
+			if !a.shuttingDown.Load() {
+				bound, bindErr := a.waitForAPIBind()
+				if !bound {
+					if bindErr == nil {
+						bindErr = fmt.Errorf("%s did not come up within %s", normalized, a.apiBindVerifyWindow())
+					}
+					a.setAPIAddress(published)
+					a.restartAPIServer()
+					if rollbackErr := a.config.SetAPIListenAddress(previous); rollbackErr != nil {
+						a.setConfigPersistenceStatus()
+						return fmt.Errorf(
+							"cannot listen on %s: %v; additionally, rolling back to %s failed: %v",
+							normalized, bindErr, previous, rollbackErr,
+						)
+					}
+					a.setConfigPersistenceStatus()
+					return fmt.Errorf("cannot listen on %s: %v", normalized, bindErr)
+				}
+			}
 		}
 	}
 

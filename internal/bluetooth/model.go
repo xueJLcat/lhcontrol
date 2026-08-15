@@ -3,6 +3,7 @@ package bluetooth
 import (
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"sync"
 	"time"
@@ -39,6 +40,12 @@ type BaseStation struct {
 	modeCharacteristic     characteristicIO
 	identifyCharacteristic characteristicIO
 	isConnected            bool
+	// disconnectInFlight is closed when an in-progress device.Disconnect that
+	// released the station lock finishes. A new connection must not start
+	// while the previous GATT session is still being released: single
+	// connection peripherals reject or drop a second session maintained at the
+	// same time. Protected by mutex.
+	disconnectInFlight chan struct{}
 	// Add Mutex for thread-safe access
 	mutex             sync.RWMutex
 	invalidationMutex sync.Mutex
@@ -132,7 +139,13 @@ func (bs *BaseStation) IsConnected() bool {
 		return true
 	}
 	if err != nil {
-		bs.setConnectionErrorInternal(err)
+		// Match connectAndDiscoverInternalContext's fast path: a transient
+		// status-query failure (a COM/RPC blip) is not proof the link dropped.
+		// Tearing the session down here would make every transient blip pay a
+		// full reconnect, and nothing observed the link itself failing, so no
+		// connection error is recorded either.
+		log.Printf("Bluetooth: Connection status query failed for %s, keeping cached session: %v", bs.Name, err)
+		return false
 	}
 	_ = disconnectInternal(bs)
 	return false

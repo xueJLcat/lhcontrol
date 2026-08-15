@@ -192,7 +192,12 @@ func (m *Manager) finishScan(found int, err error, callbacks ScanCallbacks) func
 		// StartScan begins scan processing before delivering Started. Keep terminal
 		// notifications behind that callback without making processing wait for it.
 		<-lifecycle.startedDone
-		defer m.clearScanLifecycle(lifecycle)
+		// Release the scan slot before running terminal callbacks: the scan is
+		// already in a terminal state at this point, and holding the lifecycle
+		// while callbacks execute would make new scans fail with Busy even
+		// though GetScanStatus reports completed/failed/cancelled. A callback
+		// that hangs can then no longer wedge every later scan on this manager.
+		m.clearScanLifecycle(lifecycle)
 		if errors.Is(err, bluetooth.ErrScanCancelled) || errors.Is(err, context.Canceled) {
 			if callbacks.Cancelled != nil {
 				if callbackErr := runSafely("scan cancelled callback", func() error {
@@ -589,8 +594,10 @@ func (m *Manager) StartScan(callbacks ScanCallbacks) error {
 			m.asyncScanWg.Done()
 			defer m.scanCallbackWg.Done()
 			<-lifecycle.startedDone
-			m.deliverAbortedScanCallback(lifecycle.statusID, prepareErr, cancelled, callbacks)
+			// Same rule as finishScan: release the slot before delivering
+			// callbacks so a slow callback cannot block the next scan.
 			m.clearScanLifecycle(lifecycle)
+			m.deliverAbortedScanCallback(lifecycle.statusID, prepareErr, cancelled, callbacks)
 			return
 		}
 		ctx := lifecycle.ctx

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync/atomic"
@@ -24,7 +25,8 @@ func apiStatusForError(err error) int {
 	case errors.Is(err, station.ErrOperationInProgress),
 		errors.Is(err, station.ErrChannelConflict),
 		errors.Is(err, station.ErrScanRequired),
-		errors.Is(err, bluetooth.ErrScanCancelled):
+		errors.Is(err, bluetooth.ErrScanCancelled),
+		errors.Is(err, context.Canceled):
 		status = fiber.StatusConflict
 	case errors.Is(err, station.ErrStationTransitioning):
 		status = fiber.StatusLocked
@@ -44,6 +46,22 @@ func apiStatusForError(err error) int {
 func sendAPIError(c *fiber.Ctx, err error) error {
 	status := apiStatusForError(err)
 	return c.Status(status).JSON(fiber.Map{"error": err.Error()})
+}
+
+// parseAPIJSONBody decodes the request body as JSON regardless of the request
+// Content-Type. The endpoint contract is JSON-only, but a content-type driven
+// body parser silently decodes valid JSON sent with a form content type into
+// zero values (misleading "invalid state" rejections) and rejects other types
+// such as text/plain outright. An empty body keeps the zero struct so a
+// missing-field rejection reads the same as before.
+func parseAPIJSONBody(body []byte, target any) error {
+	if len(body) == 0 {
+		return nil
+	}
+	if err := json.Unmarshal(body, target); err != nil {
+		return fmt.Errorf("%w: invalid JSON body", station.ErrInvalidArgument)
+	}
+	return nil
 }
 
 func apiErrorHandler(c *fiber.Ctx, err error) error {
@@ -299,8 +317,8 @@ func registerAPIRoutes(api *fiber.App, manager apiStationManager, events scanEve
 		var request struct {
 			State string `json:"state"`
 		}
-		if err := c.BodyParser(&request); err != nil {
-			return sendAPIError(c, fmt.Errorf("%w: invalid JSON body", station.ErrInvalidArgument))
+		if err := parseAPIJSONBody(c.Body(), &request); err != nil {
+			return sendAPIError(c, err)
 		}
 		var operationErr error
 		finish := beginExternalStationOperation(events, "bulk-power", "http-power", manager.GetStationInfo, &operationErr)
@@ -316,8 +334,8 @@ func registerAPIRoutes(api *fiber.App, manager apiStationManager, events scanEve
 		var request struct {
 			State string `json:"state"`
 		}
-		if err := c.BodyParser(&request); err != nil {
-			return sendAPIError(c, fmt.Errorf("%w: invalid JSON body", station.ErrInvalidArgument))
+		if err := parseAPIJSONBody(c.Body(), &request); err != nil {
+			return sendAPIError(c, err)
 		}
 		var operationErr error
 		finish := beginExternalStationOperation(events, "power", "http-power", manager.GetStationInfo, &operationErr)
@@ -352,8 +370,8 @@ func registerAPIRoutes(api *fiber.App, manager apiStationManager, events scanEve
 			Channel                  int  `json:"channel"`
 			AllowUnknownConflictRisk bool `json:"allowUnknownConflictRisk"`
 		}
-		if err := c.BodyParser(&request); err != nil {
-			return sendAPIError(c, fmt.Errorf("%w: invalid JSON body", station.ErrInvalidArgument))
+		if err := parseAPIJSONBody(c.Body(), &request); err != nil {
+			return sendAPIError(c, err)
 		}
 		var operationErr error
 		finish := beginExternalStationOperation(events, "channel", "http-channel", manager.GetStationInfo, &operationErr)

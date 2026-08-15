@@ -41,6 +41,14 @@ type fakeAPIStationManager struct {
 	stopScanErr error
 
 	stopCalls int
+
+	lastBulkState string
+
+	lastPowerState string
+
+	lastChannelRequest int
+
+	lastAllowUnknownConflictRisk bool
 }
 
 func (f *fakeAPIStationManager) PowerOnAllStations() error { return f.legacyErr }
@@ -743,13 +751,17 @@ func (f *fakeAPIStationManager) GetScanStatus() station.ScanStatus {
 
 }
 
-func (f *fakeAPIStationManager) SetAllStationsPowerDetailed(string) (station.BulkPowerResult, error) {
+func (f *fakeAPIStationManager) SetAllStationsPowerDetailed(state string) (station.BulkPowerResult, error) {
+
+	f.lastBulkState = state
 
 	return f.bulkResult, f.bulkErr
 
 }
 
-func (f *fakeAPIStationManager) SetStationPower(string, string) (station.PowerActionResult, error) {
+func (f *fakeAPIStationManager) SetStationPower(_ string, state string) (station.PowerActionResult, error) {
+
+	f.lastPowerState = state
 
 	if f.powerErr != nil || f.powerResult.Station.Address != "" {
 
@@ -769,7 +781,11 @@ func (f *fakeAPIStationManager) RefreshStationCapabilities(string) (station.Stat
 
 }
 
-func (f *fakeAPIStationManager) SetStationChannel(string, int, bool) (station.ChannelChangeResult, error) {
+func (f *fakeAPIStationManager) SetStationChannel(_ string, channel int, allowUnknownConflictRisk bool) (station.ChannelChangeResult, error) {
+
+	f.lastChannelRequest = channel
+
+	f.lastAllowUnknownConflictRisk = allowUnknownConflictRisk
 
 	if f.channelErr != nil || f.channelResult.Address != "" {
 

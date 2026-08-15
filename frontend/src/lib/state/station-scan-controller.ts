@@ -25,6 +25,16 @@ const STOP_RECHECK_DELAY_MS = 1500;
 // probe (or never finishes the scan), give up and let the periodic poll
 // reconcile the state instead of pinning the header on "Stopping...".
 const STOP_RECHECK_MAX_ATTEMPTS = 10;
+// Wails bindings carry no timeout: a BLE scan wedged inside an adapter call
+// that ignores cancellation would otherwise keep the UI in "scanning" forever
+// (periodic polling is gated by isLoading, and only the scan promise's
+// finally clears the state). After this generous window — well past the
+// longest configured scan plus the read-phase budgets — the watchdog requests
+// a backend stop and reconciles the local state instead of waiting on the
+// hung promise indefinitely.
+const SCAN_WATCHDOG_DELAY_MS = 90000;
+const SCAN_WATCHDOG_RECHECK_DELAY_MS = 5000;
+const SCAN_WATCHDOG_MAX_ATTEMPTS = 24;
 
 export interface StationScanHost {
   stations: StationInfo[];
@@ -60,16 +70,70 @@ export interface StationScanHost {
 
 export class StationScanController {
   private stopRecheckTimer: ReturnType<typeof setTimeout> | null = null;
+  private scanWatchdogTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(private host: StationScanHost) {}
 
   dispose() {
     this.cancelStopRecheck();
+    this.cancelScanWatchdog();
   }
 
   private cancelStopRecheck() {
     if (this.stopRecheckTimer !== null) clearTimeout(this.stopRecheckTimer);
     this.stopRecheckTimer = null;
+  }
+
+  private cancelScanWatchdog() {
+    if (this.scanWatchdogTimer !== null) clearTimeout(this.scanWatchdogTimer);
+    this.scanWatchdogTimer = null;
+  }
+
+  private armScanWatchdog(operationEpoch: number) {
+    this.cancelScanWatchdog();
+    this.scanWatchdogTimer = setTimeout(() => {
+      this.scanWatchdogTimer = null;
+      void this.runScanWatchdog(operationEpoch, 0);
+    }, SCAN_WATCHDOG_DELAY_MS);
+  }
+
+  // Reconciles a local scan that exceeded every plausible backend duration.
+  // While the backend still reports scanning, request a stop (unless one is
+  // already in flight) and keep rechecking with a bounded budget. Once the
+  // backend reports no scan — or the budget runs out — force-settle the local
+  // scanning state: the hung scan promise's finally becomes a no-op because
+  // globalOperation is no longer 'scanning', and any late response is still
+  // gated by the scan epoch and list revision. This restores periodic polling
+  // and the Scan/Stop controls instead of forcing a process restart.
+  private async runScanWatchdog(operationEpoch: number, attempt: number) {
+    const host = this.host;
+    if (host.disposed || host.globalOperation !== 'scanning') return;
+    if (!host.gates.canCommitOperation(operationEpoch)) return;
+    const scanning = await IsScanning().catch(() => true);
+    if (host.disposed || host.globalOperation !== 'scanning') return;
+    if (!host.gates.canCommitOperation(operationEpoch)) return;
+    if (scanning) {
+      if (!host.stoppingScan && !host.stopRequestPending) {
+        void StopScan().catch(() => {
+          // A failed stop does not abort the reconciliation chain; the next
+          // attempt retries the request.
+        });
+      }
+      if (attempt + 1 < SCAN_WATCHDOG_MAX_ATTEMPTS) {
+        this.scanWatchdogTimer = setTimeout(() => {
+          this.scanWatchdogTimer = null;
+          void this.runScanWatchdog(operationEpoch, attempt + 1);
+        }, SCAN_WATCHDOG_RECHECK_DELAY_MS);
+        return;
+      }
+    }
+    host.globalOperation = 'idle';
+    host.stoppingScan = false;
+    const summary = await this.completedScanSummary();
+    if (!host.disposed && host.gates.canCommitOperation(operationEpoch)) {
+      host.statusMessage = summary ?? t('Scan stopped.');
+    }
+    host.maybeEndScanTimer();
   }
 
   // The backend accepted the stop but the scan had not finished when finishStop
@@ -273,6 +337,7 @@ export class StationScanController {
     const statusOperation = this.host.gates.beginStatusOperation();
     this.host.beginScanTimer();
     const operationEpoch = this.host.gates.beginScanEpoch();
+    this.armScanWatchdog(operationEpoch);
     const revision = this.host.listRevisions.next();
     this.host.statusMessage = t('Scanning for base stations...');
     try {
@@ -333,8 +398,15 @@ export class StationScanController {
           : t('Scan failed: {heading}', { heading: scanErrorCopy(classified).heading });
       }
     } finally {
-      if (!this.host.disposed && this.host.globalOperation === 'scanning') this.host.globalOperation = 'idle';
-      if (!this.host.disposed && !this.host.stopRequestPending && !this.host.externalScanning) this.host.stoppingScan = false;
+      this.cancelScanWatchdog();
+      // The watchdog can force-settle this scan when the backend hangs, and
+      // a newer scan may start before this late promise resolves. The epoch
+      // check keeps the settled scan's cleanup from clearing a newer owner's
+      // scanning state.
+      if (!this.host.disposed && this.host.gates.canCommitOperation(operationEpoch)) {
+        if (this.host.globalOperation === 'scanning') this.host.globalOperation = 'idle';
+        if (!this.host.stopRequestPending && !this.host.externalScanning) this.host.stoppingScan = false;
+      }
       this.host.maybeEndScanTimer();
     }
     return true;

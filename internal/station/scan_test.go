@@ -98,7 +98,7 @@ func TestStopScanWaitsForScanLifecyclePublication(t *testing.T) {
 	}
 }
 
-func TestAsyncScanEventsCannotOvertakePreviousCompletion(t *testing.T) {
+func TestAsyncScanStartsWhilePreviousCompletionCallbackRuns(t *testing.T) {
 	manager := NewManager(config.NewConfig())
 	firstScanRelease := make(chan struct{})
 	firstCompletionEntered := make(chan struct{})
@@ -147,16 +147,16 @@ func TestAsyncScanEventsCannotOvertakePreviousCompletion(t *testing.T) {
 		t.Fatal("terminal scan status was published before releasing the operation lock")
 	}
 
+	// The scan slot is released with the terminal status, before the terminal
+	// callback runs: a slow callback must not make the next scan fail with
+	// Busy while GetScanStatus already reports the completed state. Events
+	// stay attributable through their per-request IDs.
 	secondReturned := make(chan error, 1)
 	go func() { secondReturned <- manager.StartScan(callbacks) }()
-	if err := <-secondReturned; !errors.Is(err, ErrOperationInProgress) {
-		t.Fatalf("second StartScan() error = %v, want ErrOperationInProgress", err)
+	if err := <-secondReturned; err != nil {
+		t.Fatalf("second StartScan() error = %v, want accepted while the completion callback runs", err)
 	}
 	close(firstCompletionRelease)
-	manager.scanCallbackWg.Wait()
-	if err := manager.StartScan(callbacks); err != nil {
-		t.Fatalf("StartScan() after completion callback error = %v", err)
-	}
 	manager.scanCallbackWg.Wait()
 
 	eventsMutex.Lock()
@@ -755,10 +755,13 @@ func TestAsyncScanReturnsWhileWaitingAndDeliversPreStartCancellation(t *testing.
 	manager.Shutdown()
 }
 
-func TestPreStartTerminalCallbackFinishesBeforeNextScanCanStart(t *testing.T) {
+func TestPreStartTerminalCallbackDoesNotBlockNextScanStart(t *testing.T) {
 	manager := NewManager(config.NewConfig())
 	if err := manager.beginRecoveryStationOperation("RECOVERY"); err != nil {
 		t.Fatalf("begin recovery: %v", err)
+	}
+	manager.bluetoothOps.scanForDurationContext = func(context.Context, time.Duration) ([]internalbluetooth.DiscoveredStation, error) {
+		return nil, nil
 	}
 	cancelledEntered := make(chan struct{})
 	releaseCancelled := make(chan struct{})
@@ -772,15 +775,16 @@ func TestPreStartTerminalCallbackFinishesBeforeNextScanCanStart(t *testing.T) {
 		t.Fatalf("StopScan() error = %v", err)
 	}
 	<-cancelledEntered
-	if err := manager.StartScan(ScanCallbacks{}); !errors.Is(err, ErrOperationInProgress) {
-		t.Fatalf("overlapping StartScan() error = %v, want ErrOperationInProgress", err)
+	// The cancelled scan already published its terminal state and released the
+	// slot before the callback runs; the next scan must be accepted instead of
+	// failing with Busy. The pending recovery keeps the accepted scan queued
+	// until it drains.
+	if err := manager.StartScan(ScanCallbacks{}); err != nil {
+		t.Fatalf("StartScan() while terminal callback is running error = %v, want accepted", err)
 	}
 	close(releaseCancelled)
-	manager.scanCallbackWg.Wait()
 	manager.endRecoveryStationOperation("RECOVERY")
-	manager.bluetoothOps.scanForDurationContext = func(context.Context, time.Duration) ([]internalbluetooth.DiscoveredStation, error) {
-		return nil, nil
-	}
+	manager.scanCallbackWg.Wait()
 	completed := make(chan struct{})
 	if err := manager.StartScan(ScanCallbacks{Completed: func(uint64, []StationInfo) { close(completed) }}); err != nil {
 		t.Fatalf("StartScan() after terminal callback error = %v", err)

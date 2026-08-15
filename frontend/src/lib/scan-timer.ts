@@ -8,7 +8,14 @@ export class ScanTimer {
   constructor(private readonly onElapsed: (seconds: number) => void) {}
 
   begin() {
-    if (this.timer) return;
+    if (this.timer) {
+      // A handover (for example an adopted external scan following a local
+      // scan) re-arms the timer for the new scan; restart the clock instead
+      // of accumulating the previous scan's elapsed time.
+      this.startedAt = Date.now();
+      this.onElapsed(0);
+      return;
+    }
     this.startedAt = Date.now();
     this.onElapsed(0);
     this.timer = setInterval(() => {
