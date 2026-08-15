@@ -71,6 +71,14 @@ func (control *scanControl) stopWatcher() (stopErr error, deferred bool) {
 	if control.stopIssued {
 		return control.stopErr, false
 	}
+	if alreadyTerminal(control.watcher) {
+		// The watcher stopped or aborted on its own (radio removed, disabled
+		// by policy, or a natural drain) before this stop was issued. WinRT
+		// can reject a redundant Stop and turn a clean end into a spurious
+		// stop failure.
+		control.terminal = true
+		return nil, false
+	}
 	control.stopIssued = true
 	control.stopErr = control.watcher.Stop()
 	return control.stopErr, false
@@ -95,9 +103,31 @@ func (control *scanControl) forceStop() error {
 		// rejection while the watcher drains through Stopping.
 		return nil
 	}
+	if alreadyTerminal(control.watcher) {
+		// The watcher finished on its own while the earlier Stop was failing
+		// or missing; re-issuing would risk a spurious rejection.
+		control.terminal = true
+		return nil
+	}
 	control.stopIssued = true
 	control.stopErr = control.watcher.Stop()
 	return control.stopErr
+}
+
+// alreadyTerminal reports a watcher that has already reached a terminal state
+// (Stopped or Aborted), so a further Stop call would be redundant. A status
+// read failure is treated as "not terminal" so the caller still attempts the
+// stop instead of silently skipping it.
+func alreadyTerminal(watcher *advertisement.BluetoothLEAdvertisementWatcher) bool {
+	if watcher == nil {
+		return false
+	}
+	status, err := watcher.GetStatus()
+	if err != nil {
+		return false
+	}
+	return status == advertisement.BluetoothLEAdvertisementWatcherStatusStopped ||
+		status == advertisement.BluetoothLEAdvertisementWatcherStatusAborted
 }
 
 // ensureStopped is the last-resort stop for cleanup paths that leave without
@@ -504,15 +534,25 @@ func waitForScanStop(stopped <-chan error, stopRequests <-chan error, stop func(
 	for {
 		status, statusErr := getStatus()
 		if statusErr == nil && (status == advertisement.BluetoothLEAdvertisementWatcherStatusStopped || status == advertisement.BluetoothLEAdvertisementWatcherStatusAborted) {
+			// The Stopped event is dispatched on a separate thread and can lag
+			// slightly behind the status transition. Give it one polling
+			// interval so an error it carries (for example a radio removed or
+			// disabled by policy while draining) is not dropped by the faster
+			// status poll. A clean stop closes the channel without a value and
+			// returns immediately, so this adds no delay in the common case.
+			eventWait := time.NewTimer(scanStopPollInterval)
+			var eventErr error
+			var eventOK bool
 			select {
-			case eventErr := <-stopped:
-				if eventErr != nil {
-					if originalErr != nil {
-						return errors.Join(originalErr, eventErr)
-					}
-					return eventErr
+			case eventErr, eventOK = <-stopped:
+				eventWait.Stop()
+			case <-eventWait.C:
+			}
+			if eventOK && eventErr != nil {
+				if originalErr != nil {
+					return errors.Join(originalErr, eventErr)
 				}
-			default:
+				return eventErr
 			}
 			if originalErr != nil {
 				return originalErr
@@ -760,8 +800,11 @@ type deviceState struct {
 	cleanupComplete bool
 	cleanupAttempt  *deviceCleanupAttempt
 	cleanupRetries  int
-	leaveThread     func()
-	cancel          context.CancelFunc
+	// cleanupRetryPending marks a scheduled automatic retry so interleaved
+	// failures cannot stack redundant timers that consume the retry budget.
+	cleanupRetryPending bool
+	leaveThread         func()
+	cancel              context.CancelFunc
 
 	device                        *bluetooth.BluetoothLEDevice
 	session                       *genericattributeprofile.GattSession
@@ -1160,13 +1203,29 @@ func cleanupRetryDelay(retries int) time.Duration {
 // arrive for a session nobody released. Without this retry the GATT session,
 // device object, and every cached service/characteristic COM handle would
 // stay alive for the lifetime of the process.
+//
+// At most one retry may be pending: interleaved manual attempts and failures
+// would otherwise stack timers that each fire an extra attempt, burning the
+// bounded retry budget on redundant work.
 func (d Device) scheduleCleanupRetry(delay time.Duration) {
+	state := d.state
+	if state == nil {
+		return
+	}
+	state.cleanupMutex.Lock()
+	if state.cleanupComplete || state.cleanupStarted || state.cleanupRetryPending {
+		state.cleanupMutex.Unlock()
+		return
+	}
+	state.cleanupRetryPending = true
+	state.cleanupMutex.Unlock()
 	time.AfterFunc(delay, func() {
 		state := d.state
 		if state == nil {
 			return
 		}
 		state.cleanupMutex.Lock()
+		state.cleanupRetryPending = false
 		if state.cleanupComplete || state.cleanupStarted {
 			state.cleanupMutex.Unlock()
 			return

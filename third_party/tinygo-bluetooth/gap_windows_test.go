@@ -281,6 +281,97 @@ func TestWaitForScanStopTimesOutAndPreservesStopError(t *testing.T) {
 	}
 }
 
+func TestWaitForScanStopSurfacesLateStoppedEventError(t *testing.T) {
+	originalTimeout := scanStopTimeout
+	originalPoll := scanStopPollInterval
+	scanStopTimeout = time.Second
+	scanStopPollInterval = 250 * time.Millisecond
+	t.Cleanup(func() {
+		scanStopTimeout = originalTimeout
+		scanStopPollInterval = originalPoll
+	})
+
+	stopped := make(chan error, 1)
+	stopRequests := make(chan error, 1)
+	stopRequests <- nil
+	// Status flips to Stopped before the Stopped event is dispatched; the
+	// event carries the real cause (radio removed while draining). The faster
+	// status poll must not drop it.
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		stopped <- ErrRadioNotAvailable
+		close(stopped)
+	}()
+	err := waitForScanStop(stopped, stopRequests, func() error { return nil }, func() (advertisement.BluetoothLEAdvertisementWatcherStatus, error) {
+		return advertisement.BluetoothLEAdvertisementWatcherStatusStopped, nil
+	})
+	if !errors.Is(err, ErrRadioNotAvailable) {
+		t.Fatalf("waitForScanStop() error = %v, want the late stopped event error", err)
+	}
+}
+
+func TestWaitForScanStopFallsBackToStatusWhenEventNeverArrives(t *testing.T) {
+	originalTimeout := scanStopTimeout
+	originalPoll := scanStopPollInterval
+	scanStopTimeout = time.Second
+	scanStopPollInterval = 2 * time.Millisecond
+	t.Cleanup(func() {
+		scanStopTimeout = originalTimeout
+		scanStopPollInterval = originalPoll
+	})
+
+	stopRequests := make(chan error, 1)
+	stopRequests <- nil
+	// No Stopped event ever arrives; the terminal status must still finish the
+	// wait cleanly after the short event grace window.
+	err := waitForScanStop(make(chan error), stopRequests, func() error { return nil }, func() (advertisement.BluetoothLEAdvertisementWatcherStatus, error) {
+		return advertisement.BluetoothLEAdvertisementWatcherStatusStopped, nil
+	})
+	if err != nil {
+		t.Fatalf("waitForScanStop() error = %v, want a clean stop", err)
+	}
+}
+
+func TestScheduleCleanupRetrySuppressesDuplicateTimers(t *testing.T) {
+	originalEnter := enterWinRTThread
+	originalBaseDelay := cleanupRetryBaseDelay
+	// Keep the scheduled timer far enough away that it cannot fire while the
+	// test asserts the pending state.
+	enterWinRTThread = func() (func(), error) { return nil, errors.New("apartment failure") }
+	cleanupRetryBaseDelay = time.Hour
+	t.Cleanup(func() {
+		enterWinRTThread = originalEnter
+		cleanupRetryBaseDelay = originalBaseDelay
+	})
+
+	state := &deviceState{callbacks: newCallbackGate()}
+	device := Device{state: state}
+	if err := device.Disconnect(); err == nil {
+		t.Fatal("Disconnect() unexpectedly succeeded")
+	}
+	state.cleanupMutex.Lock()
+	pending := state.cleanupRetryPending
+	retries := state.cleanupRetries
+	state.cleanupMutex.Unlock()
+	if !pending {
+		t.Fatal("retryable cleanup failure did not mark a pending retry")
+	}
+	if retries != 1 {
+		t.Fatalf("cleanup retries = %d, want 1 after one failed attempt", retries)
+	}
+
+	// Interleaved failures must not stack redundant pending timers.
+	device.scheduleCleanupRetry(time.Hour)
+	device.scheduleCleanupRetry(time.Hour)
+	state.cleanupMutex.Lock()
+	stillPending := state.cleanupRetryPending
+	unchanged := state.cleanupRetries == retries
+	state.cleanupMutex.Unlock()
+	if !stillPending || !unchanged {
+		t.Fatalf("duplicate scheduling changed pending=%v retries=%d", stillPending, state.cleanupRetries)
+	}
+}
+
 func TestStopScanCommunicatesWinRTInitializationFailure(t *testing.T) {
 	originalEnter := enterWinRTThread
 	threadErr := errors.New("apartment unavailable")
