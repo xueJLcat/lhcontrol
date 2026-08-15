@@ -140,6 +140,57 @@ func TestReleaseStationForScanRemovesCompletedPendingCleanup(t *testing.T) {
 	}
 }
 
+// TestFailedDisconnectRegistersPendingCleanupForFleetRetry guards the tracking
+// invariant: a Disconnect that fails while the station has already been pruned
+// from the connected list (for example by an interleaved disconnect during the
+// unlocked cleanup window) must still be registered for fleet-wide cleanup.
+// Otherwise its WinRT handles leak until process exit.
+func TestFailedDisconnectRegistersPendingCleanupForFleetRetry(t *testing.T) {
+	cleanupErr := errors.New("temporary disconnect failure")
+	device := &trackingConnectedDevice{disconnectErr: cleanupErr}
+	station := connectedFakeStation(&fakeCharacteristic{}, nil, nil, Capabilities{PowerWrite: true})
+	station.device = device
+	connectedStationsMutex.Lock()
+	previousConnected := connectedStations
+	previousPending := pendingCleanupStations
+	connectedStations = []*BaseStation{station}
+	pendingCleanupStations = nil
+	connectedStationsMutex.Unlock()
+	t.Cleanup(func() {
+		connectedStationsMutex.Lock()
+		connectedStations = previousConnected
+		pendingCleanupStations = previousPending
+		connectedStationsMutex.Unlock()
+	})
+
+	if err := DisconnectStation(station); !errors.Is(err, cleanupErr) {
+		t.Fatalf("DisconnectStation() error = %v, want %v", err, cleanupErr)
+	}
+	connectedStationsMutex.Lock()
+	tracked := false
+	for _, pending := range pendingCleanupStations {
+		if pending == station {
+			tracked = true
+		}
+	}
+	connectedStationsMutex.Unlock()
+	if !tracked {
+		t.Fatal("failed disconnect was not registered for fleet-wide cleanup retry")
+	}
+
+	device.disconnectErr = nil
+	if err := DisconnectStation(station); err != nil {
+		t.Fatalf("DisconnectStation() retry error = %v", err)
+	}
+	connectedStationsMutex.Lock()
+	pendingCount := len(pendingCleanupStations)
+	connectedCount := len(connectedStations)
+	connectedStationsMutex.Unlock()
+	if pendingCount != 0 || connectedCount != 0 {
+		t.Fatalf("completed cleanup left stale tracking entries: pending=%d connected=%d", pendingCount, connectedCount)
+	}
+}
+
 type errorReportingConnectedDevice struct {
 	trackingConnectedDevice
 	queryErr error

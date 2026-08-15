@@ -256,8 +256,9 @@ type Manager struct {
 	shutdownDrainTimeout    time.Duration
 	// Tunable wait limits; tests pin them directly. Production runs leave
 	// them at zero and follow the package defaults.
-	stopScanTimeout   time.Duration
-	adapterCleanupWait time.Duration
+	stopScanTimeout      time.Duration
+	adapterCleanupWait   time.Duration
+	foregroundDrainWait  time.Duration
 	shuttingDown            atomic.Bool
 	shutdownOnce            sync.Once
 	shutdownCh              chan struct{}

@@ -48,6 +48,15 @@ export class PowerFeedbackRegistry {
     this.onChange(this.record);
   }
 
+  // Keeps feedback only for addresses that still own a live operation. A scan
+  // that preserves in-flight station operations must not clear their visible
+  // pending notes; entries for settled operations are dropped.
+  retain(addresses: ReadonlySet<string>) {
+    for (const address of Object.keys(this.record)) {
+      if (!addresses.has(address)) this.clear(address);
+    }
+  }
+
   // Drops settled feedback once a newer authoritative read supersedes it.
   reconcile(updated: StationInfo[]) {
     for (const station of updated) {

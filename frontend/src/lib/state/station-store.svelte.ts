@@ -9,6 +9,7 @@ import {
 } from '../backend';
 import type { PowerFeedback, PowerTarget, StationInfo } from '../types';
 import { scanErrorCopy, type ScanErrorInfo } from '../scan-error';
+import { isTerminalScanState } from '../result-format';
 import { pushToast } from '../toast';
 import { deriveOperationLocks, type GlobalOperation } from '../operation-state';
 import { ExternalScanCoordinator, type ExternalScanEvent } from '../external-scan';
@@ -139,6 +140,12 @@ export class StationStore {
   // releases instead of skipping the configured startup scan for the session.
   private startupScanDeferred = false;
   private deferredStartupScanTimer: ReturnType<typeof setInterval> | null = null;
+  // The first API health snapshot tells which running operations are internal
+  // (auto-sleep or HTTP) and which are user-stoppable external scans. Until it
+  // arrives — notably when the startup barrier timed out — unknown scans must
+  // not be adopted and deferred startup scans must not start, or an internal
+  // scan could be exposed as stoppable or rejected as busy.
+  private startupScanOwnershipKnown = false;
   private mounted = false;
 
   readonly powerFeedback = new PowerFeedbackRegistry((next) => {
@@ -157,7 +164,8 @@ export class StationStore {
   readonly externalScan = new ExternalScanCoordinator({
     isDisposed: () => this.disposed,
     localScanRunning: () => this.globalOperation === 'scanning',
-    canAdoptUnknownScan: () => !this.autoSleepRunning && !this.externalOperationRunning &&
+    canAdoptUnknownScan: () => this.startupScanOwnershipKnown &&
+      !this.autoSleepRunning && !this.externalOperationRunning &&
       !this.isLoading && !this.isBulkLoading && !this.anyDeviceOperation,
     externalScanning: () => this.externalScanning,
     setExternalScanning: (value) => this.externalScanning = value,
@@ -177,6 +185,7 @@ export class StationStore {
     setStatusMessage: (message) => this.statusMessage = message,
     setStoppingScan: (value) => this.stoppingScan = value,
     beginScanTimer: () => this.beginScanTimer(),
+    restartScanTimer: () => this.restartScanTimer(),
     maybeEndScanTimer: () => this.maybeEndScanTimer(),
     isScanning: () => IsScanning(),
     getScanStatus: () => GetScanStatus(),
@@ -190,6 +199,10 @@ export class StationStore {
   readonly apiStatus = new ApiStatusPoller({
     isDisposed: () => this.disposed,
     commitStatus: (status) => {
+      // The first committed health snapshot makes scan ownership decidable:
+      // auto-sleep and HTTP operations become distinguishable from unknown
+      // external scans, releasing the adoption/deferred-scan startup gates.
+      this.startupScanOwnershipKnown = true;
       this.apiRunning = status.running;
       this.apiError = status.error;
       this.apiAddress = status.address;
@@ -383,6 +396,10 @@ export class StationStore {
     this.scanTimer.begin();
   }
 
+  restartScanTimer() {
+    this.scanTimer.restart();
+  }
+
   maybeEndScanTimer() {
     // A local scan and an external scan can overlap; the timer belongs to
     // whichever is still running, so only stop when both have finished.
@@ -451,9 +468,22 @@ export class StationStore {
       this.configOperations = new Set();
       this.channelSavingAddress = null;
       this.gates.clearOperationTokens();
+      this.powerTargetByAddress = {};
+      this.powerFeedback.clearAll();
+      return;
     }
-    this.powerTargetByAddress = {};
-    this.powerFeedback.clearAll();
+    // An external scan starts while single-station operations are still in
+    // flight. Their busy flags are preserved above, so keep their pending
+    // target highlight and feedback notes too: they settle through the gated
+    // commit path and would otherwise disappear with no result ever written
+    // for the operation. Entries whose operation already ended are dropped.
+    const activeAddresses = this.gattOperations;
+    const nextTargets: Record<string, PowerTarget | undefined> = {};
+    for (const [address, target] of Object.entries(this.powerTargetByAddress)) {
+      if (activeAddresses.has(address)) nextTargets[address] = target;
+    }
+    this.powerTargetByAddress = nextTargets;
+    this.powerFeedback.retain(activeAddresses);
   }
 
   mergeStationUpdates(updated: StationInfo[]) {
@@ -734,10 +764,19 @@ export class StationStore {
         // Keep automatic station refresh enabled when the preference is unreadable.
       });
     const startupScanPreferenceRevision = this.scanOnStartupPreferenceRevision;
+    // Set once the mount decision below has run, so a scan-on-startup
+    // preference that resolves after the decision (a slow getter or a barrier
+    // timeout) can still arm the deferred startup scan instead of being
+    // silently lost for the session.
+    let startupDecisionApplied = false;
     const startupScanPreferenceReady = GetScanOnStartup()
       .then((enabled) => {
         if (!this.disposed && this.scanOnStartupPreferenceRevision === startupScanPreferenceRevision) {
           this.scanOnStartupEnabled = enabled;
+          if (enabled && startupDecisionApplied &&
+            startupScanEpoch === this.gates.currentScanEpoch) {
+            this.setStartupScanDeferred(true);
+          }
         }
       })
       .catch(() => {
@@ -763,21 +802,26 @@ export class StationStore {
         startupAPIStatusReady,
         statusPollingPreferenceReady
       ]);
-      // A hung backend getter must not hold startupPending forever: after the
-      // timeout proceed as if no scan is running and let the periodic poll
-      // reconcile the real state.
+      // A hung backend getter must not hold startupPending forever. The null
+      // fallback marks "no authoritative observation" (barrier timeout or a
+      // rejected probe): scan ownership then stays undecidable until the first
+      // health snapshot lands, so neither adoption nor a direct startup scan
+      // may run — both could misclassify or be rejected by an internal scan.
       const startupScanning = await resolveWithTimeout(
         startupBarrier.then(() => startupScanningProbe),
         STARTUP_PROBE_TIMEOUT_MS,
-        false
+        null
       );
       // Do not allow the first polling tick to acquire the backend operation
       // lock before the initial external-scan check can start the local scan.
       this.startupPending = false;
+      startupDecisionApplied = true;
       // An external scan event may have arrived while this initial query was
       // pending. Do not let its older result overwrite the newer event state.
       if (this.disposed || startupScanEpoch !== this.gates.currentScanEpoch) return;
-      if (startupScanning) {
+      if (startupScanning === null) {
+        if (this.scanOnStartupEnabled) this.setStartupScanDeferred(true);
+      } else if (startupScanning) {
         // An auto-sleep scan is internal; adopting it would expose Stop for
         // it. Skip adoption and let the periodic check take over afterwards.
         if (!this.autoSleepRunning && !this.externalOperationRunning) {
@@ -791,8 +835,21 @@ export class StationStore {
           // recreate a deferred scan that it just cancelled.
           this.setStartupScanDeferred(true);
         }
+      } else {
+        void this.recoverPreMountScanOutcome();
       }
     })();
+  }
+
+  // A scan that started and finished between backend startup and listener
+  // mounting never delivered any events. Without this probe its terminal
+  // outcome (and its station list) stays invisible until the first periodic
+  // poll, which a user-tuned interval can delay for minutes.
+  private async recoverPreMountScanOutcome() {
+    const status = await GetScanStatus().catch(() => null);
+    if (this.disposed || !status || !isTerminalScanState(status.state)) return;
+    if (this.globalOperation !== 'idle' || this.externalScanning || this.isLoading) return;
+    await this.externalScan.recoverUntracked();
   }
 
   // Retries a startup scan that was blocked by a lock once that lock clears.
@@ -804,7 +861,10 @@ export class StationStore {
       this.setStartupScanDeferred(false);
       return;
     }
-    if (this.scanLocked || this.isLoading) {
+    // Before the first health snapshot lands, lock state cannot distinguish
+    // an internal scan from an idle backend; starting the deferred scan would
+    // fail busy against an auto-sleep scan and lose the deferral.
+    if (this.scanLocked || this.isLoading || !this.startupScanOwnershipKnown) {
       this.armDeferredStartupScanRetry();
       return;
     }
@@ -818,8 +878,14 @@ export class StationStore {
 
   private setStartupScanDeferred(deferred: boolean) {
     this.startupScanDeferred = deferred;
-    if (deferred) this.armDeferredStartupScanRetry();
-    else this.disarmDeferredStartupScanRetry();
+    if (deferred) {
+      // Attempt immediately: the blocking lock may already be released (for
+      // example when the health snapshot landed and only the startup barrier
+      // was slow). A still-held lock re-arms the retry interval inside.
+      this.maybeRunDeferredStartupScan();
+    } else {
+      this.disarmDeferredStartupScanRetry();
+    }
   }
 
   private armDeferredStartupScanRetry() {
@@ -842,6 +908,7 @@ export class StationStore {
     this.apiStatus.dispose();
     this.scanTimer.dispose();
     this.scans.dispose();
+    this.actions.dispose();
     this.fleet.stopChannelMemoryExpiry();
     this.disarmDeferredStartupScanRetry();
     this.startupScanDeferred = false;

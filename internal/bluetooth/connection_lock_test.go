@@ -140,6 +140,18 @@ func TestPendingCleanupReleasesLockAndRetainsHandleOnFailure(t *testing.T) {
 	station.isConnected = false
 	station.pendingCleanup = device
 
+	// A failed cleanup registers the station for fleet-wide retry; restore the
+	// global tracking list so the retained handle does not leak into later
+	// tests' DisconnectAllConnections/InvalidateAllConnections runs.
+	connectedStationsMutex.Lock()
+	previousPending := pendingCleanupStations
+	connectedStationsMutex.Unlock()
+	t.Cleanup(func() {
+		connectedStationsMutex.Lock()
+		pendingCleanupStations = previousPending
+		connectedStationsMutex.Unlock()
+	})
+
 	done := make(chan error, 1)
 	go func() {
 		station.mutex.Lock()

@@ -38,6 +38,9 @@ type fakeBLEAdapter struct {
 	results        []tinybluetooth.ScanResult
 	scanErr        error
 	stopErr        error
+	// startErr fails the scan before the platform watcher ever starts, so the
+	// session's started flag stays false like a real Start rejection.
+	startErr       error
 	panicScan      bool
 	panicStop      bool
 	returnEarly    bool
@@ -80,6 +83,9 @@ func (a *fakeBLEAdapter) ScanWithStart(callback func(*tinybluetooth.Adapter, tin
 	}
 	if a.startDelay != nil {
 		<-a.startDelay
+	}
+	if a.startErr != nil {
+		return a.startErr
 	}
 	a.startOnce.Do(func() { close(a.started) })
 	if started != nil {

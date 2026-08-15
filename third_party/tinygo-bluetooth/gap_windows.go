@@ -754,9 +754,15 @@ func (a *Adapter) StopScan() error {
 	if err != nil {
 		a.watcherMutex.RLock()
 		control := a.scan
-		if control != nil {
-			control.stopOnce.Do(func() { control.stopRequests <- err })
+		if control == nil || control.watcher == nil {
+			// No scan is active, so the stop is a no-op regardless of the
+			// thread failure; reporting the initialization error would make
+			// idempotent stops (shutdown, late stop requests) surface bogus
+			// failures instead of the documented not-scanning outcome.
+			a.watcherMutex.RUnlock()
+			return ErrNotScanning
 		}
+		control.stopOnce.Do(func() { control.stopRequests <- err })
 		a.watcherMutex.RUnlock()
 		return err
 	}

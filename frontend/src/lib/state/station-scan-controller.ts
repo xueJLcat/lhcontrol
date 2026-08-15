@@ -89,11 +89,11 @@ export class StationScanController {
     this.scanWatchdogTimer = null;
   }
 
-  private armScanWatchdog(operationEpoch: number) {
+  private armScanWatchdog(operationEpoch: number, statusOperation: number) {
     this.cancelScanWatchdog();
     this.scanWatchdogTimer = setTimeout(() => {
       this.scanWatchdogTimer = null;
-      void this.runScanWatchdog(operationEpoch, 0);
+      void this.runScanWatchdog(operationEpoch, statusOperation, 0);
     }, SCAN_WATCHDOG_DELAY_MS);
   }
 
@@ -105,7 +105,7 @@ export class StationScanController {
   // globalOperation is no longer 'scanning', and any late response is still
   // gated by the scan epoch and list revision. This restores periodic polling
   // and the Scan/Stop controls instead of forcing a process restart.
-  private async runScanWatchdog(operationEpoch: number, attempt: number) {
+  private async runScanWatchdog(operationEpoch: number, statusOperation: number, attempt: number) {
     const host = this.host;
     if (host.disposed || host.globalOperation !== 'scanning') return;
     if (!host.gates.canCommitOperation(operationEpoch)) return;
@@ -122,7 +122,7 @@ export class StationScanController {
       if (attempt + 1 < SCAN_WATCHDOG_MAX_ATTEMPTS) {
         this.scanWatchdogTimer = setTimeout(() => {
           this.scanWatchdogTimer = null;
-          void this.runScanWatchdog(operationEpoch, attempt + 1);
+          void this.runScanWatchdog(operationEpoch, statusOperation, attempt + 1);
         }, SCAN_WATCHDOG_RECHECK_DELAY_MS);
         return;
       }
@@ -130,7 +130,12 @@ export class StationScanController {
     host.globalOperation = 'idle';
     host.stoppingScan = false;
     const summary = await this.completedScanSummary();
-    if (!host.disposed && host.gates.canCommitOperation(operationEpoch)) {
+    // Claim the status line before writing: while the probe was awaiting the
+    // backend an auto-sleep event can take the line (its message must win),
+    // and the hung scan promise settling late must not overwrite this outcome
+    // with its own status write.
+    if (!host.disposed && host.gates.canCommitStatus(statusOperation)) {
+      host.gates.beginStatusOperation();
       host.statusMessage = summary ?? t('Scan stopped.');
     }
     host.maybeEndScanTimer();
@@ -337,7 +342,7 @@ export class StationScanController {
     const statusOperation = this.host.gates.beginStatusOperation();
     this.host.beginScanTimer();
     const operationEpoch = this.host.gates.beginScanEpoch();
-    this.armScanWatchdog(operationEpoch);
+    this.armScanWatchdog(operationEpoch, statusOperation);
     const revision = this.host.listRevisions.next();
     this.host.statusMessage = t('Scanning for base stations...');
     try {

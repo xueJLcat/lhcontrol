@@ -63,8 +63,49 @@ export interface StationActionHost {
   withStationChanges(current: StationInfo, changes: Partial<StationInfo>): StationInfo;
 }
 
+// CancelBulkPower is bounded on the backend (it returns after its wait limit
+// even when the workers ignore cancellation), but a bulk whose workers are
+// wedged inside adapter calls never settles its Wails promise: without a
+// watchdog the UI would keep globalOperation='bulk-power' forever, locking
+// every scan, bulk, and periodic refresh until a process restart. Give the
+// bulk slightly more than the backend's cancel wait limit to settle on its
+// own before force-settling the local state.
+const BULK_CANCEL_WATCHDOG_DELAY_MS = 90_000;
+
 export class StationActionController {
+  private bulkCancelWatchdogTimer: ReturnType<typeof setTimeout> | null = null;
+
   constructor(private host: StationActionHost) {}
+
+  dispose() {
+    this.cancelBulkCancelWatchdog();
+  }
+
+  private cancelBulkCancelWatchdog() {
+    if (this.bulkCancelWatchdogTimer !== null) clearTimeout(this.bulkCancelWatchdogTimer);
+    this.bulkCancelWatchdogTimer = null;
+  }
+
+  // A cancel request whose bulk promise never settles must not brick the UI.
+  // Invalidate the wedged bulk's pending commits, claim the status line, and
+  // restore the idle state; the periodic health poll reconciles the real
+  // backend state afterwards. A late bulk settlement is a no-op: its commits
+  // fail the bumped scan epoch and its finally observes globalOperation no
+  // longer 'bulk-power'.
+  private runBulkCancelWatchdog() {
+    this.bulkCancelWatchdogTimer = null;
+    const host = this.host;
+    if (host.disposed || host.globalOperation !== 'bulk-power') return;
+    host.gates.beginScanEpoch();
+    host.gates.beginStatusOperation();
+    host.listRevisions.next();
+    host.globalOperation = 'idle';
+    host.bulkTarget = null;
+    host.cancellingBulk = false;
+    const message = t('Stopping bulk power timed out; the operation state was reset.');
+    host.statusMessage = message;
+    pushToast(message, 'warning');
+  }
   private async fetchLatestList(revision = this.host.listRevisions.next()): Promise<boolean> {
     const capturedStationRevisions = this.host.gates.snapshotStationRevisions();
     try {
@@ -277,6 +318,9 @@ export class StationActionController {
       // swallow the only notification of the failure.
       pushToast(failureMessage);
     } finally {
+      // The bulk settled, so the cancel watchdog no longer needs to recover
+      // it; a pending cancel request keeps its own cancellingBulk flag.
+      this.cancelBulkCancelWatchdog();
       if (!this.host.disposed) {
         if (this.host.globalOperation === 'bulk-power') this.host.globalOperation = 'idle';
         this.host.bulkTarget = null;
@@ -290,6 +334,11 @@ export class StationActionController {
   async cancelBulkPower() {
     if (this.host.globalOperation !== 'bulk-power' || this.host.cancellingBulk) return;
     this.host.cancellingBulk = true;
+    // The watchdog outlives this request on purpose: CancelBulkPower can
+    // return its timeout error while the wedged bulk promise is still
+    // pending, and only the watchdog can restore the UI state afterwards.
+    this.cancelBulkCancelWatchdog();
+    this.bulkCancelWatchdogTimer = setTimeout(() => this.runBulkCancelWatchdog(), BULK_CANCEL_WATCHDOG_DELAY_MS);
     // Reuse the running bulk's status epoch instead of starting a new one: a
     // fresh epoch would invalidate the bulk's terminal "cancelled" summary
     // write. Committing under the captured epoch still drops this message when

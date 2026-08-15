@@ -7,15 +7,10 @@ export class ScanTimer {
 
   constructor(private readonly onElapsed: (seconds: number) => void) {}
 
+  // Idempotent while running: periodic refreshes and repeated scan ticks keep
+  // re-arming the active scan's timer and must not reset the elapsed time.
   begin() {
-    if (this.timer) {
-      // A handover (for example an adopted external scan following a local
-      // scan) re-arms the timer for the new scan; restart the clock instead
-      // of accumulating the previous scan's elapsed time.
-      this.startedAt = Date.now();
-      this.onElapsed(0);
-      return;
-    }
+    if (this.timer) return;
     this.startedAt = Date.now();
     this.onElapsed(0);
     this.timer = setInterval(() => {
@@ -25,6 +20,18 @@ export class ScanTimer {
         this.onElapsed(Math.max(0, Math.floor((Date.now() - this.startedAt) / 1000)));
       }
     }, 1000);
+  }
+
+  // Restarts the clock for a handover: an adopted external scan following
+  // another scan owns a fresh elapsed display instead of accumulating the
+  // previous scan's time.
+  restart() {
+    if (this.timer) {
+      this.startedAt = Date.now();
+      this.onElapsed(0);
+      return;
+    }
+    this.begin();
   }
 
   end() {

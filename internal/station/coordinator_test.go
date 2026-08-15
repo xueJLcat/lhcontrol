@@ -338,6 +338,28 @@ func TestForegroundGlobalOperationWaitsForRecovery(t *testing.T) {
 	}
 }
 
+// TestForegroundGlobalOperationBoundsDrainWait guards the deadline-free
+// acquisition path: when background work never drains (a wedged worker holds
+// the station lock past every budget), the wait reports a retryable Busy
+// instead of hanging the caller forever.
+func TestForegroundGlobalOperationBoundsDrainWait(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	manager.foregroundDrainWait = 20 * time.Millisecond
+	if err := manager.beginRecoveryStationOperation("RECOVERY"); err != nil {
+		t.Fatalf("beginRecoveryStationOperation() error = %v", err)
+	}
+	defer manager.endRecoveryStationOperation("RECOVERY")
+
+	start := time.Now()
+	err := manager.beginForegroundGlobalOperation()
+	if !errors.Is(err, ErrOperationInProgress) {
+		t.Fatalf("bounded drain wait error = %v, want ErrOperationInProgress", err)
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("bounded drain wait took %v, want the configured limit", elapsed)
+	}
+}
+
 func TestStatusRecoveryBackfillsBusyCandidatesAndLimitsConcurrency(t *testing.T) {
 	manager := NewManager(config.NewConfig())
 	defer manager.Shutdown()

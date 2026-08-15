@@ -68,12 +68,11 @@ func (m *Manager) SetStationPower(address, state string) (PowerActionResult, err
 				if outcomeErr == nil {
 					// Recording a transport-level channel failure can disconnect the
 					// station. Return the post-recovery snapshot while retaining the
-					// already-established confirmed no-op outcome.
-					info, infoErr := m.stationInfoByAddress(address)
-					if infoErr != nil {
-						return PowerActionResult{}, infoErr
+					// already-established confirmed no-op outcome; a lookup failure
+					// must not discard that confirmed result either.
+					if info, infoErr := m.stationInfoByAddress(address); infoErr == nil {
+						result.Station = info
 					}
-					result.Station = info
 				}
 				return result, outcomeErr
 			}

@@ -45,6 +45,7 @@ export interface ExternalScanHost {
   setStatusMessage(message: string): void;
   setStoppingScan(value: boolean): void;
   beginScanTimer(): void;
+  restartScanTimer(): void;
   maybeEndScanTimer(): void;
   isScanning(): Promise<boolean>;
   getScanStatus(): Promise<station.ScanStatus>;
@@ -160,7 +161,9 @@ export class ExternalScanCoordinator {
     this.scanID = id;
     this.host.setExternalScanning(true);
     this.host.setStoppingScan(false);
-    this.host.beginScanTimer();
+    // An adopted scan supersedes whatever the timer was counting; restart the
+    // elapsed display instead of accumulating the previous scan's time.
+    this.host.restartScanTimer();
     this.host.setStatusMessage(t('Preparing external scan...'));
   }
 

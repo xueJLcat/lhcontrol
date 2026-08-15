@@ -120,6 +120,13 @@ func (a *App) applyAutoSleep(settings autosleep.Settings) {
 			// Preserve idle/running/countdown state, and re-arm a consumed
 			// trigger whose action is still running or queued.
 			monitor = previous.ReplacementMonitor(settings.Delay())
+		} else if owed, closedAt := previous.OwedSession(); owed {
+			// A target change discards the old process observation (it belongs
+			// to a different session source), but an owed unsettled sleep must
+			// survive: seed the session-close time so the replacement watcher
+			// re-arms the debt (and keeps the closedAt de-duplication key)
+			// instead of dropping it until the new target's next full session.
+			monitor = autosleep.NewMonitorContinuing(settings.Delay(), closedAt)
 		}
 		a.autoSleepCancel = nil
 		a.autoSleepWatcher = nil

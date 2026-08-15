@@ -120,6 +120,7 @@ const zhCN = {
   'Cooldown before the Bluetooth adapter initialization is retried after a failure. Allowed range: 1–30 seconds.': '蓝牙适配器初始化失败后再次尝试前的冷却时间。允许范围：1–30 秒。',
   'Cancel bulk power': '停止批量电源操作',
   'Stopping bulk power...': '正在停止批量电源操作…',
+  'Stopping bulk power timed out; the operation state was reset.': '停止批量电源操作超时，界面状态已复位。',
   'Bulk {target} cancelled': '批量{target}操作已停止',
   'Bulk {target} timed out': '批量{target}操作已超时',
   'Bulk {target}: {summary}': '批量{target}：{summary}',

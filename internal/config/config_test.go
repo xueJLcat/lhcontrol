@@ -52,6 +52,26 @@ func TestWriteFileAtomicallyCreatesAndReplacesFile(t *testing.T) {
 	}
 }
 
+// TestLoadSweepsStaleTemporaryFiles covers the crash window between CreateTemp
+// and Rename: scratch files a previous run left behind must be removed by the
+// next Load so the config directory does not accumulate them forever.
+func TestLoadSweepsStaleTemporaryFiles(t *testing.T) {
+	configDirectory := useTemporaryConfigDirectory(t)
+	stale := filepath.Join(configDirectory, ".lhcontrol-config-123456.tmp")
+	if err := os.WriteFile(stale, []byte(`{"partial":true}`), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	config := NewConfig()
+	if err := config.Load(); err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Fatalf("stale temporary file stat error = %v, want removed", err)
+	}
+}
+
 func TestRenameRollsBackInMemoryWhenPersistenceFails(t *testing.T) {
 	t.Setenv("AppData", t.TempDir())
 	originalWriter := configFileWriter

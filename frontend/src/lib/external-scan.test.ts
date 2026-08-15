@@ -41,6 +41,7 @@ function createHost(overrides: Partial<ExternalScanHost> = {}): { host: External
     setStatusMessage: (message) => state.statusMessages.push(message),
     setStoppingScan: (value) => state.stoppingScan = value,
     beginScanTimer: vi.fn(),
+    restartScanTimer: vi.fn(),
     maybeEndScanTimer: vi.fn(),
     isScanning: vi.fn().mockResolvedValue(false),
     getScanStatus: vi.fn().mockResolvedValue({ state: 'completed', found: 2, warnings: [] }),

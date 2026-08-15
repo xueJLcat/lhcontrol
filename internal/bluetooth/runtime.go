@@ -290,6 +290,23 @@ func invalidateDisconnectedDevice(station *BaseStation, disconnected bluetooth.D
 		pendingCleanupStations = append(pendingCleanupStations, station)
 	}
 	connectedStationsMutex.Unlock()
+
+	// Kick an eager cleanup of the detached handle. The transport's own
+	// connection-status callback normally starts one, but that fallback can
+	// silently fail (WinRT thread initialization or COM errors); without this
+	// kick the GATT session stays owned by the OS until the next operation on
+	// this station or a fleet-wide cleanup, and single-connection peripherals
+	// refuse a replacement session while the old one lingers. The cleanup is
+	// idempotent: the transport deduplicates attempts, and a concurrent
+	// cleanup observes pendingCleanup==nil and returns.
+	go func() {
+		defer func() { _ = recover() }()
+		station.mutex.Lock()
+		defer station.mutex.Unlock()
+		if station.pendingCleanup != nil {
+			_ = cleanupPendingInternal(station)
+		}
+	}()
 }
 
 func IsAdapterUnavailable(err error) bool {

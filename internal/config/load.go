@@ -50,6 +50,11 @@ func (c *Config) Load() error {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
+	// A previous run dying between CreateTemp and Rename leaves scratch files
+	// behind; the single-instance guard means no other instance is mid-write,
+	// so stale temporaries are safe to sweep here.
+	removeStaleConfigTemporaries(filepath.Dir(configFilePath))
+
 	log.Printf("Loading config from: %s", configFilePath)
 	configFile, err := configFileReader(configFilePath)
 	if err != nil {

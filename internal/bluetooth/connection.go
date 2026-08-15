@@ -367,6 +367,7 @@ func disconnectInternal(s *BaseStation) error {
 			disconnectErr = nil
 		} else if disconnectErr != nil && s.pendingCleanup == nil {
 			s.pendingCleanup = device
+			trackPendingCleanupStation(s)
 		}
 	} else {
 		detachConnectionStateInternal(s)
@@ -428,19 +429,28 @@ func cleanupPendingInternal(s *BaseStation) error {
 		if bluetooth.IsDisconnectCleanupComplete(err) {
 			log.Printf("Bluetooth: Pending disconnect cleanup completed for %s with warning: %v", s.Name, err)
 			removePendingCleanupStation(s)
+			if s.device == nil && !s.isConnected {
+				pruneDisconnectedStation(s)
+			}
 			return nil
 		}
 		// Keep the handle around for a later retry unless an interleaved
 		// disconnect recorded a newer pending handle meanwhile.
 		if s.pendingCleanup == nil {
 			s.pendingCleanup = pending
+			trackPendingCleanupStation(s)
 		}
 		return err
 	}
 	// A reconnect that completes the pending cleanup must also leave the
 	// global tracking list; otherwise a healthy station keeps a stale entry
-	// until an explicit disconnect removes it.
+	// until an explicit disconnect removes it. A station that is still
+	// disconnected also leaves the connected list; a concurrent reconnect is
+	// re-added with deduplication by the connect path.
 	removePendingCleanupStation(s)
+	if s.device == nil && !s.isConnected {
+		pruneDisconnectedStation(s)
+	}
 	return nil
 }
 
@@ -467,6 +477,41 @@ func removePendingCleanupStation(station *BaseStation) {
 		}
 	}
 	pendingCleanupStations = remaining
+	connectedStationsMutex.Unlock()
+}
+
+// trackPendingCleanupStation keeps the invariant that a station holding a
+// pendingCleanup handle is always tracked for fleet-wide cleanup. Without it
+// a Disconnect that fails while another operation already pruned the station
+// from connectedStations leaks its WinRT handles until process exit.
+func trackPendingCleanupStation(station *BaseStation) {
+	connectedStationsMutex.Lock()
+	found := false
+	for _, tracked := range pendingCleanupStations {
+		if tracked == station {
+			found = true
+			break
+		}
+	}
+	if !found {
+		pendingCleanupStations = append(pendingCleanupStations, station)
+	}
+	connectedStationsMutex.Unlock()
+}
+
+// pruneDisconnectedStation drops a station whose cleanup just completed from
+// the connected tracking list when no live connection remains. The reconnect
+// path re-adds entries with deduplication, so pruning right after a
+// successful cleanup cannot lose a healthy connection.
+func pruneDisconnectedStation(station *BaseStation) {
+	connectedStationsMutex.Lock()
+	remaining := connectedStations[:0]
+	for _, tracked := range connectedStations {
+		if tracked != station {
+			remaining = append(remaining, tracked)
+		}
+	}
+	connectedStations = remaining
 	connectedStationsMutex.Unlock()
 }
 

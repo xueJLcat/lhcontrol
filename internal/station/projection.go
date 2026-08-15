@@ -35,12 +35,16 @@ func (m *Manager) GetStationInfo() []StationInfo {
 	now := time.Now()
 	displayFreshnessWindow := m.config.StatusDisplayFreshnessWindow()
 	for _, snapshot := range snapshots {
+		// Conflict detection feeds the same decision SetStationChannel makes
+		// with the operational freshness window; using the (longer, polling
+		// scaled) display window here would mark conflicts that the write path
+		// immediately rejects as stale, contradicting the safety check.
 		if snapshot.Present &&
 			snapshot.MissedScans == 0 &&
 			!snapshot.PresenceUncertain &&
 			isRecent(snapshot.LastSeenAt, now, m.channelScanFreshnessWindowDuration()) &&
 			snapshot.Channel != bluetooth.ChannelUnknown &&
-			isRecent(snapshot.LastChannelReadAt, now, displayFreshnessWindow) {
+			isOperationallyFresh(snapshot.LastChannelReadAt, now) {
 			channelCounts[snapshot.Channel]++
 		}
 	}
@@ -83,7 +87,7 @@ func (m *Manager) GetStationInfo() []StationInfo {
 			PowerStateConfirmed: powerFresh && bluetooth.IsPowerStateVerified(snapshot.PowerState, snapshot.RawPowerState),
 			RawPowerState:       snapshot.RawPowerState,
 			Channel:             snapshot.Channel,
-			ChannelConflict: snapshot.Present && scanFresh && channelFresh &&
+			ChannelConflict: snapshot.Present && scanFresh && channelOperationallyFresh &&
 				channelCounts[snapshot.Channel] > 1,
 			IsPresent:                    snapshot.Present,
 			PresenceUncertain:            snapshot.PresenceUncertain,

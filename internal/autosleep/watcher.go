@@ -79,6 +79,30 @@ func (w *Watcher) OwesTrigger() bool {
 	return w.triggerOwed
 }
 
+// OwedSession reports the consumed-trigger debt: whether an owed sleep is
+// still unsettled and the session-close time that identifies it. A watcher
+// replacing this one for a different watched process cannot reuse the
+// monitor's observation state (running/countdown belongs to the old
+// process), but the debt itself does not depend on which process is watched
+// next and must survive the switch instead of being silently dropped until
+// the new target's next full session.
+func (w *Watcher) OwedSession() (bool, time.Time) {
+	w.mutex.Lock()
+	owed := w.triggerOwed
+	w.mutex.Unlock()
+	if !owed {
+		return false, time.Time{}
+	}
+	w.lifecycleMutex.Lock()
+	monitor := w.Monitor
+	w.lifecycleMutex.Unlock()
+	if monitor == nil {
+		return true, time.Time{}
+	}
+	_, closedAt := monitor.Countdown()
+	return true, closedAt
+}
+
 func (w *Watcher) markTriggerOwed(owed bool) uint64 {
 	w.mutex.Lock()
 	w.triggerGeneration++

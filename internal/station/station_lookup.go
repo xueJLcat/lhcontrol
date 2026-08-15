@@ -59,7 +59,14 @@ func (m *Manager) cachedPowerOutcome(stationPtr *bluetooth.BaseStation, target b
 	}
 	info, err := m.stationInfoByAddress(snapshot.Address)
 	if err != nil {
-		return PowerActionResult{}, err, true
+		// The station was already confirmed to be at the target state; a
+		// lookup failure must not discard that confirmed no-op outcome and
+		// reclassify it as a hard error.
+		return PowerActionResult{
+			Skipped:   true,
+			Reason:    ReasonAlreadyAtTarget,
+			Confirmed: true,
+		}, nil, true
 	}
 	return PowerActionResult{
 		Station:   info,

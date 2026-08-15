@@ -187,8 +187,13 @@ func (c *Config) saveLocked() error {
 	return nil
 }
 
+// configTempFilePattern names the atomic-write scratch files. Load sweeps
+// matches so a crash between CreateTemp and Rename cannot accumulate stale
+// temporaries forever; the pattern is shared so the two sites cannot drift.
+const configTempFilePattern = ".lhcontrol-config-*.tmp"
+
 func writeFileAtomically(path string, data []byte, permissions os.FileMode) (returnErr error) {
-	tempFile, err := os.CreateTemp(filepath.Dir(path), ".lhcontrol-config-*.tmp")
+	tempFile, err := os.CreateTemp(filepath.Dir(path), configTempFilePattern)
 	if err != nil {
 		return fmt.Errorf("create temporary config: %w", err)
 	}
@@ -220,6 +225,20 @@ func writeFileAtomically(path string, data []byte, permissions os.FileMode) (ret
 		return fmt.Errorf("replace config: %w", err)
 	}
 	return nil
+}
+
+// removeStaleConfigTemporaries deletes scratch files left behind by a crash
+// or power loss between CreateTemp and Rename. Removal failures are ignored:
+// a locked or already-gone file is harmless, and quarantined
+// config.json.invalid-* files are deliberately left untouched.
+func removeStaleConfigTemporaries(dir string) {
+	matches, err := filepath.Glob(filepath.Join(dir, configTempFilePattern))
+	if err != nil {
+		return
+	}
+	for _, match := range matches {
+		_ = os.Remove(match)
+	}
 }
 
 // GetRenamedStation returns the local display name for a station.

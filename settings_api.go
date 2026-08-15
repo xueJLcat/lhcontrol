@@ -44,15 +44,33 @@ func (a *App) SetAPIListenAddress(address string) error {
 
 	normalized := strings.TrimSpace(address)
 
-	// Re-saving the unchanged address must not restart the listener: the
-	// restart tears down the live socket and drops in-flight responses for a
-	// bind target that is already the configured one. The config setter still
-	// runs so an invalid residual stored value (which the getter masks with
-	// the default) is repaired by persisting its sanitized equivalent.
+	// Re-saving the unchanged address must not restart the listener when the
+	// listener already serves it: the restart tears down the live socket and
+	// drops in-flight responses for a bind target that is already the
+	// configured one. The config setter still runs so an invalid residual
+	// stored value (which the getter masks with the default) is repaired by
+	// persisting its sanitized equivalent. A listener that diverged from the
+	// configured address (for example retrying elsewhere after a failed
+	// switch) converges again on the explicit re-save instead of requiring a
+	// different address and back.
 	if a.config.GetAPIListenAddress() == normalized {
 		err := a.config.SetAPIListenAddress(normalized)
 		a.setConfigPersistenceStatus()
-		return err
+		if err != nil {
+			return err
+		}
+		if a.GetAPIStatus().Address != normalized && !a.shuttingDown.Load() {
+			a.setAPIAddress(normalized)
+			a.restartAPIServer()
+			bound, bindErr := a.waitForAPIBind()
+			if !bound {
+				if bindErr == nil {
+					bindErr = fmt.Errorf("%s did not come up within %s", normalized, a.apiBindVerifyWindow())
+				}
+				return fmt.Errorf("cannot listen on %s: %v", normalized, bindErr)
+			}
+		}
+		return nil
 	}
 
 	previous := a.config.GetAPIListenAddress()
@@ -103,8 +121,7 @@ func (a *App) SetAPIListenAddress(address string) error {
 					if bindErr == nil {
 						bindErr = fmt.Errorf("%s did not come up within %s", normalized, a.apiBindVerifyWindow())
 					}
-					a.setAPIAddress(published)
-					a.restartAPIServer()
+					a.rollbackListener(published, previous)
 					if rollbackErr := a.config.SetAPIListenAddress(previous); rollbackErr != nil {
 						a.setConfigPersistenceStatus()
 						return fmt.Errorf(
@@ -147,12 +164,32 @@ func (a *App) verifyAndSwitchListenAddress(normalized string) error {
 	if bound {
 		return nil
 	}
-	a.setAPIAddress(published)
-	a.restartAPIServer()
+	a.rollbackListener(published, published)
 	if bindErr != nil {
 		return bindErr
 	}
 	return fmt.Errorf("%s did not come up within %s", normalized, a.apiBindVerifyWindow())
+}
+
+// rollbackListener restores the listener onto restoreAddress and verifies the
+// bind. If that restoration cannot bind either (the port was grabbed in the
+// meantime), converge the listener onto convergeAddress so the running server
+// and the rolled-back persisted configuration agree; config state itself is
+// managed by the caller.
+func (a *App) rollbackListener(restoreAddress, convergeAddress string) {
+	if a.shuttingDown.Load() {
+		return
+	}
+	a.setAPIAddress(restoreAddress)
+	a.restartAPIServer()
+	if bound, _ := a.waitForAPIBind(); bound {
+		return
+	}
+	if restoreAddress == convergeAddress {
+		return
+	}
+	a.setAPIAddress(convergeAddress)
+	a.restartAPIServer()
 }
 
 // waitForAPIBind polls the freshly restarted listener until it reports a

@@ -4,7 +4,18 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"time"
 )
+
+// foregroundDrainWaitLimit bounds how long a foreground global acquisition
+// waits for manager-owned background work (status refresh or recovery) to
+// drain. Background work is normally bounded by its own read and cleanup
+// budgets, but an abandoned bounded-cleanup goroutine can keep a station lock
+// held long past its deadline, leaving the background done channel un-closed.
+// Without this limit a scan prepared from a deadline-free context (for
+// example ScanAndFetchStationsContext on context.Background) would hang
+// indefinitely instead of reporting Busy so the caller can retry.
+const foregroundDrainWaitLimit = 45 * time.Second
 
 func (m *Manager) registerOperation() error {
 	m.lifecycleMutex.Lock()
@@ -102,9 +113,26 @@ func (m *Manager) attemptForegroundGlobalOperation(ctx context.Context) (<-chan 
 	return backgroundDone, nil
 }
 
+// foregroundDrainDeadline returns the channel bounding background-drain waits
+// for a ctx that carries no deadline of its own. Callers with an explicit
+// deadline already bound the wait through their context.
+func (m *Manager) foregroundDrainDeadline(ctx context.Context) (<-chan time.Time, func()) {
+	if _, hasDeadline := ctx.Deadline(); hasDeadline {
+		return nil, func() {}
+	}
+	limit := m.foregroundDrainWait
+	if limit <= 0 {
+		limit = foregroundDrainWaitLimit
+	}
+	timer := time.NewTimer(limit)
+	return timer.C, func() { timer.Stop() }
+}
+
 // waitForForegroundGlobalOperation runs the attempt/wait loop shared by the
 // global foreground acquisitions.
 func (m *Manager) waitForForegroundGlobalOperation(ctx context.Context) error {
+	drainDeadline, stopDrainDeadline := m.foregroundDrainDeadline(ctx)
+	defer stopDrainDeadline()
 	for {
 		backgroundDone, err := m.attemptForegroundGlobalOperation(ctx)
 		if err != nil {
@@ -115,6 +143,11 @@ func (m *Manager) waitForForegroundGlobalOperation(ctx context.Context) error {
 		}
 		select {
 		case <-backgroundDone:
+		case <-drainDeadline:
+			// Background work stayed queued past the bounded wait. Report Busy
+			// (retryable) instead of hanging on a done channel that a wedged
+			// background worker may never close.
+			return ErrOperationInProgress
 		case <-ctx.Done():
 			return m.foregroundContextError(ctx)
 		case <-m.shutdownCh:
@@ -421,6 +454,8 @@ func (m *Manager) beginBulkGlobalOperationContext(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	drainDeadline, stopDrainDeadline := m.foregroundDrainDeadline(ctx)
+	defer stopDrainDeadline()
 	for {
 		if err := m.foregroundContextError(ctx); err != nil {
 			return err
@@ -440,6 +475,11 @@ func (m *Manager) beginBulkGlobalOperationContext(ctx context.Context) error {
 		}
 		select {
 		case <-backgroundDone:
+		case <-drainDeadline:
+			// Same bounded-drain rule as waitForForegroundGlobalOperation: a
+			// wedged background worker must keep the bulk retryable as Busy
+			// instead of holding the global lock wait open indefinitely.
+			return ErrOperationInProgress
 		case <-ctx.Done():
 			return m.foregroundContextError(ctx)
 		case <-m.shutdownCh:

@@ -353,6 +353,16 @@ describe('StationStore startup', () => {
     expect(backend.ScanAndFetchStations).not.toHaveBeenCalled();
   });
 
+  it('recovers an external scan outcome that finished before listeners mounted', async () => {
+    backend.GetScanOnStartup.mockResolvedValue(false);
+    backend.GetScanStatus.mockResolvedValue({ state: 'failed', found: 0, error: 'radio removed', warnings: [] });
+    const { store } = mountStore();
+    // Without the pre-mount probe this outcome only surfaced on the first
+    // periodic poll (a user-tunable wait of minutes).
+    await vi.waitFor(() => expect(store.statusMessage).toContain('External scan failed'));
+    expect(backend.ScanAndFetchStations).not.toHaveBeenCalled();
+  });
+
   it('keeps cached freshness current without automatic Bluetooth station reads', async () => {
     vi.useFakeTimers();
     backend.GetStatusPollingEnabled.mockResolvedValue(false);
@@ -436,8 +446,10 @@ describe('StationStore startup', () => {
     const { store } = mountStore();
     await vi.waitFor(() => expect(store.stations).toHaveLength(1));
     backend.ScanAndFetchStations.mockClear();
-    // The boot-time lock has lifted only via this deferred flag in scenarios
-    // where no terminal event arrives; the dedicated retry timer must drive it.
+    // Hold a lock so the immediate attempt re-arms the dedicated retry timer
+    // instead of starting directly; the timer must then drive the scan once
+    // the lock releases, without waiting for the poll interval.
+    store.globalOperation = 'status-refresh';
     vi.useFakeTimers();
     const internals = store as unknown as {
       setStartupScanDeferred(deferred: boolean): void;
@@ -449,6 +461,7 @@ describe('StationStore startup', () => {
 
     await vi.advanceTimersByTimeAsync(2999);
     expect(backend.ScanAndFetchStations).not.toHaveBeenCalled();
+    store.globalOperation = 'idle';
     await vi.advanceTimersByTimeAsync(1);
     await vi.advanceTimersByTimeAsync(50);
 
@@ -616,6 +629,34 @@ describe('StationStore power operations', () => {
     await store.refreshCapabilities(store.stations[0]);
 
     expect(store.powerFeedbackMap[store.stations[0].address]).toBeUndefined();
+  });
+
+  it('keeps in-flight power feedback across an external scan start and clears settled feedback', async () => {
+    const { store } = mountStore();
+    await vi.waitFor(() => expect(store.stations).toHaveLength(1));
+    const address = store.stations[0].address;
+
+    // In-flight: the busy flag (and with it the operation token) is still
+    // held, so an external scan starting now must keep the pending highlight.
+    store.setGattBusy(address, true);
+    store.powerTargetByAddress = { [address]: 'on' };
+    store.powerFeedback.set(address, { kind: 'pending', text: 'Switching to On…', target: 'on' });
+
+    store.prepareForScan(false);
+
+    expect(store.powerTargetByAddress[address]).toBe('on');
+    expect(store.powerFeedbackMap[address]?.kind).toBe('pending');
+
+    // Settled: the operation released its busy flag and target, so the next
+    // preserved-operations scan clears the leftover feedback like before.
+    store.setGattBusy(address, false);
+    store.powerTargetByAddress = {};
+    store.powerFeedback.set(address, { kind: 'success', text: 'On confirmed', target: 'on' });
+
+    store.prepareForScan(false);
+
+    expect(store.powerTargetByAddress[address]).toBeUndefined();
+    expect(store.powerFeedbackMap[address]).toBeUndefined();
   });
 });
 
@@ -785,6 +826,37 @@ describe('StationStore bulk power', () => {
     await vi.waitFor(() => expect(store.stations).toHaveLength(1));
 
     await expect(store.runBulkPower('on')).resolves.toBe(true);
+  });
+
+  it('force-settles a wedged bulk once the cancel watchdog budget expires', async () => {
+    // The bulk promise never settles (workers wedged inside adapter calls);
+    // CancelBulkPower reports its bounded timeout. Without the watchdog the
+    // UI would stay locked in 'bulk-power' until a process restart.
+    backend.SetAllStationsPowerDetailed.mockReturnValueOnce(new Promise(() => {}));
+    backend.CancelBulkPower.mockRejectedValueOnce(new Error('bulk operation did not stop within 1m0s after cancellation'));
+    const { store } = mountStore();
+    await vi.waitFor(() => expect(store.stations).toHaveLength(1));
+
+    void store.runBulkPower('on');
+    await vi.waitFor(() => expect(store.globalOperation).toBe('bulk-power'));
+
+    // Fake timers before the cancel so the watchdog it arms is controllable.
+    vi.useFakeTimers();
+    void store.cancelBulkPower();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(backend.CancelBulkPower).toHaveBeenCalledOnce();
+    expect(store.cancellingBulk).toBe(false);
+    // The wedged bulk promise keeps the operation locked even though the
+    // cancel request settled with the backend's timeout error.
+    expect(store.globalOperation).toBe('bulk-power');
+
+    await vi.advanceTimersByTimeAsync(90_000);
+    vi.useRealTimers();
+
+    expect(store.globalOperation).toBe('idle');
+    expect(store.cancellingBulk).toBe(false);
+    expect(store.bulkTarget).toBeNull();
+    expect(store.statusMessage).toContain('Stopping bulk power timed out');
   });
 });
 

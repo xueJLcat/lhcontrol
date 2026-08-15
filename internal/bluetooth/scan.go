@@ -212,6 +212,15 @@ func (s *scanSession) durationStopIssuedFlag() bool {
 	return s.durationStopIssued
 }
 
+// startedFlag reports whether the platform watcher accepted a Start. A scan
+// that never started treats its start error as the authoritative outcome
+// even when a cancellation was recorded concurrently.
+func (s *scanSession) startedFlag() bool {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	return s.started
+}
+
 // IsConnected returns the current connection status safely.
 
 func ScanForDuration(duration time.Duration) ([]DiscoveredStation, error) {
@@ -346,6 +355,17 @@ func ScanForDurationContext(ctx context.Context, duration time.Duration) ([]Disc
 	// hard scan failure. An abandoned stop is swallowed by the cancellation:
 	// the stop attempt was given up on as part of honoring the cancel.
 	if reason == scanStopCancelled || ctx.Err() != nil {
+		// A platform failure that happened before the watcher ever started is
+		// the real outcome of the scan (for example the radio was unavailable
+		// and the start failure raced a cancellation): report it instead of a
+		// plain cancellation, which would never reach the adapter retry path.
+		// An adapter-unavailable failure keeps priority over cancellation even
+		// after a start so a pulled or disabled radio is still classified.
+		if scanErr != nil && (IsAdapterUnavailable(scanErr) || !session.startedFlag()) {
+			if err := scanCompletionError(scanErr); err != nil {
+				return nil, err
+			}
+		}
 		if stopErr != nil && !abandonedStop {
 			return nil, fmt.Errorf("failed to stop Bluetooth scan after cancellation: %w", stopErr)
 		}

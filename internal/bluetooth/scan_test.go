@@ -35,6 +35,58 @@ func TestScanFindsServiceOnlyAdvertisement(t *testing.T) {
 		t.Fatalf("service-only scan results = %+v", results)
 	}
 }
+// TestScanStartFailureBeatsConcurrentCancellation guards the cancel/start
+// race: when the platform watcher never accepted a Start (for example the
+// radio became unavailable) and a cancellation lands at the same moment, the
+// adapter failure is the real outcome and must be reported so callers reach
+// the adapter retry path instead of classifying the scan as cancelled.
+func TestScanStartFailureBeatsConcurrentCancellation(t *testing.T) {
+	originalAdapter := adapter
+	fake := newFakeBLEAdapter()
+	fake.startErr = tinybluetooth.ErrRadioNotAvailable
+	fake.startDelay = make(chan struct{})
+	adapter = fake
+	t.Cleanup(func() { adapter = originalAdapter })
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	scanDone := make(chan error, 1)
+	go func() {
+		_, err := ScanForDurationContext(ctx, time.Second)
+		scanDone <- err
+	}()
+	// Wait until the scan session is registered, then cancel before the
+	// blocked platform start is released with its failure.
+	registered := false
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); {
+		activeScanMutex.Lock()
+		registered = activeScan != nil
+		activeScanMutex.Unlock()
+		if registered {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if !registered {
+		t.Fatal("scan session was not registered")
+	}
+	cancel()
+	close(fake.startDelay)
+	select {
+	case err := <-scanDone:
+		if errors.Is(err, ErrScanCancelled) {
+			t.Fatalf("ScanForDurationContext() error = %v, want the adapter failure instead of a cancellation", err)
+		}
+		if !errors.Is(err, tinybluetooth.ErrRadioNotAvailable) {
+			t.Fatalf("ScanForDurationContext() error = %v, want ErrRadioNotAvailable", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ScanForDurationContext() did not return after the start failure")
+	}
+}
+
 func TestScanMergesNamesAcrossDuplicateAdvertisements(t *testing.T) {
 	originalAdapter := adapter
 	t.Cleanup(func() { adapter = originalAdapter })

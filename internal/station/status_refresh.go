@@ -139,15 +139,15 @@ func (m *Manager) CheckAllStationStatuses() ([]StationInfo, error) {
 							statusErrors[item.index] = fmt.Errorf("%s: status read cancelled: %w", address, workerErr)
 							return
 						}
-					if isPureContextError(workerErr) && errors.Is(workerErr, context.Canceled) &&
-						m.lifecycleContext.Err() == nil {
-						// Only an error made exclusively of context errors is a
-						// plain interruption: the bluetooth layer joins a real
-						// read failure with the cancelling context error, and
-						// that mixed outcome must take the failure path below.
-						m.trackStatusRefreshPending(address)
-						return
-					}
+						if isPureContextError(workerErr) && errors.Is(workerErr, context.Canceled) &&
+							m.lifecycleContext.Err() == nil {
+							// Only an error made exclusively of context errors is a
+							// plain interruption: the bluetooth layer joins a real
+							// read failure with the cancelling context error, and
+							// that mixed outcome must take the failure path below.
+							m.trackStatusRefreshPending(address)
+							return
+						}
 						if !ownBudget && errors.Is(refreshContext.Err(), context.DeadlineExceeded) &&
 							errors.Is(workerErr, context.DeadlineExceeded) {
 							m.trackStatusRefreshPending(address)

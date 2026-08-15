@@ -339,6 +339,67 @@ func TestWatcherReplacementRearmsOwedTrigger(t *testing.T) {
 	}
 }
 
+// TestWatcherOwedSessionSurvivesTargetSwitch covers a watched-target change
+// while a sleep debt is unsettled: the replacement watcher cannot reuse the
+// old process observation, but the debt must survive and fire on the new
+// watcher instead of being dropped until the new target's next full session.
+func TestWatcherOwedSessionSurvivesTargetSwitch(t *testing.T) {
+	base := time.Now()
+	monitor := NewMonitor(time.Minute)
+	monitor.Poll(true, base)
+	monitor.Poll(false, base.Add(time.Second))
+	if got := monitor.Poll(false, base.Add(2*time.Minute)); got != ActionTrigger {
+		t.Fatalf("source monitor = %v, want ActionTrigger", got)
+	}
+	source := &Watcher{Settings: Settings{Target: string(TargetSteamVR), DelaySeconds: 60}, Monitor: monitor}
+	source.markTriggerOwed(true)
+
+	owed, closedAt := source.OwedSession()
+	if !owed || !closedAt.Equal(base.Add(time.Second)) {
+		t.Fatalf("OwedSession() = %v, %v, want owed at %v", owed, closedAt, base.Add(time.Second))
+	}
+
+	// Seed the owed session into a watcher for a different target whose
+	// monitor starts counting from the old session-close time.
+	var ticks atomic.Int64
+	var firedClosedAt atomic.Value
+	secondRan := make(chan struct{})
+	var secondOnce sync.Once
+	replacement := NewMonitorContinuing(3*time.Minute, closedAt)
+	watcher := &Watcher{
+		Settings:  Settings{Enabled: true, Target: string(TargetSteam), DelaySeconds: 180},
+		Interval:  time.Millisecond,
+		IsRunning: func(string) (bool, error) { return false, nil },
+		Now:       func() time.Time { return base.Add(3*time.Minute + time.Duration(ticks.Add(1))*time.Minute) },
+		Monitor:   replacement,
+		Trigger: func(_ context.Context, gotClosedAt time.Time) bool {
+			firedClosedAt.Store(gotClosedAt)
+			secondOnce.Do(func() { close(secondRan) })
+			return true
+		},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		watcher.Run(ctx)
+	}()
+	defer func() {
+		cancel()
+		<-done
+	}()
+
+	select {
+	case <-secondRan:
+	case <-time.After(2 * time.Second):
+		t.Fatal("owed sleep did not fire on the replacement watcher after the target switch")
+	}
+	got, _ := firedClosedAt.Load().(time.Time)
+	if !got.Equal(closedAt) {
+		t.Fatalf("replacement trigger closedAt = %v, want the original session close %v", got, closedAt)
+	}
+}
+
 func TestWatcherCancelsActiveTriggerWhenProcessRelaunches(t *testing.T) {
 	var running atomic.Bool
 	running.Store(true)
