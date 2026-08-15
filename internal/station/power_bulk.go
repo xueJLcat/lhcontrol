@@ -26,13 +26,11 @@ func (m *Manager) SetAllStationsPower(state string) error {
 
 func (m *Manager) setAllStationsPower(state string) error {
 	result, err := m.SetAllStationsPowerDetailedContext(context.Background(), state)
-	if (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) &&
-		(result.Cancelled || result.TimedOut) {
-		// Cancellation and timeout are reported through the structured result,
-		// keeping the legacy error contract consistent with the detailed form.
-		err = nil
-	}
 	if err != nil {
+		// Cancellation and timeout are carried by structured fields in the
+		// detailed form, but the legacy error contract has no such channel:
+		// swallowing them here would report a batch where every station was
+		// skipped as a success.
 		return err
 	}
 	var operationErrors []error

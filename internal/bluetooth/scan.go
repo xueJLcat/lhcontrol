@@ -312,7 +312,14 @@ func stopScanSafely() (returnErr error) {
 			returnErr = fmt.Errorf("Bluetooth StopScan panicked: %v\n%s", recovered, debug.Stack())
 		}
 	}()
-	return adapter.StopScan()
+	err := adapter.StopScan()
+	if errors.Is(err, bluetooth.ErrNotScanning) {
+		// The platform watcher already ended on its own (a radio event or a
+		// racing stop finished it first). A late stop found no scan to halt,
+		// which is the desired end state, not a stop failure.
+		return nil
+	}
+	return err
 }
 
 // CancelScan requests cancellation of an active platform scan. It is used

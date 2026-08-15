@@ -21,6 +21,10 @@ import { t, withDetail } from '../i18n.svelte';
 // long user-tuned interval. Actively recheck whether the scan ended so the
 // header leaves the disabled "Stopping..." state promptly.
 const STOP_RECHECK_DELAY_MS = 1500;
+// The recheck chain must not run unbounded: if the backend keeps failing the
+// probe (or never finishes the scan), give up and let the periodic poll
+// reconcile the state instead of pinning the header on "Stopping...".
+const STOP_RECHECK_MAX_ATTEMPTS = 10;
 
 export interface StationScanHost {
   stations: StationInfo[];
@@ -72,21 +76,55 @@ export class StationScanController {
   // checked; schedule a short recheck chain until the terminal outcome lands or
   // the stop request is superseded. Without this, only the periodic status poll
   // (up to a user-tuned minutes-long interval) would clear the stopping state.
-  private scheduleStopRecheck(operationEpoch: number, requestGeneration: number) {
+  private scheduleStopRecheck(
+    operationEpoch: number,
+    statusOperation: number,
+    requestGeneration: number,
+    attempt: number
+  ) {
     this.cancelStopRecheck();
     if (this.host.disposed) return;
+    if (attempt >= STOP_RECHECK_MAX_ATTEMPTS) {
+      // Restore the header; the periodic poll reconciles the real scan state
+      // (and re-arms the stop if the scan is genuinely still running).
+      this.host.stoppingScan = false;
+      return;
+    }
     this.stopRecheckTimer = setTimeout(() => {
       this.stopRecheckTimer = null;
-      void this.retryStopFinish(operationEpoch, requestGeneration);
+      void this.retryStopFinish(operationEpoch, statusOperation, requestGeneration, attempt);
     }, STOP_RECHECK_DELAY_MS);
   }
 
-  private async retryStopFinish(operationEpoch: number, requestGeneration: number) {
+  private async retryStopFinish(
+    operationEpoch: number,
+    statusOperation: number,
+    requestGeneration: number,
+    attempt: number
+  ) {
     const host = this.host;
     if (host.disposed || !host.stoppingScan || host.stopRequestGeneration !== requestGeneration) return;
     if (!host.gates.canCommitOperation(operationEpoch)) return;
-    const outcome = await host.externalScan.finishStop(operationEpoch, () => host.stopRequestGeneration === requestGeneration);
-    if (outcome === 'still-scanning') this.scheduleStopRecheck(operationEpoch, requestGeneration);
+    const outcome = await host.externalScan.finishStop(
+      operationEpoch,
+      statusOperation,
+      () => host.stopRequestGeneration === requestGeneration
+    );
+    if (outcome === 'still-scanning') this.scheduleStopRecheck(operationEpoch, statusOperation, requestGeneration, attempt + 1);
+  }
+
+  // Reads the backend scan status and renders its completion summary when the
+  // scan finished on its own. Returns null for any other state so callers can
+  // fall back to their own message.
+  private async completedScanSummary(): Promise<string | null> {
+    const scanStatus = await GetScanStatus().catch(() => null);
+    if (!scanStatus || scanStatus.state !== 'completed') return null;
+    return formatTerminalScanResult({
+      state: 'completed',
+      found: scanStatus.found ?? this.host.stations.filter((station) => station.seenInLatestScan).length,
+      known: this.host.stations.length,
+      warnings: scanStatus.warnings
+    });
   }
 
   async periodicStatusCheck() {
@@ -245,18 +283,48 @@ export class StationScanController {
       this.host.stopRequestPending = false;
       if (!this.host.stoppingScan) return;
       if (this.host.externalScanning) {
-        const outcome = await this.host.externalScan.finishStop(operationEpoch, () => this.host.stopRequestGeneration === requestGeneration);
-        if (outcome === 'still-scanning') this.scheduleStopRecheck(operationEpoch, requestGeneration);
+        const outcome = await this.host.externalScan.finishStop(
+          operationEpoch,
+          statusOperation,
+          () => this.host.stopRequestGeneration === requestGeneration
+        );
+        if (outcome === 'still-scanning') this.scheduleStopRecheck(operationEpoch, statusOperation, requestGeneration, 1);
       } else {
         if (this.host.globalOperation !== 'scanning') this.host.stoppingScan = false;
         if (this.host.gates.canCommitStatus(statusOperation)) {
-          this.host.statusMessage = t('Scan stopped.');
+          // The scan can complete on its own while the stop is in flight;
+          // report its real outcome instead of a plain "stopped" message.
+          const summary = await this.completedScanSummary();
+          if (this.host.gates.canCommitStatus(statusOperation)) {
+            this.host.statusMessage = summary ?? t('Scan stopped.');
+          }
         }
         this.host.maybeEndScanTimer();
       }
     } catch (error) {
       if (!this.host.gates.canCommitOperation(operationEpoch)) return;
       this.host.stopRequestPending = false;
+      // A scan that finished while the stop request failed keeps its
+      // completion summary instead of a misleading stop-failure toast.
+      const summary = await this.completedScanSummary();
+      if (summary !== null && this.host.gates.canCommitStatus(statusOperation)) {
+        this.host.stoppingScan = false;
+        this.host.statusMessage = summary;
+        return;
+      }
+      // A stop-timeout means the cancellation was accepted but scan processing
+      // had not drained within the bounded wait; keep the stopping state and
+      // let the recheck chain or the periodic poll observe the terminal
+      // outcome instead of reporting a hard stop failure.
+      if (classifyScanError(error).kind === 'timeout') {
+        if (this.host.gates.canCommitStatus(statusOperation)) {
+          this.host.statusMessage = t('Stopping scan...');
+        }
+        if (this.host.externalScanning) {
+          this.scheduleStopRecheck(operationEpoch, statusOperation, requestGeneration, 1);
+        }
+        return;
+      }
       this.host.stoppingScan = false;
       const failureMessage = withDetail('Unable to stop scan', error);
       if (this.host.gates.canCommitStatus(statusOperation)) {

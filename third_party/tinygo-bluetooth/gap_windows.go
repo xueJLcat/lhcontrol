@@ -766,7 +766,7 @@ func (a *Adapter) StopScan() error {
 	defer a.watcherMutex.RUnlock()
 	control := a.scan
 	if control == nil || control.watcher == nil {
-		return errNotScanning
+		return ErrNotScanning
 	}
 	// stopWatcher dedupes concurrent callers so at most one watcher.Stop()
 	// COM call is issued per scan; a stop before Start is recorded and

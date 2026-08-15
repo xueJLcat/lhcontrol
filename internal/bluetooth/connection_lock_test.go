@@ -74,6 +74,61 @@ func TestDisconnectReleasesStationLockDuringCleanup(t *testing.T) {
 	}
 }
 
+// TestDisconnectDoesNotDropReconnectedTrackingEntry guards against a slow
+// disconnect whose cleanup returns after a concurrent operation already
+// rebuilt the connection: the late tracking-filter must not remove the entry
+// for the live connection, or it leaks from DisconnectAllStations and
+// adapter-change invalidation.
+func TestDisconnectDoesNotDropReconnectedTrackingEntry(t *testing.T) {
+	device := &blockingDisconnectDevice{block: make(chan struct{}), started: make(chan struct{})}
+	station := connectedFakeStation(&fakeCharacteristic{}, nil, nil, Capabilities{PowerWrite: true})
+	station.device = device
+
+	connectedStationsMutex.Lock()
+	previous := connectedStations
+	connectedStations = []*BaseStation{station}
+	connectedStationsMutex.Unlock()
+	t.Cleanup(func() {
+		connectedStationsMutex.Lock()
+		connectedStations = previous
+		connectedStationsMutex.Unlock()
+	})
+
+	done := make(chan error, 1)
+	go func() {
+		station.mutex.Lock()
+		done <- disconnectInternal(station)
+		station.mutex.Unlock()
+	}()
+
+	select {
+	case <-device.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("disconnect did not reach the WinRT cleanup call")
+	}
+
+	// Recreate the connection while the old cleanup is still blocked. The
+	// registry entry already exists, so the connect dedup keeps it.
+	station.mutex.Lock()
+	station.device = fakeConnectedDevice{}
+	station.isConnected = true
+	station.mutex.Unlock()
+
+	close(device.block)
+	if err := <-done; err != nil {
+		t.Fatalf("disconnectInternal() error = %v", err)
+	}
+	connectedStationsMutex.Lock()
+	count := len(connectedStations)
+	connectedStationsMutex.Unlock()
+	if count != 1 {
+		t.Fatalf("tracked connection count = %d, want the rebuilt connection retained", count)
+	}
+	if snapshot := station.Snapshot(); !snapshot.Connected {
+		t.Fatalf("rebuilt connection reads disconnected: %+v", snapshot)
+	}
+}
+
 // TestPendingCleanupReleasesLockAndRetainsHandleOnFailure covers the retry path
 // for an earlier failed disconnect: the WinRT cleanup runs outside the lock and
 // a still-failing handle must be kept for a later retry instead of dropped.

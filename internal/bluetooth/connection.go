@@ -217,7 +217,13 @@ func connectAndDiscoverInternalContext(ctx context.Context, station *BaseStation
 				continue
 			}
 			if !controlServiceFound || powerCharacteristic == nil {
-				err = unsupportedCapability("Lighthouse power control service", nil)
+				// Discovery succeeded but the service list is incomplete. The
+				// Windows uncached discovery drops services on unstable links
+				// and freshly booted devices, so a missing control service is
+				// an incomplete result, not an explicit capability rejection.
+				// Keep it retryable; classifying it as unsupported would mark
+				// the station permanently capability-less and stop recovery.
+				err = fmt.Errorf("%s discovery did not return the Lighthouse power control service", station.Name)
 				continue
 			}
 			station.characteristic = powerCharacteristic
@@ -314,9 +320,16 @@ func disconnectInternal(s *BaseStation) error {
 	connectedStationsMutex.Lock()
 	newConnectedStations := make([]*BaseStation, 0, len(connectedStations))
 	for _, cs := range connectedStations {
-		if cs.Address != s.Address || s.pendingCleanup != nil {
-			newConnectedStations = append(newConnectedStations, cs)
+		// Disconnect() can block past every caller deadline while the station
+		// lock is released; a concurrent operation may reconnect this station
+		// before this cleanup returns. Only release the tracking entry when
+		// this disconnect still owns the connection state, otherwise a rebuilt
+		// connection loses its entry and leaks from DisconnectAllStations and
+		// adapter-change invalidation.
+		if cs == s && s.device == nil && !s.isConnected && s.pendingCleanup == nil {
+			continue
 		}
+		newConnectedStations = append(newConnectedStations, cs)
 	}
 	connectedStations = newConnectedStations
 	connectedStationsMutex.Unlock()

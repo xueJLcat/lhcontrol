@@ -372,7 +372,10 @@ func (m *Manager) scanAndFetchStations(ctx context.Context) ([]StationInfo, int,
 		}
 		wg.Wait()
 		if err := scanContextError(ctx); err != nil {
-			return m.GetStationInfo(), 0, err
+			// The discovery results above were already merged; only the
+			// optional initial reads were interrupted. Report the merged
+			// count instead of claiming nothing was found.
+			return m.GetStationInfo(), len(discoveredValues), err
 		}
 		sort.Slice(readResults, func(i, j int) bool {
 			return strings.ToLower(readResults[i].address) < strings.ToLower(readResults[j].address)

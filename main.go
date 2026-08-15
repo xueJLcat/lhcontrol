@@ -333,9 +333,16 @@ func setupLogging(mirrorConsole bool) (*rotatingLogFile, error) {
 }
 
 func main() {
-	// Define command-line flag for logging
-	mirrorConsole := flag.Bool("log", false, "Also mirror diagnostics to the console")
-	flag.Parse() // Parse command line arguments
+	// Define command-line flag for logging. Parse with ContinueOnError so an
+	// unknown argument (for example one appended by a shortcut or shell
+	// association) cannot terminate the second instance with exit code 2
+	// before it reaches the single-instance check that focuses the running
+	// window.
+	flagSet := flag.NewFlagSet("lhcontrol", flag.ContinueOnError)
+	mirrorConsole := flagSet.Bool("log", false, "Also mirror diagnostics to the console")
+	if parseErr := flagSet.Parse(os.Args[1:]); parseErr != nil {
+		log.Printf("Ignoring unrecognized command line arguments: %v", parseErr)
+	}
 
 	// Setup standard logger flags (applies to console and potentially file)
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)

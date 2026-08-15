@@ -69,6 +69,58 @@ func TestApplyPresenceMissThresholdReclassifiesAndRevivesRecovery(t *testing.T) 
 	}
 }
 
+// TestPresenceThresholdReviveRebasesExistingBackoff guards the promise that a
+// station revived by raising the miss threshold gets an immediate recovery
+// attempt: an absent-era backoff deadline far in the future must not delay it.
+func TestPresenceThresholdReviveRebasesExistingBackoff(t *testing.T) {
+	cfg := config.NewConfig()
+	cfg.PresenceMissThreshold = 2
+	manager := NewManager(cfg)
+	manager.shuttingDown.Store(true)
+	address := "11:22:33:44:55:6B"
+	station := &internalbluetooth.BaseStation{
+		Address: mustAddress(t, address), Present: false, MissedScans: 3,
+	}
+	manager.stations[address] = station
+
+	futureAttempt := time.Now().Add(time.Hour)
+	manager.statusRetryMutex.Lock()
+	manager.statusRetries[address] = statusRetry{
+		kinds:              statusRetryConnection | statusRetryChannel,
+		failures:           5,
+		lastAttempt:        time.Now().Add(-time.Hour),
+		nextAt:             futureAttempt,
+		channelFailures:    4,
+		channelLastAttempt: time.Now().Add(-time.Hour),
+		channelNextAt:      futureAttempt,
+	}
+	manager.statusRetryMutex.Unlock()
+
+	cfg.PresenceMissThreshold = 5
+	now := time.Now()
+	manager.ApplyPresenceMissThreshold()
+
+	snapshot := station.Snapshot()
+	if !snapshot.Present {
+		t.Fatalf("raised threshold did not revive station: %+v", snapshot)
+	}
+	manager.statusRetryMutex.Lock()
+	retry, tracked := manager.statusRetries[address]
+	manager.statusRetryMutex.Unlock()
+	if !tracked {
+		t.Fatal("revived station lost its recovery entry")
+	}
+	if retry.nextAt.After(now) {
+		t.Fatalf("revived connection recovery still backed off: nextAt=%v", retry.nextAt)
+	}
+	if retry.channelNextAt.After(now) {
+		t.Fatalf("revived channel recovery still backed off: nextAt=%v", retry.channelNextAt)
+	}
+	if retry.failures != 5 || retry.channelFailures != 4 {
+		t.Fatalf("rebase discarded failure history: %+v", retry)
+	}
+}
+
 func TestAbsentRecoveryStopsExhaustedKindsIndependently(t *testing.T) {
 	// Drive the limit through the config (a non-default value) so a wiring
 	// regression that hardcodes the old constant would fail this test.

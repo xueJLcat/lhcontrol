@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -297,6 +298,7 @@ func sanitizeRangedInt(value *int, min, max, fallback int) int {
 }
 
 func sanitizeAPIListenAddress(address string) string {
+	address = strings.TrimSpace(address)
 	if validateAPIListenAddress(address) != nil {
 		return DefaultAPIListenAddress
 	}
@@ -304,6 +306,7 @@ func sanitizeAPIListenAddress(address string) string {
 }
 
 func validateAPIListenAddress(address string) error {
+	address = strings.TrimSpace(address)
 	host, portText, err := net.SplitHostPort(address)
 	if err != nil {
 		return fmt.Errorf("listen address must be host:port, got %q", address)
@@ -311,8 +314,8 @@ func validateAPIListenAddress(address string) error {
 	if host == "" {
 		return fmt.Errorf("listen address %q is missing a host", address)
 	}
-	port, err := strconv.Atoi(portText)
-	if err != nil || port < 1024 || port > 65535 {
+	port, err := strconv.ParseUint(portText, 10, 16)
+	if err != nil || port < 1024 {
 		return fmt.Errorf("listen address %q must use a port between 1024 and 65535", address)
 	}
 	return nil

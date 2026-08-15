@@ -366,7 +366,7 @@ describe('ExternalScanCoordinator', () => {
       state: 'cancelled', found: 1, warnings: []
     });
 
-    const outcome = await coordinator.finishStop(state.scanEpoch, () => true);
+    const outcome = await coordinator.finishStop(state.scanEpoch, state.statusEpoch, () => true);
 
     expect(outcome).toBe('recovered');
     expect(state.externalScanning).toBe(false);
@@ -379,7 +379,7 @@ describe('ExternalScanCoordinator', () => {
     const coordinator = new ExternalScanCoordinator(host);
     coordinator.handleStarted({ id: 6 });
 
-    const outcome = await coordinator.finishStop(state.scanEpoch, () => false);
+    const outcome = await coordinator.finishStop(state.scanEpoch, state.statusEpoch, () => false);
 
     expect(outcome).toBe('aborted');
     expect(state.externalScanning).toBe(true);
@@ -394,7 +394,7 @@ describe('ExternalScanCoordinator', () => {
     expect(state.externalScanning).toBe(true);
     mockIsScanning(host, false);
 
-    const outcome = await coordinator.finishStop(state.scanEpoch, () => true);
+    const outcome = await coordinator.finishStop(state.scanEpoch, state.statusEpoch, () => true);
     expect(outcome).toBe('recovered');
     expect(coordinator.hasPendingTerminal()).toBe(false);
 
@@ -449,7 +449,7 @@ describe('ExternalScanCoordinator', () => {
     const coordinator = new ExternalScanCoordinator(host);
     await coordinator.adoptUnknown();
     mockIsScanning(host, false);
-    await coordinator.finishStop(state.scanEpoch, () => true);
+    await coordinator.finishStop(state.scanEpoch, state.statusEpoch, () => true);
 
     // A new external scan starts after the stop recovered; its own lifecycle
     // must not be shadowed by the earlier stop's pending terminal consumption.
@@ -516,5 +516,45 @@ describe('ExternalScanCoordinator', () => {
     await coordinator.recoverTrackedTerminal(1, state.statusEpoch, new Map<string, number>());
     expect(coordinator.hasPendingRecovery()).toBe(false);
     expect(state.statusMessages[state.statusMessages.length - 1]).toContain('found 4');
+  });
+
+  it('drops a permanently unmatched recovery after bounded retries', async () => {
+    const { host, state } = createHost();
+    // The shared status record is owned by a newer scan whose start event was
+    // lost; no poll can ever match the recovered scan's identity.
+    (host.getScanStatus as ReturnType<typeof vi.fn>).mockResolvedValue({
+      id: 4, state: 'completed', found: 1, warnings: []
+    });
+    const coordinator = new ExternalScanCoordinator(host);
+    coordinator.handleStarted({ id: 3 });
+    await coordinator.handleCompleted({ id: 3, statusId: 2, stations: [] });
+    expect(coordinator.hasPendingRecovery()).toBe(true);
+
+    for (let attempt = 0; attempt < 7; attempt++) {
+      await coordinator.recoverTrackedTerminal(1, state.statusEpoch, new Map<string, number>());
+      expect(coordinator.hasPendingRecovery()).toBe(true);
+    }
+    await coordinator.recoverTrackedTerminal(1, state.statusEpoch, new Map<string, number>());
+
+    // The recovery gives up so the periodic check returns to full status
+    // refreshes instead of rerunning the unmatched reads forever.
+    expect(coordinator.hasPendingRecovery()).toBe(false);
+  });
+
+  it('does not overwrite a newer status owner when finishing a stop', async () => {
+    const { host, state } = createHost();
+    const coordinator = new ExternalScanCoordinator(host);
+    coordinator.handleStarted({ id: 6 });
+    const stopStatusEpoch = host.beginStatusOperation();
+    // A newer owner (for example an auto-sleep event) takes the status line
+    // while StopScan is pending and writes its own message.
+    host.beginStatusOperation();
+    host.setStatusMessage('auto sleep message');
+
+    const outcome = await coordinator.finishStop(state.scanEpoch, stopStatusEpoch, () => true);
+
+    expect(outcome).toBe('recovered');
+    expect(state.statusMessages[state.statusMessages.length - 1]).toBe('auto sleep message');
+    expect(coordinator.hasPendingRecovery()).toBe(true);
   });
 });

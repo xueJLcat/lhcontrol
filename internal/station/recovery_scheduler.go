@@ -57,6 +57,48 @@ func (m *Manager) ensureStatusRecoveryTracked(address string) {
 	m.statusRetryMutex.Unlock()
 	m.scheduleStatusRecovery()
 }
+
+// rebaseRecoveryForRevivedStation schedules an immediate recovery attempt for
+// a station that just became present again (for example after the missed-scan
+// threshold was raised). Its existing deadlines were computed while it was
+// absent; leaving them untouched postpones the revival attempt by the old
+// backoff even though the station is visible again. Failure counts are
+// preserved so a failed revival attempt resumes normal backoff.
+func (m *Manager) rebaseRecoveryForRevivedStation(address string) {
+	now := time.Now()
+	m.statusRetryMutex.Lock()
+	retry, exists := m.statusRetries[address]
+	if !exists {
+		retry = statusRetry{
+			kinds:  statusRetryConnection,
+			nextAt: now,
+		}
+	} else {
+		// Entries created before the schedules were split can store a
+		// channel-only schedule in the connection fields; migrate first so
+		// the rebase below targets the real channel schedule.
+		if retry.kinds&statusRetryChannel != 0 && retry.channelNextAt.IsZero() {
+			retry.channelFailures = retry.failures
+			retry.channelLastAttempt = retry.lastAttempt
+			retry.channelNextAt = retry.nextAt
+		}
+		retry.kinds = effectiveStatusRetryKinds(retry)
+		if retry.kinds&statusRetryConnection == 0 {
+			// A channel-only entry must not delay a newly revived station's
+			// connection recovery.
+			retry.kinds |= statusRetryConnection
+			retry.failures = 0
+			retry.lastAttempt = time.Time{}
+		}
+		retry.nextAt = now
+		if retry.kinds&statusRetryChannel != 0 {
+			retry.channelNextAt = now
+		}
+	}
+	m.statusRetries[address] = retry
+	m.statusRetryMutex.Unlock()
+	m.scheduleStatusRecovery()
+}
 func (m *Manager) statusRecoveryLoop() {
 	var timer *time.Timer
 	stopTimer := func() {

@@ -489,7 +489,10 @@ func (a *App) runAutoSleepSession(ctx context.Context, closedAt time.Time) (sett
 
 	case errors.Is(err, context.DeadlineExceeded), result.TimedOut:
 
-		log.Printf("Auto-sleep timed out with partial results: %v", err)
+		// The structured timeout flag can be set while err is nil; log both
+		// halves instead of printing a nil placeholder.
+
+		log.Printf("Auto-sleep timed out with partial results (timedOut=%v, err=%v)", result.TimedOut, err)
 
 		emitTerminal(timedOutAutoSleepEvent(result.Results, "bulk power timeout reached"))
 

@@ -6,8 +6,11 @@ import (
 )
 
 var (
-	errScanning                  = errors.New("bluetooth: a scan is already in progress")
-	errNotScanning               = errors.New("bluetooth: there is no scan in progress")
+	errScanning = errors.New("bluetooth: a scan is already in progress")
+	// ErrNotScanning reports that StopScan was requested while no scan session
+	// is active. Callers use it to treat a stop that lands after the watcher
+	// already ended as a successful no-op.
+	ErrNotScanning               = errors.New("bluetooth: there is no scan in progress")
 	ErrRadioNotAvailable         = errors.New("bluetooth radio is unavailable")
 	ErrResourceInUse             = errors.New("bluetooth resource is in use")
 	ErrDisabledByPolicy          = errors.New("bluetooth is disabled by system policy")

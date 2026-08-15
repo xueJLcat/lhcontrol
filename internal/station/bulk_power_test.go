@@ -944,6 +944,37 @@ func TestCancelBulkPowerStopsActiveOperation(t *testing.T) {
 	}
 }
 
+// TestLegacyBulkPowerReportsCancellationInsteadOfSuccess guards the error-only
+// contract: when cancellation skips every station, the legacy API must not
+// report success, because the caller has no structured result to inspect.
+func TestLegacyBulkPowerReportsCancellationInsteadOfSuccess(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	address := "11:22:33:44:AA:09"
+	manager.stations[address] = &internalbluetooth.BaseStation{
+		Name: "LHB-LEGACY-CANCEL", Address: mustAddress(t, address), Present: true,
+		Capabilities: internalbluetooth.Capabilities{PowerWrite: true}, CapabilitiesKnown: true,
+	}
+	stubPowerVerificationRead(manager)
+	started := make(chan struct{})
+	manager.bluetoothOps.setPowerState = func(ctx context.Context, _ *internalbluetooth.BaseStation, _ internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
+		close(started)
+		<-ctx.Done()
+		return internalbluetooth.PowerControlResult{}, ctx.Err()
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- manager.PowerOnAllStations() }()
+	<-started
+	if err := manager.CancelBulkPower(); err != nil {
+		t.Fatalf("CancelBulkPower() error = %v", err)
+	}
+	err := <-done
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("legacy bulk cancellation error = %v, want context.Canceled", err)
+	}
+}
+
 func TestBulkPowerReportsCallerDeadline(t *testing.T) {
 	manager := NewManager(config.NewConfig())
 	defer manager.Shutdown()

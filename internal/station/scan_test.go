@@ -227,6 +227,50 @@ func TestAsyncScanRejectsForegroundOperationsBeforeStarted(t *testing.T) {
 	}
 }
 
+// TestScanCancellationAfterMergeKeepsFoundCount guards against reporting
+// found=0 for a cancelled scan whose discovery results were already merged
+// before the cancellation interrupted the optional initial reads.
+func TestScanCancellationAfterMergeKeepsFoundCount(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	address := "11:22:33:44:55:6C"
+	readStarted := make(chan struct{})
+	manager.bluetoothOps.scanForDurationContext = func(context.Context, time.Duration) ([]internalbluetooth.DiscoveredStation, error) {
+		return []internalbluetooth.DiscoveredStation{
+			{Address: mustAddress(t, address), Name: "LHB-MERGED"},
+		}, nil
+	}
+	manager.bluetoothOps.fetchInitialPowerState = func(ctx context.Context, _ *internalbluetooth.BaseStation) error {
+		close(readStarted)
+		<-ctx.Done()
+		return ctx.Err()
+	}
+
+	if err := manager.StartScan(ScanCallbacks{}); err != nil {
+		t.Fatalf("StartScan() error = %v", err)
+	}
+	select {
+	case <-readStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("initial read phase did not start")
+	}
+	if err := manager.StopScan(); err != nil {
+		t.Fatalf("StopScan() error = %v", err)
+	}
+	manager.scanCallbackWg.Wait()
+
+	status := manager.GetScanStatus()
+	if status.State != "cancelled" {
+		t.Fatalf("scan status state = %q, want cancelled", status.State)
+	}
+	if status.Found != 1 {
+		t.Fatalf("cancelled scan found count = %d, want the merged discovery count 1", status.Found)
+	}
+	if _, ok := manager.stations[address]; !ok {
+		t.Fatal("merged discovery station was rolled back")
+	}
+}
+
 func TestStopScanFinishesBeforeCancelledCallbackAndIsIdempotent(t *testing.T) {
 	manager := NewManager(config.NewConfig())
 	scanStarted := make(chan struct{})

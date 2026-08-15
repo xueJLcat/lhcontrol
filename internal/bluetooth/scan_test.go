@@ -119,6 +119,39 @@ func TestStopScanSafelyConvertsPanicToError(t *testing.T) {
 		t.Fatal("stopScanSafely() unexpectedly ignored panic")
 	}
 }
+
+// TestLateStopAfterWatcherEndedIsNotAStopFailure guards against a stop request
+// that lands after the platform watcher already ended on its own: the adapter
+// reports "no scan in progress", which is the desired end state and must not
+// turn a full-duration scan into a failure.
+func TestLateStopAfterWatcherEndedIsNotAStopFailure(t *testing.T) {
+	originalAdapter := adapter
+	fake := newFakeBLEAdapter()
+	fake.stopErr = tinybluetooth.ErrNotScanning
+	adapter = fake
+	t.Cleanup(func() { adapter = originalAdapter })
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+	mac, err := tinybluetooth.ParseMAC("11:22:33:44:55:70")
+	if err != nil {
+		t.Fatalf("ParseMAC() error = %v", err)
+	}
+	fake.results = []tinybluetooth.ScanResult{{
+		Address: tinybluetooth.Address{MACAddress: tinybluetooth.MACAddress{MAC: mac}},
+		AdvertisementPayload: &fakeAdvertisementPayload{
+			name:     "LHB-LATE-STOP",
+			services: []tinybluetooth.UUID{powerControlServiceUUID},
+		},
+	}}
+	results, err := ScanForDuration(10 * time.Millisecond)
+	if err != nil {
+		t.Fatalf("ScanForDuration() error = %v, want the late stop treated as success", err)
+	}
+	if len(results) != 1 || results[0].Name != "LHB-LATE-STOP" {
+		t.Fatalf("late-stop scan results = %+v", results)
+	}
+}
 func TestScanForDurationRepeatedLifecycle(t *testing.T) {
 	originalAdapter := adapter
 	t.Cleanup(func() { adapter = originalAdapter })

@@ -53,6 +53,31 @@ export interface StationStoreUi {
 // dedicated short timer keeps the configured startup scan from stalling that long.
 const DEFERRED_STARTUP_SCAN_RETRY_MS = 3000;
 
+// A hung backend getter (Wails bindings carry no timeout of their own) must
+// not keep startupPending true for the whole session; after this window the
+// store proceeds as if no scan is running and lets the periodic poll
+// reconcile the real state.
+const STARTUP_PROBE_TIMEOUT_MS = 15000;
+
+// Resolves with the promise's value, or with the fallback once the timeout
+// elapses. Startup probes use it so a single hung backend getter cannot
+// freeze the UI state machine.
+function resolveWithTimeout<T>(promise: Promise<T>, timeoutMs: number, fallback: T): Promise<T> {
+  return new Promise<T>((resolve) => {
+    const timer = setTimeout(() => resolve(fallback), timeoutMs);
+    void promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      () => {
+        clearTimeout(timer);
+        resolve(fallback);
+      }
+    );
+  });
+}
+
 // All fleet state and backend orchestration. Held in one rune-backed class so
 // App.svelte stays a pure composition + overlay-switching shell. Effects are
 // deliberately absent here ($effect cannot run outside components); App wires
@@ -727,8 +752,9 @@ export class StationStore {
     // happened so startup waits for the response that can actually commit.
     const startupAPIStatusReady = statusPollIntervalReady.then(() => this.startupAPIStatusReady);
     void (async () => {
-      const [startupScanning] = await Promise.all([
-        IsScanning().catch(() => false),
+      const startupScanningProbe = IsScanning().catch(() => false);
+      const startupBarrier = Promise.all([
+        startupScanningProbe,
         startupScanPreferenceReady,
         // Wait for the operation-health snapshot started above. It recovers
         // automatic sleep (and HTTP work) that began before event listeners
@@ -737,6 +763,14 @@ export class StationStore {
         startupAPIStatusReady,
         statusPollingPreferenceReady
       ]);
+      // A hung backend getter must not hold startupPending forever: after the
+      // timeout proceed as if no scan is running and let the periodic poll
+      // reconcile the real state.
+      const startupScanning = await resolveWithTimeout(
+        startupBarrier.then(() => startupScanningProbe),
+        STARTUP_PROBE_TIMEOUT_MS,
+        false
+      );
       // Do not allow the first polling tick to acquire the backend operation
       // lock before the initial external-scan check can start the local scan.
       this.startupPending = false;

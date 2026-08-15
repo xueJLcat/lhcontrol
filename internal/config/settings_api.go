@@ -1,5 +1,7 @@
 package config
 
+import "strings"
+
 func (c *Config) GetAPIListenAddress() string {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
@@ -7,11 +9,18 @@ func (c *Config) GetAPIListenAddress() string {
 }
 
 func (c *Config) SetAPIListenAddress(address string) error {
+	address = strings.TrimSpace(address)
 	if err := validateAPIListenAddress(address); err != nil {
 		return err
 	}
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
+	// Compare the stored value (not the sanitized getter) so a re-save also
+	// repairs an invalid residual value that the getter masks with the
+	// default.
+	if c.APIListenAddress == address {
+		return nil
+	}
 	previous := c.APIListenAddress
 	c.APIListenAddress = address
 	if err := c.saveLocked(); err != nil {

@@ -37,6 +37,7 @@ func (p *fakeAdvertisementPayload) ServiceData() []tinybluetooth.ServiceDataElem
 type fakeBLEAdapter struct {
 	results        []tinybluetooth.ScanResult
 	scanErr        error
+	stopErr        error
 	panicScan      bool
 	panicStop      bool
 	returnEarly    bool
@@ -100,7 +101,7 @@ func (a *fakeBLEAdapter) StopScan() error {
 		<-a.stopHold
 	}
 	a.once.Do(func() { close(a.stopped) })
-	return nil
+	return a.stopErr
 }
 
 type fakeCharacteristic struct {

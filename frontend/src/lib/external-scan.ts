@@ -54,6 +54,12 @@ export interface ExternalScanHost {
 
 export type StopOutcome = 'still-scanning' | 'recovered' | 'aborted';
 
+// A pending recovery retries on every poll while its status read cannot be
+// matched (for example a newer scan overwrote the shared scan-status record
+// and that scan's events never arrived). Bound the retries so a permanently
+// unmatched recovery cannot starve the periodic full status refresh forever.
+const MAX_RECOVERY_ATTEMPTS = 8;
+
 // State machine for scans started outside this UI (the HTTP API). Tracks
 // scan identity, claims terminal events, remembers untracked terminals, and
 // drives the recovery reads that reconcile the list and status line after an
@@ -74,6 +80,9 @@ export class ExternalScanCoordinator {
   // next untracked terminal event belongs to that already-recovered scan and
   // must be consumed instead of being remembered for a redundant recovery.
   private stoppedScanTerminalPending = false;
+  // Consecutive polls where a pending recovery made no progress. Capped so an
+  // unmatched terminal status cannot rerun the recovery reads forever.
+  private recoveryAttempts = 0;
 
   constructor(private readonly host: ExternalScanHost) {}
 
@@ -82,6 +91,7 @@ export class ExternalScanCoordinator {
     this.recoveryEpoch = null;
     this.recoveryStatusEpoch = null;
     this.recoveryStatusId = null;
+    this.recoveryAttempts = 0;
     this.pendingTerminal = null;
   }
 
@@ -101,6 +111,30 @@ export class ExternalScanCoordinator {
     this.recoveryEpoch = this.host.scanEpoch();
     this.recoveryStatusEpoch = this.host.statusEpoch();
     this.recoveryStatusId = null;
+    this.recoveryAttempts = 0;
+  }
+
+  // Records a fresh recovery claim and resets the bounded-retry counter.
+  private claimRecovery(operationEpoch: number, statusEpoch: number, statusId: number | null) {
+    this.recoveryEpoch = operationEpoch;
+    this.recoveryStatusEpoch = statusEpoch;
+    this.recoveryStatusId = statusId;
+    this.recoveryAttempts = 0;
+  }
+
+  // Counts a poll on which a pending recovery made no progress and, once the
+  // cap is reached, drops it. The authoritative station list is re-applied on
+  // every periodic poll regardless, so only the terminal status message is
+  // given up; keeping the recovery forever would rerun the same unmatched
+  // reads on every tick and permanently suppress the full status refresh.
+  private noteRecoveryStalled() {
+    if (this.recoveryEpoch === null) return;
+    this.recoveryAttempts += 1;
+    if (this.recoveryAttempts < MAX_RECOVERY_ATTEMPTS) return;
+    this.recoveryEpoch = null;
+    this.recoveryStatusEpoch = null;
+    this.recoveryStatusId = null;
+    this.recoveryAttempts = 0;
   }
 
   handleStarted(event: ExternalScanEvent) {
@@ -117,6 +151,7 @@ export class ExternalScanCoordinator {
     this.recoveryEpoch = null;
     this.recoveryStatusEpoch = null;
     this.recoveryStatusId = null;
+    this.recoveryAttempts = 0;
     this.pendingTerminal = null;
     // A new scan supersedes any stop that is still owed its terminal event:
     // backend ordering guarantees the old terminal is delivered before this
@@ -141,9 +176,7 @@ export class ExternalScanCoordinator {
     const operationEpoch = this.host.beginScanEpoch();
     const revision = this.host.nextListRevision();
     this.host.prepareForScan();
-    this.recoveryEpoch = operationEpoch;
-    this.recoveryStatusEpoch = statusOperation;
-    this.recoveryStatusId = event.statusId ?? null;
+    this.claimRecovery(operationEpoch, statusOperation, event.statusId ?? null);
     this.host.setStoppingScan(false);
     this.host.maybeEndScanTimer();
     const capturedStationRevisions = this.host.snapshotStationRevisions();
@@ -184,9 +217,7 @@ export class ExternalScanCoordinator {
     const operationEpoch = this.host.beginScanEpoch();
     const revision = this.host.nextListRevision();
     this.host.prepareForScan();
-    this.recoveryEpoch = operationEpoch;
-    this.recoveryStatusEpoch = statusOperation;
-    this.recoveryStatusId = event.statusId ?? null;
+    this.claimRecovery(operationEpoch, statusOperation, event.statusId ?? null);
     if (!this.host.localScanRunning()) this.host.setStoppingScan(false);
     this.host.maybeEndScanTimer();
     const capturedStationRevisions = this.host.snapshotStationRevisions();
@@ -225,9 +256,7 @@ export class ExternalScanCoordinator {
     const operationEpoch = this.host.beginScanEpoch();
     const revision = this.host.nextListRevision();
     this.host.prepareForScan();
-    this.recoveryEpoch = operationEpoch;
-    this.recoveryStatusEpoch = statusOperation;
-    this.recoveryStatusId = event.statusId ?? null;
+    this.claimRecovery(operationEpoch, statusOperation, event.statusId ?? null);
     if (!this.host.localScanRunning()) this.host.setStoppingScan(false);
     this.host.maybeEndScanTimer();
     const capturedStationRevisions = this.host.snapshotStationRevisions();
@@ -255,9 +284,7 @@ export class ExternalScanCoordinator {
     this.host.prepareForScan();
     const terminal = this.pendingTerminal;
     this.pendingTerminal = null;
-    this.recoveryEpoch = operationEpoch;
-    this.recoveryStatusEpoch = statusOperation;
-    this.recoveryStatusId = terminal?.statusId ?? null;
+    this.claimRecovery(operationEpoch, statusOperation, terminal?.statusId ?? null);
     this.host.setStoppingScan(false);
     this.host.maybeEndScanTimer();
     const capturedStationRevisions = this.host.snapshotStationRevisions();
@@ -343,9 +370,11 @@ export class ExternalScanCoordinator {
     // check, which would overwrite the status with a misleading error.
     const updated = await this.host.getCurrentStationInfo().catch(() => null);
     if (updated === null) {
+      this.noteRecoveryStalled();
       return;
     }
     if (!this.host.applyStationList(updated, revision, capturedStationRevisions)) {
+      this.noteRecoveryStalled();
       return;
     }
     const scanStatus = this.terminalStatusFor(
@@ -357,8 +386,12 @@ export class ExternalScanCoordinator {
     }
     // A non-terminal status, or a terminal status whose identity names a
     // different scan, belongs to a newer scan; keep the recovery epochs
-    // pending for a retry instead of rendering its state.
+    // pending for a retry instead of rendering its state. If the matching
+    // record never appears (its scan's events were lost), the bounded retry
+    // count eventually drops the recovery so the periodic check returns to
+    // full status refreshes.
     if (!scanStatus) {
+      this.noteRecoveryStalled();
       return;
     }
     if (this.recoveryStatusEpoch === null || this.recoveryStatusEpoch < statusOperation) {
@@ -398,8 +431,16 @@ export class ExternalScanCoordinator {
 
   // Completes a stop whose StopScan promise settled while this coordinator
   // owned the displayed scan. Rechecks the backend because the scan may have
-  // ended on its own while the stop request was in flight.
-  async finishStop(operationEpoch: number, isStopRequestCurrent: () => boolean): Promise<StopOutcome> {
+  // ended on its own while the stop request was in flight. The terminal
+  // status write is gated by the stop's own status-operation epoch: an
+  // auto-sleep or HTTP event that advanced the status line while StopScan was
+  // pending owns the message, and re-deriving ownership from the current
+  // epoch would let this late write clobber it.
+  async finishStop(
+    operationEpoch: number,
+    statusOperation: number,
+    isStopRequestCurrent: () => boolean
+  ): Promise<StopOutcome> {
     const stillScanning = await this.host.isScanning().catch(() => true);
     if (!this.host.canCommitOperation(operationEpoch) || !isStopRequestCurrent()) return 'aborted';
     if (stillScanning) {
@@ -424,8 +465,7 @@ export class ExternalScanCoordinator {
     // A non-terminal status belongs to a scan that started after the stop;
     // aborting keeps the recovery epochs pending for the periodic check.
     if (!scanStatus || !isTerminalScanState(scanStatus.state)) return 'aborted';
-    const canWriteTerminalStatus = this.recoveryStatusEpoch === this.host.statusEpoch();
-    if (canWriteTerminalStatus) {
+    if (this.host.canCommitStatus(statusOperation)) {
       // Clear the recovery epochs only once the terminal status is committed;
       // a rejected commit must leave them pending so the periodic check can
       // retry instead of silently dropping the stop outcome.
