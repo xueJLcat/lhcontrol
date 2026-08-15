@@ -775,18 +775,22 @@ func (c DeviceCharacteristic) ReadContext(ctx context.Context, data []byte) (int
 // getGattProtocolError reads the nullable ATT protocol byte from a WinRT GATT
 // result interface. winrt-go currently generates these vtable slots without
 // public wrappers, so the Windows backend keeps this narrow ABI bridge.
+// Infrastructure failures (QueryInterface, missing vtable slot, HRESULT read)
+// mean no protocol error information is available; returning nil lets callers
+// fall back to the status-based communication error classification instead of
+// mistaking the accessor failure for a protocol rejection.
 func getGattProtocolError(source *ole.IUnknown, interfaceID string, methodIndex int) error {
 	if source == nil {
 		return nil
 	}
 	itf, err := source.QueryInterface(ole.NewGUID(interfaceID))
 	if err != nil {
-		return err
+		return nil
 	}
 	defer itf.Release()
 	vtable := (*[16]uintptr)(unsafe.Pointer(itf.RawVTable))
 	if methodIndex < 0 || methodIndex >= len(vtable) || vtable[methodIndex] == 0 {
-		return errors.New("bluetooth: GATT protocol error accessor is unavailable")
+		return nil
 	}
 	var reference *foundation.IReference
 	hr, _, _ := syscall.SyscallN(
@@ -795,7 +799,7 @@ func getGattProtocolError(source *ole.IUnknown, interfaceID string, methodIndex 
 		uintptr(unsafe.Pointer(&reference)),
 	)
 	if hr != 0 {
-		return ole.NewError(hr)
+		return nil
 	}
 	if reference == nil {
 		return nil
@@ -803,7 +807,7 @@ func getGattProtocolError(source *ole.IUnknown, interfaceID string, methodIndex 
 	defer reference.Release()
 	value, err := reference.GetValue()
 	if err != nil {
-		return err
+		return nil
 	}
 	if value == nil {
 		return nil

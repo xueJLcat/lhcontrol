@@ -863,6 +863,46 @@ func TestBulkShutdownCancellationReturnsSkippedResults(t *testing.T) {
 	manager.Shutdown()
 }
 
+// TestBulkPowerShutdownAtReadinessCheckReportsSkippedResults guards the entry
+// shape when shutdown lands between the bulk's entry check and ensureReady:
+// the batch never started, so every entry must carry the interrupted-batch
+// shape (Skipped + shutdown reason, no error text) like every other
+// cancellation path, not a failed-with-error record.
+func TestBulkPowerShutdownAtReadinessCheckReportsSkippedResults(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	address := "11:22:33:44:AA:0A"
+	manager.stations[address] = &internalbluetooth.BaseStation{
+		Name: "LHB-READINESS-SHUTDOWN", Address: mustAddress(t, address), Present: true,
+		Capabilities:      internalbluetooth.Capabilities{PowerWrite: true},
+		CapabilitiesKnown: true,
+	}
+	stubPowerVerificationRead(manager)
+	manager.initializeErr = errors.New("radio unavailable")
+	manager.nextInitializeAt = time.Now().Add(-time.Second)
+	manager.initializeBluetooth = func() error {
+		// Shutdown lands between the entry check and the readiness check.
+		manager.BeginShutdown()
+		return nil
+	}
+
+	result, err := manager.SetAllStationsPowerDetailed("on")
+	if !errors.Is(err, ErrShuttingDown) {
+		t.Fatalf("SetAllStationsPowerDetailed() error = %v, want %v", err, ErrShuttingDown)
+	}
+	if !result.Cancelled {
+		t.Fatalf("bulk result = %+v, want a cancelled batch", result)
+	}
+	if len(result.Results) != 1 {
+		t.Fatalf("bulk results = %+v, want one entry", result.Results)
+	}
+	for _, item := range result.Results {
+		if !item.Skipped || item.Reason != ReasonShuttingDown || item.CommandSent || item.Error != "" {
+			t.Fatalf("readiness-shutdown result = %+v, want a skipped entry without error text", item)
+		}
+	}
+	manager.Shutdown()
+}
+
 func TestBulkPowerContextCancellationPreservesPossiblySentResult(t *testing.T) {
 	manager := NewManager(config.NewConfig())
 	defer manager.Shutdown()

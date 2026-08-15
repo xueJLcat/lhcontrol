@@ -117,6 +117,16 @@
     <p class="hint ch-hint">{t('Struck-through channels are occupied by a visible station. The dot marks the current channel.')}</p>
     {#if allChannelsOccupied}
       <div class="alert warning ch-all-occupied" role="status">{t('All 16 channels are occupied by visible stations, so there is no free channel to switch to.')}</div>
+    {:else if occupiedChannels.has(targetChannel)}
+      <!-- The selected channel became occupied while the modal was open (a
+           background refresh or event updated another station); explain why
+           Confirm is disabled instead of leaving only the strikethrough. -->
+      <div class="alert warning ch-all-occupied" role="status">
+        {t('The selected channel {channel} is now occupied by {names}. Pick a free channel.', {
+          channel: targetChannel,
+          names: occupiedChannels.get(targetChannel)?.join(', ') ?? ''
+        })}
+      </div>
     {/if}
   </fieldset>
   {#if hasUnknownVisibleChannel}

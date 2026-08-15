@@ -263,10 +263,17 @@ func (m *Manager) setAllStationsPowerDetailed(ctx context.Context, state string)
 		return result, false, nil
 	}
 	if err := m.ensureReady(); err != nil {
-		for index := range result.Results {
-			item := &result.Results[index]
-			if !item.Success && !item.Skipped && !item.CommandSent && item.Error == "" {
-				item.Error = err.Error()
+		// A shutdown rejection shares the entry shape with every other
+		// interrupted batch: leave the entries untouched so the outer
+		// cancellation backfill marks them Skipped with the shutdown reason
+		// instead of failed-with-error. Non-shutdown failures (an unavailable
+		// adapter) keep per-entry error details.
+		if !errors.Is(err, ErrShuttingDown) {
+			for index := range result.Results {
+				item := &result.Results[index]
+				if !item.Success && !item.Skipped && !item.CommandSent && item.Error == "" {
+					item.Error = err.Error()
+				}
 			}
 		}
 		return result, errors.Is(err, ErrShuttingDown), err

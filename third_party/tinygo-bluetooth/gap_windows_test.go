@@ -310,6 +310,41 @@ func TestWaitForScanStopSurfacesLateStoppedEventError(t *testing.T) {
 	}
 }
 
+// TestWaitForScanStopDropsStaleStopErrorAfterRetrySucceeds guards the retry
+// classification: when the initial stop failed but the forced retry is
+// accepted and the watcher reaches a clean Stopped state, the stale initial
+// failure must not be reported (callers would otherwise discard a completed
+// scan's results).
+func TestWaitForScanStopDropsStaleStopErrorAfterRetrySucceeds(t *testing.T) {
+	originalTimeout := scanStopTimeout
+	originalPoll := scanStopPollInterval
+	scanStopTimeout = time.Second
+	scanStopPollInterval = 2 * time.Millisecond
+	t.Cleanup(func() {
+		scanStopTimeout = originalTimeout
+		scanStopPollInterval = originalPoll
+	})
+
+	stopRequests := make(chan error, 1)
+	stopRequests <- errors.New("transient stop failure")
+	var retried atomic.Bool
+	err := waitForScanStop(make(chan error), stopRequests, func() error {
+		retried.Store(true)
+		return nil
+	}, func() (advertisement.BluetoothLEAdvertisementWatcherStatus, error) {
+		if !retried.Load() {
+			return advertisement.BluetoothLEAdvertisementWatcherStatusStopping, nil
+		}
+		return advertisement.BluetoothLEAdvertisementWatcherStatusStopped, nil
+	})
+	if !retried.Load() {
+		t.Fatal("failed stop was never retried")
+	}
+	if err != nil {
+		t.Fatalf("waitForScanStop() error = %v, want a clean stop after the retry succeeded", err)
+	}
+}
+
 func TestWaitForScanStopFallsBackToStatusWhenEventNeverArrives(t *testing.T) {
 	originalTimeout := scanStopTimeout
 	originalPoll := scanStopPollInterval
@@ -378,7 +413,11 @@ func TestStopScanCommunicatesWinRTInitializationFailure(t *testing.T) {
 	enterWinRTThread = func() (func(), error) { return nil, threadErr }
 	t.Cleanup(func() { enterWinRTThread = originalEnter })
 
-	control := &scanControl{stopRequests: make(chan error, 1)}
+	control := &scanControl{
+		watcher:      &advertisement.BluetoothLEAdvertisementWatcher{},
+		stopRequests: make(chan error, 1),
+		started:      true,
+	}
 	adapter := &Adapter{scan: control}
 	if err := adapter.StopScan(); !errors.Is(err, threadErr) {
 		t.Fatalf("StopScan() error = %v, want %v", err, threadErr)
@@ -390,6 +429,49 @@ func TestStopScanCommunicatesWinRTInitializationFailure(t *testing.T) {
 		}
 	default:
 		t.Fatal("StopScan did not communicate initialization failure")
+	}
+}
+
+// TestStopScanThreadFailureBeforeStartIsDeferred guards the deferred-stop
+// contract for the thread-failure window: when the watcher has not accepted
+// Start, the stop must be recorded as pending (so ScanWithStart delivers the
+// real stop result after Start) instead of consuming stopOnce on the thread
+// error, which would misreport the scan as failed.
+func TestStopScanThreadFailureBeforeStartIsDeferred(t *testing.T) {
+	originalEnter := enterWinRTThread
+	threadErr := errors.New("apartment unavailable")
+	enterWinRTThread = func() (func(), error) { return nil, threadErr }
+	t.Cleanup(func() { enterWinRTThread = originalEnter })
+
+	control := &scanControl{
+		watcher:      &advertisement.BluetoothLEAdvertisementWatcher{},
+		stopRequests: make(chan error, 1),
+	}
+	adapter := &Adapter{scan: control}
+	if err := adapter.StopScan(); err != nil {
+		t.Fatalf("StopScan() error = %v, want a deferred stop without error", err)
+	}
+	control.mutex.Lock()
+	pending := control.pendingStop
+	control.mutex.Unlock()
+	if !pending {
+		t.Fatal("stop before Start was not recorded as pending")
+	}
+	select {
+	case err := <-control.stopRequests:
+		t.Fatalf("deferred stop consumed stopRequests with %v", err)
+	default:
+	}
+}
+
+func TestStopScanWithoutScanReportsNotScanningOnThreadFailure(t *testing.T) {
+	originalEnter := enterWinRTThread
+	enterWinRTThread = func() (func(), error) { return nil, errors.New("apartment unavailable") }
+	t.Cleanup(func() { enterWinRTThread = originalEnter })
+
+	adapter := &Adapter{}
+	if err := adapter.StopScan(); !errors.Is(err, ErrNotScanning) {
+		t.Fatalf("StopScan() error = %v, want ErrNotScanning", err)
 	}
 }
 

@@ -887,6 +887,31 @@ describe('App asynchronous operations', () => {
     expect(screen.queryByText('Scanning for base stations...')).not.toBeInTheDocument();
   });
 
+  it('starts a fresh scan after the watchdog force-settles a wedged one', async () => {
+    vi.useFakeTimers();
+    // The wedged promise never settles; the second scan succeeds. The wedged
+    // promise's late finally must not corrupt the new scan's state (epoch
+    // guard), and the new scan must both start and render its results.
+    api.ScanAndFetchStations
+      .mockReturnValueOnce(new Promise(() => {}))
+      .mockResolvedValueOnce([createStation({ name: 'LHB-RESCANNED' })]);
+    api.StopScan.mockResolvedValue(undefined);
+    api.IsScanning.mockResolvedValueOnce(false).mockResolvedValueOnce(true).mockResolvedValue(false);
+    api.GetScanStatus.mockResolvedValue({ state: 'completed', found: 1, warnings: [] });
+    render(App);
+    await vi.waitFor(() => expect(api.ScanAndFetchStations).toHaveBeenCalledOnce());
+
+    await vi.advanceTimersByTimeAsync(90_000);
+    await vi.waitFor(() => expect(api.StopScan).toHaveBeenCalledOnce());
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(await screen.findByRole('button', { name: 'Scan' })).toBeEnabled();
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Scan' }));
+    await vi.waitFor(() => expect(api.ScanAndFetchStations).toHaveBeenCalledTimes(2));
+    expect(await screen.findByText('LHB-RESCANNED')).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: 'Scan' })).toBeEnabled();
+  });
+
   it('keeps a scan started while a previous StopScan is settling stoppable', async () => {
     let rejectFirstScan!: (error: Error) => void;
     let resolveSecondScan!: (stations: StationInfo[]) => void;

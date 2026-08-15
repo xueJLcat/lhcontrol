@@ -52,6 +52,8 @@
 
   let localName = $state('');
   let wasRenaming = false;
+  let wasConfigBusy = false;
+  let renameInput: HTMLInputElement | undefined = $state();
   let prevPowerState: number | null = null;
   let flash = $state(false);
   let flashTimer: ReturnType<typeof setTimeout> | null = null;
@@ -60,6 +62,19 @@
     if (renaming !== wasRenaming) {
       if (renaming) localName = station.name;
       wasRenaming = renaming;
+    }
+  });
+
+  $effect(() => {
+    if (configBusy === wasConfigBusy) return;
+    wasConfigBusy = configBusy;
+    // Disabling the input for the save drops its focus. When the save fails
+    // and the row stays open, restore the focus so the user can retry
+    // immediately. Successful saves close the row first, so renaming is
+    // already false by the time busy clears.
+    if (!configBusy && renaming && renameInput) {
+      renameInput.focus();
+      renameInput.select();
     }
   });
 
@@ -176,6 +191,7 @@
     <div class="rename-row">
       <input
         use:autofocus
+        bind:this={renameInput}
         bind:value={localName}
         maxlength="32"
         placeholder={station.originalName}

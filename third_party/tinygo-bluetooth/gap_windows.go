@@ -140,6 +140,14 @@ func (control *scanControl) ensureStopped() {
 		control.mutex.Unlock()
 		return
 	}
+	if control.stopIssued && control.stopErr == nil {
+		// A stop was already accepted; the watcher is only draining through
+		// Stopping. The cleanup path calls this while holding the adapter
+		// write lock, so a redundant Stop that WinRT can reject (and that can
+		// stall on a wedged radio) must not be re-issued.
+		control.mutex.Unlock()
+		return
+	}
 	watcher := control.watcher
 	control.mutex.Unlock()
 	_ = watcher.Stop()
@@ -579,7 +587,14 @@ func waitForScanStop(stopped <-chan error, stopRequests <-chan error, stop func(
 			// a redundant Stop call; recording that rejection would poison
 			// an otherwise clean scan.
 			if originalErr != nil {
-				_ = stop()
+				if stop() == nil {
+					// The retry was accepted, so the watcher drains to
+					// Stopped on its own. The initial failure no longer
+					// describes the outcome; drop it instead of reporting a
+					// clean stop as a failure (which would make callers
+					// discard an otherwise completed scan's results).
+					originalErr = nil
+				}
 			}
 		case <-deadline.C:
 			timeoutErr := error(&ScanStopTimeoutError{})
@@ -762,6 +777,20 @@ func (a *Adapter) StopScan() error {
 			a.watcherMutex.RUnlock()
 			return ErrNotScanning
 		}
+		control.mutex.Lock()
+		if !control.started && !control.terminal {
+			// The watcher has not accepted Start yet. Record the stop as
+			// pending instead of consuming stopOnce on a thread failure:
+			// ScanWithStart issues the real stop after Start succeeds and
+			// delivers its actual result. Consuming the once here would make
+			// that clean result undeliverable and misreport the scan as
+			// failed on the thread error alone.
+			control.pendingStop = true
+			control.mutex.Unlock()
+			a.watcherMutex.RUnlock()
+			return nil
+		}
+		control.mutex.Unlock()
 		control.stopOnce.Do(func() { control.stopRequests <- err })
 		a.watcherMutex.RUnlock()
 		return err

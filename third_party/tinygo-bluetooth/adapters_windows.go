@@ -210,7 +210,10 @@ func awaitAsyncOperationByPolling(ctx context.Context, asyncOperation *foundatio
 		}
 		if time.Now().After(deadline) {
 			_ = asyncInfo.Cancel()
-			return &AsyncOperationTimeoutError{Cause: context.DeadlineExceeded}
+			// The deadline belongs to this polling helper, not the caller's
+			// context; attributing it to context.DeadlineExceeded would make
+			// callers take their own cancellation branches.
+			return &AsyncOperationTimeoutError{Cause: ErrAsyncBudgetExceeded}
 		}
 		select {
 		case <-ticker.C:

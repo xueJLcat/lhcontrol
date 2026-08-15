@@ -441,6 +441,7 @@ const zhCN = {
   'Configuration could not be loaded: {detail}': '配置无法加载：{detail}',
   'Configuration changes could not be saved: {detail}': '配置更改无法保存：{detail}',
   '{capability} is not supported': '不支持{capability}',
+  'The selected channel {channel} is now occupied by {names}. Pick a free channel.': '所选频道 {channel} 现已被 {names} 占用，请选择空闲频道。',
   'settings.error.between': '{subject}必须在 {min}–{max} {unit}范围内，当前为 {value}',
   'settings.error.mustCover': '{subject}必须不小于{other}（{limit} 秒），当前为 {value}',
   'settings.error.mustNotExceed': '{subject}不能超过{other}（{limit} 秒），当前为 {value}',
