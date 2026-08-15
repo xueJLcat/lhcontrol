@@ -360,6 +360,46 @@ func TestStatusRefreshTimeoutBoundsWholeFleet(t *testing.T) {
 	manager.statusRetryMutex.Unlock()
 }
 
+// TestStatusRefreshAbandonsWedgedWorker guards the bounded worker join: a
+// read blocked inside an adapter call that ignores cancellation (a wedged
+// WinRT cleanup holding the transport lock) must not hold the refresh lock
+// forever. The refresh is abandoned with a retryable Busy error and every
+// candidate is registered for recovery instead.
+func TestStatusRefreshAbandonsWedgedWorker(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	manager.statusRecoveryStart.Do(func() {})
+	manager.statusReadTimeout = time.Hour
+	manager.statusRefreshTimeout = time.Hour
+	manager.statusRefreshJoinWait = 20 * time.Millisecond
+	address := "11:22:33:44:55:78"
+	manager.stations[address] = &internalbluetooth.BaseStation{
+		Name: "LHB-WEDGED", Address: mustAddress(t, address), Present: true,
+	}
+	manager.bluetoothOps.stationConnected = func(*internalbluetooth.BaseStation) bool { return true }
+	release := make(chan struct{})
+	defer close(release)
+	manager.bluetoothOps.readPowerStateContext = func(context.Context, *internalbluetooth.BaseStation) error {
+		<-release // Ignores ctx: simulates a worker blocked in an adapter call.
+		return nil
+	}
+
+	started := time.Now()
+	_, err := manager.CheckAllStationStatuses()
+	if !errors.Is(err, ErrOperationInProgress) {
+		t.Fatalf("CheckAllStationStatuses() error = %v, want a retryable busy error", err)
+	}
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("wedged status refresh took %v, want the bounded join", elapsed)
+	}
+	manager.statusRetryMutex.Lock()
+	retry, tracked := manager.statusRetries[address]
+	manager.statusRetryMutex.Unlock()
+	if !tracked || retry.kinds&statusRetryRefresh == 0 {
+		t.Fatalf("abandoned status retry = %+v, tracked=%v; want a refresh retry", retry, tracked)
+	}
+}
+
 func TestStatusCheckLeavesOneSlotForForegroundWork(t *testing.T) {
 	manager := NewManager(config.NewConfig())
 	defer manager.Shutdown()

@@ -63,7 +63,10 @@ func (c *Config) SetRenamedStationForAddresses(originalName, newName string, add
 	}
 	for _, address := range addresses {
 		previousAddress, hasAddress := c.RenamedStationsByAddress[address]
-		explicitChoice := hasAddress && previousAddress != previousLegacy
+		// An empty entry is by construction a user tombstone (an explicit
+		// reset), including after the legacy entry it shadowed was cleared;
+		// only entries mirroring the previous legacy alias follow the rename.
+		explicitChoice := hasAddress && (previousAddress == "" || previousAddress != previousLegacy)
 		if explicitChoice {
 			continue
 		}

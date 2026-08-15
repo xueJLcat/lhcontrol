@@ -288,14 +288,24 @@ func (m *Manager) scanAndFetchStations(ctx context.Context) ([]StationInfo, int,
 	stationsToFetch := make([]*bluetooth.BaseStation, 0)
 	scanTime := time.Now()
 	m.stationsMutex.Lock()
+	// Snapshot absence before the miss marking below: a station seen this
+	// round can still cross the miss threshold during MarkMissed, and MarkSeen
+	// would then report an absent-to-present transition that never happened.
+	// Only genuinely absent stations are revivals worth re-arming recovery
+	// for; the others already participate in this scan's own initial reads.
+	previouslyAbsent := make(map[*bluetooth.BaseStation]bool, len(m.stations))
 	for _, stationPtr := range m.stations {
-		if stationPtr != nil {
-			if _, unreliable := unreliablePresence[strings.ToLower(stationPtr.Snapshot().Address)]; unreliable {
-				stationPtr.MarkPresenceUncertain()
-				continue
-			}
-			stationPtr.MarkMissed()
+		if stationPtr == nil {
+			continue
 		}
+		if _, unreliable := unreliablePresence[strings.ToLower(stationPtr.Snapshot().Address)]; unreliable {
+			stationPtr.MarkPresenceUncertain()
+			continue
+		}
+		if !stationPtr.Snapshot().Present {
+			previouslyAbsent[stationPtr] = true
+		}
+		stationPtr.MarkMissed()
 	}
 	revivedStations := make([]*bluetooth.BaseStation, 0)
 	for _, currentScanStation := range discoveredValues {
@@ -304,7 +314,7 @@ func (m *Manager) scanAndFetchStations(ctx context.Context) ([]StationInfo, int,
 			if currentScanStation.Name != "" {
 				existingStation.UpdateName(currentScanStation.Name)
 			}
-			if existingStation.MarkSeen(scanTime) {
+			if existingStation.MarkSeen(scanTime) && previouslyAbsent[existingStation] {
 				revivedStations = append(revivedStations, existingStation)
 			}
 			if !existingStation.Snapshot().Connected {

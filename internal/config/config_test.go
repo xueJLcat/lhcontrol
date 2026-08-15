@@ -93,6 +93,31 @@ func TestRenameRollsBackInMemoryWhenPersistenceFails(t *testing.T) {
 	}
 }
 
+// TestLegacyRenameKeepsResetTombstoneAfterLegacyCleared covers the sequence
+// legacy rename → explicit per-device reset → legacy clear → legacy rename
+// again. The reset writes a tombstone that must survive the final legacy
+// rename: the user explicitly restored the factory name for that device.
+func TestLegacyRenameKeepsResetTombstoneAfterLegacyCleared(t *testing.T) {
+	useTemporaryConfigDirectory(t)
+	cfg := NewConfig()
+	address := "11:22:33:44:55:90"
+	if err := cfg.SetRenamedStationForAddresses("LHB-X", "Studio", []string{address}); err != nil {
+		t.Fatalf("legacy rename error = %v", err)
+	}
+	if err := cfg.SetRenamedStationByAddress(address, "LHB-X", ""); err != nil {
+		t.Fatalf("per-device reset error = %v", err)
+	}
+	if err := cfg.SetRenamedStationForAddresses("LHB-X", "", []string{address}); err != nil {
+		t.Fatalf("legacy clear error = %v", err)
+	}
+	if err := cfg.SetRenamedStationForAddresses("LHB-X", "Theater", []string{address}); err != nil {
+		t.Fatalf("second legacy rename error = %v", err)
+	}
+	if name, renamed := cfg.GetStationDisplayName(address, "LHB-X"); renamed || name != "LHB-X" {
+		t.Fatalf("display name = %q (renamed=%v), want the tombstone to keep the factory name", name, renamed)
+	}
+}
+
 func TestAddressRenameRollbackSurvivesDuplicateAddresses(t *testing.T) {
 	t.Setenv("AppData", t.TempDir())
 	cfg := NewConfig()

@@ -50,6 +50,38 @@ const CAPABILITY_ZH: Record<string, string> = {
   'safe channel control': '安全频道控制'
 };
 
+// Setting names used by the config validation errors. Unmapped names fall
+// back to the English subject so messages stay readable.
+const SETTINGS_SUBJECT_ZH: Record<string, string> = {
+  'scan duration': '扫描时长',
+  'status poll interval': '状态轮询间隔',
+  'bulk power timeout': '批量电源操作超时',
+  'station operation timeout': '单站操作超时',
+  'per-station operation timeout': '单站操作超时',
+  'power-on confirmation attempts': '开机确认次数',
+  'power-off confirmation attempts': '待机/休眠确认次数',
+  'power confirmation poll interval': '电源确认轮询间隔',
+  'boot fallback window': '启动回退窗口',
+  'sleep final write timeout': '休眠最终写入超时',
+  'sleep prepare gap': '休眠预备间隔',
+  'discovery attempts': '发现尝试次数',
+  'discovery retry delay': '发现重试延迟',
+  'recovery retry base': '恢复退避基底',
+  'recovery retry maximum': '恢复退避上限',
+  'initial read timeout': '初始读取超时',
+  'scan read phase timeout': '扫描读取阶段超时',
+  'status read timeout': '状态读取超时',
+  'status refresh timeout': '状态刷新超时',
+  'power write attempts': '电源写入次数',
+  'operation retry delay': '操作重试延迟',
+  'channel confirmation attempts': '频道确认次数',
+  'channel confirmation interval': '频道确认间隔',
+  'confirmation reconnect threshold': '确认重连阈值',
+  'confirmation reconnect delay': '确认重连延迟',
+  'identify attempts': '识别尝试次数',
+  'presence miss threshold': '在场漏扫阈值'
+};
+
 interface CopyPattern {
   pattern: RegExp;
   render(match: RegExpMatchArray): string;
@@ -99,6 +131,39 @@ const PATTERNS: readonly CopyPattern[] = [
         ? (CAPABILITY_ZH[m[1]] ?? m[1])
         : m[1];
       return t('{capability} is not supported', { capability });
+    }
+  },
+  {
+    // Config setters: "<subject> must be between <min> and <max>[ unit], got <value>".
+    pattern: /^(.+?) must be between (\d+) and (\d+)(?: (seconds|milliseconds))?, got (\d+)$/,
+    render: (m) => {
+      if (locale() !== 'zh-CN') {
+        return `${m[1]} must be between ${m[2]} and ${m[3]}${m[4] ? ` ${m[4]}` : ''}, got ${m[5]}`;
+      }
+      const unit = m[4] === 'milliseconds' ? '毫秒' : m[4] === 'seconds' ? '秒' : '';
+      return t('settings.error.between', {
+        subject: SETTINGS_SUBJECT_ZH[m[1]] ?? m[1],
+        min: m[2],
+        max: m[3],
+        unit,
+        value: m[5]
+      });
+    }
+  },
+  {
+    // Config setters: "<subject> must cover/must not exceed/cannot exceed
+    // <other> of <limit> seconds, got <value>".
+    pattern: /^(.+?) (must cover the|must not exceed the|cannot exceed the) (.+?) of (\d+) seconds, got (\d+)$/,
+    render: (m) => {
+      if (locale() !== 'zh-CN') {
+        return `${m[1]} ${m[2]} ${m[3]} of ${m[4]} seconds, got ${m[5]}`;
+      }
+      const subject = SETTINGS_SUBJECT_ZH[m[1]] ?? m[1];
+      const other = SETTINGS_SUBJECT_ZH[m[3]] ?? m[3];
+      const key = m[2] === 'must cover the'
+        ? 'settings.error.mustCover'
+        : 'settings.error.mustNotExceed';
+      return t(key, { subject, other, limit: m[4], value: m[5] });
     }
   }
 ];

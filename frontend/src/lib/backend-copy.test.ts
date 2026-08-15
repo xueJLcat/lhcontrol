@@ -62,6 +62,36 @@ describe('backendCopy', () => {
     expect(backendCopyOr(null, 'not actionable')).toBe('不可操作');
   });
 
+  it('keeps config range rejections byte-identical in English', () => {
+    const raw = 'scan duration must be between 2 and 30 seconds, got 1';
+    expect(backendCopy(raw)).toBe(raw);
+    const generic = 'power write attempts must be between 1 and 5, got 9';
+    expect(backendCopy(generic)).toBe(generic);
+  });
+
+  it('translates config range rejections under zh-CN', () => {
+    setLanguagePreference('zh-CN');
+    expect(backendCopy('scan duration must be between 2 and 30 seconds, got 1'))
+      .toBe('扫描时长必须在 2–30 秒范围内，当前为 1');
+    expect(backendCopy('power write attempts must be between 1 and 5, got 9'))
+      .toBe('电源写入次数必须在 1–5 范围内，当前为 9');
+  });
+
+  it('translates cross-field config rejections under zh-CN', () => {
+    setLanguagePreference('zh-CN');
+    expect(backendCopy('bulk power timeout must cover the per-station operation timeout of 30 seconds, got 20'))
+      .toBe('批量电源操作超时必须不小于单站操作超时（30 秒），当前为 20');
+    expect(backendCopy('station operation timeout cannot exceed the bulk power timeout of 120 seconds, got 130'))
+      .toBe('单站操作超时不能超过批量电源操作超时（120 秒），当前为 130');
+    expect(backendCopy('initial read timeout must not exceed the scan read phase timeout of 60 seconds, got 70'))
+      .toBe('初始读取超时不能超过扫描读取阶段超时（60 秒），当前为 70');
+  });
+
+  it('keeps cross-field config rejections byte-identical in English', () => {
+    const raw = 'bulk power timeout must cover the per-station operation timeout of 30 seconds, got 20';
+    expect(backendCopy(raw)).toBe(raw);
+  });
+
   it('joins translated warnings with a locale-appropriate separator', () => {
     const warnings = ['station is booting', 'unknown detail stays raw'];
     expect(joinBackendCopy(warnings)).toBe('station is booting unknown detail stays raw');

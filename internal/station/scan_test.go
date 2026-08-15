@@ -328,6 +328,44 @@ func TestScanRevivesRecoveryForReturningAbsentStation(t *testing.T) {
 	}
 }
 
+// TestScanDoesNotReviveStationThatOnlyCrossedMissThreshold guards the revival
+// hook against a false positive: a station present before the merge can cross
+// the miss threshold during the merge's own MarkMissed, and MarkSeen then
+// reports an absent-to-present transition that never happened. Only genuinely
+// absent stations may re-arm recovery; the flicker case already participates
+// in the same scan's initial reads.
+func TestScanDoesNotReviveStationThatOnlyCrossedMissThreshold(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	address := "11:22:33:44:55:6E"
+	station := &internalbluetooth.BaseStation{
+		Name: "LHB-FLICKER", Address: mustAddress(t, address),
+		Present: true, MissedScans: 1,
+	}
+	manager.stations[address] = station
+	manager.bluetoothOps.scanForDurationContext = func(context.Context, time.Duration) ([]internalbluetooth.DiscoveredStation, error) {
+		return []internalbluetooth.DiscoveredStation{{
+			Name: "LHB-FLICKER", Address: mustAddress(t, address),
+		}}, nil
+	}
+	manager.bluetoothOps.fetchInitialPowerState = func(context.Context, *internalbluetooth.BaseStation) error {
+		return nil
+	}
+
+	if _, err := manager.ScanAndFetchStations(); err != nil {
+		t.Fatalf("ScanAndFetchStations() error = %v", err)
+	}
+	if !station.Snapshot().Present {
+		t.Fatal("scan merge did not keep the flickering station present")
+	}
+	manager.statusRetryMutex.Lock()
+	retry, tracked := manager.statusRetries[address]
+	manager.statusRetryMutex.Unlock()
+	if tracked {
+		t.Fatalf("scan merge re-armed recovery for a station that only crossed the miss threshold: %+v", retry)
+	}
+}
+
 func TestStopScanFinishesBeforeCancelledCallbackAndIsIdempotent(t *testing.T) {
 	manager := NewManager(config.NewConfig())
 	scanStarted := make(chan struct{})

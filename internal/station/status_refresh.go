@@ -5,10 +5,19 @@ import (
 	"errors"
 	"fmt"
 	"lhcontrol/internal/bluetooth"
+	"log"
 	"sort"
 	"strings"
 	"sync"
+	"time"
 )
+
+// statusRefreshJoinLimit bounds the wait for status-read workers after the
+// dispatch loop closes. A wedged WinRT cleanup can keep a worker blocked on a
+// transport lock long past its read budget; without this cap a single wedged
+// device would hold statusOperationMutex forever and stop every later status
+// refresh (and the exclusive front-door operations that queue behind it).
+const statusRefreshJoinLimit = 20 * time.Second
 
 // isPureContextError reports whether every leaf in the error tree is a context
 // cancellation or deadline. The bluetooth layer joins the stopping context
@@ -212,7 +221,34 @@ dispatch:
 		}
 	}
 	close(work)
-	wg.Wait()
+	joined := make(chan struct{})
+	go func() {
+		defer close(joined)
+		wg.Wait()
+	}()
+	joinLimit := m.statusRefreshJoinWait
+	if joinLimit <= 0 {
+		joinLimit = statusRefreshJoinLimit
+	}
+	joinTimer := time.NewTimer(joinLimit)
+	select {
+	case <-joined:
+		joinTimer.Stop()
+	case <-joinTimer.C:
+		// A worker is blocked past its budget (typically on an adapter call
+		// that ignores cancellation). Abandon the refresh instead of holding
+		// statusOperationMutex until it unblocks: the worker keeps running and
+		// releases its slot when the OS call returns, and registering every
+		// candidate for recovery lets the scheduler re-read each station. Do
+		// not touch statusErrors from here on: the abandoned worker may still
+		// be writing its entry.
+		log.Printf("Bluetooth status refresh worker did not finish within %s; abandoning the refresh", joinLimit)
+		for _, stationPtr := range stationsToRead {
+			m.trackStatusRefreshPending(stationPtr.Snapshot().Address)
+		}
+		m.scheduleStatusRecovery()
+		return m.GetStationInfo(), fmt.Errorf("status refresh did not finish within %s: %w", joinLimit, ErrOperationInProgress)
+	}
 	// Start newly discovered disconnect recovery only after foreground status
 	// reads have released their slots. Otherwise this refresh can make one of
 	// its own connected-device reads fail with Busy.

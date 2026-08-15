@@ -71,6 +71,7 @@
   } from '../backend';
   import { autosleep as autosleepModels, bluetooth as bluetoothModels } from '../../../wailsjs/go/models';
   import { pushToast } from '../toast';
+  import { backendCopy } from '../backend-copy';
   import { languagePreference, saveLanguagePreference, t, type LanguagePreference } from '../i18n.svelte';
   import SettingsDrawer from './SettingsDrawer.svelte';
   import { AsyncSetting } from './settings/async-setting.svelte';
@@ -233,7 +234,7 @@
     try {
       adapters = await ListBluetoothAdapters() ?? [];
     } catch (error) {
-      loadError = String(error);
+      loadError = backendCopy(String(error));
     } finally {
       loading = false;
     }

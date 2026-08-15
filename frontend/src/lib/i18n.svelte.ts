@@ -441,6 +441,9 @@ const zhCN = {
   'Configuration could not be loaded: {detail}': '配置无法加载：{detail}',
   'Configuration changes could not be saved: {detail}': '配置更改无法保存：{detail}',
   '{capability} is not supported': '不支持{capability}',
+  'settings.error.between': '{subject}必须在 {min}–{max} {unit}范围内，当前为 {value}',
+  'settings.error.mustCover': '{subject}必须不小于{other}（{limit} 秒），当前为 {value}',
+  'settings.error.mustNotExceed': '{subject}不能超过{other}（{limit} 秒），当前为 {value}',
   // Scan-error recovery card: busy classification.
   'Bluetooth is busy': '蓝牙正忙',
   'Another Bluetooth operation is still running, so the scan could not start.': '另一个蓝牙操作仍在进行，扫描无法开始。',
