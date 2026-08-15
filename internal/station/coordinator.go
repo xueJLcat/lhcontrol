@@ -286,23 +286,34 @@ func (m *Manager) beginForegroundStationOperation(address string) error {
 	return m.beginForegroundStationOperationContext(context.Background(), address)
 }
 
+// beginForegroundStationOperationContext guards the busy check and the
+// acquisition under the scan transition lock, but never holds it across the
+// waits for background work: finishScan needs the same lock to publish the
+// terminal scan state, and a foreground wait that can stretch several seconds
+// (a background cleanup draining a stuck adapter call among them) would keep
+// isScanning true and delay every new scan, bulk, or StopScan behind it.
 func (m *Manager) beginForegroundStationOperationContext(ctx context.Context, address string) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	m.scanTransitionMutex.Lock()
-	defer m.scanTransitionMutex.Unlock()
-	if err := m.foregroundContextError(ctx); err != nil {
-		return err
-	}
-	if m.isScanning.Load() {
-		return ErrOperationInProgress
-	}
 	for {
+		if err := m.foregroundContextError(ctx); err != nil {
+			return err
+		}
 		m.recoveryOperationMutex.Lock()
 		generationBefore := m.recoveryGeneration
 		m.recoveryOperationMutex.Unlock()
+		m.scanTransitionMutex.Lock()
+		if err := m.foregroundContextError(ctx); err != nil {
+			m.scanTransitionMutex.Unlock()
+			return err
+		}
+		if m.isScanning.Load() {
+			m.scanTransitionMutex.Unlock()
+			return ErrOperationInProgress
+		}
 		err := m.beginStationOperation(address)
+		m.scanTransitionMutex.Unlock()
 		if !errors.Is(err, ErrOperationInProgress) {
 			return err
 		}

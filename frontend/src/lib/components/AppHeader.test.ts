@@ -77,4 +77,13 @@ describe('AppHeader bulk controls', () => {
     expect(screen.getByRole('button', { name: 'Stop' })).toBeEnabled();
     expect(document.querySelector('.scan-progress')).toBeInTheDocument();
   });
+
+  it('explains that a running scan disables the bulk buttons', () => {
+    renderHeader({ scanning: true });
+    for (const name of ['On', 'Standby', 'Sleep']) {
+      const button = screen.getByRole('button', { name });
+      expect(button).toBeDisabled();
+      expect(button).toHaveAttribute('title', 'Scanning for base stations...');
+    }
+  });
 });

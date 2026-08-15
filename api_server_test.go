@@ -638,6 +638,67 @@ func reserveFreeAddress(t *testing.T) string {
 
 }
 
+func TestSetAPIListenAddressUnchangedSkipsRestart(t *testing.T) {
+	t.Setenv("AppData", t.TempDir())
+	address := reserveFreeAddress(t)
+	app := NewApp()
+	app.apiStatus.Address = address
+	app.apiRetryDelay = 5 * time.Millisecond
+	registerAPIRoutes(app.api, &fakeAPIStationManager{}, scanEventCallbacks{}, app.GetAPIStatus)
+	app.startAPIServer()
+	t.Cleanup(func() {
+		app.apiLifecycleMutex.Lock()
+		cancel := app.apiCancel
+		app.apiCancel = nil
+		app.apiLifecycleMutex.Unlock()
+		if cancel != nil {
+			cancel()
+		}
+		_ = app.api.Shutdown()
+		app.apiWG.Wait()
+	})
+	deadline := time.Now().Add(2 * time.Second)
+	for !app.GetAPIStatus().Running && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if status := app.GetAPIStatus(); !status.Running || status.Address != address {
+		t.Fatalf("initial API status = %+v, want running on %s", status, address)
+	}
+
+	// Persist the address through a real change first so the unchanged
+	// re-save below exercises the short-circuit against the same value.
+	if err := app.SetAPIListenAddress(address); err != nil {
+		t.Fatalf("SetAPIListenAddress() error = %v", err)
+	}
+	deadline = time.Now().Add(2 * time.Second)
+	for !(app.GetAPIStatus().Running && app.GetAPIStatus().Address == address) && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+
+	// Re-saving the unchanged address must not tear down the live listener:
+	// the generation only moves when the restart path actually runs.
+	app.apiLifecycleMutex.Lock()
+	generation := app.apiGeneration
+	app.apiLifecycleMutex.Unlock()
+	if err := app.SetAPIListenAddress(address); err != nil {
+		t.Fatalf("SetAPIListenAddress() unchanged error = %v", err)
+	}
+	app.apiLifecycleMutex.Lock()
+	generationAfter := app.apiGeneration
+	app.apiLifecycleMutex.Unlock()
+	if generationAfter != generation {
+		t.Fatalf("API generation moved %d -> %d for an unchanged address", generation, generationAfter)
+	}
+	response, err := http.Get("http://" + address + "/health")
+	if err != nil {
+		t.Fatalf("loopback health request after unchanged save: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("health status after unchanged save = %d, want 200", response.StatusCode)
+	}
+}
+
 func TestSetAPIListenAddressRejectsInvalidValues(t *testing.T) {
 
 	t.Setenv("AppData", t.TempDir())

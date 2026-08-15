@@ -238,6 +238,19 @@ describe('SettingsDrawer', () => {
     expect(props.onScanDurationChange).toHaveBeenCalledWith(30);
   });
 
+  it('disables the polling interval until the automatic-refresh preference is known and enabled', () => {
+    render(SettingsDrawer, { props: defaultProps({ statusPollingEnabled: null }) });
+    expect(screen.getByLabelText('Status polling interval')).toBeDisabled();
+
+    cleanup();
+    render(SettingsDrawer, { props: defaultProps({ statusPollingEnabled: false }) });
+    expect(screen.getByLabelText('Status polling interval')).toBeDisabled();
+
+    cleanup();
+    render(SettingsDrawer, { props: defaultProps({ statusPollingEnabled: true }) });
+    expect(screen.getByLabelText('Status polling interval')).toBeEnabled();
+  });
+
   it('shows the loading state without an adapter list', () => {
     render(SettingsDrawer, { props: defaultProps({ loading: true, adapters: [] }) });
     expect(screen.getByText(/Detecting Bluetooth adapters/)).toBeInTheDocument();

@@ -123,7 +123,7 @@
       <div class="delay-row">
         <label for="status-poll-interval">{t('Status polling interval')}</label>
         <span class="delay-input">
-          <input id="status-poll-interval" type="number" min={R.MIN_STATUS_POLL_INTERVAL_SECONDS} max={R.MAX_STATUS_POLL_INTERVAL_SECONDS} step="1" bind:value={statusPollIntervalDraft.draft} onchange={statusPollIntervalDraft.commit} disabled={settings.statusPollIntervalBusy || settings.statusPollingEnabled === false} />
+          <input id="status-poll-interval" type="number" min={R.MIN_STATUS_POLL_INTERVAL_SECONDS} max={R.MAX_STATUS_POLL_INTERVAL_SECONDS} step="1" bind:value={statusPollIntervalDraft.draft} onchange={statusPollIntervalDraft.commit} disabled={settings.statusPollIntervalBusy || settings.statusPollingEnabled !== true} />
           {t('seconds')}
         </span>
       </div>

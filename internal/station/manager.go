@@ -2,6 +2,7 @@ package station
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"lhcontrol/internal/bluetooth"
 	"lhcontrol/internal/config"
@@ -552,6 +553,12 @@ func (m *Manager) recordObservedReadResult(
 	if channelObserved {
 		if channelErr == nil || bluetooth.IsUnsupportedCapabilityError(channelErr) {
 			m.clearStatusFailureKind(address, statusRetryChannel)
+		} else if errors.Is(channelErr, context.Canceled) || errors.Is(channelErr, context.DeadlineExceeded) {
+			// A budget deadline or cancellation that interrupted the channel
+			// read is not evidence of a channel fault, matching the deadline
+			// rule used by status refreshes and recovery. Schedule a plain
+			// re-read instead of counting a failure with backoff.
+			m.noteStatusRefreshPending(address)
 		} else {
 			m.noteChannelFailure(address)
 			if bluetooth.RequiresReconnect(channelErr) || bluetooth.IsAdapterUnavailable(channelErr) {

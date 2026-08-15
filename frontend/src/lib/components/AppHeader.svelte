@@ -144,9 +144,9 @@
           style:opacity={bulkActiveIndex >= 0 ? 1 : 0}
           aria-hidden="true"
         ></div>
-        <button class="seg-on" class:pending={bulkTarget === 'on'} class:active={allOn} onclick={() => onBulkPower('on')} disabled={scanning || bulkLocked || !canOn} title={t(!canOn ? 'No actionable station' : bulkLocked ? 'Bluetooth operation in progress' : 'Turn all known stations on')}>{t('On')}</button>
-        <button class="seg-standby" class:pending={bulkTarget === 'standby'} class:active={allStandby} onclick={() => onBulkPower('standby')} disabled={scanning || bulkLocked || !canStandby} title={t(!canStandby ? 'No actionable station' : bulkLocked ? 'Bluetooth operation in progress' : 'Set all known stations to standby')}>{t('Standby')}</button>
-        <button class="seg-sleep" class:pending={bulkTarget === 'sleep'} class:active={allSleep} onclick={() => onBulkPower('sleep')} disabled={scanning || bulkLocked || !canSleep} title={t(!canSleep ? 'No actionable station' : bulkLocked ? 'Bluetooth operation in progress' : 'Put all known stations to sleep')}>{t('Sleep')}</button>
+        <button class="seg-on" class:pending={bulkTarget === 'on'} class:active={allOn} onclick={() => onBulkPower('on')} disabled={scanning || bulkLocked || !canOn} title={t(scanning ? 'Scanning for base stations...' : !canOn ? 'No actionable station' : bulkLocked ? 'Bluetooth operation in progress' : 'Turn all known stations on')}>{t('On')}</button>
+        <button class="seg-standby" class:pending={bulkTarget === 'standby'} class:active={allStandby} onclick={() => onBulkPower('standby')} disabled={scanning || bulkLocked || !canStandby} title={t(scanning ? 'Scanning for base stations...' : !canStandby ? 'No actionable station' : bulkLocked ? 'Bluetooth operation in progress' : 'Set all known stations to standby')}>{t('Standby')}</button>
+        <button class="seg-sleep" class:pending={bulkTarget === 'sleep'} class:active={allSleep} onclick={() => onBulkPower('sleep')} disabled={scanning || bulkLocked || !canSleep} title={t(scanning ? 'Scanning for base stations...' : !canSleep ? 'No actionable station' : bulkLocked ? 'Bluetooth operation in progress' : 'Put all known stations to sleep')}>{t('Sleep')}</button>
       </div>
     </div>
     <button class="btn settings-btn" title={t('Settings')} aria-label={t('Open settings')} onclick={onOpenSettings} aria-haspopup="dialog">

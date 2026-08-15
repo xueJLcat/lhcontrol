@@ -13,6 +13,13 @@ func (a *App) SetAPIListenAddress(address string) error {
 	a.apiSettingsMutex.Lock()
 	defer a.apiSettingsMutex.Unlock()
 
+	// Re-saving the unchanged address must not restart the listener: the
+	// restart tears down the live socket and drops in-flight responses for a
+	// bind target that is already the configured one.
+	if a.config.GetAPIListenAddress() == address {
+		return nil
+	}
+
 	err := a.config.SetAPIListenAddress(address)
 
 	a.setConfigPersistenceStatus()
