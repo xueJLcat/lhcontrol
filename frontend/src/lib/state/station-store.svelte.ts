@@ -61,6 +61,16 @@ const DEFERRED_STARTUP_SCAN_RETRY_MS = 3000;
 // reconcile the real state.
 const STARTUP_PROBE_TIMEOUT_MS = 15000;
 
+// Consecutive health-probe failures after which scan ownership is treated as
+// decidable even though no health snapshot committed. A failing probe means
+// the HTTP listener is unreachable, so HTTP-driven external operations cannot
+// be in flight; auto-sleep state arrives over the separate Wails event stream,
+// and a deferred startup scan that loses a race still re-arms on the next
+// retry. Without this fallback a persistently failing probe leaves ownership
+// permanently unknown, stalling the configured startup scan and its retry
+// timer for the whole session.
+const STARTUP_OWNERSHIP_FAILURE_THRESHOLD = 3;
+
 // Resolves with the promise's value, or with the fallback once the timeout
 // elapses. Startup probes use it so a single hung backend getter cannot
 // freeze the UI state machine.
@@ -117,6 +127,11 @@ export class StationStore {
   private projectionRefreshFailures = 0;
   private statusPollIntervalSeconds = DEFAULT_STATUS_POLL_INTERVAL_SECONDS;
   private statusPollingEnabled = true;
+  // Re-enabling status polling promises an immediate refresh, but the startup
+  // barrier gates every status check until it completes. When the re-enable
+  // lands inside that window the promised refresh is owed and runs as soon as
+  // the barrier clears instead of waiting a full poll interval.
+  private owedImmediateStatusCheck = false;
   private scanOnStartupEnabled = false;
   private scanOnStartupPreferenceRevision = 0;
   private statusPollIntervalPreferenceRevision = 0;
@@ -147,6 +162,11 @@ export class StationStore {
   // not be adopted and deferred startup scans must not start, or an internal
   // scan could be exposed as stoppable or rejected as busy.
   private startupScanOwnershipKnown = false;
+  // Counts consecutive health-probe failures so a persistently unreachable
+  // API can still settle scan ownership instead of leaving it unknown forever
+  // (which stalls the deferred startup scan for the session). Reset by a
+  // committed snapshot.
+  private healthProbeFailures = 0;
   private mounted = false;
 
   readonly powerFeedback = new PowerFeedbackRegistry((next) => {
@@ -204,6 +224,7 @@ export class StationStore {
       // auto-sleep and HTTP operations become distinguishable from unknown
       // external scans, releasing the adoption/deferred-scan startup gates.
       this.startupScanOwnershipKnown = true;
+      this.healthProbeFailures = 0;
       this.apiRunning = status.running;
       this.apiError = status.error;
       this.apiAddress = status.address;
@@ -220,6 +241,16 @@ export class StationStore {
     commitFailure: (error) => {
       this.apiRunning = false;
       this.apiError = error;
+      // A failing health probe means the HTTP listener is unreachable, so no
+      // HTTP-driven external operation can be in flight and ownership becomes
+      // decidable even without a committed snapshot. Treat it as such after a
+      // short failure streak; otherwise a persistently failing probe leaves
+      // ownership unknown and stalls the deferred startup scan for the session.
+      this.healthProbeFailures += 1;
+      if (!this.startupScanOwnershipKnown && this.healthProbeFailures >= STARTUP_OWNERSHIP_FAILURE_THRESHOLD) {
+        this.startupScanOwnershipKnown = true;
+        this.maybeRunDeferredStartupScan();
+      }
     },
     reportConfigWarning: (warning) => pushToast(backendCopy(warning), 'warning')
   });
@@ -674,6 +705,16 @@ export class StationStore {
     }
   }
 
+  // Delivers the immediate refresh promised by a polling re-enable that landed
+  // while the startup barrier was still gating status checks. A no-op unless
+  // such a re-enable actually happened.
+  private runOwedImmediateStatusCheck() {
+    if (!this.owedImmediateStatusCheck) return;
+    this.owedImmediateStatusCheck = false;
+    if (this.disposed || !this.statusPollingEnabled) return;
+    void this.periodicStatusCheck();
+  }
+
   setStatusPollingEnabled(enabled: boolean) {
     if (this.disposed) return;
     // Count the user's intent before the equality fast path. At startup the
@@ -694,7 +735,11 @@ export class StationStore {
         void this.periodicStatusCheck();
       }, intervalMs);
       // Re-enabling polling is an explicit request for live station state, so
-      // do not make the user wait for the next interval tick.
+      // do not make the user wait for the next interval tick. While the
+      // startup barrier still gates status checks the call is a no-op; owe the
+      // refresh so it runs as soon as the barrier clears instead of waiting a
+      // full poll interval.
+      this.owedImmediateStatusCheck = this.startupPending;
       void this.periodicStatusCheck();
     } else {
       // Recompute cached age-based fields immediately, then API-health polls
@@ -821,6 +866,7 @@ export class StationStore {
       // lock before the initial external-scan check can start the local scan.
       this.startupPending = false;
       startupDecisionApplied = true;
+      this.runOwedImmediateStatusCheck();
       // An external scan event may have arrived while this initial query was
       // pending. Do not let its older result overwrite the newer event state.
       if (this.disposed || startupScanEpoch !== this.gates.currentScanEpoch) return;
@@ -922,6 +968,7 @@ export class StationStore {
     this.projectionRefreshTimer = null;
     this.projectionRefreshPending = false;
     this.projectionRefreshFailures = 0;
+    this.owedImmediateStatusCheck = false;
     this.powerFeedback.clearAll();
     this.cancelExternalScanListener?.();
     this.cancelExternalScanFailureListener?.();
@@ -939,6 +986,10 @@ export class StationStore {
   }
 
   startScan() {
+    // A scan the user starts manually fulfills the configured scan-on-startup
+    // intent; drop any deferred startup scan so the retry timer does not fire
+    // a redundant automatic scan moments after the user's own scan.
+    if (this.startupScanDeferred) this.setStartupScanDeferred(false);
     return this.scans.startScan();
   }
 

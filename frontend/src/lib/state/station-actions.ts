@@ -75,6 +75,11 @@ const BULK_CANCEL_WATCHDOG_DELAY_MS = 90_000;
 
 export class StationActionController {
   private bulkCancelWatchdogTimer: ReturnType<typeof setTimeout> | null = null;
+  // Bumped when the cancel watchdog force-resets a wedged bulk. A cancel
+  // request that settles afterwards belongs to the generation that started
+  // it: a late error landing after the reset must not surface a stale
+  // "cancel failed" toast over the recovered (or a newly started) state.
+  private bulkCancelGeneration = 0;
 
   constructor(private host: StationActionHost) {}
 
@@ -95,6 +100,7 @@ export class StationActionController {
   // longer 'bulk-power'.
   private runBulkCancelWatchdog() {
     this.bulkCancelWatchdogTimer = null;
+    this.bulkCancelGeneration += 1;
     const host = this.host;
     if (host.disposed || host.globalOperation !== 'bulk-power') return;
     host.gates.beginScanEpoch();
@@ -278,25 +284,29 @@ export class StationActionController {
     this.host.statusMessage = t('Setting all available stations to {target}…', { target: targetLabel });
     try {
       const result = await SetAllStationsPowerDetailed(state);
-      if (!this.host.gates.canCommitOperation(operationEpoch)) return;
-      this.host.mergeStationUpdates(result.results.map((item) => item.station).filter((item) => Boolean(item?.address)));
-      await this.fetchLatestList();
-      if (!this.host.gates.canCommitOperation(operationEpoch)) return;
-      for (const item of result.results) {
-        const feedback: Pick<PowerFeedback, 'kind' | 'text'> = item.skipped
-          ? item.success && item.confirmed
-            ? { kind: 'success', text: t('Already {target}', { target: targetLabel }) }
-            : { kind: 'warning', text: t('Skipped · {reason}', { reason: backendCopyOr(item.reason, 'not actionable') }) }
-            : item.success && item.confirmed
-              ? { kind: 'success', text: t('{target} confirmed', { target: targetLabel }) }
-              : item.success && item.commandSent
-              ? { kind: 'warning', text: t('{target} sent · {detail}', { target: targetLabel, detail: backendCopyOr(item.error, 'status unavailable') }) }
-              : { kind: 'error', text: backendCopy(item.error) || t('Failed to set {target}', { target: targetLabel }) };
-        this.host.powerFeedback.set(item.address, {
-          ...feedback,
-          target: state,
-          readAt: item.station?.lastPowerReadAt
-        });
+      let committable = this.host.gates.canCommitOperation(operationEpoch);
+      if (committable) {
+        this.host.mergeStationUpdates(result.results.map((item) => item.station).filter((item) => Boolean(item?.address)));
+        await this.fetchLatestList();
+        committable = this.host.gates.canCommitOperation(operationEpoch);
+      }
+      if (committable) {
+        for (const item of result.results) {
+          const feedback: Pick<PowerFeedback, 'kind' | 'text'> = item.skipped
+            ? item.success && item.confirmed
+              ? { kind: 'success', text: t('Already {target}', { target: targetLabel }) }
+              : { kind: 'warning', text: t('Skipped · {reason}', { reason: backendCopyOr(item.reason, 'not actionable') }) }
+              : item.success && item.confirmed
+                ? { kind: 'success', text: t('{target} confirmed', { target: targetLabel }) }
+                : item.success && item.commandSent
+                  ? { kind: 'warning', text: t('{target} sent · {detail}', { target: targetLabel, detail: backendCopyOr(item.error, 'status unavailable') }) }
+                  : { kind: 'error', text: backendCopy(item.error) || t('Failed to set {target}', { target: targetLabel }) };
+          this.host.powerFeedback.set(item.address, {
+            ...feedback,
+            target: state,
+            readAt: item.station?.lastPowerReadAt
+          });
+        }
       }
       const summary = summarizeBulkResult(result.results);
       const summaryText = formatBulkResult(targetLabel, summary);
@@ -312,23 +322,25 @@ export class StationActionController {
       const toastMessage = result.timedOut || result.cancelled
         ? statusText
         : t('Bulk {target}: {summary}', { target: targetLabel, summary: summaryText });
-      // The summary toast must not be gated by status-line ownership: a
-      // partial failure's error toast would otherwise be swallowed by a
-      // concurrent owner, leaving only the per-card feedback.
+      // The result notification must not be gated by scan-epoch or
+      // status-line ownership: an external scan advancing while the bulk ran
+      // would otherwise swallow the outcome entirely (including partial
+      // failures) with no visible feedback. Only the list and status-line
+      // writes are gated.
       pushToast(toastMessage, toastKind);
-      if (!this.host.gates.canCommitStatus(statusOperation)) return;
-      this.host.statusMessage = statusText;
+      if (committable && this.host.gates.canCommitStatus(statusOperation)) {
+        this.host.statusMessage = statusText;
+      }
     } catch (error) {
-      if (!this.host.gates.canCommitOperation(operationEpoch)) return;
-      await this.fetchLatestList();
-      if (!this.host.gates.canCommitOperation(operationEpoch)) return;
+      // Same notification rule as the settled path: a superseded epoch must
+      // not swallow the failure report, while the list refresh stays gated.
+      if (this.host.gates.canCommitOperation(operationEpoch)) {
+        await this.fetchLatestList();
+      }
       const failureMessage = `${t('Bulk {target} operation partially failed', { target: targetLabel })}: ${backendCopy(String(error))}`;
-      if (this.host.gates.canCommitStatus(statusOperation)) {
+      if (this.host.gates.canCommitOperation(operationEpoch) && this.host.gates.canCommitStatus(statusOperation)) {
         this.host.statusMessage = failureMessage;
       }
-      // As with single-station failures, keep the toast independent of
-      // status-line ownership so a concurrent auto-sleep or HTTP event cannot
-      // swallow the only notification of the failure.
       pushToast(failureMessage);
     } finally {
       // The bulk settled, so the cancel watchdog no longer needs to recover
@@ -357,11 +369,15 @@ export class StationActionController {
     // write. Committing under the captured epoch still drops this message when
     // a newer status owner takes over mid-cancellation.
     const statusOperation = this.host.gates.currentStatusEpoch;
+    const cancelGeneration = this.bulkCancelGeneration;
     this.host.statusMessage = t('Stopping bulk power...');
     try {
       await CancelBulkPower();
     } catch (error) {
-      if (!this.host.disposed) {
+      // A wedged cancel can settle after the watchdog already force-reset the
+      // bulk (a newer generation). Reporting it then would surface a stale
+      // failure over the recovered — or a newly started — bulk state.
+      if (!this.host.disposed && cancelGeneration === this.bulkCancelGeneration) {
         const message = `${t('Cancel bulk power')}: ${backendCopy(String(error))}`;
         if (this.host.gates.canCommitStatus(statusOperation)) this.host.statusMessage = message;
         pushToast(message);
