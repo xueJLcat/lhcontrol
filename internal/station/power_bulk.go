@@ -176,6 +176,59 @@ func (m *Manager) CancelBulkPower() error {
 	}
 }
 
+type bulkPowerWork struct {
+	station     *bluetooth.BaseStation
+	resultIndex int
+}
+
+type bulkPowerCandidate struct {
+	station  *bluetooth.BaseStation
+	snapshot bluetooth.BaseStationSnapshot
+	name     string
+}
+
+// bulkInterruptionReason attributes one skip reason to an interruption that
+// stopped a bulk worker. Shutdown wins over a concurrent deadline because the
+// worker observes a cancelled context either way, and a station-level timeout
+// is only reported when the bulk context is still healthy.
+func (m *Manager) bulkInterruptionReason(ctx context.Context, workerErr error) string {
+	if m.shuttingDown.Load() {
+		return ReasonShuttingDown
+	}
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return ReasonBulkOperationTimeout
+	}
+	if errors.Is(ctx.Err(), context.Canceled) {
+		return ReasonOperationCancelled
+	}
+	if errors.Is(workerErr, context.DeadlineExceeded) {
+		// Only this station's own budget expired; the bulk deadline is still
+		// pending, so report the station-level timeout instead of blaming the
+		// whole batch.
+		return ReasonStationOperationTimeout
+	}
+	return ReasonOperationCancelled
+}
+
+// isContextInterruption reports whether a worker failure was actually shaped
+// by cancellation or shutdown rather than failing on its own.
+func isContextInterruption(ctx context.Context, workerErr error, shuttingDown bool) bool {
+	return (errors.Is(workerErr, context.Canceled) || errors.Is(workerErr, context.DeadlineExceeded)) &&
+		(ctx.Err() != nil || shuttingDown)
+}
+
+// failUntouchedBulkResults records a setup failure on every entry the batch
+// never started. Untouched means not succeeded, not skipped, not sent, and
+// not already carrying an error.
+func failUntouchedBulkResults(results []BulkPowerStationResult, err error) {
+	for index := range results {
+		item := &results[index]
+		if !item.Success && !item.Skipped && !item.CommandSent && item.Error == "" {
+			item.Error = err.Error()
+		}
+	}
+}
+
 // setAllStationsPowerDetailed reports whether cancellation or shutdown
 // actually prevented any selected station from reaching a terminal result.
 // The caller uses that signal to distinguish an interrupted batch from a
@@ -199,16 +252,60 @@ func (m *Manager) setAllStationsPowerDetailed(ctx context.Context, state string)
 	}
 	defer m.endForegroundGlobalOperation()
 
-	type bulkPowerWork struct {
-		station     *bluetooth.BaseStation
-		resultIndex int
-	}
-	type bulkPowerCandidate struct {
-		station  *bluetooth.BaseStation
-		snapshot bluetooth.BaseStationSnapshot
-		name     string
-	}
 	selectionTime := time.Now()
+	result, work := m.seedBulkPowerResults(m.selectBulkPowerCandidates(), target, selectionTime)
+	m.attachBulkPowerStationInfos(result.Results)
+	if len(work) == 0 {
+		return result, false, nil
+	}
+	if err := m.ensureReady(); err != nil {
+		// A shutdown rejection shares the entry shape with every other
+		// interrupted batch: leave the entries untouched so the outer
+		// cancellation backfill marks them Skipped with the shutdown reason
+		// instead of failed-with-error. Non-shutdown failures (an unavailable
+		// adapter) keep per-entry error details.
+		if !errors.Is(err, ErrShuttingDown) {
+			failUntouchedBulkResults(result.Results, err)
+		}
+		return result, errors.Is(err, ErrShuttingDown), err
+	}
+	if err := ctx.Err(); err != nil {
+		return result, true, err
+	}
+
+	var wg sync.WaitGroup
+	semaphore := make(chan struct{}, 2)
+	contextAffected := make([]bool, len(result.Results))
+
+	for _, item := range work {
+		wg.Add(1)
+		go func(resultIndex int, s *bluetooth.BaseStation) {
+			defer wg.Done()
+			if m.runBulkPowerWorker(ctx, semaphore, target, s, &result.Results[resultIndex]) {
+				contextAffected[resultIndex] = true
+			}
+		}(item.resultIndex, item.station)
+	}
+
+	wg.Wait()
+	for _, affected := range contextAffected {
+		if !affected {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return result, true, err
+		}
+		if m.shuttingDown.Load() {
+			return result, true, ErrShuttingDown
+		}
+		return result, true, context.Canceled
+	}
+	return result, false, nil
+}
+
+// selectBulkPowerCandidates snapshots every known station under the fleet
+// lock, applies display-name overrides, and orders the batch deterministically.
+func (m *Manager) selectBulkPowerCandidates() []bulkPowerCandidate {
 	m.stationsMutex.RLock()
 	candidates := make([]bulkPowerCandidate, 0, len(m.stations))
 	for _, stationPtr := range m.stations {
@@ -230,275 +327,231 @@ func (m *Manager) setAllStationsPowerDetailed(ctx context.Context, state string)
 			right.snapshot.Channel, right.name, right.snapshot.Address,
 		)
 	})
+	return candidates
+}
 
+// seedBulkPowerResults creates one entry per candidate, skipping stations
+// already booting at selection time, and returns the work list for every
+// entry that still needs a worker.
+func (m *Manager) seedBulkPowerResults(candidates []bulkPowerCandidate, target bluetooth.PowerState, selectionTime time.Time) (BulkPowerResult, []bulkPowerWork) {
+	result := BulkPowerResult{Target: target.String(), Results: []BulkPowerStationResult{}}
 	work := make([]bulkPowerWork, 0, len(candidates))
 	for _, candidate := range candidates {
-		stationPtr := candidate.station
-		snapshot := candidate.snapshot
-		name := candidate.name
-		stationResult := BulkPowerStationResult{Address: snapshot.Address, Name: name}
-		switch classifyCachedPower(snapshot, target, selectionTime) {
+		stationResult := BulkPowerStationResult{Address: candidate.snapshot.Address, Name: candidate.name}
+		switch classifyCachedPower(candidate.snapshot, target, selectionTime) {
 		case cachedPowerBooting:
 			stationResult.Skipped = true
 			stationResult.Reason = ReasonStationBooting
 		}
 		result.Results = append(result.Results, stationResult)
-		resultIndex := len(result.Results) - 1
 		if !stationResult.Skipped {
-			work = append(work, bulkPowerWork{station: stationPtr, resultIndex: resultIndex})
+			work = append(work, bulkPowerWork{station: candidate.station, resultIndex: len(result.Results) - 1})
 		}
 	}
+	return result, work
+}
 
-	infoByAddress := make(map[string]StationInfo, len(result.Results))
+// attachBulkPowerStationInfos backfills the full station projection onto
+// every entry in one fleet-info lookup.
+func (m *Manager) attachBulkPowerStationInfos(results []BulkPowerStationResult) {
+	infoByAddress := make(map[string]StationInfo, len(results))
 	for _, info := range m.GetStationInfo() {
 		infoByAddress[info.Address] = info
 	}
-	for index := range result.Results {
-		if info, ok := infoByAddress[result.Results[index].Address]; ok {
-			result.Results[index].Station = info
-			result.Results[index].Name = info.Name
+	for index := range results {
+		if info, ok := infoByAddress[results[index].Address]; ok {
+			results[index].Station = info
+			results[index].Name = info.Name
 		}
 	}
-	if len(work) == 0 {
-		return result, false, nil
-	}
-	if err := m.ensureReady(); err != nil {
-		// A shutdown rejection shares the entry shape with every other
-		// interrupted batch: leave the entries untouched so the outer
-		// cancellation backfill marks them Skipped with the shutdown reason
-		// instead of failed-with-error. Non-shutdown failures (an unavailable
-		// adapter) keep per-entry error details.
-		if !errors.Is(err, ErrShuttingDown) {
-			for index := range result.Results {
-				item := &result.Results[index]
-				if !item.Success && !item.Skipped && !item.CommandSent && item.Error == "" {
-					item.Error = err.Error()
-				}
-			}
-		}
-		return result, errors.Is(err, ErrShuttingDown), err
-	}
-	if err := ctx.Err(); err != nil {
-		return result, true, err
-	}
+}
 
-	var wg sync.WaitGroup
-	semaphore := make(chan struct{}, 2)
-	contextAffected := make([]bool, len(result.Results))
-
-	for _, item := range work {
-		wg.Add(1)
-		go func(resultIndex int, s *bluetooth.BaseStation) {
-			defer wg.Done()
-			select {
-			case semaphore <- struct{}{}:
-			case <-ctx.Done():
-				contextAffected[resultIndex] = true
-				result.Results[resultIndex].Skipped = true
-				if m.shuttingDown.Load() {
-					result.Results[resultIndex].Reason = ReasonShuttingDown
-				} else if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-					result.Results[resultIndex].Reason = ReasonBulkOperationTimeout
-				} else {
-					result.Results[resultIndex].Reason = ReasonOperationCancelled
-				}
-				return
-			case <-m.shutdownCh:
-				contextAffected[resultIndex] = true
-				result.Results[resultIndex].Skipped = true
-				result.Results[resultIndex].Reason = ReasonShuttingDown
-				return
-			}
-			defer func() { <-semaphore }()
-			operationContext, cancelOperation := m.newStationOperationContext(ctx)
-			defer cancelOperation()
-			if m.shuttingDown.Load() || ctx.Err() != nil {
-				contextAffected[resultIndex] = true
-				result.Results[resultIndex].Skipped = true
-				if m.shuttingDown.Load() {
-					result.Results[resultIndex].Reason = ReasonShuttingDown
-				} else if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-					result.Results[resultIndex].Reason = ReasonBulkOperationTimeout
-				} else {
-					result.Results[resultIndex].Reason = ReasonOperationCancelled
-				}
-				return
-			}
-			stationResult := BulkPowerStationResult{
-				Address: s.Address.String(),
-			}
-			metadataReadRevision := s.Snapshot().MetadataReadRevision
-			defer func() {
-				m.reconcileMetadataReadResult(stationResult.Address, metadataReadRevision, s.Snapshot())
-			}()
-			cachedSkip := false
-			workerErr := runSafely("bulk power worker", func() error {
-				snapshot := s.Snapshot()
-				stationResult.Address = snapshot.Address
-				stationResult.Name = snapshot.Name
-				disposition := classifyCachedPower(snapshot, target, time.Now())
-				if disposition == cachedPowerBooting {
-					cachedSkip = true
-					stationResult.Skipped = true
-					stationResult.Reason = ReasonStationBooting
-					return nil
-				}
-				if disposition == cachedPowerAtTarget || !isOperationallyFresh(snapshot.LastPowerReadAt, time.Now()) {
-					readContext, cancelRead := context.WithTimeout(operationContext, m.initialReadTimeoutDuration())
-					readErr := m.bluetoothOps.fetchInitialPowerState(readContext, s)
-					cancelRead()
-					readSucceeded := powerReadSucceeded(readErr)
-					verifiedDisposition := cachedPowerActionable
-					if readSucceeded {
-						// Classify before recovery bookkeeping: a transport-level channel
-						// error may disconnect the station and intentionally clear freshness,
-						// but it cannot invalidate the power value read just beforehand.
-						verifiedDisposition = classifyCachedPower(s.Snapshot(), target, time.Now())
-					}
-					m.recordPowerVerificationResult(s, stationResult.Address, snapshot, readErr)
-					if readSucceeded {
-						switch verifiedDisposition {
-						case cachedPowerBooting:
-							cachedSkip = true
-							stationResult.Skipped = true
-							stationResult.Reason = ReasonStationBooting
-							return nil
-						case cachedPowerAtTarget:
-							cachedSkip = true
-							stationResult.Skipped = true
-							stationResult.Success = true
-							stationResult.Confirmed = true
-							stationResult.Reason = ReasonAlreadyAtTarget
-							return nil
-						}
-					}
-				}
-				snapshot = s.Snapshot()
-				capabilities := snapshot.Capabilities
-				var err error
-				discoveryContext, cancelDiscovery := context.WithTimeout(operationContext, m.initialReadTimeoutDuration())
-				defer cancelDiscovery()
-				if snapshot.CapabilitiesKnown &&
-					(!capabilities.PowerWrite ||
-						(target == bluetooth.PowerStateStandby && !capabilities.Standby)) {
-					capabilities, err = m.bluetoothOps.refreshCapabilities(discoveryContext, s)
-				} else if !snapshot.CapabilitiesKnown {
-					capabilities, err = m.bluetoothOps.ensureCapabilities(discoveryContext, s)
-				}
-				if err != nil {
-					return err
-				}
-				// The station may enter a boot transition while capability
-				// discovery is in flight. Re-evaluate at the final write boundary
-				// instead of acting on the worker's earlier snapshot.
-				if isFreshBootingPower(s.Snapshot(), time.Now()) {
-					cachedSkip = true
-					stationResult.Skipped = true
-					stationResult.Reason = ReasonStationBooting
-					return nil
-				}
-				if !capabilities.PowerWrite {
-					stationResult.Skipped = true
-					stationResult.Reason = ReasonUnsupportedCapability
-					return nil
-				}
-				if target == bluetooth.PowerStateStandby && !capabilities.Standby {
-					stationResult.Skipped = true
-					stationResult.Reason = ReasonUnsupportedStandby
-					return nil
-				}
-				var controlResult bluetooth.PowerControlResult
-				controlResult, err = m.bluetoothOps.setPowerState(operationContext, s, target)
-				stationResult.CommandSent = err == nil
-				stationResult.Confirmed = controlResult.Confirmed
-				if err == nil {
-					stationResult.Success = true
-				}
-				return err
-			})
-			if workerErr != nil {
-				if (errors.Is(workerErr, context.Canceled) || errors.Is(workerErr, context.DeadlineExceeded)) &&
-					(ctx.Err() != nil || m.shuttingDown.Load()) {
-					contextAffected[resultIndex] = true
-				}
-				var confirmationErr *bluetooth.PowerConfirmationError
-				if errors.As(workerErr, &confirmationErr) {
-					// A possibly-sent command keeps its command-sent outcome even
-					// when shutdown cancelled the confirmation read.
-					m.observeStationBluetoothError(s, stationResult.Address, workerErr)
-					stationResult.CommandSent = true
-					stationResult.Success = true
-					stationResult.Confirmed = false
-					stationResult.Error = workerErr.Error()
-				} else if errors.Is(workerErr, context.Canceled) || errors.Is(workerErr, context.DeadlineExceeded) {
-					stationResult.Skipped = true
-					if m.shuttingDown.Load() {
-						stationResult.Reason = ReasonShuttingDown
-					} else if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-						stationResult.Reason = ReasonBulkOperationTimeout
-					} else if errors.Is(ctx.Err(), context.Canceled) {
-						// A batch cancellation owns the skip even when this station's
-						// own budget happens to expire in the same instant, matching
-						// the semaphore-wait attribution above.
-						stationResult.Reason = ReasonOperationCancelled
-					} else if errors.Is(workerErr, context.DeadlineExceeded) {
-						// Only this station's own budget expired; the bulk
-						// deadline is still pending, so report the station-level
-						// timeout instead of blaming the whole batch.
-						stationResult.Reason = ReasonStationOperationTimeout
-					} else {
-						stationResult.Reason = ReasonOperationCancelled
-					}
-					stationResult.CommandSent = false
-					stationResult.Error = ""
-					if info, infoErr := m.stationInfoByAddress(stationResult.Address); infoErr == nil {
-						stationResult.Station = info
-						stationResult.Name = info.Name
-					}
-					result.Results[resultIndex] = stationResult
-					return
-				} else {
-					m.observeStationBluetoothError(s, stationResult.Address, workerErr)
-					if bluetooth.IsUnsupportedCapabilityError(workerErr) {
-						// Reason is a closed public contract: classify through the
-						// constants instead of leaking the raw error string.
-						stationResult.Skipped = true
-						stationResult.Reason = ReasonUnsupportedCapability
-						var unsupported *bluetooth.UnsupportedCapabilityError
-						if errors.As(workerErr, &unsupported) && unsupported.Capability == "standby" {
-							stationResult.Reason = ReasonUnsupportedStandby
-						}
-					}
-					if !stationResult.Skipped {
-						stationResult.Error = workerErr.Error()
-					}
-				}
-			}
-			if info, infoErr := m.stationInfoByAddress(stationResult.Address); infoErr == nil {
-				stationResult.Station = info
-				stationResult.Name = info.Name
-			}
-			communicationSucceeded := !cachedSkip && (workerErr == nil || stationResult.CommandSent)
-			if communicationSucceeded && !bluetooth.RequiresReconnect(workerErr) &&
-				!bluetooth.IsAdapterUnavailable(workerErr) {
-				m.clearStatusFailureKind(stationResult.Address, statusRetryConnection)
-			}
-			result.Results[resultIndex] = stationResult
-		}(item.resultIndex, item.station)
+func (m *Manager) attachBulkPowerStationInfo(stationResult *BulkPowerStationResult) {
+	if info, infoErr := m.stationInfoByAddress(stationResult.Address); infoErr == nil {
+		stationResult.Station = info
+		stationResult.Name = info.Name
 	}
+}
 
-	wg.Wait()
-	for _, affected := range contextAffected {
-		if !affected {
-			continue
-		}
-		if err := ctx.Err(); err != nil {
-			return result, true, err
-		}
-		if m.shuttingDown.Load() {
-			return result, true, ErrShuttingDown
-		}
-		return result, true, context.Canceled
+// runBulkPowerWorker drives one station's bulk attempt to a terminal entry and
+// reports whether cancellation or shutdown actually shaped the outcome.
+func (m *Manager) runBulkPowerWorker(ctx context.Context, semaphore chan struct{}, target bluetooth.PowerState, s *bluetooth.BaseStation, entry *BulkPowerStationResult) bool {
+	select {
+	case semaphore <- struct{}{}:
+	case <-ctx.Done():
+		entry.Skipped = true
+		entry.Reason = m.bulkInterruptionReason(ctx, nil)
+		return true
+	case <-m.shutdownCh:
+		entry.Skipped = true
+		entry.Reason = ReasonShuttingDown
+		return true
 	}
-	return result, false, nil
+	defer func() { <-semaphore }()
+	operationContext, cancelOperation := m.newStationOperationContext(ctx)
+	defer cancelOperation()
+	if m.shuttingDown.Load() || ctx.Err() != nil {
+		entry.Skipped = true
+		entry.Reason = m.bulkInterruptionReason(ctx, nil)
+		return true
+	}
+	stationResult := BulkPowerStationResult{
+		Address: s.Address.String(),
+	}
+	metadataReadRevision := s.Snapshot().MetadataReadRevision
+	defer func() {
+		m.reconcileMetadataReadResult(stationResult.Address, metadataReadRevision, s.Snapshot())
+	}()
+	cachedSkip := false
+	workerErr := runSafely("bulk power worker", func() error {
+		var applyErr error
+		cachedSkip, applyErr = m.applyBulkPowerCommand(operationContext, s, target, &stationResult)
+		return applyErr
+	})
+	contextAffected := false
+	if workerErr != nil {
+		if isContextInterruption(ctx, workerErr, m.shuttingDown.Load()) {
+			contextAffected = true
+		}
+		// A context interruption owns the entry entirely and skips the
+		// post-error bookkeeping the other outcomes share.
+		if m.finalizeBulkPowerWorkerOutcome(ctx, s, &stationResult, workerErr) {
+			*entry = stationResult
+			return contextAffected
+		}
+	}
+	m.attachBulkPowerStationInfo(&stationResult)
+	communicationSucceeded := !cachedSkip && (workerErr == nil || stationResult.CommandSent)
+	if communicationSucceeded && !bluetooth.RequiresReconnect(workerErr) &&
+		!bluetooth.IsAdapterUnavailable(workerErr) {
+		m.clearStatusFailureKind(stationResult.Address, statusRetryConnection)
+	}
+	*entry = stationResult
+	return contextAffected
+}
+
+// applyBulkPowerCommand performs one station's cached-state verification,
+// capability gate, and power write for a bulk attempt. It mutates the result
+// incrementally so a recovered panic still reports the fields already settled,
+// and reports whether the outcome was a cached skip that never communicated.
+func (m *Manager) applyBulkPowerCommand(operationContext context.Context, s *bluetooth.BaseStation, target bluetooth.PowerState, stationResult *BulkPowerStationResult) (bool, error) {
+	snapshot := s.Snapshot()
+	stationResult.Address = snapshot.Address
+	stationResult.Name = snapshot.Name
+	disposition := classifyCachedPower(snapshot, target, time.Now())
+	if disposition == cachedPowerBooting {
+		stationResult.Skipped = true
+		stationResult.Reason = ReasonStationBooting
+		return true, nil
+	}
+	if disposition == cachedPowerAtTarget || !isOperationallyFresh(snapshot.LastPowerReadAt, time.Now()) {
+		readContext, cancelRead := context.WithTimeout(operationContext, m.initialReadTimeoutDuration())
+		readErr := m.bluetoothOps.fetchInitialPowerState(readContext, s)
+		cancelRead()
+		readSucceeded := powerReadSucceeded(readErr)
+		verifiedDisposition := cachedPowerActionable
+		if readSucceeded {
+			// Classify before recovery bookkeeping: a transport-level channel
+			// error may disconnect the station and intentionally clear freshness,
+			// but it cannot invalidate the power value read just beforehand.
+			verifiedDisposition = classifyCachedPower(s.Snapshot(), target, time.Now())
+		}
+		m.recordPowerVerificationResult(s, stationResult.Address, snapshot, readErr)
+		if readSucceeded {
+			switch verifiedDisposition {
+			case cachedPowerBooting:
+				stationResult.Skipped = true
+				stationResult.Reason = ReasonStationBooting
+				return true, nil
+			case cachedPowerAtTarget:
+				stationResult.Skipped = true
+				stationResult.Success = true
+				stationResult.Confirmed = true
+				stationResult.Reason = ReasonAlreadyAtTarget
+				return true, nil
+			}
+		}
+	}
+	snapshot = s.Snapshot()
+	capabilities := snapshot.Capabilities
+	var err error
+	discoveryContext, cancelDiscovery := context.WithTimeout(operationContext, m.initialReadTimeoutDuration())
+	defer cancelDiscovery()
+	if snapshot.CapabilitiesKnown &&
+		(!capabilities.PowerWrite ||
+			(target == bluetooth.PowerStateStandby && !capabilities.Standby)) {
+		capabilities, err = m.bluetoothOps.refreshCapabilities(discoveryContext, s)
+	} else if !snapshot.CapabilitiesKnown {
+		capabilities, err = m.bluetoothOps.ensureCapabilities(discoveryContext, s)
+	}
+	if err != nil {
+		return false, err
+	}
+	// The station may enter a boot transition while capability
+	// discovery is in flight. Re-evaluate at the final write boundary
+	// instead of acting on the worker's earlier snapshot.
+	if isFreshBootingPower(s.Snapshot(), time.Now()) {
+		stationResult.Skipped = true
+		stationResult.Reason = ReasonStationBooting
+		return true, nil
+	}
+	if !capabilities.PowerWrite {
+		stationResult.Skipped = true
+		stationResult.Reason = ReasonUnsupportedCapability
+		return false, nil
+	}
+	if target == bluetooth.PowerStateStandby && !capabilities.Standby {
+		stationResult.Skipped = true
+		stationResult.Reason = ReasonUnsupportedStandby
+		return false, nil
+	}
+	var controlResult bluetooth.PowerControlResult
+	controlResult, err = m.bluetoothOps.setPowerState(operationContext, s, target)
+	stationResult.CommandSent = err == nil
+	stationResult.Confirmed = controlResult.Confirmed
+	if err == nil {
+		stationResult.Success = true
+	}
+	return false, err
+}
+
+// finalizeBulkPowerWorkerOutcome classifies a failed bulk attempt into the
+// entry's terminal shape. It reports whether the failure was a context
+// interruption, in which case the entry is complete and needs no further
+// bookkeeping.
+func (m *Manager) finalizeBulkPowerWorkerOutcome(ctx context.Context, s *bluetooth.BaseStation, stationResult *BulkPowerStationResult, workerErr error) bool {
+	var confirmationErr *bluetooth.PowerConfirmationError
+	switch {
+	case errors.As(workerErr, &confirmationErr):
+		// A possibly-sent command keeps its command-sent outcome even
+		// when shutdown cancelled the confirmation read.
+		m.observeStationBluetoothError(s, stationResult.Address, workerErr)
+		stationResult.CommandSent = true
+		stationResult.Success = true
+		stationResult.Confirmed = false
+		stationResult.Error = workerErr.Error()
+	case errors.Is(workerErr, context.Canceled), errors.Is(workerErr, context.DeadlineExceeded):
+		stationResult.Skipped = true
+		stationResult.Reason = m.bulkInterruptionReason(ctx, workerErr)
+		stationResult.CommandSent = false
+		stationResult.Error = ""
+		m.attachBulkPowerStationInfo(stationResult)
+		return true
+	default:
+		m.observeStationBluetoothError(s, stationResult.Address, workerErr)
+		if bluetooth.IsUnsupportedCapabilityError(workerErr) {
+			// Reason is a closed public contract: classify through the
+			// constants instead of leaking the raw error string.
+			stationResult.Skipped = true
+			stationResult.Reason = ReasonUnsupportedCapability
+			var unsupported *bluetooth.UnsupportedCapabilityError
+			if errors.As(workerErr, &unsupported) && unsupported.Capability == "standby" {
+				stationResult.Reason = ReasonUnsupportedStandby
+			}
+		}
+		if !stationResult.Skipped {
+			stationResult.Error = workerErr.Error()
+		}
+	}
+	return false
 }
