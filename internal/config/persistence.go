@@ -40,8 +40,14 @@ func (c *Config) saveLocked() error {
 		return err
 	}
 
-	// Sanitize while persisting so a directly-assigned or zero-value field can
-	// never write an out-of-range value that Load would later silently replace.
+	// Sanitize and repair the runtime fields in place while persisting so a
+	// directly-assigned or zero-value field can never write an out-of-range
+	// value that Load would later silently replace, then build the snapshot
+	// from the normalized runtime values (fields.go is the single declaration
+	// of the ranged settings).
+	c.sanitizeRuntimeInPlace()
+	c.repairCrossItemInvariants()
+
 	snapshot := persistedConfig{
 		RenamedStations:          make(map[string]string, len(c.RenamedStations)),
 		RenamedStationsByAddress: make(map[string]string, len(c.RenamedStationsByAddress)),
@@ -49,77 +55,10 @@ func (c *Config) saveLocked() error {
 	}
 	scanOnStartup := c.ScanOnStartup
 	snapshot.ScanOnStartup = &scanOnStartup
-	scanDurationSeconds := sanitizeScanDuration(&c.ScanDurationSeconds)
-	snapshot.ScanDurationSeconds = &scanDurationSeconds
 	statusPollingEnabled := c.StatusPollingEnabled
 	snapshot.StatusPollingEnabled = &statusPollingEnabled
-	bulkPowerTimeoutSeconds := sanitizeBulkPowerTimeout(&c.BulkPowerTimeoutSeconds)
-	snapshot.BulkPowerTimeoutSeconds = &bulkPowerTimeoutSeconds
-	statusPollIntervalSeconds := sanitizeStatusPollInterval(&c.StatusPollIntervalSeconds)
-	snapshot.StatusPollIntervalSeconds = &statusPollIntervalSeconds
-	stationOperationTimeoutSeconds := sanitizeStationOperationTimeout(&c.StationOperationTimeoutSeconds)
-	snapshot.StationOperationTimeoutSeconds = &stationOperationTimeoutSeconds
-	powerConfirmAttemptsOn := sanitizeRangedInt(&c.PowerConfirmAttemptsOn, MinPowerConfirmAttempts, MaxPowerConfirmAttempts, DefaultPowerConfirmAttemptsOn)
-	snapshot.PowerConfirmAttemptsOn = &powerConfirmAttemptsOn
-	powerConfirmAttemptsOff := sanitizeRangedInt(&c.PowerConfirmAttemptsOff, MinPowerConfirmAttempts, MaxPowerConfirmAttempts, DefaultPowerConfirmAttemptsOff)
-	snapshot.PowerConfirmAttemptsOff = &powerConfirmAttemptsOff
-	powerConfirmPollIntervalMs := sanitizeRangedInt(&c.PowerConfirmPollIntervalMs, MinPowerConfirmPollIntervalMs, MaxPowerConfirmPollIntervalMs, DefaultPowerConfirmPollIntervalMs)
-	snapshot.PowerConfirmPollIntervalMs = &powerConfirmPollIntervalMs
-	bootFallbackSeconds := sanitizeRangedInt(&c.BootFallbackSeconds, MinBootFallbackSeconds, MaxBootFallbackSeconds, DefaultBootFallbackSeconds)
-	snapshot.BootFallbackSeconds = &bootFallbackSeconds
-	sleepFinalWriteTimeoutSeconds := sanitizeRangedInt(&c.SleepFinalWriteTimeoutSeconds, MinSleepFinalWriteTimeoutSeconds, MaxSleepFinalWriteTimeoutSeconds, DefaultSleepFinalWriteTimeoutSeconds)
-	snapshot.SleepFinalWriteTimeoutSeconds = &sleepFinalWriteTimeoutSeconds
-	sleepPrepareGapMs := sanitizeRangedInt(&c.SleepPrepareGapMs, MinSleepPrepareGapMs, MaxSleepPrepareGapMs, DefaultSleepPrepareGapMs)
-	snapshot.SleepPrepareGapMs = &sleepPrepareGapMs
-	discoveryAttempts := sanitizeRangedInt(&c.DiscoveryAttempts, MinDiscoveryAttempts, MaxDiscoveryAttempts, DefaultDiscoveryAttempts)
-	snapshot.DiscoveryAttempts = &discoveryAttempts
-	discoveryRetryDelayMs := sanitizeRangedInt(&c.DiscoveryRetryDelayMs, MinDiscoveryRetryDelayMs, MaxDiscoveryRetryDelayMs, DefaultDiscoveryRetryDelayMs)
-	snapshot.DiscoveryRetryDelayMs = &discoveryRetryDelayMs
 	snapshot.APIListenAddress = sanitizeAPIListenAddress(c.APIListenAddress)
-	powerWriteAttempts := sanitizeRangedInt(&c.PowerWriteAttempts, MinPowerWriteAttempts, MaxPowerWriteAttempts, DefaultPowerWriteAttempts)
-	snapshot.PowerWriteAttempts = &powerWriteAttempts
-	operationRetryDelayMs := sanitizeRangedInt(&c.OperationRetryDelayMs, MinOperationRetryDelayMs, MaxOperationRetryDelayMs, DefaultOperationRetryDelayMs)
-	snapshot.OperationRetryDelayMs = &operationRetryDelayMs
-	channelConfirmAttempts := sanitizeRangedInt(&c.ChannelConfirmAttempts, MinChannelConfirmAttempts, MaxChannelConfirmAttempts, DefaultChannelConfirmAttempts)
-	snapshot.ChannelConfirmAttempts = &channelConfirmAttempts
-	channelConfirmIntervalMs := sanitizeRangedInt(&c.ChannelConfirmIntervalMs, MinChannelConfirmIntervalMs, MaxChannelConfirmIntervalMs, DefaultChannelConfirmIntervalMs)
-	snapshot.ChannelConfirmIntervalMs = &channelConfirmIntervalMs
-	confirmReconnectThreshold := sanitizeRangedInt(&c.ConfirmReconnectThreshold, MinConfirmReconnectThreshold, MaxConfirmReconnectThreshold, DefaultConfirmReconnectThreshold)
-	snapshot.ConfirmReconnectThreshold = &confirmReconnectThreshold
-	confirmReconnectDelayMs := sanitizeRangedInt(&c.ConfirmReconnectDelayMs, MinConfirmReconnectDelayMs, MaxConfirmReconnectDelayMs, DefaultConfirmReconnectDelayMs)
-	snapshot.ConfirmReconnectDelayMs = &confirmReconnectDelayMs
-	identifyAttempts := sanitizeRangedInt(&c.IdentifyAttempts, MinIdentifyAttempts, MaxIdentifyAttempts, DefaultIdentifyAttempts)
-	snapshot.IdentifyAttempts = &identifyAttempts
-	presenceMissThreshold := sanitizeRangedInt(&c.PresenceMissThreshold, MinPresenceMissThreshold, MaxPresenceMissThreshold, DefaultPresenceMissThreshold)
-	snapshot.PresenceMissThreshold = &presenceMissThreshold
-	recoveryRetryBaseSeconds := sanitizeRangedInt(&c.RecoveryRetryBaseSeconds, MinRecoveryRetryBaseSeconds, MaxRecoveryRetryBaseSeconds, DefaultRecoveryRetryBaseSeconds)
-	snapshot.RecoveryRetryBaseSeconds = &recoveryRetryBaseSeconds
-	recoveryRetryMaxSeconds := sanitizeRangedInt(&c.RecoveryRetryMaxSeconds, MinRecoveryRetryMaxSeconds, MaxRecoveryRetryMaxSeconds, DefaultRecoveryRetryMaxSeconds)
-	snapshot.RecoveryRetryMaxSeconds = &recoveryRetryMaxSeconds
-	absentStationRetryLimit := sanitizeRangedInt(&c.AbsentStationRetryLimit, MinAbsentStationRetryLimit, MaxAbsentStationRetryLimit, DefaultAbsentStationRetryLimit)
-	snapshot.AbsentStationRetryLimit = &absentStationRetryLimit
-	initialReadTimeoutSeconds := sanitizeRangedInt(&c.InitialReadTimeoutSeconds, MinInitialReadTimeoutSeconds, MaxInitialReadTimeoutSeconds, DefaultInitialReadTimeoutSeconds)
-	snapshot.InitialReadTimeoutSeconds = &initialReadTimeoutSeconds
-	scanReadPhaseTimeoutSeconds := sanitizeRangedInt(&c.ScanReadPhaseTimeoutSeconds, MinScanReadPhaseTimeoutSeconds, MaxScanReadPhaseTimeoutSeconds, DefaultScanReadPhaseTimeoutSeconds)
-	snapshot.ScanReadPhaseTimeoutSeconds = &scanReadPhaseTimeoutSeconds
-	statusReadTimeoutSeconds := sanitizeRangedInt(&c.StatusReadTimeoutSeconds, MinStatusReadTimeoutSeconds, MaxStatusReadTimeoutSeconds, DefaultStatusReadTimeoutSeconds)
-	snapshot.StatusReadTimeoutSeconds = &statusReadTimeoutSeconds
-	statusRefreshTimeoutSeconds := sanitizeRangedInt(&c.StatusRefreshTimeoutSeconds, MinStatusRefreshTimeoutSeconds, MaxStatusRefreshTimeoutSeconds, DefaultStatusRefreshTimeoutSeconds)
-	snapshot.StatusRefreshTimeoutSeconds = &statusRefreshTimeoutSeconds
-	channelScanFreshnessSeconds := sanitizeRangedInt(&c.ChannelScanFreshnessSeconds, MinChannelScanFreshnessSeconds, MaxChannelScanFreshnessSeconds, DefaultChannelScanFreshnessSeconds)
-	snapshot.ChannelScanFreshnessSeconds = &channelScanFreshnessSeconds
-	bluetoothInitRetrySeconds := sanitizeRangedInt(&c.BluetoothInitRetrySeconds, MinBluetoothInitRetrySeconds, MaxBluetoothInitRetrySeconds, DefaultBluetoothInitRetrySeconds)
-	snapshot.BluetoothInitRetrySeconds = &bluetoothInitRetrySeconds
-	repairCrossItemValues(
-		&bulkPowerTimeoutSeconds,
-		&stationOperationTimeoutSeconds,
-		&initialReadTimeoutSeconds,
-		&scanReadPhaseTimeoutSeconds,
-		&statusReadTimeoutSeconds,
-		&statusRefreshTimeoutSeconds,
-		&recoveryRetryBaseSeconds,
-		&recoveryRetryMaxSeconds,
-	)
+	c.populatePersistedInts(&snapshot)
 	autoSleep := sanitizeAutoSleep(&c.AutoSleep)
 	if c.AutoSleep != (autosleep.Settings{}) {
 		snapshot.AutoSleep = &autoSleep
@@ -146,43 +85,13 @@ func (c *Config) saveLocked() error {
 		return saveErr
 	}
 	// Save is also a normalization boundary for callers that populated the
-	// exported fields directly. Once the atomic write succeeds, keep runtime
-	// getters and the just-written file on the same repaired values instead of
-	// changing behavior only after the next process restart.
+	// exported fields directly. The ranged runtime fields were already
+	// sanitized and repaired in place above; mirror only the remaining
+	// normalized non-ranged fields so runtime getters and the just-written
+	// file agree.
 	c.AutoSleep = autoSleep
 	c.Language = snapshot.Language
-	c.ScanOnStartup = scanOnStartup
-	c.ScanDurationSeconds = scanDurationSeconds
-	c.StatusPollingEnabled = statusPollingEnabled
-	c.BulkPowerTimeoutSeconds = bulkPowerTimeoutSeconds
-	c.StatusPollIntervalSeconds = statusPollIntervalSeconds
-	c.StationOperationTimeoutSeconds = stationOperationTimeoutSeconds
-	c.PowerConfirmAttemptsOn = powerConfirmAttemptsOn
-	c.PowerConfirmAttemptsOff = powerConfirmAttemptsOff
-	c.PowerConfirmPollIntervalMs = powerConfirmPollIntervalMs
-	c.BootFallbackSeconds = bootFallbackSeconds
-	c.SleepFinalWriteTimeoutSeconds = sleepFinalWriteTimeoutSeconds
-	c.SleepPrepareGapMs = sleepPrepareGapMs
-	c.DiscoveryAttempts = discoveryAttempts
-	c.DiscoveryRetryDelayMs = discoveryRetryDelayMs
 	c.APIListenAddress = snapshot.APIListenAddress
-	c.PowerWriteAttempts = powerWriteAttempts
-	c.OperationRetryDelayMs = operationRetryDelayMs
-	c.ChannelConfirmAttempts = channelConfirmAttempts
-	c.ChannelConfirmIntervalMs = channelConfirmIntervalMs
-	c.ConfirmReconnectThreshold = confirmReconnectThreshold
-	c.ConfirmReconnectDelayMs = confirmReconnectDelayMs
-	c.IdentifyAttempts = identifyAttempts
-	c.PresenceMissThreshold = presenceMissThreshold
-	c.RecoveryRetryBaseSeconds = recoveryRetryBaseSeconds
-	c.RecoveryRetryMaxSeconds = recoveryRetryMaxSeconds
-	c.AbsentStationRetryLimit = absentStationRetryLimit
-	c.InitialReadTimeoutSeconds = initialReadTimeoutSeconds
-	c.ScanReadPhaseTimeoutSeconds = scanReadPhaseTimeoutSeconds
-	c.StatusReadTimeoutSeconds = statusReadTimeoutSeconds
-	c.StatusRefreshTimeoutSeconds = statusRefreshTimeoutSeconds
-	c.ChannelScanFreshnessSeconds = channelScanFreshnessSeconds
-	c.BluetoothInitRetrySeconds = bluetoothInitRetrySeconds
 	c.lastPersistenceErr = nil
 	return nil
 }

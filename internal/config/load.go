@@ -59,43 +59,7 @@ func (c *Config) Load() error {
 	configFile, err := configFileReader(configFilePath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			defaults := NewConfig()
-			c.RenamedStations = defaults.RenamedStations
-			c.RenamedStationsByAddress = defaults.RenamedStationsByAddress
-			c.AutoSleep = defaults.AutoSleep
-			c.Language = defaults.Language
-			c.ScanOnStartup = defaults.ScanOnStartup
-			c.ScanDurationSeconds = defaults.ScanDurationSeconds
-			c.StatusPollingEnabled = defaults.StatusPollingEnabled
-			c.BulkPowerTimeoutSeconds = defaults.BulkPowerTimeoutSeconds
-			c.StatusPollIntervalSeconds = defaults.StatusPollIntervalSeconds
-			c.StationOperationTimeoutSeconds = defaults.StationOperationTimeoutSeconds
-			c.PowerConfirmAttemptsOn = defaults.PowerConfirmAttemptsOn
-			c.PowerConfirmAttemptsOff = defaults.PowerConfirmAttemptsOff
-			c.PowerConfirmPollIntervalMs = defaults.PowerConfirmPollIntervalMs
-			c.BootFallbackSeconds = defaults.BootFallbackSeconds
-			c.SleepFinalWriteTimeoutSeconds = defaults.SleepFinalWriteTimeoutSeconds
-			c.SleepPrepareGapMs = defaults.SleepPrepareGapMs
-			c.DiscoveryAttempts = defaults.DiscoveryAttempts
-			c.DiscoveryRetryDelayMs = defaults.DiscoveryRetryDelayMs
-			c.APIListenAddress = defaults.APIListenAddress
-			c.PowerWriteAttempts = defaults.PowerWriteAttempts
-			c.OperationRetryDelayMs = defaults.OperationRetryDelayMs
-			c.ChannelConfirmAttempts = defaults.ChannelConfirmAttempts
-			c.ChannelConfirmIntervalMs = defaults.ChannelConfirmIntervalMs
-			c.ConfirmReconnectThreshold = defaults.ConfirmReconnectThreshold
-			c.ConfirmReconnectDelayMs = defaults.ConfirmReconnectDelayMs
-			c.IdentifyAttempts = defaults.IdentifyAttempts
-			c.PresenceMissThreshold = defaults.PresenceMissThreshold
-			c.RecoveryRetryBaseSeconds = defaults.RecoveryRetryBaseSeconds
-			c.RecoveryRetryMaxSeconds = defaults.RecoveryRetryMaxSeconds
-			c.AbsentStationRetryLimit = defaults.AbsentStationRetryLimit
-			c.InitialReadTimeoutSeconds = defaults.InitialReadTimeoutSeconds
-			c.ScanReadPhaseTimeoutSeconds = defaults.ScanReadPhaseTimeoutSeconds
-			c.StatusReadTimeoutSeconds = defaults.StatusReadTimeoutSeconds
-			c.StatusRefreshTimeoutSeconds = defaults.StatusRefreshTimeoutSeconds
-			c.ChannelScanFreshnessSeconds = defaults.ChannelScanFreshnessSeconds
-			c.BluetoothInitRetrySeconds = defaults.BluetoothInitRetrySeconds
+			c.applyDefaults()
 			c.persistenceBlockedErr = nil
 			c.lastPersistenceErr = nil
 			return nil // No config file yet, which is fine
@@ -125,43 +89,7 @@ func (c *Config) Load() error {
 			c.lastPersistenceErr = c.persistenceBlockedErr
 			return fmt.Errorf("error unmarshalling config (failed to preserve invalid file: %v): %w", renameErr, err)
 		}
-		defaults := NewConfig()
-		c.RenamedStations = defaults.RenamedStations
-		c.RenamedStationsByAddress = defaults.RenamedStationsByAddress
-		c.AutoSleep = defaults.AutoSleep
-		c.Language = defaults.Language
-		c.ScanOnStartup = defaults.ScanOnStartup
-		c.ScanDurationSeconds = defaults.ScanDurationSeconds
-		c.StatusPollingEnabled = defaults.StatusPollingEnabled
-		c.BulkPowerTimeoutSeconds = defaults.BulkPowerTimeoutSeconds
-		c.StatusPollIntervalSeconds = defaults.StatusPollIntervalSeconds
-		c.StationOperationTimeoutSeconds = defaults.StationOperationTimeoutSeconds
-		c.PowerConfirmAttemptsOn = defaults.PowerConfirmAttemptsOn
-		c.PowerConfirmAttemptsOff = defaults.PowerConfirmAttemptsOff
-		c.PowerConfirmPollIntervalMs = defaults.PowerConfirmPollIntervalMs
-		c.BootFallbackSeconds = defaults.BootFallbackSeconds
-		c.SleepFinalWriteTimeoutSeconds = defaults.SleepFinalWriteTimeoutSeconds
-		c.SleepPrepareGapMs = defaults.SleepPrepareGapMs
-		c.DiscoveryAttempts = defaults.DiscoveryAttempts
-		c.DiscoveryRetryDelayMs = defaults.DiscoveryRetryDelayMs
-		c.APIListenAddress = defaults.APIListenAddress
-		c.PowerWriteAttempts = defaults.PowerWriteAttempts
-		c.OperationRetryDelayMs = defaults.OperationRetryDelayMs
-		c.ChannelConfirmAttempts = defaults.ChannelConfirmAttempts
-		c.ChannelConfirmIntervalMs = defaults.ChannelConfirmIntervalMs
-		c.ConfirmReconnectThreshold = defaults.ConfirmReconnectThreshold
-		c.ConfirmReconnectDelayMs = defaults.ConfirmReconnectDelayMs
-		c.IdentifyAttempts = defaults.IdentifyAttempts
-		c.PresenceMissThreshold = defaults.PresenceMissThreshold
-		c.RecoveryRetryBaseSeconds = defaults.RecoveryRetryBaseSeconds
-		c.RecoveryRetryMaxSeconds = defaults.RecoveryRetryMaxSeconds
-		c.AbsentStationRetryLimit = defaults.AbsentStationRetryLimit
-		c.InitialReadTimeoutSeconds = defaults.InitialReadTimeoutSeconds
-		c.ScanReadPhaseTimeoutSeconds = defaults.ScanReadPhaseTimeoutSeconds
-		c.StatusReadTimeoutSeconds = defaults.StatusReadTimeoutSeconds
-		c.StatusRefreshTimeoutSeconds = defaults.StatusRefreshTimeoutSeconds
-		c.ChannelScanFreshnessSeconds = defaults.ChannelScanFreshnessSeconds
-		c.BluetoothInitRetrySeconds = defaults.BluetoothInitRetrySeconds
+		c.applyDefaults()
 		c.persistenceBlockedErr = nil
 		c.lastPersistenceErr = nil
 		return fmt.Errorf("error unmarshalling config; invalid file preserved as '%s': %w", invalidPath, err)
@@ -177,37 +105,9 @@ func (c *Config) Load() error {
 	c.AutoSleep = sanitizeAutoSleep(loaded.AutoSleep)
 	c.Language = sanitizeLanguage(loaded.Language)
 	c.ScanOnStartup = boolOrDefault(loaded.ScanOnStartup, true)
-	c.ScanDurationSeconds = sanitizeScanDuration(loaded.ScanDurationSeconds)
 	c.StatusPollingEnabled = boolOrDefault(loaded.StatusPollingEnabled, true)
-	c.BulkPowerTimeoutSeconds = sanitizeBulkPowerTimeout(loaded.BulkPowerTimeoutSeconds)
-	c.StatusPollIntervalSeconds = sanitizeStatusPollInterval(loaded.StatusPollIntervalSeconds)
-	c.StationOperationTimeoutSeconds = sanitizeStationOperationTimeout(loaded.StationOperationTimeoutSeconds)
-	c.PowerConfirmAttemptsOn = sanitizeRangedInt(loaded.PowerConfirmAttemptsOn, MinPowerConfirmAttempts, MaxPowerConfirmAttempts, DefaultPowerConfirmAttemptsOn)
-	c.PowerConfirmAttemptsOff = sanitizeRangedInt(loaded.PowerConfirmAttemptsOff, MinPowerConfirmAttempts, MaxPowerConfirmAttempts, DefaultPowerConfirmAttemptsOff)
-	c.PowerConfirmPollIntervalMs = sanitizeRangedInt(loaded.PowerConfirmPollIntervalMs, MinPowerConfirmPollIntervalMs, MaxPowerConfirmPollIntervalMs, DefaultPowerConfirmPollIntervalMs)
-	c.BootFallbackSeconds = sanitizeRangedInt(loaded.BootFallbackSeconds, MinBootFallbackSeconds, MaxBootFallbackSeconds, DefaultBootFallbackSeconds)
-	c.SleepFinalWriteTimeoutSeconds = sanitizeRangedInt(loaded.SleepFinalWriteTimeoutSeconds, MinSleepFinalWriteTimeoutSeconds, MaxSleepFinalWriteTimeoutSeconds, DefaultSleepFinalWriteTimeoutSeconds)
-	c.SleepPrepareGapMs = sanitizeRangedInt(loaded.SleepPrepareGapMs, MinSleepPrepareGapMs, MaxSleepPrepareGapMs, DefaultSleepPrepareGapMs)
-	c.DiscoveryAttempts = sanitizeRangedInt(loaded.DiscoveryAttempts, MinDiscoveryAttempts, MaxDiscoveryAttempts, DefaultDiscoveryAttempts)
-	c.DiscoveryRetryDelayMs = sanitizeRangedInt(loaded.DiscoveryRetryDelayMs, MinDiscoveryRetryDelayMs, MaxDiscoveryRetryDelayMs, DefaultDiscoveryRetryDelayMs)
 	c.APIListenAddress = sanitizeAPIListenAddress(loaded.APIListenAddress)
-	c.PowerWriteAttempts = sanitizeRangedInt(loaded.PowerWriteAttempts, MinPowerWriteAttempts, MaxPowerWriteAttempts, DefaultPowerWriteAttempts)
-	c.OperationRetryDelayMs = sanitizeRangedInt(loaded.OperationRetryDelayMs, MinOperationRetryDelayMs, MaxOperationRetryDelayMs, DefaultOperationRetryDelayMs)
-	c.ChannelConfirmAttempts = sanitizeRangedInt(loaded.ChannelConfirmAttempts, MinChannelConfirmAttempts, MaxChannelConfirmAttempts, DefaultChannelConfirmAttempts)
-	c.ChannelConfirmIntervalMs = sanitizeRangedInt(loaded.ChannelConfirmIntervalMs, MinChannelConfirmIntervalMs, MaxChannelConfirmIntervalMs, DefaultChannelConfirmIntervalMs)
-	c.ConfirmReconnectThreshold = sanitizeRangedInt(loaded.ConfirmReconnectThreshold, MinConfirmReconnectThreshold, MaxConfirmReconnectThreshold, DefaultConfirmReconnectThreshold)
-	c.ConfirmReconnectDelayMs = sanitizeRangedInt(loaded.ConfirmReconnectDelayMs, MinConfirmReconnectDelayMs, MaxConfirmReconnectDelayMs, DefaultConfirmReconnectDelayMs)
-	c.IdentifyAttempts = sanitizeRangedInt(loaded.IdentifyAttempts, MinIdentifyAttempts, MaxIdentifyAttempts, DefaultIdentifyAttempts)
-	c.PresenceMissThreshold = sanitizeRangedInt(loaded.PresenceMissThreshold, MinPresenceMissThreshold, MaxPresenceMissThreshold, DefaultPresenceMissThreshold)
-	c.RecoveryRetryBaseSeconds = sanitizeRangedInt(loaded.RecoveryRetryBaseSeconds, MinRecoveryRetryBaseSeconds, MaxRecoveryRetryBaseSeconds, DefaultRecoveryRetryBaseSeconds)
-	c.RecoveryRetryMaxSeconds = sanitizeRangedInt(loaded.RecoveryRetryMaxSeconds, MinRecoveryRetryMaxSeconds, MaxRecoveryRetryMaxSeconds, DefaultRecoveryRetryMaxSeconds)
-	c.AbsentStationRetryLimit = sanitizeRangedInt(loaded.AbsentStationRetryLimit, MinAbsentStationRetryLimit, MaxAbsentStationRetryLimit, DefaultAbsentStationRetryLimit)
-	c.InitialReadTimeoutSeconds = sanitizeRangedInt(loaded.InitialReadTimeoutSeconds, MinInitialReadTimeoutSeconds, MaxInitialReadTimeoutSeconds, DefaultInitialReadTimeoutSeconds)
-	c.ScanReadPhaseTimeoutSeconds = sanitizeRangedInt(loaded.ScanReadPhaseTimeoutSeconds, MinScanReadPhaseTimeoutSeconds, MaxScanReadPhaseTimeoutSeconds, DefaultScanReadPhaseTimeoutSeconds)
-	c.StatusReadTimeoutSeconds = sanitizeRangedInt(loaded.StatusReadTimeoutSeconds, MinStatusReadTimeoutSeconds, MaxStatusReadTimeoutSeconds, DefaultStatusReadTimeoutSeconds)
-	c.StatusRefreshTimeoutSeconds = sanitizeRangedInt(loaded.StatusRefreshTimeoutSeconds, MinStatusRefreshTimeoutSeconds, MaxStatusRefreshTimeoutSeconds, DefaultStatusRefreshTimeoutSeconds)
-	c.ChannelScanFreshnessSeconds = sanitizeRangedInt(loaded.ChannelScanFreshnessSeconds, MinChannelScanFreshnessSeconds, MaxChannelScanFreshnessSeconds, DefaultChannelScanFreshnessSeconds)
-	c.BluetoothInitRetrySeconds = sanitizeRangedInt(loaded.BluetoothInitRetrySeconds, MinBluetoothInitRetrySeconds, MaxBluetoothInitRetrySeconds, DefaultBluetoothInitRetrySeconds)
+	c.applyPersisted(&loaded)
 	c.repairCrossItemInvariants()
 	c.persistenceBlockedErr = nil
 	c.lastPersistenceErr = nil
@@ -262,34 +162,6 @@ func boolOrDefault(value *bool, fallback bool) bool {
 		return fallback
 	}
 	return *value
-}
-
-func sanitizeScanDuration(durationSeconds *int) int {
-	if durationSeconds == nil || *durationSeconds < MinScanDurationSeconds || *durationSeconds > MaxScanDurationSeconds {
-		return DefaultScanDurationSeconds
-	}
-	return *durationSeconds
-}
-
-func sanitizeBulkPowerTimeout(timeoutSeconds *int) int {
-	if timeoutSeconds == nil || *timeoutSeconds < MinBulkPowerTimeoutSeconds || *timeoutSeconds > MaxBulkPowerTimeoutSeconds {
-		return DefaultBulkPowerTimeoutSeconds
-	}
-	return *timeoutSeconds
-}
-
-func sanitizeStatusPollInterval(intervalSeconds *int) int {
-	if intervalSeconds == nil || *intervalSeconds < MinStatusPollIntervalSeconds || *intervalSeconds > MaxStatusPollIntervalSeconds {
-		return DefaultStatusPollIntervalSeconds
-	}
-	return *intervalSeconds
-}
-
-func sanitizeStationOperationTimeout(timeoutSeconds *int) int {
-	if timeoutSeconds == nil || *timeoutSeconds < MinStationOperationTimeoutSeconds || *timeoutSeconds > MaxStationOperationTimeoutSeconds {
-		return DefaultStationOperationTimeoutSeconds
-	}
-	return *timeoutSeconds
 }
 
 // sanitizeRangedInt repairs a persisted integer against its allowed range,

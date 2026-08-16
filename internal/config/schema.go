@@ -189,43 +189,10 @@ var (
 	configFileRenamer = os.Rename
 )
 
-// NewConfig creates a new Config with defaults
+// NewConfig creates a new Config with defaults. The default set itself lives
+// in applyDefaults (fields.go) so Load's fallback paths share it.
 func NewConfig() *Config {
-	return &Config{
-		RenamedStations:                make(map[string]string),
-		RenamedStationsByAddress:       make(map[string]string),
-		AutoSleep:                      autosleep.DefaultSettings(),
-		ScanOnStartup:                  true,
-		ScanDurationSeconds:            DefaultScanDurationSeconds,
-		StatusPollingEnabled:           true,
-		BulkPowerTimeoutSeconds:        DefaultBulkPowerTimeoutSeconds,
-		StatusPollIntervalSeconds:      DefaultStatusPollIntervalSeconds,
-		StationOperationTimeoutSeconds: DefaultStationOperationTimeoutSeconds,
-		PowerConfirmAttemptsOn:         DefaultPowerConfirmAttemptsOn,
-		PowerConfirmAttemptsOff:        DefaultPowerConfirmAttemptsOff,
-		PowerConfirmPollIntervalMs:     DefaultPowerConfirmPollIntervalMs,
-		BootFallbackSeconds:            DefaultBootFallbackSeconds,
-		SleepFinalWriteTimeoutSeconds:  DefaultSleepFinalWriteTimeoutSeconds,
-		SleepPrepareGapMs:              DefaultSleepPrepareGapMs,
-		DiscoveryAttempts:              DefaultDiscoveryAttempts,
-		DiscoveryRetryDelayMs:          DefaultDiscoveryRetryDelayMs,
-		APIListenAddress:               DefaultAPIListenAddress,
-		PowerWriteAttempts:             DefaultPowerWriteAttempts,
-		OperationRetryDelayMs:          DefaultOperationRetryDelayMs,
-		ChannelConfirmAttempts:         DefaultChannelConfirmAttempts,
-		ChannelConfirmIntervalMs:       DefaultChannelConfirmIntervalMs,
-		ConfirmReconnectThreshold:      DefaultConfirmReconnectThreshold,
-		ConfirmReconnectDelayMs:        DefaultConfirmReconnectDelayMs,
-		IdentifyAttempts:               DefaultIdentifyAttempts,
-		PresenceMissThreshold:          DefaultPresenceMissThreshold,
-		RecoveryRetryBaseSeconds:       DefaultRecoveryRetryBaseSeconds,
-		RecoveryRetryMaxSeconds:        DefaultRecoveryRetryMaxSeconds,
-		AbsentStationRetryLimit:        DefaultAbsentStationRetryLimit,
-		InitialReadTimeoutSeconds:      DefaultInitialReadTimeoutSeconds,
-		ScanReadPhaseTimeoutSeconds:    DefaultScanReadPhaseTimeoutSeconds,
-		StatusReadTimeoutSeconds:       DefaultStatusReadTimeoutSeconds,
-		StatusRefreshTimeoutSeconds:    DefaultStatusRefreshTimeoutSeconds,
-		ChannelScanFreshnessSeconds:    DefaultChannelScanFreshnessSeconds,
-		BluetoothInitRetrySeconds:      DefaultBluetoothInitRetrySeconds,
-	}
+	config := &Config{}
+	config.applyDefaults()
+	return config
 }

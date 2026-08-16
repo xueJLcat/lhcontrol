@@ -62,7 +62,7 @@ func (c *Config) InitialReadTimeout() time.Duration {
 func (c *Config) SetInitialReadTimeoutSeconds(timeoutSeconds int) error {
 	return c.setRanged("initial read timeout", timeoutSeconds, MinInitialReadTimeoutSeconds, MaxInitialReadTimeoutSeconds, &c.InitialReadTimeoutSeconds,
 		func(c *Config, value int) error {
-			stationTimeout := sanitizeStationOperationTimeout(&c.StationOperationTimeoutSeconds)
+			stationTimeout := sanitizeRangedInt(&c.StationOperationTimeoutSeconds, MinStationOperationTimeoutSeconds, MaxStationOperationTimeoutSeconds, DefaultStationOperationTimeoutSeconds)
 			if value > stationTimeout {
 				return fmt.Errorf("initial read timeout must not exceed the station operation timeout of %d seconds, got %d", stationTimeout, value)
 			}

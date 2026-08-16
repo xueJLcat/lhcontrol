@@ -147,7 +147,7 @@ func (c *Config) SetBulkPowerTimeoutSeconds(timeoutSeconds int) error {
 	}
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
-	stationTimeout := sanitizeStationOperationTimeout(&c.StationOperationTimeoutSeconds)
+	stationTimeout := sanitizeRangedInt(&c.StationOperationTimeoutSeconds, MinStationOperationTimeoutSeconds, MaxStationOperationTimeoutSeconds, DefaultStationOperationTimeoutSeconds)
 	if timeoutSeconds < stationTimeout {
 		return fmt.Errorf(
 			"bulk power timeout must cover the per-station operation timeout of %d seconds, got %d",
@@ -217,7 +217,7 @@ func (c *Config) SetStationOperationTimeoutSeconds(timeoutSeconds int) error {
 	}
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
-	bulkTimeout := sanitizeBulkPowerTimeout(&c.BulkPowerTimeoutSeconds)
+	bulkTimeout := sanitizeRangedInt(&c.BulkPowerTimeoutSeconds, MinBulkPowerTimeoutSeconds, MaxBulkPowerTimeoutSeconds, DefaultBulkPowerTimeoutSeconds)
 	if timeoutSeconds > bulkTimeout {
 		return fmt.Errorf(
 			"station operation timeout cannot exceed the bulk power timeout of %d seconds, got %d",
