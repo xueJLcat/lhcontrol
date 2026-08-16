@@ -457,10 +457,7 @@ func SetPowerStateContext(ctx context.Context, station *BaseStation, target Powe
 			// Retry backoff runs outside the station lock so short readers
 			// are not queued behind the wait; the lock is held again before
 			// the next attempt touches station state.
-			station.mutex.Unlock()
-			waitErr := sleepContext(ctx, CurrentTiming().OperationRetryDelay)
-			station.mutex.Lock()
-			if waitErr != nil {
+			if waitErr := station.retryBackoff(ctx); waitErr != nil {
 				return PowerControlResult{}, waitErr
 			}
 			continue
@@ -486,35 +483,10 @@ func SetPowerStateContext(ctx context.Context, station *BaseStation, target Powe
 		station.bootingSince = time.Time{}
 		log.Printf("Bluetooth: Sending %s command to %s", target, station.Name)
 		if target == PowerStateSleep {
-			// Some Lighthouse 2.0 firmware expects wake/prepare then sleep.
-			err = writePowerValueInternal(ctx, station, 0x01)
-			if err == nil {
-				// Once prepare has been sent, complete this paired write even when
-				// shutdown cancels ctx. Leaving a sleeping station prepared can wake it.
-				timing := CurrentTiming()
-				if timing.PrepareGap > 0 {
-					// Release the station lock during the firmware settling gap so
-					// short readers are not queued behind it, matching every other
-					// wait in this package.
-					station.mutex.Unlock()
-					waitErr := sleepContext(context.WithoutCancel(ctx), timing.PrepareGap)
-					station.mutex.Lock()
-					if waitErr != nil {
-						return PowerControlResult{}, waitErr
-					}
-				}
-				sleepFinalAttempted = true
-				// Once prepare succeeds, the final sleep write is a bounded cleanup
-				// action. Give it an independent hard deadline: reusing an expired
-				// caller deadline here can leave the station prepared (and awake)
-				// without ever attempting the matching sleep command.
-				finalBudget := finalSleepWriteTimeout
-				if finalBudget <= 0 {
-					finalBudget = timing.FinalSleepWrite
-				}
-				finalContext, cancelFinal := context.WithTimeout(context.WithoutCancel(ctx), finalBudget)
-				err = writePowerValueInternal(finalContext, station, command)
-				cancelFinal()
+			var gapErr error
+			sleepFinalAttempted, gapErr, err = writeSleepCommandPair(ctx, station, command)
+			if gapErr != nil {
+				return PowerControlResult{}, gapErr
 			}
 		} else {
 			err = writePowerValueInternal(ctx, station, command)
@@ -527,8 +499,7 @@ func SetPowerStateContext(ctx context.Context, station *BaseStation, target Powe
 		// sleep prepare write succeeds, however, the paired sequence has begun
 		// and the final-write outcome must still be handled as command state.
 		if !sleepFinalAttempted && isDefinitelyUnsentContextError(ctx, err) {
-			station.bootRawTrustedOn = previousBootRawTrustedOn
-			station.bootingSince = previousBootingSince
+			station.restoreBootInference(previousBootRawTrustedOn, previousBootingSince)
 			return PowerControlResult{}, ctx.Err()
 		}
 		// A successful sleep prepare is itself an applied power command. Even
@@ -554,15 +525,13 @@ func SetPowerStateContext(ctx context.Context, station *BaseStation, target Powe
 		if target == PowerStateStandby &&
 			errors.As(err, &protocolErr) &&
 			protocolErr == bluetooth.ErrAttValueNotAllowed {
-			station.bootRawTrustedOn = previousBootRawTrustedOn
-			station.bootingSince = previousBootingSince
+			station.restoreBootInference(previousBootRawTrustedOn, previousBootingSince)
 			station.Capabilities.Standby = false
 			station.setOperationErrorInternal(err)
 			return PowerControlResult{}, unsupportedCapability("standby", err)
 		}
 		if IsCapabilityUnsupported(err) {
-			station.bootRawTrustedOn = previousBootRawTrustedOn
-			station.bootingSince = previousBootingSince
+			station.restoreBootInference(previousBootRawTrustedOn, previousBootingSince)
 			station.Capabilities.PowerWrite = false
 			station.Capabilities.Standby = false
 			station.setOperationErrorInternal(err)
@@ -577,14 +546,10 @@ func SetPowerStateContext(ctx context.Context, station *BaseStation, target Powe
 			// inference the write reset; the next attempt retries without paying
 			// a reconnect, and no read pays a fresh boot-fallback window for a
 			// command that never landed.
-			station.bootRawTrustedOn = previousBootRawTrustedOn
-			station.bootingSince = previousBootingSince
+			station.restoreBootInference(previousBootRawTrustedOn, previousBootingSince)
 			log.Printf("Bluetooth: Write %s was not applied for %s: %v. Retrying on the current connection...", target, station.Name, err)
 			if i < maxRetries-1 {
-				station.mutex.Unlock()
-				waitErr := sleepContext(ctx, CurrentTiming().OperationRetryDelay)
-				station.mutex.Lock()
-				if waitErr != nil {
+				if waitErr := station.retryBackoff(ctx); waitErr != nil {
 					return PowerControlResult{}, waitErr
 				}
 			}
@@ -593,40 +558,76 @@ func SetPowerStateContext(ctx context.Context, station *BaseStation, target Powe
 		log.Printf("Bluetooth: Write %s failed for %s: %v. Retrying...", target, station.Name, err)
 		_ = disconnectInternal(station)
 		if i < maxRetries-1 {
-			station.mutex.Unlock()
-			waitErr := sleepContext(ctx, CurrentTiming().OperationRetryDelay)
-			station.mutex.Lock()
-			if waitErr != nil {
+			if waitErr := station.retryBackoff(ctx); waitErr != nil {
 				return PowerControlResult{}, waitErr
 			}
 		}
 	}
-	if err != nil {
-		if unconfirmedCommand != nil {
-			if station.Capabilities.PowerRead && !ambiguousSleepPrepare {
-				if confirmationErr := confirmPowerStateInternalContext(ctx, station, target); confirmationErr == nil {
-					station.setPowerErrorInternal(nil)
-					station.setOperationErrorInternal(nil)
-					return PowerControlResult{State: target, Confirmed: true}, nil
-				} else {
-					err = errors.Join(unconfirmedCommand, confirmationErr)
-				}
-			} else if !station.Capabilities.PowerRead {
-				err = errors.Join(unconfirmedCommand, unsupportedCapability("power confirmation read", nil))
-			} else {
-				err = errors.Join(unconfirmedCommand, fmt.Errorf("sleep prepare write was ambiguous before the final sleep command"))
-			}
-			station.setPowerErrorInternal(err)
-			station.setOperationErrorInternal(nil)
-			return PowerControlResult{State: station.PowerState, Confirmed: false}, &PowerConfirmationError{
-				Target: target,
-				Actual: station.PowerState,
-				Raw:    station.RawPowerState,
-				Err:    fmt.Errorf("command outcome could not be confirmed for %s: %w", station.Name, err),
-			}
+	return resolvePowerCommandOutcome(ctx, station, target, maxRetries, err, unconfirmedCommand, ambiguousSleepPrepare)
+}
+
+// retryBackoff waits one OperationRetryDelay outside the station lock so
+// short readers are not queued behind the wait; the lock is held again when
+// the caller continues.
+func (station *BaseStation) retryBackoff(ctx context.Context) error {
+	station.mutex.Unlock()
+	defer station.mutex.Lock()
+	return sleepContext(ctx, CurrentTiming().OperationRetryDelay)
+}
+
+// restoreBootInference puts back the compatibility inference a write attempt
+// reset, used when the transport proves the command was never applied.
+func (station *BaseStation) restoreBootInference(bootRawTrustedOn bool, bootingSince time.Time) {
+	station.bootRawTrustedOn = bootRawTrustedOn
+	station.bootingSince = bootingSince
+}
+
+// writeSleepCommandPair sends the paired prepare (0x01) and final sleep
+// writes that some Lighthouse 2.0 firmware expects. Once the prepare has
+// been sent the pair must complete even when the caller context is already
+// cancelled: leaving a sleeping station prepared can wake it, so both waits
+// detach from ctx cancellation. A non-nil gapErr abandons the pair between
+// the two writes and must terminate the whole operation immediately; writeErr
+// carries the final-write outcome through the normal retry classification.
+func writeSleepCommandPair(ctx context.Context, station *BaseStation, command byte) (finalAttempted bool, gapErr, writeErr error) {
+	if prepareErr := writePowerValueInternal(ctx, station, 0x01); prepareErr != nil {
+		return false, nil, prepareErr
+	}
+	timing := CurrentTiming()
+	if timing.PrepareGap > 0 {
+		// Release the station lock during the firmware settling gap so
+		// short readers are not queued behind it, matching every other
+		// wait in this package.
+		station.mutex.Unlock()
+		waitErr := sleepContext(context.WithoutCancel(ctx), timing.PrepareGap)
+		station.mutex.Lock()
+		if waitErr != nil {
+			return false, waitErr, nil
 		}
-		station.setOperationErrorInternal(err)
-		return PowerControlResult{}, fmt.Errorf("failed to write %s command after %d retries: %w", target, maxRetries, err)
+	}
+	// Once prepare succeeds, the final sleep write is a bounded cleanup
+	// action. Give it an independent hard deadline: reusing an expired
+	// caller deadline here can leave the station prepared (and awake)
+	// without ever attempting the matching sleep command.
+	finalBudget := finalSleepWriteTimeout
+	if finalBudget <= 0 {
+		finalBudget = timing.FinalSleepWrite
+	}
+	finalContext, cancelFinal := context.WithTimeout(context.WithoutCancel(ctx), finalBudget)
+	defer cancelFinal()
+	return true, nil, writePowerValueInternal(finalContext, station, command)
+}
+
+// resolvePowerCommandOutcome converts the retry loop's terminal state into
+// the operation result. Assumes the caller holds station.mutex and keeps it
+// held on return.
+func resolvePowerCommandOutcome(ctx context.Context, station *BaseStation, target PowerState, maxRetries int, writeErr, unconfirmedCommand error, ambiguousSleepPrepare bool) (PowerControlResult, error) {
+	if writeErr != nil {
+		if unconfirmedCommand != nil {
+			return resolveUnconfirmedPowerCommand(ctx, station, target, unconfirmedCommand, ambiguousSleepPrepare)
+		}
+		station.setOperationErrorInternal(writeErr)
+		return PowerControlResult{}, fmt.Errorf("failed to write %s command after %d retries: %w", target, maxRetries, writeErr)
 	}
 	if !station.Capabilities.PowerRead {
 		station.clearPowerStateInternal()
@@ -634,20 +635,49 @@ func SetPowerStateContext(ctx context.Context, station *BaseStation, target Powe
 		station.setOperationErrorInternal(nil)
 		return PowerControlResult{State: target, Confirmed: false}, nil
 	}
-	if err = confirmPowerStateInternalContext(ctx, station, target); err != nil {
-		station.setPowerErrorInternal(err)
+	if confirmErr := confirmPowerStateInternalContext(ctx, station, target); confirmErr != nil {
+		station.setPowerErrorInternal(confirmErr)
 		station.setOperationErrorInternal(nil)
 		return PowerControlResult{State: station.PowerState, Confirmed: false}, &PowerConfirmationError{
 			Target: target,
 			Actual: station.PowerState,
 			Raw:    station.RawPowerState,
-			Err:    fmt.Errorf("state confirmation failed for %s: %w", station.Name, err),
+			Err:    fmt.Errorf("state confirmation failed for %s: %w", station.Name, confirmErr),
 		}
 	}
 	station.LastReadAt = time.Now()
 	station.setPowerErrorInternal(nil)
 	station.setOperationErrorInternal(nil)
 	return PowerControlResult{State: target, Confirmed: true}, nil
+}
+
+// resolveUnconfirmedPowerCommand settles a command the transport may already
+// have applied: it is never silently dropped or replayed. A readable power
+// characteristic gets a confirmation attempt; the ambiguous sleep prepare and
+// unreadable firmware can only report the command as sent but unconfirmed.
+func resolveUnconfirmedPowerCommand(ctx context.Context, station *BaseStation, target PowerState, unconfirmedCommand error, ambiguousSleepPrepare bool) (PowerControlResult, error) {
+	err := unconfirmedCommand
+	if station.Capabilities.PowerRead && !ambiguousSleepPrepare {
+		if confirmationErr := confirmPowerStateInternalContext(ctx, station, target); confirmationErr == nil {
+			station.setPowerErrorInternal(nil)
+			station.setOperationErrorInternal(nil)
+			return PowerControlResult{State: target, Confirmed: true}, nil
+		} else {
+			err = errors.Join(unconfirmedCommand, confirmationErr)
+		}
+	} else if !station.Capabilities.PowerRead {
+		err = errors.Join(unconfirmedCommand, unsupportedCapability("power confirmation read", nil))
+	} else {
+		err = errors.Join(unconfirmedCommand, fmt.Errorf("sleep prepare write was ambiguous before the final sleep command"))
+	}
+	station.setPowerErrorInternal(err)
+	station.setOperationErrorInternal(nil)
+	return PowerControlResult{State: station.PowerState, Confirmed: false}, &PowerConfirmationError{
+		Target: target,
+		Actual: station.PowerState,
+		Raw:    station.RawPowerState,
+		Err:    fmt.Errorf("command outcome could not be confirmed for %s: %w", station.Name, err),
+	}
 }
 func PowerOn(station *BaseStation) error {
 	_, err := SetPowerState(station, PowerStateOn)
