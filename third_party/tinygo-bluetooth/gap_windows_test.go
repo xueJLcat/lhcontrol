@@ -367,6 +367,68 @@ func TestWaitForScanStopFallsBackToStatusWhenEventNeverArrives(t *testing.T) {
 	}
 }
 
+// TestWaitForScanStopAcceptsSlowDrainAfterAcceptedStop guards the drain
+// budget: a Stop accepted by WinRT can linger in the intermediate Stopping
+// state longer than the retry budget for a failed stop. That scan is ending
+// cleanly, so the wait must use the longer drain budget instead of reporting
+// a stop timeout (which would discard a completed scan's results and release
+// a still-draining watcher).
+func TestWaitForScanStopAcceptsSlowDrainAfterAcceptedStop(t *testing.T) {
+	originalTimeout := scanStopTimeout
+	originalDrain := scanStopDrainTimeout
+	originalPoll := scanStopPollInterval
+	scanStopTimeout = 10 * time.Millisecond
+	scanStopDrainTimeout = 2 * time.Second
+	scanStopPollInterval = time.Millisecond
+	t.Cleanup(func() {
+		scanStopTimeout = originalTimeout
+		scanStopDrainTimeout = originalDrain
+		scanStopPollInterval = originalPoll
+	})
+
+	drainedAt := time.Now().Add(50 * time.Millisecond)
+	stopRequests := make(chan error, 1)
+	stopRequests <- nil // the stop was accepted
+	started := time.Now()
+	err := waitForScanStop(make(chan error), stopRequests, func() error { return nil }, func() (advertisement.BluetoothLEAdvertisementWatcherStatus, error) {
+		if time.Now().Before(drainedAt) {
+			return advertisement.BluetoothLEAdvertisementWatcherStatusStopping, nil
+		}
+		return advertisement.BluetoothLEAdvertisementWatcherStatusStopped, nil
+	})
+	if err != nil {
+		t.Fatalf("waitForScanStop() error = %v, want a clean stop after a slow drain", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("drain wait took %v, want bounded by the drain budget", elapsed)
+	}
+}
+
+// TestCallbackGateWaitIsBounded guards against a permanently blocked callback
+// body pinning scan teardown or device cleanup forever: after the drain limit
+// the wait must return even though the callback never ends.
+func TestCallbackGateWaitIsBounded(t *testing.T) {
+	originalLimit := callbackDrainLimit
+	callbackDrainLimit = 30 * time.Millisecond
+	t.Cleanup(func() { callbackDrainLimit = originalLimit })
+
+	gate := newCallbackGate()
+	if !gate.begin() {
+		t.Fatal("open callback gate rejected work")
+	}
+	gate.close()
+	started := time.Now()
+	gate.wait()
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("callback gate wait took %v, want bounded by the drain limit", elapsed)
+	}
+	if gate.begin() {
+		gate.end()
+		t.Fatal("closed gate admitted late callback after bounded wait")
+	}
+	gate.end()
+}
+
 func TestScheduleCleanupRetrySuppressesDuplicateTimers(t *testing.T) {
 	originalEnter := enterWinRTThread
 	originalBaseDelay := cleanupRetryBaseDelay

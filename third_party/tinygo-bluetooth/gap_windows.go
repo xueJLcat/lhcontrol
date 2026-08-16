@@ -30,6 +30,12 @@ type callbackGate struct {
 var (
 	scanStopTimeout      = 2 * time.Second
 	scanStopPollInterval = 50 * time.Millisecond
+	// scanStopDrainTimeout bounds the wait for an already-accepted stop to
+	// drain from Stopping to Stopped. A successful Stop can linger in the
+	// intermediate Stopping state far longer than the retry budget for a
+	// failed stop; cutting the drain short reports a timeout for a scan that
+	// is ending cleanly and leaves the watcher draining while it is released.
+	scanStopDrainTimeout = 10 * time.Second
 )
 
 type scanControl struct {
@@ -156,15 +162,50 @@ func (control *scanControl) ensureStopped() {
 	}
 	if control.stopIssued && control.stopErr == nil {
 		// A stop was already accepted; the watcher is only draining through
-		// Stopping. The cleanup path calls this while holding the adapter
-		// write lock, so a redundant Stop that WinRT can reject (and that can
-		// stall on a wedged radio) must not be re-issued.
+		// Stopping. A redundant Stop that WinRT can reject (and that can stall
+		// on a wedged radio) must not be re-issued.
 		control.mutex.Unlock()
 		return
 	}
 	watcher := control.watcher
 	control.mutex.Unlock()
 	_ = stopWatcherSafely(watcher)
+}
+
+// releaseWatcher frees the watcher COM reference only when it is safe: when
+// the watcher never started, or once a terminal state is confirmed (after a
+// brief bounded wait for a watcher still draining). Releasing a watcher WinRT
+// is still draining can cut the drain short so the radio keeps scanning and
+// rejects the next Start with ResourceInUse; a watcher that never reaches a
+// terminal state within the wait is abandoned (reference leaked) rather than
+// released, letting WinRT finish draining on its own.
+func (control *scanControl) releaseWatcher(watcher *advertisement.BluetoothLEAdvertisementWatcher) {
+	control.mutex.Lock()
+	started := control.started
+	terminal := control.terminal
+	control.mutex.Unlock()
+	if watcher == nil || !started || terminal {
+		if watcher != nil {
+			watcher.Release()
+		}
+		return
+	}
+	deadline := time.NewTimer(scanStopTimeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(scanStopPollInterval)
+	defer ticker.Stop()
+	for {
+		if alreadyTerminal(watcher) {
+			watcher.Release()
+			return
+		}
+		select {
+		case <-deadline.C:
+			// Abandon the reference rather than interrupt an in-flight drain.
+			return
+		case <-ticker.C:
+		}
+	}
 }
 
 func (control *scanControl) markTerminal() {
@@ -210,12 +251,36 @@ func (gate *callbackGate) close() {
 	gate.mutex.Unlock()
 }
 
+// callbackDrainLimit bounds callbackGate.wait. Callback bodies are expected
+// to be short; one that blocks forever (a wedged application handler) must
+// not pin scan teardown or device cleanup indefinitely. After the limit the
+// wait gives up and proceeds; the closed gate keeps admitting no new
+// callbacks.
+var callbackDrainLimit = 10 * time.Second
+
 func (gate *callbackGate) wait() {
 	gate.mutex.Lock()
-	for gate.active > 0 {
+	defer gate.mutex.Unlock()
+	if gate.active == 0 {
+		return
+	}
+	stopBroadcast := make(chan struct{})
+	defer close(stopBroadcast)
+	go func() {
+		timer := time.NewTimer(callbackDrainLimit)
+		defer timer.Stop()
+		select {
+		case <-stopBroadcast:
+		case <-timer.C:
+			gate.mutex.Lock()
+			gate.cond.Broadcast()
+			gate.mutex.Unlock()
+		}
+	}()
+	deadline := time.Now().Add(callbackDrainLimit)
+	for gate.active > 0 && time.Now().Before(deadline) {
 		gate.cond.Wait()
 	}
-	gate.mutex.Unlock()
 }
 
 // Address contains a Bluetooth MAC address.
@@ -264,7 +329,18 @@ func (a *Advertisement) Configure(options AdvertisementOptions) error {
 		return nil
 	}
 
+	leaveThread, err := enterWinRTThread()
+	if err != nil {
+		return err
+	}
+	defer leaveThread()
+
 	if a.publisher != nil {
+		// Stop before releasing: releasing an advertising publisher leaves
+		// the advertisement running with no handle left to stop it, and the
+		// residual activity can make a later Start fail. Ignore the error: a
+		// publisher that never started rejects Stop.
+		_ = a.publisher.Stop()
 		a.publisher.Release()
 	}
 
@@ -331,20 +407,28 @@ func (a *Advertisement) Configure(options AdvertisementOptions) error {
 // Start advertisement. May only be called after it has been configured.
 func (a *Advertisement) Start() error {
 	// publisher will be present if we actually have manufacturer data to advertise.
-	if a.publisher != nil {
-		return a.publisher.Start()
+	if a.publisher == nil {
+		return nil
 	}
-
-	return nil
+	leaveThread, err := enterWinRTThread()
+	if err != nil {
+		return err
+	}
+	defer leaveThread()
+	return a.publisher.Start()
 }
 
 // Stop advertisement. May only be called after it has been started.
 func (a *Advertisement) Stop() error {
-	if a.publisher != nil {
-		return a.publisher.Stop()
+	if a.publisher == nil {
+		return nil
 	}
-
-	return nil
+	leaveThread, err := enterWinRTThread()
+	if err != nil {
+		return err
+	}
+	defer leaveThread()
+	return a.publisher.Stop()
 }
 
 // Scan starts a BLE scan. It is stopped by a call to StopScan. A common pattern
@@ -372,25 +456,41 @@ func (a *Adapter) ScanWithStart(callback func(*Adapter, ScanResult), started fun
 		// stop?
 		return errScanning
 	}
+	a.watcherMutex.Unlock()
 
+	// Creating the watcher is a RoActivateInstance COM call that can stall
+	// when the radio is removed or the driver wedges. Run it outside the
+	// watcher lock so a hung creation cannot pin every concurrent Scan and
+	// StopScan caller; a racing scan that wins the slot below gets priority
+	// and the extra watcher is released.
 	watcher, err := advertisement.NewBluetoothLEAdvertisementWatcher()
 	if err != nil {
-		a.watcherMutex.Unlock()
 		return err
 	}
 	control := &scanControl{watcher: watcher, stopRequests: make(chan error, 1)}
+
+	a.watcherMutex.Lock()
+	if a.watcher != nil {
+		a.watcherMutex.Unlock()
+		_ = watcher.Release()
+		return errScanning
+	}
 	a.watcher = watcher
 	a.scan = control
 	a.watcherMutex.Unlock()
 	defer func() {
+		// Clear the adapter slot under the write lock, then tear the watcher
+		// down outside it: the fallback Stop and the drain wait can block when
+		// the radio is wedged, and holding the lock would queue every other
+		// Scan/StopScan caller behind the hang.
 		a.watcherMutex.Lock()
 		if a.watcher == watcher {
 			a.watcher = nil
 			a.scan = nil
 		}
-		control.ensureStopped()
-		_ = watcher.Release()
 		a.watcherMutex.Unlock()
+		control.ensureStopped()
+		control.releaseWatcher(watcher)
 	}()
 
 	// Set scanning mode to active so we receive scan responses
@@ -549,7 +649,14 @@ func waitForScanStop(stopped <-chan error, stopRequests <-chan error, stop func(
 	case originalErr = <-stopRequests:
 	}
 
-	deadline := time.NewTimer(scanStopTimeout)
+	// A stop that was accepted only needs time to drain from Stopping to
+	// Stopped; give it the longer drain budget. A failed (or missing) stop
+	// keeps the short budget because the loop below must actively retry it.
+	waitBudget := scanStopDrainTimeout
+	if originalErr != nil {
+		waitBudget = scanStopTimeout
+	}
+	deadline := time.NewTimer(waitBudget)
 	defer deadline.Stop()
 	ticker := time.NewTicker(scanStopPollInterval)
 	defer ticker.Stop()

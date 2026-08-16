@@ -55,7 +55,10 @@ func writeValueWithResultAndOptionAsync(characteristic *genericattributeprofile.
 	defer itf.Release()
 	vtable := (*iGattCharacteristic3Vtbl)(unsafe.Pointer(itf.RawVTable))
 	if vtable.writeValueWithResultAndOptionAsync == 0 {
-		return nil, true, errors.New("bluetooth: IGattCharacteristic3 write method is unavailable")
+		// No async operation was created, so the write definitely was not
+		// submitted; reporting it as created would misclassify the failure
+		// as possibly sent.
+		return nil, false, errors.New("bluetooth: IGattCharacteristic3 write method is unavailable")
 	}
 	var operation *foundation.IAsyncOperation
 	hr, _, _ := syscall.SyscallN(
