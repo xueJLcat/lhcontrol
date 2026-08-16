@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"embed"
 	"errors"
 	"flag"
@@ -419,6 +420,12 @@ func main() {
 
 	if err != nil {
 		log.Println("FATAL: Error running Wails app: ", err.Error())
+		// OnShutdown is not guaranteed after a failed wails.Run; drain the
+		// auto-sleep watcher, API server, and station manager ourselves so
+		// their goroutines and handles are released instead of being killed
+		// mid-flight. The drain is idempotent and safe even when startup
+		// never ran.
+		app.shutdown(context.Background())
 		if logFile != nil {
 			logFile.Sync()
 		} // Sync before exit, only if file exists

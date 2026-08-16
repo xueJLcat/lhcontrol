@@ -14,6 +14,7 @@ import type { GlobalOperation } from '../operation-state';
 import { ExternalScanCoordinator } from '../external-scan';
 import { OperationGate } from '../operation-gate';
 import { RevisionGate } from '../revision-gate';
+import { backendCopy } from '../backend-copy';
 import { t, withDetail } from '../i18n.svelte';
 
 // A stop whose StopScan settled while the backend scan was still finishing has
@@ -155,8 +156,12 @@ export class StationScanController {
     if (this.host.disposed) return;
     if (attempt >= STOP_RECHECK_MAX_ATTEMPTS) {
       // Restore the header; the periodic poll reconciles the real scan state
-      // (and re-arms the stop if the scan is genuinely still running).
+      // (and re-arms the stop if the scan is genuinely still running). While
+      // auto-sleep is running the periodic poll is skipped entirely, so a scan
+      // observed here is its internal scan: drop the external-scan flag so a
+      // Stop button is not offered for it.
       this.host.stoppingScan = false;
+      if (this.host.autoSleepRunning) this.host.externalScanning = false;
       return;
     }
     this.stopRecheckTimer = setTimeout(() => {
@@ -318,7 +323,7 @@ export class StationScanController {
       // While the scan recovery card is up the Bluetooth outage is already
       // explained; repeating this failure in the status line every poll
       // cycle only re-surfaces the same error.
-      if (this.host.gates.canCommitStatus(statusOperation) && !this.host.scanError) this.host.statusMessage = withDetail('Status refresh incomplete', error);
+      if (this.host.gates.canCommitStatus(statusOperation) && !this.host.scanError) this.host.statusMessage = withDetail('Status refresh incomplete', backendCopy(String(error)));
     } finally {
       if (!this.host.disposed && this.host.globalOperation === 'status-refresh') this.host.globalOperation = 'idle';
     }
@@ -478,7 +483,7 @@ export class StationScanController {
         return;
       }
       this.host.stoppingScan = false;
-      const failureMessage = withDetail('Unable to stop scan', error);
+      const failureMessage = withDetail('Unable to stop scan', backendCopy(String(error)));
       if (this.host.gates.canCommitStatus(statusOperation)) {
         this.host.statusMessage = failureMessage;
       }

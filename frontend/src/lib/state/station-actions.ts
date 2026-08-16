@@ -156,7 +156,13 @@ export class StationActionController {
     this.host.statusMessage = t('Setting {name} to {target}…', { name: station.name, target: targetLabel });
     try {
       const result = await SetStationPower(station.address, state);
-      if (!this.host.gates.canCommitStationOperation(operationEpoch, station.address, operationRevision)) return;
+      if (!this.host.gates.canCommitStationOperation(operationEpoch, station.address, operationRevision)) {
+        // The promise settled but a newer scan owns the list now. Clear the
+        // orphan pending note instead of leaving it to the long retention
+        // fallback: the operation it described is already over.
+        this.host.powerFeedback.clear(station.address);
+        return;
+      }
       this.host.mergeStationUpdates([result.station]);
       this.host.powerFeedback.set(station.address, result.skipped
         ? {
@@ -182,14 +188,20 @@ export class StationActionController {
           : result.confirmed
           ? t('{name} is {target}.', { name: station.name, target: targetLabel })
           : result.confirmationError
-            ? t('{name}: command sent, but confirmation failed. {detail}', { name: station.name, detail: result.confirmationError })
+            ? t('{name}: command sent, but confirmation failed. {detail}', { name: station.name, detail: backendCopy(result.confirmationError) })
             : t('{name}: {target} command sent; this firmware cannot confirm the state.', { name: station.name, target: targetLabel });
       }
     } catch (error) {
-      if (!this.host.gates.canCommitStationOperation(operationEpoch, station.address, operationRevision)) return;
-      const errorText = String(error);
+      if (!this.host.gates.canCommitStationOperation(operationEpoch, station.address, operationRevision)) {
+        this.host.powerFeedback.clear(station.address);
+        return;
+      }
+      const errorText = backendCopy(String(error));
       const actual = await this.fetchStationUpdate(station.address, operationEpoch, operationRevision);
-      if (!this.host.gates.canCommitStationOperation(operationEpoch, station.address, operationRevision)) return;
+      if (!this.host.gates.canCommitStationOperation(operationEpoch, station.address, operationRevision)) {
+        this.host.powerFeedback.clear(station.address);
+        return;
+      }
       this.host.powerFeedback.set(station.address, {
         kind: 'error',
         text: t('Failed · {readback}', { readback: this.powerReadbackLabel(actual) }),
@@ -310,7 +322,7 @@ export class StationActionController {
       if (!this.host.gates.canCommitOperation(operationEpoch)) return;
       await this.fetchLatestList();
       if (!this.host.gates.canCommitOperation(operationEpoch)) return;
-      const failureMessage = `${t('Bulk {target} operation partially failed', { target: targetLabel })}: ${String(error)}`;
+      const failureMessage = `${t('Bulk {target} operation partially failed', { target: targetLabel })}: ${backendCopy(String(error))}`;
       if (this.host.gates.canCommitStatus(statusOperation)) {
         this.host.statusMessage = failureMessage;
       }
@@ -350,7 +362,7 @@ export class StationActionController {
       await CancelBulkPower();
     } catch (error) {
       if (!this.host.disposed) {
-        const message = `${t('Cancel bulk power')}: ${String(error)}`;
+        const message = `${t('Cancel bulk power')}: ${backendCopy(String(error))}`;
         if (this.host.gates.canCommitStatus(statusOperation)) this.host.statusMessage = message;
         pushToast(message);
       }
@@ -405,7 +417,7 @@ export class StationActionController {
       if (this.host.editingAddress === station.address) this.cancelRename();
     } catch (error) {
       if (!this.host.gates.canCommitStationOperation(operationEpoch, station.address, operationRevision)) return;
-      const failureMessage = withDetail('Error renaming', error);
+      const failureMessage = withDetail('Error renaming', backendCopy(String(error)));
       if (this.host.gates.canCommitStatus(statusOperation)) {
         this.host.statusMessage = failureMessage;
       }
@@ -436,7 +448,7 @@ export class StationActionController {
       if (!this.host.gates.canCommitStationOperation(operationEpoch, station.address, operationRevision)) return;
       await this.fetchStationUpdate(station.address, operationEpoch, operationRevision);
       if (!this.host.gates.canCommitStationOperation(operationEpoch, station.address, operationRevision)) return;
-      const failureMessage = `${t('Identify failed for {name}', { name: station.name })}: ${String(error)}`;
+      const failureMessage = `${t('Identify failed for {name}', { name: station.name })}: ${backendCopy(String(error))}`;
       if (this.host.gates.canCommitStatus(statusOperation)) {
         this.host.statusMessage = failureMessage;
       }
@@ -463,7 +475,7 @@ export class StationActionController {
       // observation also retires settled feedback from an older command.
       this.host.mergeStationUpdates([updated]);
       const message = updated.lastError
-        ? `${t('Capabilities refreshed for {name}, but some values are unavailable', { name: station.name })}: ${updated.lastError}`
+        ? `${t('Capabilities refreshed for {name}, but some values are unavailable', { name: station.name })}: ${backendCopy(updated.lastError)}`
         : t('Capabilities refreshed for {name}.', { name: station.name });
       if (this.host.gates.canCommitStatus(statusOperation)) {
         this.host.statusMessage = message;
@@ -475,7 +487,7 @@ export class StationActionController {
       if (!this.host.gates.canCommitStationOperation(operationEpoch, station.address, operationRevision)) return;
       await this.fetchStationUpdate(station.address, operationEpoch, operationRevision);
       if (!this.host.gates.canCommitStationOperation(operationEpoch, station.address, operationRevision)) return;
-      const failureMessage = `${t('Capability refresh failed for {name}', { name: station.name })}: ${String(error)}`;
+      const failureMessage = `${t('Capability refresh failed for {name}', { name: station.name })}: ${backendCopy(String(error))}`;
       if (this.host.gates.canCommitStatus(statusOperation)) {
         this.host.statusMessage = failureMessage;
       }
@@ -527,7 +539,7 @@ export class StationActionController {
         if (!this.host.gates.canCommitStationOperation(operationEpoch, address, operationRevision)) return;
       }
       if (result.confirmed === false) {
-        const warning = result.confirmationError || t('Channel readback is unavailable.');
+        const warning = backendCopy(result.confirmationError) || t('Channel readback is unavailable.');
         this.host.channelError = `${t('Channel command sent but unconfirmed')}: ${warning} ${t('Readback')}: ${this.channelReadbackLabel(actual)}.`;
         this.host.channelWarning = true;
         if (this.host.gates.canCommitStatus(statusOperation)) this.host.statusMessage = t('{name}: channel command sent, but confirmation failed. {detail}', { name: stationName, detail: warning });
@@ -546,7 +558,7 @@ export class StationActionController {
       if (!this.host.gates.canCommitStationOperation(operationEpoch, address, operationRevision)) return;
       const actual = await this.fetchStationUpdate(address, operationEpoch, operationRevision);
       if (!this.host.gates.canCommitStationOperation(operationEpoch, address, operationRevision)) return;
-      this.host.channelError = `${String(error)} ${t('Readback')}: ${this.channelReadbackLabel(actual)}.`;
+      this.host.channelError = `${backendCopy(String(error))} ${t('Readback')}: ${this.channelReadbackLabel(actual)}.`;
       this.host.channelWarning = false;
       const failureMessage = `${t('Channel change failed')}: ${this.host.channelError}`;
       if (this.host.gates.canCommitStatus(statusOperation)) {

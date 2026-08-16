@@ -6,7 +6,13 @@ param(
     [int]$MinimumStations = 1,
     [string[]]$ExpectedAddresses = @(),
     [switch]$ExercisePower,
-    [switch]$SelfTest
+    [switch]$SelfTest,
+    # A scan can legitimately take far longer than a minute: per-station
+    # connection release before scanning, the configured scan duration, and
+    # the initial-read phase all add up. Keep the wait budget configurable
+    # instead of failing slow-but-successful scans.
+    [ValidateRange(10, 3600)]
+    [int]$ScanWaitSeconds = 300
 )
 
 $ErrorActionPreference = "Stop"
@@ -258,7 +264,7 @@ $restoreFailed = $false
 $lastScanTimeoutEvidence = $null
 
 function Wait-Scan {
-    $deadline = (Get-Date).AddSeconds(60)
+    $deadline = (Get-Date).AddSeconds($ScanWaitSeconds)
     $lastStatus = $null
     while ((Get-Date) -lt $deadline) {
         $status = Invoke-RestMethod -Method Get -Uri "$ApiBase/scan/status"
@@ -279,7 +285,7 @@ function Wait-Scan {
         status = $lastStatus
         stations = @($lastStations)
     }
-    throw "Scan did not complete within 60 seconds"
+    throw "Scan did not complete within $ScanWaitSeconds seconds"
 }
 
 function Get-Stations {
@@ -290,7 +296,10 @@ function Invoke-StationPower {
     param([string]$Address, [string]$Target)
     $escapedAddress = [uri]::EscapeDataString($Address)
     $body = @{ state = $Target } | ConvertTo-Json
-    return Invoke-RestMethod -Method Post -Uri "$ApiBase/stations/$escapedAddress/power" -ContentType "application/json" -Body $body
+    # A single-station operation may take up to the configured 120s budget;
+    # the default 100s REST timeout would abort a legitimately slow command
+    # (notably during the restore phase) and misreport the outcome.
+    return Invoke-RestMethod -Method Post -Uri "$ApiBase/stations/$escapedAddress/power" -ContentType "application/json" -Body $body -TimeoutSec 180
 }
 
 $outputDirectory = Join-Path $PSScriptRoot "..\build\verification"
@@ -369,7 +378,9 @@ try {
             $results.power += $powerRecord
             $phase = "request"
             try {
-                $result = Invoke-RestMethod -Method Post -Uri "$ApiBase/stations/power" -ContentType "application/json" -Body $body
+                # A bulk can be configured up to a 600s total timeout; give the
+                # client headroom past that instead of aborting a slow batch.
+                $result = Invoke-RestMethod -Method Post -Uri "$ApiBase/stations/power" -ContentType "application/json" -Body $body -TimeoutSec 660
                 $powerRecord.result = $result
                 $phase = "validation"
                 Assert-BulkResult $result $target $snapshotAddresses

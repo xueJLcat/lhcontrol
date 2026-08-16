@@ -978,6 +978,38 @@ describe('App asynchronous operations', () => {
     expect(pushToast).not.toHaveBeenCalledWith(expect.stringContaining('Scan failed'));
   });
 
+  it('does not expose a Stop for an auto-sleep scan once the stop recheck budget expires', async () => {
+    vi.useFakeTimers();
+    // The stop is accepted but the scan keeps running; the recheck chain then
+    // keeps observing a scanning backend.
+    api.IsScanning.mockResolvedValueOnce(false).mockResolvedValue(true);
+    api.StopScan.mockResolvedValue(undefined);
+    api.GetScanStatus.mockResolvedValue({ state: 'running', found: 0, warnings: [] });
+    api.GetCurrentStationInfo.mockResolvedValue([createStation()]);
+    render(App);
+    await screen.findByText('LHB-TEST');
+
+    runtime.handlers.get('external-scan-started')?.(externalScanEvent(9));
+    await screen.findByText('Preparing external scan...');
+    await fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
+    // The stop is in flight before the chain runs its course.
+    await screen.findByRole('button', { name: 'Stopping...' });
+
+    // Auto-sleep starts while the recheck chain runs; its internal scan is the
+    // one still observed running.
+    runtime.handlers.get('auto-sleep')?.({ phase: 'started' });
+
+    // Exhaust the 10-attempt recheck chain. The header must come back to a
+    // Scan button (not a Stop): the external-scan flag is dropped because the
+    // scanning backend is the auto-sleep action's internal scan, which must
+    // not be offered a Stop. Scan stays rendered but locked while auto-sleep
+    // holds the adapter lock.
+    await vi.advanceTimersByTimeAsync(16_000);
+    expect(screen.queryByRole('button', { name: 'Stop' })).not.toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: 'Scan' })).toBeInTheDocument();
+    expect(screen.queryByText('External scan in progress...')).not.toBeInTheDocument();
+  });
+
   it('does not commit a pending scan result after unmount', async () => {
     let resolveScan!: (stations: StationInfo[]) => void;
     api.ScanAndFetchStations.mockReturnValue(new Promise((resolve) => {

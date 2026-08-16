@@ -465,6 +465,10 @@ button:focus-visible, [tabindex]:focus-visible {
   font-weight: 600;
   color: var(--text-secondary);
   box-shadow: var(--shadow-sm);
+  /* Long unbreakable tokens in backend error details (GUIDs, paths) must not
+     force the drawer wider than its container. */
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .alert.danger {
   background: linear-gradient(135deg, color-mix(in srgb, var(--color-danger) 9%, white), color-mix(in srgb, var(--color-danger) 4%, white));
