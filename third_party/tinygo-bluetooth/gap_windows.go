@@ -84,6 +84,20 @@ func (control *scanControl) stopWatcher() (stopErr error, deferred bool) {
 	return control.stopErr, false
 }
 
+// stopWatcherSafely bounds a watcher.Stop() COM call so a panic inside WinRT
+// surfaces as a stop error instead of unwinding the caller. The first-stop
+// path is covered by stopScanSafely, but the retry (forceStop) and last-resort
+// (ensureStopped) paths call Stop directly; a panic there would otherwise turn
+// an otherwise clean scan into a crash or a bogus panic failure.
+func stopWatcherSafely(watcher *advertisement.BluetoothLEAdvertisementWatcher) (err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("Bluetooth watcher stop panicked: %v", recovered)
+		}
+	}()
+	return watcher.Stop()
+}
+
 // forceStop re-issues watcher.Stop() even though an earlier attempt already
 // ran. waitForScanStop calls it only on a retry tick after the initial stop
 // request produced an error; WinRT may reject a redundant Stop on a watcher
@@ -110,7 +124,7 @@ func (control *scanControl) forceStop() error {
 		return nil
 	}
 	control.stopIssued = true
-	control.stopErr = control.watcher.Stop()
+	control.stopErr = stopWatcherSafely(control.watcher)
 	return control.stopErr
 }
 
@@ -150,7 +164,7 @@ func (control *scanControl) ensureStopped() {
 	}
 	watcher := control.watcher
 	control.mutex.Unlock()
-	_ = watcher.Stop()
+	_ = stopWatcherSafely(watcher)
 }
 
 func (control *scanControl) markTerminal() {

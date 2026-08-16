@@ -475,6 +475,22 @@ func TestStopScanWithoutScanReportsNotScanningOnThreadFailure(t *testing.T) {
 	}
 }
 
+// TestStopWatcherSafelyRecoversPanic guards the panic bound around the retry
+// and last-resort watcher.Stop() calls: a panic inside the WinRT call must
+// surface as a stop error instead of unwinding the scan (a nil watcher
+// dereferences inside the COM call, standing in for a wedged radio panic).
+func TestStopWatcherSafelyRecoversPanic(t *testing.T) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			t.Fatalf("stopWatcherSafely leaked a panic: %v", recovered)
+		}
+	}()
+	err := stopWatcherSafely(nil)
+	if err == nil {
+		t.Fatal("stopWatcherSafely(nil) error = nil, want a recovered panic error")
+	}
+}
+
 // TestStopScanTerminalScanReportsNotScanningOnThreadFailure guards the teardown
 // window: a late idempotent stop that cannot enter its WinRT thread after the
 // scan already finished cleanly must report not-scanning, not the unrelated
