@@ -10,10 +10,27 @@ import (
 	"tinygo.org/x/bluetooth"
 )
 
+// connectNotStartedError reports a connect/discover request that was
+// cancelled before it touched any connection state. Callers cleaning up after
+// a cancelled operation must not disconnect a session this call never used;
+// errors.Is still matches the wrapped context error.
+type connectNotStartedError struct {
+	Err error
+}
+
+func (e *connectNotStartedError) Error() string { return e.Err.Error() }
+
+func (e *connectNotStartedError) Unwrap() error { return e.Err }
+
+func isConnectNotStarted(err error) bool {
+	var notStarted *connectNotStartedError
+	return errors.As(err, &notStarted)
+}
+
 func connectAndDiscoverInternalContext(ctx context.Context, station *BaseStation) error {
 	ctx = normalizeContext(ctx)
 	if err := ctx.Err(); err != nil {
-		return err
+		return &connectNotStartedError{Err: err}
 	}
 	if err := waitForInFlightDisconnect(ctx, station); err != nil {
 		return err
@@ -93,12 +110,14 @@ func connectAndDiscoverInternalContext(ctx context.Context, station *BaseStation
 				if cleanupErr := disconnectInternal(station); cleanupErr != nil {
 					return transportError("cleanup before discovery retry", cleanupErr)
 				}
-				retryDelay := time.NewTimer(discoveryTiming.DiscoveryRetryDelay)
-				select {
-				case <-ctx.Done():
-					retryDelay.Stop()
-					return ctx.Err()
-				case <-retryDelay.C:
+				// The retry delay runs outside the station lock, matching every
+				// other wait in this package: snapshots and short readers must
+				// not queue behind up to DiscoveryAttempts full retry windows.
+				station.mutex.Unlock()
+				waitErr := sleepContext(ctx, discoveryTiming.DiscoveryRetryDelay)
+				station.mutex.Lock()
+				if waitErr != nil {
+					return waitErr
 				}
 				device, connectErr := connectContext(ctx, station.Address)
 				if connectErr != nil {

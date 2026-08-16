@@ -792,3 +792,53 @@ func TestScanSessionStopAfterFinishedDoesNotRecordReason(t *testing.T) {
 		t.Fatalf("stop reason after finish = %v, want none", got)
 	}
 }
+
+// TestScanAbandonsWedgedScanStartAndReleasesSlot covers a platform watcher
+// whose start sequence never completes (radio removed or driver wedged before
+// Start). No stop budget applies because nothing ever started, yet the scan
+// must settle within the bounded start budget and release the active-scan slot
+// instead of blocking every later scan until a process restart.
+func TestScanAbandonsWedgedScanStartAndReleasesSlot(t *testing.T) {
+	originalAdapter := adapter
+	originalStartWait := scanStartWaitLimit
+	fake := newFakeBLEAdapter()
+	fake.startDelay = make(chan struct{}) // never closed: the watcher Start hangs
+	adapter = fake
+	scanStartWaitLimit = 50 * time.Millisecond
+	t.Cleanup(func() {
+		adapter = originalAdapter
+		scanStartWaitLimit = originalStartWait
+	})
+	result := make(chan error, 1)
+	go func() {
+		_, err := ScanForDuration(time.Hour)
+		result <- err
+	}()
+	select {
+	case err := <-result:
+		if !isScanStartTimeout(err) {
+			t.Fatalf("ScanForDuration() error = %v, want a scan start timeout", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("wedged scan start did not return within the bounded budget")
+	}
+	activeScanMutex.Lock()
+	stillRegistered := activeScan != nil
+	activeScanMutex.Unlock()
+	if stillRegistered {
+		t.Fatal("abandoned scan start left the scan session registered")
+	}
+	// Release the wedged start and let the abandoned platform goroutine finish
+	// so it stops touching the fake adapter before it is swapped.
+	close(fake.startDelay)
+	select {
+	case <-fake.started:
+	case <-time.After(time.Second):
+		t.Fatal("abandoned platform scan never reported its late start")
+	}
+	// The released slot must let the next scan run to completion.
+	adapter = newFakeBLEAdapter()
+	if _, err := ScanForDuration(time.Millisecond); err != nil {
+		t.Fatalf("scan after an abandoned scan start error = %v", err)
+	}
+}

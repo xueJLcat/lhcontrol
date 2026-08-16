@@ -209,12 +209,15 @@ func writeCharacteristicValueInternal(ctx context.Context, characteristic charac
 		if err != nil && properties.Write() && IsCapabilityUnsupported(err) {
 			n, err = writeWithResponse()
 		}
-		err = classifyUnmarkedWriteFailure(err)
 	case properties.Write():
 		n, err = writeWithResponse()
 	default:
 		return unsupportedCapability("characteristic write", nil)
 	}
+	// Both write paths run through the replay-protection classification: a
+	// transport that does not self-classify a with-response write failure
+	// must not let callers replay a command that may already have landed.
+	err = classifyUnmarkedWriteFailure(err)
 	if err != nil {
 		return transportError("write characteristic", err)
 	}
@@ -457,6 +460,11 @@ func SetPowerStateContext(ctx context.Context, station *BaseStation, target Powe
 			return PowerControlResult{}, contextErr
 		}
 		if err = connectAndDiscoverInternalContext(ctx, station); err != nil {
+			if isConnectNotStarted(err) {
+				// The attempt never started; keep the cached session intact and
+				// report the cancellation without a cleanup disconnect or retry.
+				return PowerControlResult{}, err
+			}
 			log.Printf("Bluetooth: connect/discover failed during power attempt %d/%d for %s: %v", i+1, maxRetries, station.Name, err)
 			if i == maxRetries-1 {
 				// Cancellation during discovery leaves the session connected;

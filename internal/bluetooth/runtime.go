@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -245,8 +247,22 @@ func (bs *BaseStation) drainDeviceInvalidations() {
 		bs.pendingInvalidations[0] = bluetooth.Device{}
 		bs.pendingInvalidations = bs.pendingInvalidations[1:]
 		bs.invalidationMutex.Unlock()
-		invalidateDisconnectedDevice(bs, device)
+		bs.invalidateOneSafely(device)
 	}
+}
+
+// invalidateOneSafely bounds a panic in one device invalidation to that item.
+// The drain worker is the only consumer of the invalidation queue and keeps
+// the running latch set for its whole lifetime; an unguarded panic would kill
+// it with the latch never reset, silently dropping every later OS disconnect
+// notification for this station while the queue grows without bound.
+func (bs *BaseStation) invalidateOneSafely(device bluetooth.Device) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			log.Printf("[BT] device invalidation panicked: %v\n%s", recovered, debug.Stack())
+		}
+	}()
+	invalidateDisconnectedDevice(bs, device)
 }
 
 func invalidateDisconnectedDevice(station *BaseStation, disconnected bluetooth.Device) {

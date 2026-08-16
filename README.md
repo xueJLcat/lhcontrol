@@ -305,11 +305,13 @@ API 仅监听本机回环地址。JSON 请求体上限为 16 KiB。常见错误�
   "address": "127.0.0.1:7575",
   "error": "",
   "warnings": [],
-  "configWritable": true
+  "configWritable": true,
+  "activeOperations": [],
+  "operationRevision": 42
 }
 ```
 
-该接口适合启动探测及诊断；`running` 表示 API 监听器当前是否正常运行，`warnings` 会包含配置加载或保存警告。
+该接口适合启动探测及诊断；`running` 表示 API 监听器当前是否正常运行，`warnings` 会包含配置加载或保存警告。`activeOperations` 列出当前正在执行的外部可见操作（每项包含 `id` 和 `kind`，例如扫描或自动休眠）；`operationRevision` 是单调递增的操作序号，界面用它对外部站点快照做版本门控，客户端合并状态时应比较该值而不是假设某个原子时刻。
 
 ---
 
@@ -477,6 +479,14 @@ GET /status
 ```text
 204 No Content
 ```
+
+如果取消请求已送达、但扫描工作流在有界等待内仍未排空（例如某个适配器调用忽略了取消），接口会返回：
+
+```text
+408 Request Timeout
+```
+
+此时取消仍然保持生效，扫描状态最终仍会变为 `cancelled`；调用方可以轮询 `/scan/status` 确认终态。
 
 取消后的最终扫描状态为：
 
@@ -1009,11 +1019,13 @@ Returns local API and configuration-persistence health:
   "address": "127.0.0.1:7575",
   "error": "",
   "warnings": [],
-  "configWritable": true
+  "configWritable": true,
+  "activeOperations": [],
+  "operationRevision": 42
 }
 ```
 
-Use this endpoint for startup probes and diagnostics. `running` describes the API listener, while `warnings` reports configuration load or save problems.
+Use this endpoint for startup probes and diagnostics. `running` describes the API listener, while `warnings` reports configuration load or save problems. `activeOperations` lists the externally visible operations currently in flight (each with an `id` and a `kind`, such as a scan or auto-sleep); `operationRevision` is a monotonically increasing operation sequence number that the UI uses to version-gate external station snapshots, and clients merging state should compare it rather than assume a single atomic instant.
 
 ---
 
@@ -1185,6 +1197,14 @@ It is safe to call when no scan is active.
 ```text
 204 No Content
 ```
+
+If the cancellation was delivered but the scan workflow does not drain within the bounded wait (for example an adapter call that ignores cancellation), the endpoint returns:
+
+```text
+408 Request Timeout
+```
+
+The cancellation stays in effect and the scan status still settles to `cancelled`; poll `/scan/status` to observe the terminal state.
 
 The terminal scan status is:
 

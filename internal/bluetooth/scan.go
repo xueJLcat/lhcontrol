@@ -47,11 +47,29 @@ type scanSession struct {
 	// mirroring stopWaitLimit, so the scan body's bounded wait on a wedged
 	// platform Scan call cannot race a new scan's override of that variable.
 	abandonGrace time.Duration
+	// startWaitLimit is captured from scanStartWaitLimit at session creation,
+	// mirroring the other budgets, so the scan body's bounded wait for the
+	// platform watcher to accept a Start cannot race a new scan's override.
+	startWaitLimit time.Duration
 }
 
 const defaultScanStopWait = 10 * time.Second
 
 const defaultScanAbandonGrace = 2 * time.Second
+
+const defaultScanStartWait = 10 * time.Second
+
+// scanStartWaitLimit bounds how long the scan body waits for the platform
+// watcher to accept a Start. The WinRT start sequence (watcher creation,
+// scanning mode, event registration, Start) can hang when the radio is
+// removed or the driver wedges; without a budget the scan body would block
+// forever on a scan that never started, keep activeScan set, and turn every
+// later scan into "scan is already active" until a process restart. Once the
+// budget runs out without a start the session is abandoned the same way a
+// wedged post-stop scan is. It is a var so tests can exercise the timeout
+// without the production wait; sessions snapshot it at creation for the
+// reason documented on the field.
+var scanStartWaitLimit = defaultScanStartWait
 
 // scanAbandonGrace bounds how long the scan body waits for the platform Scan
 // call to return after the stop handshake has finished or been abandoned. The
@@ -82,7 +100,11 @@ func newScanSession() *scanSession {
 	if grace <= 0 {
 		grace = defaultScanAbandonGrace
 	}
-	return &scanSession{stopDone: make(chan struct{}), stopWaitLimit: limit, abandonGrace: grace}
+	startWait := scanStartWaitLimit
+	if startWait <= 0 {
+		startWait = defaultScanStartWait
+	}
+	return &scanSession{stopDone: make(chan struct{}), stopWaitLimit: limit, abandonGrace: grace, startWaitLimit: startWait}
 }
 
 // scanStopAbandonedError reports a stop handshake that was given up on after
@@ -100,6 +122,23 @@ func (e *scanStopAbandonedError) Error() string {
 func isScanStopAbandoned(err error) bool {
 	var abandoned *scanStopAbandonedError
 	return errors.As(err, &abandoned)
+}
+
+// scanStartTimeoutError reports a platform scan that never reported a started
+// watcher within the start budget. It is deliberately distinct from a stop
+// failure: no watcher ever came up, so there was nothing to stop, and the
+// session must be abandoned so the active-scan slot is released.
+type scanStartTimeoutError struct {
+	budget time.Duration
+}
+
+func (e *scanStartTimeoutError) Error() string {
+	return fmt.Sprintf("Bluetooth scan did not start within %s", e.budget)
+}
+
+func isScanStartTimeout(err error) bool {
+	var startTimeout *scanStartTimeoutError
+	return errors.As(err, &startTimeout)
 }
 
 func (s *scanSession) requestStop(reason scanStopReason) error {
@@ -358,22 +397,47 @@ func ScanForDurationContext(ctx context.Context, duration time.Duration) ([]Disc
 	}()
 	var scanErr error
 	scanWedged := false
-	select {
-	case scanErr = <-scanDone:
-	case <-session.stopDone:
-		// The stop handshake completed or was abandoned. Give the platform scan
-		// call a short grace to drain its own tail; when it never returns,
-		// abandon the blocked goroutine and proceed. The hang stays isolated on
-		// the already-resolved watcher and cannot affect a later scan session.
-		grace := time.NewTimer(session.abandonGrace)
+	// The platform watcher's start sequence can wedge on its own (thread
+	// initialization, watcher creation, Start). No stop-side budget covers it:
+	// nothing has started so there is nothing to stop, stopDone never closes,
+	// and the duration timer is only created after a successful start. Without
+	// a start watchdog one wedged start blocks this body forever and keeps
+	// activeScan set, turning every later scan into "scan is already active"
+	// until a process restart. After the budget the session is abandoned the
+	// same way a wedged post-stop scan is.
+	startWatch := time.NewTimer(session.startWaitLimit)
+waitScan:
+	for {
 		select {
 		case scanErr = <-scanDone:
-			grace.Stop()
-		case <-grace.C:
+			break waitScan
+		case <-session.stopDone:
+			// The stop handshake completed or was abandoned. Give the platform scan
+			// call a short grace to drain its own tail; when it never returns,
+			// abandon the blocked goroutine and proceed. The hang stays isolated on
+			// the already-resolved watcher and cannot affect a later scan session.
+			grace := time.NewTimer(session.abandonGrace)
+			select {
+			case scanErr = <-scanDone:
+				grace.Stop()
+			case <-grace.C:
+				scanWedged = true
+				log.Printf("[BT] ScanForDuration: platform scan did not finish within %s of the stop handshake; abandoning it", session.abandonGrace)
+			}
+			break waitScan
+		case <-startWatch.C:
+			if session.startedFlag() {
+				// The watcher accepted a Start right at the deadline. Keep waiting
+				// for the normal outcome; the fired timer channel cannot fire again.
+				continue
+			}
 			scanWedged = true
-			log.Printf("[BT] ScanForDuration: platform scan did not finish within %s of the stop handshake; abandoning it", session.abandonGrace)
+			scanErr = &scanStartTimeoutError{budget: session.startWaitLimit}
+			log.Printf("[BT] ScanForDuration: platform scan did not start within %s; abandoning it", session.startWaitLimit)
+			break waitScan
 		}
 	}
+	startWatch.Stop()
 	session.markFinished()
 	if !scanWedged {
 		session.waitForIssuedStop()

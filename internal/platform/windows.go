@@ -129,11 +129,11 @@ func firstOwnedWindow(
 			break
 		}
 		actual, ownerErr := owner(hwnd)
-		if ownerErr != nil || expected == "" || strings.EqualFold(actual, expected) {
-			// Preserve the previous best-effort behavior when owner validation is
-			// unavailable; refusing every window would make the instance unusable.
+		if ownerErr == nil && (expected == "" || strings.EqualFold(actual, expected)) {
 			return hwnd, nil
 		}
+		// An unverifiable or foreign-owned window must not shadow a later
+		// verified match; keep only the first one as the mutex-backed fallback.
 		if fallback == 0 {
 			fallback = hwnd
 		}

@@ -117,8 +117,10 @@ func (m *Manager) attemptForegroundGlobalOperation(ctx context.Context) (<-chan 
 // It applies even when the caller ctx carries its own deadline: a bulk context
 // always has the bulk timeout, and without this cap a wedged background worker
 // would consume the entire bulk budget waiting (surfacing as a bulk timeout)
-// instead of failing fast as retryable Busy. The effective wait is the minimum
-// of this limit and the ctx deadline, both selected in the caller's loop.
+// instead of failing fast as retryable Busy. The same applies to per-station
+// foreground waits bounded by the station operation timeout. The effective
+// wait is the minimum of this limit and the ctx deadline, both selected in the
+// caller's loop.
 func (m *Manager) foregroundDrainDeadline(ctx context.Context) (<-chan time.Time, func()) {
 	limit := m.foregroundDrainWait
 	if limit <= 0 {
@@ -370,6 +372,8 @@ func (m *Manager) beginForegroundStationOperationContext(ctx context.Context, ad
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	drainDeadline, stopDrainDeadline := m.foregroundDrainDeadline(ctx)
+	defer stopDrainDeadline()
 	for {
 		if err := m.foregroundContextError(ctx); err != nil {
 			return err
@@ -409,6 +413,13 @@ func (m *Manager) beginForegroundStationOperationContext(ctx context.Context, ad
 			select {
 			case <-deviceBusy.backgroundDone:
 				continue
+			case <-drainDeadline:
+				// A wedged background worker (an abandoned status read stuck in
+				// an adapter call that ignores cancellation among them) must not
+				// consume the entire per-station operation budget and surface as
+				// an operation timeout; report retryable Busy like the global
+				// drain paths do.
+				return ErrOperationInProgress
 			case <-ctx.Done():
 				return m.foregroundContextError(ctx)
 			case <-m.shutdownCh:
@@ -431,6 +442,11 @@ func (m *Manager) beginForegroundStationOperationContext(ctx context.Context, ad
 		m.cancelRecoveryForForeground()
 		select {
 		case <-done:
+		case <-drainDeadline:
+			// Same bounded-drain rule as the device-busy wait: a wedged
+			// recovery worker must keep the station retryable as Busy instead
+			// of consuming the whole per-station budget as an operation timeout.
+			return ErrOperationInProgress
 		case <-ctx.Done():
 			return m.foregroundContextError(ctx)
 		case <-m.shutdownCh:

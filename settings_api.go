@@ -59,7 +59,8 @@ func (a *App) SetAPIListenAddress(address string) error {
 		if err != nil {
 			return err
 		}
-		if published := a.GetAPIStatus().Address; published != normalized && !a.shuttingDown.Load() {
+		published := a.GetAPIStatus().Address
+		if published != normalized && !a.shuttingDown.Load() {
 			a.setAPIAddress(normalized)
 			a.restartAPIServer()
 			bound, bindErr := a.waitForAPIBind()
@@ -72,6 +73,19 @@ func (a *App) SetAPIListenAddress(address string) error {
 				// address stays the configured one so the listener target and
 				// the configuration converge again on the next change.
 				a.rollbackListener(published, normalized)
+				return fmt.Errorf("cannot listen on %s: %v", normalized, bindErr)
+			}
+		} else if published == normalized && !a.shuttingDown.Load() && !a.GetAPIStatus().Running {
+			// The listener already targets the configured address but is not
+			// serving it (a failed bind stuck in its retry loop). Re-saving
+			// must converge it the same way the changed-address branch does
+			// instead of reporting success while the HTTP API stays down.
+			a.restartAPIServer()
+			bound, bindErr := a.waitForAPIBind()
+			if !bound {
+				if bindErr == nil {
+					bindErr = fmt.Errorf("%s did not come up within %s", normalized, a.apiBindVerifyWindow())
+				}
 				return fmt.Errorf("cannot listen on %s: %v", normalized, bindErr)
 			}
 		}

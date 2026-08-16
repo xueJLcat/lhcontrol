@@ -12,6 +12,13 @@ import (
 // while making the snapshot cost negligible.
 const DefaultPollInterval = 3 * time.Second
 
+// maxConsecutiveCheckErrors bounds how many consecutive process-check
+// failures the watcher tolerates before stopping. A persistently failing
+// process snapshot (or an unsupported platform) can never produce a trigger,
+// and retrying forever only fills the log; stopping surfaces the failure
+// instead of silently spinning.
+const maxConsecutiveCheckErrors = 10
+
 // IsRunningFunc reports whether the named process is currently running.
 type IsRunningFunc func(processName string) (bool, error)
 
@@ -188,12 +195,19 @@ func (w *Watcher) Run(ctx context.Context) {
 			w.finishTrigger(generation, settled)
 		}()
 	}
+	consecutiveCheckErrors := 0
 	poll := func(now time.Time) bool {
 		running, checkErr := w.IsRunning(processName)
 		if checkErr != nil {
+			consecutiveCheckErrors++
+			if consecutiveCheckErrors >= maxConsecutiveCheckErrors {
+				log.Printf("Auto-sleep watcher stopping after %d consecutive process check failures: %v", consecutiveCheckErrors, checkErr)
+				return false
+			}
 			log.Printf("Auto-sleep process check failed: %v", checkErr)
 			return true
 		}
+		consecutiveCheckErrors = 0
 
 		w.lifecycleMutex.Lock()
 		if ctx.Err() != nil {

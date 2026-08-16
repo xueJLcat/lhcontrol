@@ -383,6 +383,10 @@ func EnsureCapabilitiesContext(ctx context.Context, station *BaseStation) (Capab
 		return Capabilities{}, err
 	}
 	if err := connectAndDiscoverInternalContext(ctx, station); err != nil {
+		if isConnectNotStarted(err) {
+			// Discovery never started, so the cached session stays intact.
+			return Capabilities{}, err
+		}
 		if contextErr := ctx.Err(); contextErr != nil {
 			return Capabilities{}, finishCancelledCapabilityDiscovery(station, contextErr)
 		}
@@ -421,6 +425,11 @@ func RefreshCapabilitiesContext(ctx context.Context, station *BaseStation) (Capa
 	}
 	station.CapabilitiesKnown = false
 	if err := connectAndDiscoverInternalContext(ctx, station); err != nil {
+		if isConnectNotStarted(err) {
+			// The refresh deliberately disconnected first; a connect that never
+			// started leaves nothing further to clean up.
+			return Capabilities{}, err
+		}
 		if contextErr := ctx.Err(); contextErr != nil {
 			return Capabilities{}, finishCancelledCapabilityDiscovery(station, contextErr)
 		}
@@ -523,6 +532,11 @@ func FetchInitialPowerStateContext(ctx context.Context, station *BaseStation) er
 
 	err := connectAndDiscoverInternalContext(ctx, station)
 	if err != nil {
+		if isConnectNotStarted(err) {
+			// The read never started; keep the pre-existing healthy session
+			// instead of tearing it down as cancelled discovery would.
+			return err
+		}
 		if contextErr := ctx.Err(); contextErr != nil {
 			return finishCancelledInitialRead(station, contextErr)
 		}

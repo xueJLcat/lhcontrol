@@ -67,6 +67,33 @@ func TestFirstOwnedWindowSkipsSameTitledForeignWindow(t *testing.T) {
 	}
 }
 
+// TestFirstOwnedWindowPrefersVerifiedMatchOverUnverifiableWindow covers a
+// window whose owner cannot be resolved (protected process): it must not
+// shadow a later window that verifies as owned by this executable.
+func TestFirstOwnedWindowPrefersVerifiedMatchOverUnverifiableWindow(t *testing.T) {
+	unverifiable := syscall.Handle(0x1000)
+	owned := syscall.Handle(0x2000)
+	sequence := []syscall.Handle{unverifiable, owned, 0}
+	index := 0
+	got, err := firstOwnedWindow(
+		"lhcontrol.exe",
+		func(syscall.Handle) (syscall.Handle, error) {
+			value := sequence[index]
+			index++
+			return value, nil
+		},
+		func(hwnd syscall.Handle) (string, error) {
+			if hwnd == unverifiable {
+				return "", fmt.Errorf("open process: access denied")
+			}
+			return "lhcontrol.exe", nil
+		},
+	)
+	if err != nil || got != owned {
+		t.Fatalf("firstOwnedWindow() = (%v, %v), want (%v, nil)", got, err, owned)
+	}
+}
+
 // TestFirstOwnedWindowFallsBackToTitleMatchWhenOwnerDiffers covers a running
 // instance whose executable base name differs from the second launch (wails
 // dev build next to an installed copy, or a renamed portable exe). The

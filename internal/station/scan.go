@@ -56,7 +56,6 @@ func (m *Manager) beginScanContext(ctx context.Context, callbacks ScanCallbacks)
 		err = bluetooth.ErrScanCancelled
 	}
 	m.abortScanStart(lifecycle, err, cancelled, operationAcquired)
-	m.clearScanLifecycle(lifecycle)
 	return err
 }
 func (m *Manager) reserveScan(parent context.Context) (*scanLifecycle, error) {
@@ -158,19 +157,16 @@ func (m *Manager) abortScanStart(lifecycle *scanLifecycle, err error, cancelled,
 	} else {
 		m.markScanFinished(0, err)
 	}
-	close(lifecycle.done)
-}
-func (m *Manager) clearScanLifecycle(lifecycle *scanLifecycle) {
+	// Release the scan slot together with the terminal state: StopScan waiters
+	// observe lifecycle.done from inside this critical section, so they must
+	// never return while a new scan still sees a non-nil lifecycle.
 	m.scanLifecycleMutex.Lock()
 	if m.scanLifecycle == lifecycle {
 		m.scanLifecycle = nil
 	}
 	m.scanLifecycleMutex.Unlock()
-	// Release the scan's context tree on every terminal path. StopScan and
-	// BeginShutdown already cancel it, but a scan that completes on its own
-	// would otherwise leave the derived context (and anything attached to it)
-	// alive for the lifetime of the parent. Cancel is idempotent.
 	lifecycle.cancel()
+	close(lifecycle.done)
 }
 func (m *Manager) finishScan(found int, err error, callbacks ScanCallbacks) func() {
 	m.scanTransitionMutex.Lock()
@@ -179,8 +175,18 @@ func (m *Manager) finishScan(found int, err error, callbacks ScanCallbacks) func
 	m.markScanFinished(found, err)
 	m.scanLifecycleMutex.Lock()
 	lifecycle := m.scanLifecycle
+	if lifecycle != nil {
+		// Release the scan slot together with the terminal state: StopScan
+		// waiters observe lifecycle.done from inside this critical section, so
+		// they must never return while a new scan still sees a non-nil
+		// lifecycle even though GetScanStatus already reports a terminal
+		// state. The terminal callbacks below still wait for Started, but a
+		// slow Started callback can no longer wedge later scans.
+		m.scanLifecycle = nil
+	}
 	m.scanLifecycleMutex.Unlock()
 	if lifecycle != nil {
+		lifecycle.cancel()
 		close(lifecycle.done)
 	}
 	m.scanTransitionMutex.Unlock()
@@ -189,15 +195,10 @@ func (m *Manager) finishScan(found int, err error, callbacks ScanCallbacks) func
 	}
 	statusID := lifecycle.statusID
 	return func() {
-		// StartScan begins scan processing before delivering Started. Keep terminal
-		// notifications behind that callback without making processing wait for it.
+		// StartScan begins scan processing before delivering Started. Keep
+		// terminal notifications behind that callback without making the slot
+		// release (already done above) or processing wait for it.
 		<-lifecycle.startedDone
-		// Release the scan slot before running terminal callbacks: the scan is
-		// already in a terminal state at this point, and holding the lifecycle
-		// while callbacks execute would make new scans fail with Busy even
-		// though GetScanStatus reports completed/failed/cancelled. A callback
-		// that hangs can then no longer wedge every later scan on this manager.
-		m.clearScanLifecycle(lifecycle)
 		if errors.Is(err, bluetooth.ErrScanCancelled) || errors.Is(err, context.Canceled) {
 			if callbacks.Cancelled != nil {
 				if callbackErr := runSafely("scan cancelled callback", func() error {
@@ -696,10 +697,11 @@ func (m *Manager) StartScan(callbacks ScanCallbacks) error {
 			m.abortScanStart(lifecycle, prepareErr, cancelled, operationAcquired)
 			m.asyncScanWg.Done()
 			defer m.scanCallbackWg.Done()
+			// The slot was released with the terminal state in abortScanStart.
+			// Keep the terminal notification behind the Started callback so
+			// ordering holds even though a slow callback can no longer wedge
+			// the next scan.
 			<-lifecycle.startedDone
-			// Same rule as finishScan: release the slot before delivering
-			// callbacks so a slow callback cannot block the next scan.
-			m.clearScanLifecycle(lifecycle)
 			m.deliverAbortedScanCallback(lifecycle.statusID, prepareErr, cancelled, callbacks)
 			return
 		}

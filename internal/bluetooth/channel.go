@@ -24,6 +24,11 @@ func IdentifyContext(ctx context.Context, station *BaseStation) error {
 			return contextErr
 		}
 		if err := connectAndDiscoverInternalContext(ctx, station); err != nil {
+			if isConnectNotStarted(err) {
+				// The attempt never started; keep the cached session and report
+				// the cancellation instead of tearing down before noticing it.
+				return err
+			}
 			lastErr = err
 		} else if !station.Capabilities.Identify || station.identifyCharacteristic == nil {
 			return unsupportedCapability("identify", nil)
@@ -95,6 +100,10 @@ func SetChannelContext(ctx context.Context, station *BaseStation, channel int) (
 		return result, err
 	}
 	if err := connectAndDiscoverInternalContext(ctx, station); err != nil {
+		if isConnectNotStarted(err) {
+			// The request never started; the healthy session stays intact.
+			return result, err
+		}
 		// Cancellation during discovery leaves the session connected;
 		// disconnect so the station is not left holding a live GATT session
 		// (idempotent when discovery already cleaned up).
