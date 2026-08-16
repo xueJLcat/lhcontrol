@@ -103,6 +103,15 @@ func (c *Config) loadLocked(configFilePath string) error {
 	if loaded.RenamedStations == nil {
 		loaded.RenamedStations = make(map[string]string)
 	}
+	// A legacy alias whose value is empty is a leftover from an external or
+	// hand edit; the setter treats an empty name as a removal. Dropping such
+	// entries here keeps the getter from returning ("", true), which would
+	// otherwise blank the station's display name.
+	for originalName, renamedName := range loaded.RenamedStations {
+		if renamedName == "" {
+			delete(loaded.RenamedStations, originalName)
+		}
+	}
 	if loaded.RenamedStationsByAddress == nil {
 		loaded.RenamedStationsByAddress = make(map[string]string)
 	}

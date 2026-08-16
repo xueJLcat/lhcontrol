@@ -1418,3 +1418,31 @@ func TestLoadSanitizesUnknownLanguage(t *testing.T) {
 		t.Fatalf("unknown persisted language = %q, want system default marker", got)
 	}
 }
+
+// TestLoadDropsEmptyLegacyAliases guards the load sanitization: the setter
+// treats an empty alias as a removal, but a hand-edited file can carry
+// {"LHB-X":""}. Loading it verbatim would make GetStationDisplayName return
+// ("", true) and blank the station's display name; the entry is dropped
+// instead, matching the setter's delete-on-empty semantics.
+func TestLoadDropsEmptyLegacyAliases(t *testing.T) {
+	configRoot := t.TempDir()
+	t.Setenv("AppData", configRoot)
+	configDirectory := filepath.Join(configRoot, "lhcontrol")
+	if err := os.MkdirAll(configDirectory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	seed := `{"renamedStations":{"LHB-EMPTY":"","LHB-KEPT":"Named"}}`
+	if err := os.WriteFile(filepath.Join(configDirectory, "config.json"), []byte(seed), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := NewConfig()
+	if err := cfg.Load(); err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if name, ok := cfg.GetStationDisplayName("AA:BB:CC:DD:EE:01", "LHB-EMPTY"); ok {
+		t.Fatalf("empty legacy alias loaded as %q,%v, want the tombstone treated as absent", name, ok)
+	}
+	if name, ok := cfg.GetStationDisplayName("AA:BB:CC:DD:EE:02", "LHB-KEPT"); !ok || name != "Named" {
+		t.Fatalf("valid legacy alias = %q,%v, want Named,true", name, ok)
+	}
+}
