@@ -285,15 +285,28 @@ func (m *Manager) releaseStationsForScan(ctx context.Context) (map[string]struct
 	m.stationsMutex.RUnlock()
 	releaseErrors := make([]error, 0)
 	unreliablePresence := make(map[string]struct{})
-	for _, stationPtr := range connectedStations {
+	for index, stationPtr := range connectedStations {
 		if err := scanContextError(ctx); err != nil {
 			return nil, err
 		}
 		address := stationPtr.Snapshot().Address
-		if releaseErr := m.releaseStationForScanBounded(stationPtr); releaseErr != nil {
-			m.observeBluetoothError(releaseErr)
-			releaseErrors = append(releaseErrors, fmt.Errorf("%s: %w", address, releaseErr))
-			unreliablePresence[strings.ToLower(address)] = struct{}{}
+		releaseErr := m.releaseStationForScanBounded(stationPtr)
+		if releaseErr == nil {
+			continue
+		}
+		m.observeBluetoothError(releaseErr)
+		releaseErrors = append(releaseErrors, fmt.Errorf("%s: %w", address, releaseErr))
+		unreliablePresence[strings.ToLower(address)] = struct{}{}
+		if bluetooth.IsAdapterUnavailable(releaseErr) {
+			// The adapter itself is gone: every remaining cached connection
+			// would pay the same bounded cleanup for the same outcome. Mark
+			// the rest of the fleet unreliable (presence uncertain) and stop
+			// issuing releases; recovery re-reads them once the adapter
+			// returns.
+			for _, remaining := range connectedStations[index+1:] {
+				unreliablePresence[strings.ToLower(remaining.Snapshot().Address)] = struct{}{}
+			}
+			break
 		}
 	}
 	if len(releaseErrors) > 0 {
@@ -397,6 +410,13 @@ type initialScanReadResult struct {
 	station               *bluetooth.BaseStation
 	err                   error
 	phaseDeadlineExceeded bool
+	// cancelSkipped marks a read whose only outcome was the scan's own
+	// cancellation. The station was never read, so it must not be booked as a
+	// success (no failure to clear), a failure, or a pending recovery: a
+	// user-cancelled scan stays clean instead of emitting warnings and
+	// background reads for work that never ran. Real transport failures and
+	// phase deadlines are classified separately and keep their handling.
+	cancelSkipped bool
 }
 
 // runInitialScanReads reads initial power/channel values for freshly seen
@@ -452,11 +472,30 @@ func (m *Manager) runInitialScanReads(ctx context.Context, stationsToFetch []*bl
 		}(index, stationToFetch)
 	}
 	wg.Wait()
-	if err := scanContextError(ctx); err != nil {
-		return err
+	interrupted := scanContextError(ctx)
+	if interrupted != nil {
+		// The discovery results were already merged into the fleet before the
+		// phase stopped, so the read outcomes are still booked even though the
+		// scan was cancelled. A read that only observed the cancellation itself
+		// (the gate, the pre-read guard, or an in-flight read torn down by the
+		// stop) is a pure interruption and stays clean: no warning, no failure,
+		// no recovery, matching a user-cancelled scan's contract. A read that
+		// hit a genuine transport fault before the stop landed keeps its real
+		// error so the disconnect/backoff bookkeeping below still runs instead
+		// of being silently dropped along with the interruption.
+		for index := range readResults {
+			result := &readResults[index]
+			if result.err == nil || result.phaseDeadlineExceeded {
+				continue
+			}
+			if errors.Is(result.err, bluetooth.ErrScanCancelled) || isPureContextError(result.err) {
+				result.err = nil
+				result.cancelSkipped = true
+			}
+		}
 	}
 	m.recordInitialScanReadResults(readResults)
-	return nil
+	return interrupted
 }
 
 // recordInitialScanReadResults classifies each initial read outcome: success
@@ -469,6 +508,9 @@ func (m *Manager) recordInitialScanReadResults(readResults []initialScanReadResu
 	})
 	readErrors := make([]error, 0)
 	for _, result := range readResults {
+		if result.cancelSkipped {
+			continue
+		}
 		if result.err == nil {
 			m.clearStatusFailure(result.address)
 			continue

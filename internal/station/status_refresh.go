@@ -64,7 +64,12 @@ func (m *Manager) CheckAllStationStatuses() ([]StationInfo, error) {
 	refreshContext, cancelRefresh := context.WithTimeout(m.lifecycleContext, m.statusRefreshTimeoutDuration())
 	defer cancelRefresh()
 	statusDone := m.beginStatusLifecycle(cancelRefresh)
-	defer m.endStatusLifecycle(statusDone)
+	endStatusLifecycleNow := true
+	defer func() {
+		if endStatusLifecycleNow {
+			m.endStatusLifecycle(statusDone)
+		}
+	}()
 	if err := m.beginSharedOperation(); err != nil {
 		return m.GetStationInfo(), err
 	}
@@ -147,6 +152,18 @@ dispatch:
 			m.ensureStatusRecoveryTracked(address)
 		}
 		m.scheduleStatusRecovery()
+		// The abandoned worker still holds the shared read lock and a GATT
+		// slot. Keep this refresh's lifecycle done channel open until the
+		// worker releases them so an exclusive foreground operation (scan or
+		// bulk) that starts meanwhile can drain on the channel instead of
+		// observing a nil channel and returning an immediate, non-waiting
+		// Busy for as long as the OS call stays wedged. The synchronous
+		// lifecycle end is skipped by the flag checked in the deferred end.
+		endStatusLifecycleNow = false
+		go func() {
+			<-joined
+			m.abandonStatusLifecycle(statusDone)
+		}()
 		return m.GetStationInfo(), fmt.Errorf("status refresh did not finish within %s: %w", joinLimit, ErrOperationInProgress)
 	}
 	// Start newly discovered disconnect recovery only after foreground status

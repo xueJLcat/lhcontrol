@@ -186,6 +186,21 @@ func (m *Manager) endStatusLifecycle(done chan struct{}) {
 	m.statusLifecycleMutex.Unlock()
 }
 
+// abandonStatusLifecycle closes one abandoned refresh's done channel when its
+// last worker releases the shared read lock, clearing the manager reference
+// only when no newer refresh replaced it. Unlike endStatusLifecycle it always
+// closes the channel: a foreground operation that captured it before a newer
+// refresh published its own must still be released by the abandoned worker.
+func (m *Manager) abandonStatusLifecycle(done chan struct{}) {
+	m.statusLifecycleMutex.Lock()
+	if m.statusOperationDone == done {
+		m.statusOperationDone = nil
+		m.cancelStatusOperation = nil
+	}
+	close(done)
+	m.statusLifecycleMutex.Unlock()
+}
+
 // beginSharedOperation participates in shutdown and excludes global operations
 // without consuming a GATT slot. It is used for short configuration writes.
 func (m *Manager) beginSharedOperation() error {

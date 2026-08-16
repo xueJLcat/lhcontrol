@@ -263,6 +263,7 @@ type Manager struct {
 	shuttingDown            atomic.Bool
 	shutdownOnce            sync.Once
 	shutdownCh              chan struct{}
+	shutdownDraining        chan struct{}
 	lifecycleContext        context.Context
 	cancelLifecycle         context.CancelFunc
 	lifecycleMutex          sync.Mutex

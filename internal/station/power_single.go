@@ -103,7 +103,7 @@ func (m *Manager) SetStationPower(address, state string) (PowerActionResult, err
 				return PowerActionResult{}, ErrShuttingDown
 			}
 			m.observeStationBluetoothError(stationPtr, canonicalAddress, err)
-			return PowerActionResult{}, err
+			return PowerActionResult{}, m.stationOperationContextError(err)
 		}
 	}
 	// Capability discovery can take long enough for a power notification to

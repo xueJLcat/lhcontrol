@@ -583,3 +583,75 @@ func TestMalformedReadValueDoesNotDisconnectOrScheduleRecovery(t *testing.T) {
 		t.Fatalf("disconnects after unstructured value error = %d, want 0", disconnects.Load())
 	}
 }
+
+// TestCancelledScanStillBooksRealInitialReadFailures guards the cancellation
+// bookkeeping: when a scan's initial-read phase is cancelled, a station whose
+// read hit a genuine transport fault (joined with the cancellation) must keep
+// its disconnect/backoff handling, and a read that only saw the cancellation
+// must stay clean. Dropping the outcomes together left a failed station
+// disconnected from its recovery path.
+func TestCancelledScanStillBooksRealInitialReadFailures(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	manager.statusRecoveryStart.Do(func() {})
+
+	failedAddress := "11:22:33:44:55:A1"
+	pendingAddress := "11:22:33:44:55:A2"
+	transportErr := errors.New("gatt read failed")
+	var disconnects atomic.Int32
+	manager.bluetoothOps.disconnectStation = func(*internalbluetooth.BaseStation) error {
+		disconnects.Add(1)
+		return nil
+	}
+	manager.bluetoothOps.scanForDurationContext = func(context.Context, time.Duration) ([]internalbluetooth.DiscoveredStation, error) {
+		return []internalbluetooth.DiscoveredStation{
+			{Name: "LHB-FAILED", Address: mustAddress(t, failedAddress)},
+			{Name: "LHB-PENDING", Address: mustAddress(t, pendingAddress)},
+		}, nil
+	}
+	readStarted := make(chan struct{})
+	manager.bluetoothOps.fetchInitialPowerState = func(ctx context.Context, station *internalbluetooth.BaseStation) error {
+		if station.Address.String() == failedAddress {
+			close(readStarted)
+			return errors.Join(transportErr, context.Canceled)
+		}
+		<-readStarted
+		<-ctx.Done()
+		return ctx.Err()
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := manager.ScanAndFetchStationsContext(ctx)
+		done <- err
+	}()
+	select {
+	case <-readStarted:
+	case <-time.After(time.Second):
+		t.Fatal("initial read did not start")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, internalbluetooth.ErrScanCancelled) {
+			t.Fatalf("cancelled scan error = %v, want ErrScanCancelled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cancelled scan did not return promptly")
+	}
+
+	if disconnects.Load() == 0 {
+		t.Fatal("real transport failure during a cancelled scan was not disconnected")
+	}
+	manager.statusRetryMutex.Lock()
+	_, failedTracked := manager.statusRetries[failedAddress]
+	_, pendingTracked := manager.statusRetries[pendingAddress]
+	manager.statusRetryMutex.Unlock()
+	if !failedTracked {
+		t.Fatal("real transport failure during a cancelled scan was not scheduled for recovery")
+	}
+	if pendingTracked {
+		t.Fatal("purely cancelled read scheduled recovery instead of staying clean")
+	}
+}

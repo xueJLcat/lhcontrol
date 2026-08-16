@@ -124,12 +124,15 @@ func (m *Manager) SetAllStationsPowerDetailedContext(ctx context.Context, state 
 		}
 		// Cancellation can occur before worker goroutines start (for example
 		// while the adapter is being initialized) or before candidates are
-		// enumerated at all. Backfill the known fleet in that case and then
-		// complete every untouched entry so callers never receive ambiguous
-		// zero-value station results or an empty result list.
+		// enumerated at all. Backfill through the same candidate pipeline the
+		// normal path uses so the pre-work entries carry stations' snapshots
+		// and the same selection semantics (booting skips, display names,
+		// deterministic order) instead of a raw list of every known station.
 		if len(result.Results) == 0 {
-			for _, info := range m.GetStationInfo() {
-				result.Results = append(result.Results, BulkPowerStationResult{Address: info.Address, Name: info.Name})
+			if backfillTarget, backfillErr := bluetooth.ParsePowerTarget(state); backfillErr == nil {
+				backfilled, _ := m.seedBulkPowerResults(m.selectBulkPowerCandidates(), backfillTarget, time.Now())
+				result.Results = backfilled.Results
+				m.attachBulkPowerStationInfos(result.Results)
 			}
 		}
 		for index := range result.Results {

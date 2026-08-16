@@ -94,7 +94,7 @@ func (m *Manager) SetStationChannel(
 				return result, ErrShuttingDown
 			}
 			m.observeStationBluetoothError(stationPtr, canonicalAddress, err)
-			return result, err
+			return result, m.stationOperationContextError(err)
 		}
 	}
 	targetSnapshot = stationPtr.Snapshot()
@@ -166,7 +166,15 @@ func (m *Manager) SetStationChannel(
 	// The conflict check above can take several seconds; a boot transition
 	// landing in that window must still block the write, matching the guard
 	// before the capability refresh and the power paths' pre-write re-check.
-	if isFreshBootingPower(stationPtr.Snapshot(), time.Now()) {
+	// Presence can also be reclassified inside the same window (the miss
+	// threshold is applied from settings while no scan runs), so re-run the
+	// entry presence gate instead of writing to a station the fleet already
+	// considers absent.
+	recheckSnapshot := stationPtr.Snapshot()
+	if !recheckSnapshot.Present || recheckSnapshot.MissedScans > 0 || recheckSnapshot.PresenceUncertain {
+		return result, fmt.Errorf("%w: station %s was not seen in the latest scan", ErrNotFound, address)
+	}
+	if isFreshBootingPower(recheckSnapshot, time.Now()) {
 		return result, fmt.Errorf(
 			"station is booting; retry channel change after transition: %w",
 			ErrStationTransitioning,

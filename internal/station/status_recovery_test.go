@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -398,6 +399,57 @@ func TestStatusRefreshAbandonsWedgedWorker(t *testing.T) {
 	if !tracked || retry.kinds&statusRetryRefresh == 0 {
 		t.Fatalf("abandoned status retry = %+v, tracked=%v; want a refresh retry", retry, tracked)
 	}
+}
+
+// TestStatusRefreshAbandonKeepsDrainChannel guards the abandoned-worker
+// lifecycle: while the wedged worker still holds the shared read lock, the
+// refresh's done channel must stay published so an exclusive foreground
+// operation (scan or bulk) can wait on it instead of receiving an immediate
+// Busy with nothing to drain, and it must close when the worker finishes.
+func TestStatusRefreshAbandonKeepsDrainChannel(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	manager.statusRecoveryStart.Do(func() {})
+	manager.statusReadTimeout = time.Hour
+	manager.statusRefreshTimeout = time.Hour
+	manager.statusRefreshJoinWait = 20 * time.Millisecond
+	address := "11:22:33:44:55:79"
+	manager.stations[address] = &internalbluetooth.BaseStation{
+		Name: "LHB-WEDGED", Address: mustAddress(t, address), Present: true,
+	}
+	manager.bluetoothOps.stationConnected = func(*internalbluetooth.BaseStation) bool { return true }
+	release := make(chan struct{})
+	releaseOnce := sync.Once{}
+	releaseWorker := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseWorker()
+	manager.bluetoothOps.readPowerStateContext = func(context.Context, *internalbluetooth.BaseStation) error {
+		<-release
+		return nil
+	}
+
+	if _, err := manager.CheckAllStationStatuses(); !errors.Is(err, ErrOperationInProgress) {
+		t.Fatalf("CheckAllStationStatuses() error = %v, want a retryable busy error", err)
+	}
+	backgroundDone, err := manager.attemptForegroundGlobalOperation(context.Background())
+	if err != nil {
+		t.Fatalf("foreground acquisition after abandon error = %v, want a drain channel", err)
+	}
+	if backgroundDone == nil {
+		t.Fatal("foreground acquisition after abandon returned no drain channel; the exclusive operation would get an immediate non-waiting Busy")
+	}
+
+	releaseWorker()
+	select {
+	case <-backgroundDone:
+	case <-time.After(time.Second):
+		t.Fatal("abandoned worker finishing did not close the drain channel")
+	}
+	// With the worker gone the acquisition must succeed immediately.
+	backgroundDone, err = manager.attemptForegroundGlobalOperation(context.Background())
+	if err != nil || backgroundDone != nil {
+		t.Fatalf("foreground acquisition after drain = (%v, %v), want acquired", backgroundDone, err)
+	}
+	manager.endForegroundGlobalOperation()
 }
 
 func TestStatusCheckLeavesOneSlotForForegroundWork(t *testing.T) {

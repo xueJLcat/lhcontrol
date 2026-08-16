@@ -92,27 +92,18 @@ const shutdownDrainLimit = 60 * time.Second
 
 func (m *Manager) Shutdown() {
 	m.BeginShutdown()
-	drained := make(chan struct{})
-	go func() {
-		defer close(drained)
-		if err := m.StopScan(); err != nil {
-			log.Printf("Bluetooth scan cancellation was incomplete: %v", err)
-		}
-		m.statusRecoveryWg.Wait()
-		m.lifecycleMutex.Lock()
-		for m.activeOperations > 0 {
-			m.lifecycleCond.Wait()
-		}
-		m.lifecycleMutex.Unlock()
-		m.asyncScanWg.Wait()
-		// scanCallbackWg is intentionally not awaited: shutdown may itself be
-		// invoked from a scan callback, so waiting for callbacks would
-		// self-deadlock. Event emissions are guarded by the caller's shutdown
-		// flag instead.
-		if err := bluetooth.DisconnectAllStations(); err != nil {
-			log.Printf("Bluetooth shutdown cleanup was incomplete: %v", err)
-		}
-	}()
+	m.lifecycleMutex.Lock()
+	if m.shutdownDraining == nil {
+		// BeginShutdown is already idempotent, but the drain itself is not: a
+		// second caller (desktop exit plus an API-triggered shutdown, or a
+		// repeated call) would otherwise run a concurrent fleet disconnect
+		// alongside the first drain. Publish one shared done channel and let
+		// every caller wait on the single drain.
+		m.shutdownDraining = make(chan struct{})
+		go m.runShutdownDrain(m.shutdownDraining)
+	}
+	drained := m.shutdownDraining
+	m.lifecycleMutex.Unlock()
 	limit := m.shutdownDrainTimeout
 	if limit <= 0 {
 		limit = shutdownDrainLimit
@@ -123,5 +114,29 @@ func (m *Manager) Shutdown() {
 	case <-drained:
 	case <-drainTimer.C:
 		log.Printf("Bluetooth shutdown drain exceeded %s; exiting without complete cleanup", limit)
+	}
+}
+
+// runShutdownDrain performs the ordered shutdown cleanup exactly once and
+// closes done when finished. It is started under the lifecycle lock by the
+// first Shutdown caller; later callers wait on the same done channel.
+func (m *Manager) runShutdownDrain(done chan struct{}) {
+	defer close(done)
+	if err := m.StopScan(); err != nil {
+		log.Printf("Bluetooth scan cancellation was incomplete: %v", err)
+	}
+	m.statusRecoveryWg.Wait()
+	m.lifecycleMutex.Lock()
+	for m.activeOperations > 0 {
+		m.lifecycleCond.Wait()
+	}
+	m.lifecycleMutex.Unlock()
+	m.asyncScanWg.Wait()
+	// scanCallbackWg is intentionally not awaited: shutdown may itself be
+	// invoked from a scan callback, so waiting for callbacks would
+	// self-deadlock. Event emissions are guarded by the caller's shutdown
+	// flag instead.
+	if err := bluetooth.DisconnectAllStations(); err != nil {
+		log.Printf("Bluetooth shutdown cleanup was incomplete: %v", err)
 	}
 }

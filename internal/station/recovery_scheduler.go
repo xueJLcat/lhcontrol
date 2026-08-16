@@ -242,6 +242,14 @@ func (m *Manager) runStatusRecoveryRound() time.Duration {
 	if m.isScanning.Load() {
 		return m.statusBusyRetry
 	}
+	// While an exclusive global operation (a bulk power batch) holds the
+	// write lock, every station-slot acquisition in this round fails Busy
+	// immediately. Back off eight times the per-station busy retry instead
+	// of re-copying the retry table and the fleet snapshot four times a
+	// second for the whole batch window.
+	if m.IsBusy() {
+		return 8 * m.statusBusyRetry
+	}
 	now := time.Now()
 	type recoveryCandidate struct {
 		station *bluetooth.BaseStation

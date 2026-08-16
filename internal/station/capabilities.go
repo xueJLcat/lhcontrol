@@ -46,7 +46,7 @@ func (m *Manager) IdentifyStation(address string) error {
 				return ErrShuttingDown
 			}
 			m.observeStationBluetoothError(stationPtr, canonicalAddress, err)
-			return err
+			return m.stationOperationContextError(err)
 		}
 	}
 	if !capabilities.Identify {

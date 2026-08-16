@@ -684,10 +684,21 @@ func (m *Manager) markBluetoothUnavailable(err error) {
 		return
 	}
 	m.initializeMutex.Lock()
+	// Debounce: an adapter loss marks every operation that observes it (a
+	// scan release loop reports one per failing station). While the cooldown
+	// from the first mark is still pending, the adapter state cannot change
+	// — ensureReady refuses re-initialization until nextInitializeAt — so the
+	// fleet-wide cleanup already issued for that loss must not be re-issued
+	// for every subsequent observer (each copy pays the same bounded wait).
+	alreadyMarked := bluetooth.IsAdapterUnavailable(m.initializeErr) && time.Now().Before(m.nextInitializeAt)
 	m.initializeErr = err
 	m.initializeFailedAt = time.Now()
 	m.nextInitializeAt = m.initializeFailedAt.Add(m.initializeRetryCooldown())
 	m.initializeMutex.Unlock()
+	if alreadyMarked {
+		m.wakeStatusRecovery()
+		return
+	}
 	// Run the contextless fleet cleanup with the same bounded wait as every
 	// other adapter cleanup: adapter loss is exactly when WinRT disconnect
 	// calls are most likely to stall, and this path is invoked synchronously
