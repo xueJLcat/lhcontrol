@@ -555,3 +555,130 @@ func TestChannelChangeRevalidatesPresenceAfterCapabilityRefresh(t *testing.T) {
 		t.Fatalf("channel writes = %d, want 0", got)
 	}
 }
+
+// TestSetStationChannelRejectsConcurrentChannelWrite guards the channel-write
+// mutual exclusion: a second channel change while the first still holds the
+// channel-operation lock must fail fast with Busy instead of double-writing.
+func TestSetStationChannelRejectsConcurrentChannelWrite(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	address := "11:22:33:44:55:82"
+	manager.stations[address] = &internalbluetooth.BaseStation{
+		Name:              "LHB-CH-LOCK",
+		Address:           mustAddress(t, address),
+		Channel:           3,
+		Present:           true,
+		LastSeenAt:        time.Now(),
+		LastChannelReadAt: time.Now(),
+		Capabilities:      internalbluetooth.Capabilities{ChannelRead: true, ChannelWrite: true},
+	}
+	manager.channelOperationMutex.Lock()
+	defer manager.channelOperationMutex.Unlock()
+
+	_, err := manager.SetStationChannel(address, 5, false)
+	if !errors.Is(err, ErrOperationInProgress) {
+		t.Fatalf("SetStationChannel() error = %v, want ErrOperationInProgress", err)
+	}
+}
+
+// TestSetStationChannelUnsupportedAfterRefresh covers the path where a
+// capability refresh still reports no read/write support: the change must be
+// rejected as unsupported rather than writing blindly.
+func TestSetStationChannelUnsupportedAfterRefresh(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	address := "11:22:33:44:55:83"
+	manager.stations[address] = &internalbluetooth.BaseStation{
+		Name:              "LHB-NO-CHANNEL",
+		Address:           mustAddress(t, address),
+		Channel:           3,
+		Present:           true,
+		LastSeenAt:        time.Now(),
+		LastChannelReadAt: time.Now(),
+		Capabilities:      internalbluetooth.Capabilities{},
+	}
+	manager.bluetoothOps.refreshCapabilities = func(context.Context, *internalbluetooth.BaseStation) (internalbluetooth.Capabilities, error) {
+		return internalbluetooth.Capabilities{}, nil
+	}
+	var writes atomic.Int32
+	manager.bluetoothOps.setChannel = func(context.Context, *internalbluetooth.BaseStation, int) (internalbluetooth.ChannelWriteResult, error) {
+		writes.Add(1)
+		return internalbluetooth.ChannelWriteResult{}, nil
+	}
+
+	_, err := manager.SetStationChannel(address, 5, false)
+	if !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("SetStationChannel() error = %v, want ErrUnsupported", err)
+	}
+	if got := writes.Load(); got != 0 {
+		t.Fatalf("channel writes = %d, want 0", got)
+	}
+}
+
+// TestSetStationChannelUnknownChannelRisk covers the unknown-channel safety
+// gate: a visible station whose channel is unknown blocks the change unless
+// the caller explicitly accepts the risk, in which case a warning is attached.
+func TestSetStationChannelUnknownChannelRisk(t *testing.T) {
+	newManager := func(t *testing.T) *Manager {
+		manager := NewManager(config.NewConfig())
+		now := time.Now()
+		manager.stations["target"] = &internalbluetooth.BaseStation{
+			Name:              "LHB-TARGET",
+			Address:           mustAddress(t, "11:22:33:44:55:84"),
+			Channel:           3,
+			Present:           true,
+			LastSeenAt:        now,
+			LastChannelReadAt: now,
+			Capabilities:      internalbluetooth.Capabilities{ChannelRead: true, ChannelWrite: true},
+		}
+		manager.stations["unknown"] = &internalbluetooth.BaseStation{
+			Name:              "LHB-UNKNOWN",
+			Address:           mustAddress(t, "22:22:33:44:55:84"),
+			Channel:           internalbluetooth.ChannelUnknown,
+			Present:           true,
+			LastSeenAt:        now,
+			LastChannelReadAt: now,
+		}
+		manager.bluetoothOps.setChannel = func(context.Context, *internalbluetooth.BaseStation, int) (internalbluetooth.ChannelWriteResult, error) {
+			return internalbluetooth.ChannelWriteResult{Channel: 7, CommandSent: true}, nil
+		}
+		return manager
+	}
+
+	manager := newManager(t)
+	if _, err := manager.SetStationChannel("target", 7, false); !errors.Is(err, ErrScanRequired) {
+		t.Fatalf("SetStationChannel() without risk acceptance error = %v, want ErrScanRequired", err)
+	}
+
+	manager = newManager(t)
+	result, err := manager.SetStationChannel("target", 7, true)
+	if err != nil {
+		t.Fatalf("SetStationChannel() with risk acceptance error = %v", err)
+	}
+	if len(result.Warnings) == 0 {
+		t.Fatal("risk-accepted channel change attached no warning")
+	}
+}
+
+// TestRenamedStationProjectsDisplayName verifies an address rename flows into
+// the projected station list end to end.
+func TestRenamedStationProjectsDisplayName(t *testing.T) {
+	t.Setenv("AppData", t.TempDir())
+	manager := NewManager(config.NewConfig())
+	address := "11:22:33:44:55:85"
+	manager.stations[address] = &internalbluetooth.BaseStation{
+		Name:    "LHB-ORIGINAL",
+		Address: mustAddress(t, address),
+		Present: true,
+	}
+	if err := manager.RenameStationByAddress(address, "Corner Lamp"); err != nil {
+		t.Fatalf("RenameStationByAddress() error = %v", err)
+	}
+	for _, info := range manager.GetStationInfo() {
+		if info.Address == address {
+			if info.Name != "Corner Lamp" || info.OriginalName != "LHB-ORIGINAL" {
+				t.Fatalf("projected station = name %q original %q, want Corner Lamp / LHB-ORIGINAL", info.Name, info.OriginalName)
+			}
+			return
+		}
+	}
+	t.Fatal("renamed station missing from projection")
+}

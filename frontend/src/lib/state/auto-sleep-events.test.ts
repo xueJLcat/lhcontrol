@@ -39,6 +39,32 @@ describe('AutoSleepEventCoordinator', () => {
     expect(pushToast).toHaveBeenCalledWith(message, 'warning');
   });
 
+  it('appends the extra skipped count to a timed-out sleep', () => {
+    const dependencies = {
+      isDisposed: vi.fn(() => false),
+      setRunning: vi.fn(),
+      beginStatusOperation: vi.fn(),
+      setStatusMessage: vi.fn(),
+      applyStations: vi.fn(),
+      foregroundOwnsStatusLine: vi.fn(() => false)
+    };
+    const coordinator = new AutoSleepEventCoordinator(dependencies);
+
+    coordinator.handle({
+      phase: 'timed-out',
+      timedOut: true,
+      success: 1,
+      unconfirmed: 0,
+      failed: 0,
+      skipped: 2,
+      timedOutSkipped: 1
+    });
+
+    expect(dependencies.setStatusMessage).toHaveBeenCalledWith(
+      'Auto sleep timed out: 1 confirmed, 0 unconfirmed, 0 failed, 1 skipped due to timeout. 2 more skipped.'
+    );
+  });
+
   it('keeps an older draining action locked without letting its terminal event overwrite a replacement', () => {
     const dependencies = {
       isDisposed: vi.fn(() => false),

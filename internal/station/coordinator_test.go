@@ -811,3 +811,21 @@ func TestBulkOperationRejectsScanStartedDuringDrainWait(t *testing.T) {
 	manager.isScanning.Store(false)
 	manager.scanTransitionMutex.Unlock()
 }
+
+// TestScanBlocksSharedAndStationOperations verifies the two foreground paths
+// that must reject work while a scan is running: a shared configuration
+// operation (rename/save) and a per-station command.
+func TestScanBlocksSharedAndStationOperations(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	manager.scanTransitionMutex.Lock()
+	manager.isScanning.Store(true)
+	manager.scanTransitionMutex.Unlock()
+
+	if err := manager.beginForegroundSharedOperation(); !errors.Is(err, ErrOperationInProgress) {
+		t.Fatalf("beginForegroundSharedOperation() during scan error = %v, want ErrOperationInProgress", err)
+	}
+	if err := manager.beginForegroundStationOperation("11:22:33:44:99:22"); !errors.Is(err, ErrOperationInProgress) {
+		t.Fatalf("beginForegroundStationOperation() during scan error = %v, want ErrOperationInProgress", err)
+	}
+}

@@ -679,6 +679,44 @@ describe('StationStore failure notifications', () => {
     expect(store.gattOperations.size).toBe(0);
   });
 
+  it('reports a successful identify and releases the busy flag', async () => {
+    backend.IdentifyStation.mockResolvedValue(undefined);
+    const { store } = mountStore();
+    await vi.waitFor(() => expect(store.stations).toHaveLength(1));
+    const station = store.stations[0];
+
+    await store.identify(station);
+
+    expect(backend.IdentifyStation).toHaveBeenCalledWith(station.address);
+    expect(store.statusMessage).toContain('Identify signal sent');
+    expect(store.gattOperations.size).toBe(0);
+  });
+
+  it('does not start an identify while the station is busy', async () => {
+    const { store } = mountStore();
+    await vi.waitFor(() => expect(store.stations).toHaveLength(1));
+    const station = store.stations[0];
+    store.setGattBusy(station.address, true);
+
+    await store.identify(station);
+
+    expect(backend.IdentifyStation).not.toHaveBeenCalled();
+    store.setGattBusy(station.address, false);
+  });
+
+  it('toasts a capability refresh failure and releases the busy flag', async () => {
+    backend.RefreshStationCapabilities.mockRejectedValue(new Error('discovery failed'));
+    const { store } = mountStore();
+    await vi.waitFor(() => expect(store.stations).toHaveLength(1));
+    const station = store.stations[0];
+
+    await store.refreshCapabilities(station);
+
+    expect(backend.RefreshStationCapabilities).toHaveBeenCalledWith(station.address);
+    expect(pushToast).toHaveBeenCalledWith(expect.stringContaining('Capability refresh failed'));
+    expect(store.gattOperations.size).toBe(0);
+  });
+
   it('toasts a rename failure even after a newer owner takes the status line', async () => {
     let rejectRename!: (reason: unknown) => void;
     backend.RenameStationByAddress.mockReturnValue(new Promise((_, reject) => { rejectRename = reject; }));

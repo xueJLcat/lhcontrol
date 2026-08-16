@@ -10,3 +10,6 @@ config.json
 .exe
 # Wails build artifact (Windows resource object), regenerated on every build.
 lhcontrol-res.syso
+# Coverage profiles produced by go test -coverprofile runs.
+*.out
+cov_*
