@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log"
+	"net"
 	"time"
 )
 
@@ -40,7 +42,12 @@ func (a *App) waitForAPIShutdown() {
 		select {
 		case err := <-fiberDone:
 			fiberDone = nil
-			if err != nil {
+			// Fiber's Shutdown closes every listener it ever served, including
+			// stale listeners from earlier address changes that the loop already
+			// closed itself. Closing an already-closed listener reports
+			// net.ErrClosed; that is a benign duplicate, not a shutdown failure,
+			// and logging it would mask a real error on every restart.
+			if err != nil && !errors.Is(err, net.ErrClosed) {
 				log.Printf("Error shutting down API server: %v", err)
 			}
 		case <-listenerDone:
