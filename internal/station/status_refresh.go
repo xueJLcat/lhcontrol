@@ -72,25 +72,7 @@ func (m *Manager) CheckAllStationStatuses() ([]StationInfo, error) {
 	if err := m.ensureReady(); err != nil {
 		return m.GetStationInfo(), err
 	}
-	stationsToRead := make([]*bluetooth.BaseStation, 0)
-	disconnectedAddresses := make([]string, 0)
-	m.stationsMutex.RLock()
-	for _, stationPtr := range m.stations {
-		if stationPtr == nil {
-			continue
-		}
-		snapshot := stationPtr.Snapshot()
-		if !snapshot.Present {
-			continue
-		}
-		if m.bluetoothOps.stationConnected(stationPtr) {
-			stationsToRead = append(stationsToRead, stationPtr)
-		} else {
-			disconnectedAddresses = append(disconnectedAddresses, snapshot.Address)
-		}
-	}
-	m.stationsMutex.RUnlock()
-	sort.Strings(disconnectedAddresses)
+	stationsToRead, disconnectedAddresses := m.selectStatusRefreshCandidates()
 	if len(stationsToRead) == 0 {
 		for _, address := range disconnectedAddresses {
 			m.ensureStatusRecoveryTracked(address)
@@ -117,87 +99,9 @@ func (m *Manager) CheckAllStationStatuses() ([]StationInfo, error) {
 		go func() {
 			defer wg.Done()
 			for item := range work {
-				ptr := item.station
-				address := ptr.Snapshot().Address
-				readContext, cancelRead := context.WithTimeout(refreshContext, m.statusReadTimeoutDuration())
-				// Distinguish this station's own read budget from the fleet-wide
-				// refresh deadline: only when the refresh deadline is the binding
-				// constraint is a deadline failure fleet-wide. Otherwise it must go
-				// through the structured per-station handling below so backoff and
-				// failure accounting still run.
-				readDeadline, hasReadDeadline := readContext.Deadline()
-				refreshDeadline, hasRefreshDeadline := refreshContext.Deadline()
-				ownBudget := hasReadDeadline && hasRefreshDeadline && readDeadline.Before(refreshDeadline)
-				if err := m.beginStationOperationKindContext(address, deviceOperationStatus, cancelRead); err != nil {
-					cancelRead()
-					if errors.Is(err, ErrOperationInProgress) {
-						m.trackStatusRefreshPending(address)
-						continue
-					}
-					statusErrors[item.index] = fmt.Errorf("%s: status read skipped: %w", address, err)
-					continue
+				if readErr := m.readStationStatus(refreshContext, item.station); readErr != nil {
+					statusErrors[item.index] = readErr
 				}
-				func() {
-					defer m.endStationOperation(address)
-					defer cancelRead()
-					workerErr := runSafely("station status worker", func() error {
-						return m.bluetoothOps.readPowerStateContext(readContext, ptr)
-					})
-					if workerErr != nil {
-						if m.shuttingDown.Load() && errors.Is(workerErr, context.Canceled) {
-							statusErrors[item.index] = fmt.Errorf("%s: status read cancelled: %w", address, workerErr)
-							return
-						}
-						if isPureContextError(workerErr) && errors.Is(workerErr, context.Canceled) &&
-							m.lifecycleContext.Err() == nil {
-							// Only an error made exclusively of context errors is a
-							// plain interruption: the bluetooth layer joins a real
-							// read failure with the cancelling context error, and
-							// that mixed outcome must take the failure path below.
-							m.trackStatusRefreshPending(address)
-							return
-						}
-						if !ownBudget && errors.Is(refreshContext.Err(), context.DeadlineExceeded) &&
-							errors.Is(workerErr, context.DeadlineExceeded) {
-							m.trackStatusRefreshPending(address)
-							statusErrors[item.index] = fmt.Errorf("%s: status refresh deadline exceeded: %w", address, workerErr)
-							return
-						}
-						m.observeBluetoothError(workerErr)
-						var readErr *bluetooth.StatusReadError
-						if errors.As(workerErr, &readErr) {
-							// A per-station read-budget deadline is not evidence the link
-							// is broken, matching recoverOneStation and the bluetooth
-							// RequiresReconnect rule. Back off and let the next refresh
-							// retry instead of disconnecting a possibly-healthy station.
-							if readErr.Power != nil &&
-								errors.Is(readErr.Power, context.DeadlineExceeded) &&
-								!bluetooth.RequiresReconnect(readErr.Power) {
-								m.noteStatusFailure(address)
-								m.trackStatusRefreshPending(address)
-								statusErrors[item.index] = fmt.Errorf("%s: status read deadline exceeded: %w", address, workerErr)
-								return
-							}
-							m.recordStructuredReadResult(ptr, address, readErr.Power, readErr.Channel)
-						} else if errors.Is(workerErr, context.DeadlineExceeded) &&
-							!bluetooth.RequiresReconnect(workerErr) {
-							// The context can expire just before ReadPowerStateContext
-							// starts, in which case it returns a bare deadline rather than
-							// a structured read error. Treat it like the structured power
-							// timeout above instead of disconnecting a healthy station.
-							m.noteStatusFailure(address)
-							m.trackStatusRefreshPending(address)
-						} else {
-							m.recordUnstructuredStationFailure(ptr, address, workerErr)
-						}
-						statusErrors[item.index] = fmt.Errorf("%s: %w", address, workerErr)
-					} else {
-						m.clearStatusFailureKind(
-							address,
-							statusRetryConnection|statusRetryChannel|statusRetryRefresh,
-						)
-					}
-				}()
 			}
 		}()
 	}
@@ -206,17 +110,7 @@ dispatch:
 		select {
 		case work <- statusReadWork{index: index, station: station}:
 		case <-refreshContext.Done():
-			for skippedIndex := index; skippedIndex < len(stationsToRead); skippedIndex++ {
-				address := stationsToRead[skippedIndex].Snapshot().Address
-				m.trackStatusRefreshPending(address)
-				if !errors.Is(refreshContext.Err(), context.Canceled) || m.lifecycleContext.Err() != nil {
-					stopDescription := "status refresh stopped"
-					if errors.Is(refreshContext.Err(), context.DeadlineExceeded) {
-						stopDescription = "status refresh deadline exceeded"
-					}
-					statusErrors[skippedIndex] = fmt.Errorf("%s: %s: %w", address, stopDescription, refreshContext.Err())
-				}
-			}
+			m.recordSkippedStatusReads(refreshContext, stationsToRead[index:], statusErrors[index:])
 			break dispatch
 		}
 	}
@@ -273,4 +167,128 @@ dispatch:
 		return statusInfos, fmt.Errorf("one or more station status reads were incomplete: %w", errors.Join(incomplete...))
 	}
 	return statusInfos, nil
+}
+
+// selectStatusRefreshCandidates splits present stations into connected
+// stations eligible for a status read and addresses first observed
+// disconnected, which need recovery tracking instead.
+func (m *Manager) selectStatusRefreshCandidates() ([]*bluetooth.BaseStation, []string) {
+	stationsToRead := make([]*bluetooth.BaseStation, 0)
+	disconnectedAddresses := make([]string, 0)
+	m.stationsMutex.RLock()
+	for _, stationPtr := range m.stations {
+		if stationPtr == nil {
+			continue
+		}
+		snapshot := stationPtr.Snapshot()
+		if !snapshot.Present {
+			continue
+		}
+		if m.bluetoothOps.stationConnected(stationPtr) {
+			stationsToRead = append(stationsToRead, stationPtr)
+		} else {
+			disconnectedAddresses = append(disconnectedAddresses, snapshot.Address)
+		}
+	}
+	m.stationsMutex.RUnlock()
+	sort.Strings(disconnectedAddresses)
+	return stationsToRead, disconnectedAddresses
+}
+
+// readStationStatus performs one station's refresh read and returns the
+// per-station error the caller should record, if any. Every failure shape
+// (busy slot, interruption, fleet deadline, per-station budget, transport
+// error) runs its own bookkeeping here so the dispatch loop stays flat.
+func (m *Manager) readStationStatus(refreshContext context.Context, stationPtr *bluetooth.BaseStation) error {
+	address := stationPtr.Snapshot().Address
+	readContext, cancelRead := context.WithTimeout(refreshContext, m.statusReadTimeoutDuration())
+	// Distinguish this station's own read budget from the fleet-wide
+	// refresh deadline: only when the refresh deadline is the binding
+	// constraint is a deadline failure fleet-wide. Otherwise it must go
+	// through the structured per-station handling below so backoff and
+	// failure accounting still run.
+	readDeadline, hasReadDeadline := readContext.Deadline()
+	refreshDeadline, hasRefreshDeadline := refreshContext.Deadline()
+	ownBudget := hasReadDeadline && hasRefreshDeadline && readDeadline.Before(refreshDeadline)
+	if err := m.beginStationOperationKindContext(address, deviceOperationStatus, cancelRead); err != nil {
+		cancelRead()
+		if errors.Is(err, ErrOperationInProgress) {
+			m.trackStatusRefreshPending(address)
+			return nil
+		}
+		return fmt.Errorf("%s: status read skipped: %w", address, err)
+	}
+	defer m.endStationOperation(address)
+	defer cancelRead()
+	workerErr := runSafely("station status worker", func() error {
+		return m.bluetoothOps.readPowerStateContext(readContext, stationPtr)
+	})
+	if workerErr == nil {
+		m.clearStatusFailureKind(
+			address,
+			statusRetryConnection|statusRetryChannel|statusRetryRefresh,
+		)
+		return nil
+	}
+	if m.shuttingDown.Load() && errors.Is(workerErr, context.Canceled) {
+		return fmt.Errorf("%s: status read cancelled: %w", address, workerErr)
+	}
+	if isPureContextError(workerErr) && errors.Is(workerErr, context.Canceled) &&
+		m.lifecycleContext.Err() == nil {
+		// Only an error made exclusively of context errors is a
+		// plain interruption: the bluetooth layer joins a real
+		// read failure with the cancelling context error, and
+		// that mixed outcome must take the failure path below.
+		m.trackStatusRefreshPending(address)
+		return nil
+	}
+	if !ownBudget && errors.Is(refreshContext.Err(), context.DeadlineExceeded) &&
+		errors.Is(workerErr, context.DeadlineExceeded) {
+		m.trackStatusRefreshPending(address)
+		return fmt.Errorf("%s: status refresh deadline exceeded: %w", address, workerErr)
+	}
+	m.observeBluetoothError(workerErr)
+	var readErr *bluetooth.StatusReadError
+	if errors.As(workerErr, &readErr) {
+		// A per-station read-budget deadline is not evidence the link
+		// is broken, matching recoverOneStation and the bluetooth
+		// RequiresReconnect rule. Back off and let the next refresh
+		// retry instead of disconnecting a possibly-healthy station.
+		if readErr.Power != nil &&
+			errors.Is(readErr.Power, context.DeadlineExceeded) &&
+			!bluetooth.RequiresReconnect(readErr.Power) {
+			m.noteStatusFailure(address)
+			m.trackStatusRefreshPending(address)
+			return fmt.Errorf("%s: status read deadline exceeded: %w", address, workerErr)
+		}
+		m.recordStructuredReadResult(stationPtr, address, readErr.Power, readErr.Channel)
+	} else if errors.Is(workerErr, context.DeadlineExceeded) &&
+		!bluetooth.RequiresReconnect(workerErr) {
+		// The context can expire just before ReadPowerStateContext
+		// starts, in which case it returns a bare deadline rather than
+		// a structured read error. Treat it like the structured power
+		// timeout above instead of disconnecting a healthy station.
+		m.noteStatusFailure(address)
+		m.trackStatusRefreshPending(address)
+	} else {
+		m.recordUnstructuredStationFailure(stationPtr, address, workerErr)
+	}
+	return fmt.Errorf("%s: %w", address, workerErr)
+}
+
+// recordSkippedStatusReads registers every station never dispatched because
+// the refresh context stopped, marking each for recovery and reporting the
+// stop unless a plain caller-side cancellation silenced the batch.
+func (m *Manager) recordSkippedStatusReads(refreshContext context.Context, skipped []*bluetooth.BaseStation, statusErrors []error) {
+	for offset, stationPtr := range skipped {
+		address := stationPtr.Snapshot().Address
+		m.trackStatusRefreshPending(address)
+		if !errors.Is(refreshContext.Err(), context.Canceled) || m.lifecycleContext.Err() != nil {
+			stopDescription := "status refresh stopped"
+			if errors.Is(refreshContext.Err(), context.DeadlineExceeded) {
+				stopDescription = "status refresh deadline exceeded"
+			}
+			statusErrors[offset] = fmt.Errorf("%s: %s: %w", address, stopDescription, refreshContext.Err())
+		}
+	}
 }
