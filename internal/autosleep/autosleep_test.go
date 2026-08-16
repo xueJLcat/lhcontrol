@@ -766,4 +766,47 @@ func TestWatcherStopsAfterConsecutiveCheckFailures(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("watcher did not stop after repeated process check failures")
 	}
+	// The self-stop must be observable: owners rely on Done/ExitErr to tell a
+	// watcher that gave up on its own apart from one they cancelled, so the
+	// feature can be rebuilt instead of staying silently disabled.
+	select {
+	case <-watcher.Done():
+	case <-time.After(time.Second):
+		t.Fatal("Done channel was not closed after the watcher stopped itself")
+	}
+	if err := watcher.ExitErr(); err == nil {
+		t.Fatal("ExitErr() = nil after a self-stop, want the failure reason")
+	}
+}
+
+// TestWatcherDoneClosesOnCancellation verifies that a watcher cancelled by its
+// owner also closes Done but reports no exit error, so owners can distinguish
+// a planned stop from a self-stop.
+func TestWatcherDoneClosesOnCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	watcher := &Watcher{
+		Settings:  Settings{Enabled: true, Target: string(TargetSteamVR), DelaySeconds: 60},
+		Interval:  time.Millisecond,
+		IsRunning: func(string) (bool, error) { return false, nil },
+		Trigger:   func(context.Context, time.Time) bool { return true },
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		watcher.Run(ctx)
+	}()
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("watcher did not stop after cancellation")
+	}
+	select {
+	case <-watcher.Done():
+	case <-time.After(time.Second):
+		t.Fatal("Done channel was not closed after cancellation")
+	}
+	if err := watcher.ExitErr(); err != nil {
+		t.Fatalf("ExitErr() = %v after a planned cancellation, want nil", err)
+	}
 }

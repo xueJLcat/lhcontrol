@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"time"
 
@@ -169,6 +170,53 @@ func (a *App) applyAutoSleep(settings autosleep.Settings) {
 		watcher.Run(ctx)
 
 	}()
+
+	a.autoSleepWG.Add(1)
+
+	go func() {
+
+		defer a.autoSleepWG.Done()
+
+		a.reapStoppedAutoSleepWatcher(watcher)
+
+	}()
+
+}
+
+// reapStoppedAutoSleepWatcher clears the runtime state when a watcher stopped
+// on its own (invalid target or persistent process-check failures) instead of
+// being cancelled by a settings replacement or shutdown. Without this the
+// stale watcher reference keeps autoSleepMatches reporting a healthy watcher,
+// so re-saving the same settings never rebuilds it and automatic sleep stays
+// silently disabled until the application restarts.
+func (a *App) reapStoppedAutoSleepWatcher(watcher *autosleep.Watcher) {
+
+	<-watcher.Done()
+
+	err := watcher.ExitErr()
+	if err == nil {
+		// Cancelled by a replacement or shutdown; that path already detached
+		// the watcher under autoSleepMutex.
+		return
+	}
+
+	a.autoSleepMutex.Lock()
+	cleared := a.autoSleepWatcher == watcher
+	if cleared {
+		log.Printf("Auto-sleep watcher stopped unexpectedly (%v); clearing it so re-applying settings restarts it", err)
+		a.autoSleepWatcher = nil
+		if a.autoSleepCancel != nil {
+			a.autoSleepCancel()
+			a.autoSleepCancel = nil
+		}
+	}
+	a.autoSleepMutex.Unlock()
+
+	// Surface the failure outside the lock; the event must not queue behind
+	// settings calls and the sink must not be able to deadlock on it.
+	if cleared {
+		a.emitAutoSleep(autoSleepEvent{Phase: "failed", Error: fmt.Sprintf("automatic sleep stopped watching: %v", err)})
+	}
 
 }
 

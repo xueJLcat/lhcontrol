@@ -2,6 +2,7 @@ package autosleep
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"sync"
 	"time"
@@ -55,6 +56,15 @@ type Watcher struct {
 	mutex             sync.Mutex
 	triggerOwed       bool
 	triggerGeneration uint64
+
+	// done closes when Run returns, for any reason. Owners observe it to tell
+	// a watcher that stopped on its own (invalid target, persistent
+	// process-check failures) apart from one that was cancelled by a
+	// replacement or shutdown; without that signal a self-stopped watcher
+	// keeps looks-alive checks passing and the feature never rebuilds.
+	done chan struct{}
+	// exitErr records why Run stopped; nil means the context was cancelled.
+	exitErr error
 }
 
 // ReplacementMonitor snapshots the complete watched-session state for a new
@@ -76,6 +86,41 @@ func (w *Watcher) ReplacementMonitor(delay time.Duration) *Monitor {
 	return monitor.replacement(delay, triggerOwed)
 }
 
+// Done returns a channel closed once Run returns, whether the context was
+// cancelled, the target was invalid, or the watcher stopped itself after too
+// many process-check failures. A watcher never restarts; the owner must apply
+// settings again to build a replacement.
+func (w *Watcher) Done() <-chan struct{} {
+	w.mutex.Lock()
+	defer w.mutex.Unlock()
+	if w.done == nil {
+		w.done = make(chan struct{})
+	}
+	return w.done
+}
+
+// ExitErr reports why Run stopped: nil means the context was cancelled; a
+// non-nil error means the watcher gave up on its own. Only meaningful after
+// Done closes.
+func (w *Watcher) ExitErr() error {
+	w.mutex.Lock()
+	defer w.mutex.Unlock()
+	return w.exitErr
+}
+
+// markExited closes Done exactly once and records the exit reason.
+func (w *Watcher) markExited(reason error) {
+	w.mutex.Lock()
+	if w.done == nil {
+		w.done = make(chan struct{})
+	}
+	if reason != nil {
+		w.exitErr = reason
+	}
+	close(w.done)
+	w.mutex.Unlock()
+}
+
 // OwesTrigger reports that a consumed trigger's sleep has not completed yet:
 // the action is running or waits for a previous action to finish. A
 // replacement watcher uses it to re-arm its countdown instead of silently
@@ -94,19 +139,25 @@ func (w *Watcher) OwesTrigger() bool {
 // next and must survive the switch instead of being silently dropped until
 // the new target's next full session.
 func (w *Watcher) OwedSession() (bool, time.Time) {
+	// The entire snapshot runs under lifecycleMutex, matching
+	// ReplacementMonitor: the poll loop checks cancellation and commits its
+	// observation under the same lock, so no observation can land on the
+	// dying watcher after this read and disappear before the replacement
+	// starts. Reading the debt under a separate lock first left a window
+	// where a consumed trigger committed just after the read and its owed
+	// sleep was silently dropped by the target switch.
+	w.lifecycleMutex.Lock()
+	defer w.lifecycleMutex.Unlock()
 	w.mutex.Lock()
 	owed := w.triggerOwed
 	w.mutex.Unlock()
 	if !owed {
 		return false, time.Time{}
 	}
-	w.lifecycleMutex.Lock()
-	monitor := w.Monitor
-	w.lifecycleMutex.Unlock()
-	if monitor == nil {
+	if w.Monitor == nil {
 		return true, time.Time{}
 	}
-	_, closedAt := monitor.Countdown()
+	_, closedAt := w.Monitor.Countdown()
 	return true, closedAt
 }
 
@@ -140,6 +191,8 @@ func (w *Watcher) finishTrigger(generation uint64, settled bool) {
 // goroutine; every dependency is injected so the App owns lifecycle and
 // error surfacing.
 func (w *Watcher) Run(ctx context.Context) {
+	var exitErr error
+	defer func() { w.markExited(exitErr) }()
 	interval := w.Interval
 	if interval <= 0 {
 		interval = DefaultPollInterval
@@ -147,6 +200,7 @@ func (w *Watcher) Run(ctx context.Context) {
 	processName, err := Target(w.Settings.Target).ProcessName()
 	if err != nil {
 		log.Printf("Auto-sleep watcher not started: %v", err)
+		exitErr = err
 		return
 	}
 	w.lifecycleMutex.Lock()
@@ -202,6 +256,10 @@ func (w *Watcher) Run(ctx context.Context) {
 			consecutiveCheckErrors++
 			if consecutiveCheckErrors >= maxConsecutiveCheckErrors {
 				log.Printf("Auto-sleep watcher stopping after %d consecutive process check failures: %v", consecutiveCheckErrors, checkErr)
+				exitErr = fmt.Errorf(
+					"stopped after %d consecutive process check failures: %w",
+					consecutiveCheckErrors, checkErr,
+				)
 				return false
 			}
 			log.Printf("Auto-sleep process check failed: %v", checkErr)
