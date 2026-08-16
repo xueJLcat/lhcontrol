@@ -143,4 +143,36 @@ describe('backendCopy', () => {
     expect(joinBackendCopy([])).toBe('');
     expect(joinBackendCopy(null)).toBe('');
   });
+
+  // Guards against a template/argument mismatch in any translated backend
+  // string: a missing or misspelled placeholder leaks a literal "{name}" into
+  // the rendered copy. Every pattern branch must produce output free of
+  // unfilled "{...}" markers under zh-CN.
+  it('leaves no unfilled placeholders in any translated pattern under zh-CN', () => {
+    setLanguagePreference('zh-CN');
+    const patternInputs = [
+      '2 station connection(s) could not be fully released before scanning: AA:BB:CC:DD:EE:01: boom',
+      '2 station(s) were discovered, but some initial values could not be read: AA:BB:CC:DD:EE:01: boom',
+      'on command sent but state confirmation failed (actual booting, raw 0x01): timeout',
+      'station status read was incomplete: read power characteristic: boom',
+      'initial station read was incomplete: read power characteristic: boom',
+      'channel 4 was confirmed by the final readback',
+      'the write was reported as not sent, but channel 5 was observed by readback: detail',
+      'the write call reported an error, but channel 5 was confirmed by readback: detail',
+      'Configuration could not be loaded: boom',
+      'Configuration changes could not be saved: boom',
+      'identify is not supported',
+      'identify is not supported: ATT error',
+      'scan duration must be between 2 and 30 seconds, got 1',
+      'power write attempts must be between 1 and 5, got 9',
+      'bulk power timeout must cover the per-station operation timeout of 30 seconds, got 20',
+      'station operation timeout cannot exceed the bulk power timeout of 120 seconds, got 130',
+      'initial read timeout must not exceed the station operation timeout of 30 seconds, got 60',
+      'read power characteristic: boom'
+    ];
+    for (const input of patternInputs) {
+      const output = backendCopy(input);
+      expect(output, `input: ${input}`).not.toContain('{');
+    }
+  });
 });
