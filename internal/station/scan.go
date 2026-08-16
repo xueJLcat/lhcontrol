@@ -331,6 +331,13 @@ func (m *Manager) mergeDiscoveredStations(
 			continue
 		}
 		if _, unreliable := unreliablePresence[strings.ToLower(stationPtr.Snapshot().Address)]; unreliable {
+			// An unreliable station still needs its absence snapshotted: when
+			// its cached connection could not be released, a genuinely absent
+			// station this scan sees advertising again must still count as a
+			// revival so recovery is re-armed below.
+			if !stationPtr.Snapshot().Present {
+				previouslyAbsent[stationPtr] = true
+			}
 			stationPtr.MarkPresenceUncertain()
 			continue
 		}

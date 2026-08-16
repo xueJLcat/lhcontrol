@@ -133,6 +133,79 @@ func TestStructuredPowerReadDeadlineDoesNotDisconnectStation(t *testing.T) {
 		t.Fatalf("deadline retry = %+v tracked=%v, want a connection backoff", retry, tracked)
 	}
 }
+// TestStructuredChannelReadWithContextJoinedTransportFailureTakesFailurePath
+// covers a channel read whose genuine transport failure is joined with the
+// cancelling context error, the shape ReadPowerStateContext produces when a
+// real failure lands at the same instant as the context stopping. A plain
+// context error schedules an immediate re-read, but the joined transport
+// failure must take the channel backoff and its disconnect instead.
+func TestStructuredChannelReadWithContextJoinedTransportFailureTakesFailurePath(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	manager.statusRetryBase = time.Hour
+	defer manager.Shutdown()
+	var disconnects atomic.Int32
+	manager.bluetoothOps.disconnectStation = func(*internalbluetooth.BaseStation) error {
+		disconnects.Add(1)
+		return nil
+	}
+	address := "AA:BB:CC:DD:EE:03"
+	transportErr := &internalbluetooth.DeviceTransportError{
+		Operation: "read channel characteristic",
+		Err:       tinybluetooth.ErrGATTUnreachable,
+	}
+	manager.recordStructuredReadResult(
+		&internalbluetooth.BaseStation{Address: mustAddress(t, address)},
+		address,
+		nil,
+		errors.Join(transportErr, context.Canceled),
+	)
+	if disconnects.Load() != 1 {
+		t.Fatalf("disconnects after a joined channel transport failure = %d, want 1", disconnects.Load())
+	}
+	manager.statusRetryMutex.Lock()
+	retry, tracked := manager.statusRetries[address]
+	manager.statusRetryMutex.Unlock()
+	if !tracked || retry.channelFailures == 0 || effectiveStatusRetryKinds(retry)&statusRetryChannel == 0 {
+		t.Fatalf("retry = %+v tracked=%v, want a channel failure backoff", retry, tracked)
+	}
+}
+
+// TestStructuredChannelReadWithPlainContextErrorKeepsImmediateReread pins the
+// other half of the channel rule: a bare cancellation remains an immediate
+// re-read without failure accounting or a disconnect.
+func TestStructuredChannelReadWithPlainContextErrorKeepsImmediateReread(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	manager.statusRetryBase = time.Hour
+	defer manager.Shutdown()
+	var disconnects atomic.Int32
+	manager.bluetoothOps.disconnectStation = func(*internalbluetooth.BaseStation) error {
+		disconnects.Add(1)
+		return nil
+	}
+	address := "AA:BB:CC:DD:EE:04"
+	manager.recordStructuredReadResult(
+		&internalbluetooth.BaseStation{Address: mustAddress(t, address)},
+		address,
+		nil,
+		&internalbluetooth.DeviceTransportError{
+			Operation: "read channel characteristic",
+			Err:       context.Canceled,
+		},
+	)
+	if disconnects.Load() != 0 {
+		t.Fatalf("disconnects after a plain channel cancellation = %d, want 0", disconnects.Load())
+	}
+	manager.statusRetryMutex.Lock()
+	retry, tracked := manager.statusRetries[address]
+	manager.statusRetryMutex.Unlock()
+	if !tracked || retry.kinds&statusRetryRefresh == 0 {
+		t.Fatalf("retry = %+v tracked=%v, want an immediate re-read scheduled", retry, tracked)
+	}
+	if retry.channelFailures != 0 || retry.failures != 0 {
+		t.Fatalf("retry = %+v, want no failure accounting for a plain cancellation", retry)
+	}
+}
+
 func TestPermanentUnsupportedDiscoveryDoesNotRemainInBackgroundRecovery(t *testing.T) {
 	manager := NewManager(config.NewConfig())
 	manager.statusRetryBase = time.Hour

@@ -366,6 +366,47 @@ func TestScanDoesNotReviveStationThatOnlyCrossedMissThreshold(t *testing.T) {
 	}
 }
 
+// TestScanRevivesAbsentStationWhoseReleaseFailed guards the revival hook for
+// unreliable-presence stations: when a genuinely absent station's cached
+// connection cannot be released before the scan, presence for that station is
+// unreliable, but a discovery in the same scan is still a real return and
+// must re-arm recovery. The release failure usually also leaves the station
+// connected, which keeps it out of the initial-read phase, so the revival
+// hook is the only path that re-arms recovery for it.
+func TestScanRevivesAbsentStationWhoseReleaseFailed(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	address := "11:22:33:44:55:7F"
+	station := &internalbluetooth.BaseStation{
+		Name: "LHB-REVIVED", Address: mustAddress(t, address),
+		Present: false,
+	}
+	manager.stations[address] = station
+	unreliable := map[string]struct{}{
+		strings.ToLower(mustAddress(t, address).String()): {},
+	}
+
+	manager.mergeDiscoveredStations([]internalbluetooth.DiscoveredStation{{
+		Name: "LHB-REVIVED", Address: mustAddress(t, address),
+	}}, unreliable)
+
+	if !station.Snapshot().Present {
+		t.Fatal("scan merge did not mark the discovered station present")
+	}
+	if station.Snapshot().PresenceUncertain {
+		t.Fatal("scan merge kept presence unreliable although the scan observed the station")
+	}
+	manager.statusRetryMutex.Lock()
+	retry, tracked := manager.statusRetries[address]
+	manager.statusRetryMutex.Unlock()
+	if !tracked {
+		t.Fatal("scan merge did not re-arm recovery for a revived unreliable station")
+	}
+	if effectiveStatusRetryKinds(retry)&statusRetryConnection == 0 {
+		t.Fatalf("revival retry = %+v, want connection recovery", retry)
+	}
+}
+
 func TestStopScanFinishesBeforeCancelledCallbackAndIsIdempotent(t *testing.T) {
 	manager := NewManager(config.NewConfig())
 	scanStarted := make(chan struct{})
