@@ -30,7 +30,7 @@ func (m *Manager) ScanAndFetchStationsContext(ctx context.Context) ([]StationInf
 	lifecycle := m.scanLifecycle
 	m.scanLifecycleMutex.Unlock()
 	if lifecycle != nil {
-		close(lifecycle.startedDone)
+		lifecycle.closeStarted()
 	}
 	m.finishScan(found, err, ScanCallbacks{})()
 	// finishScan releases the global operation, so a queued read-only recovery
@@ -720,7 +720,7 @@ func (m *Manager) StartScan(callbacks ScanCallbacks) error {
 			log.Printf("Scan started callback failed: %v", callbackErr)
 		}
 	}
-	close(lifecycle.startedDone)
+	lifecycle.closeStarted()
 	return nil
 }
 func (m *Manager) deliverAbortedScanCallback(statusID uint64, err error, cancelled bool, callbacks ScanCallbacks) {

@@ -398,10 +398,15 @@ func (m *Manager) runBulkPowerWorker(ctx context.Context, semaphore chan struct{
 		entry.Reason = m.bulkInterruptionReason(ctx, nil)
 		return true
 	}
+	// Seed the entry with the authoritative snapshot before any work that
+	// could panic: a recovered panic must still report the station identity
+	// instead of an empty address that matches no station.
+	initialSnapshot := s.Snapshot()
 	stationResult := BulkPowerStationResult{
-		Address: s.Address.String(),
+		Address: initialSnapshot.Address,
+		Name:    initialSnapshot.Name,
 	}
-	metadataReadRevision := s.Snapshot().MetadataReadRevision
+	metadataReadRevision := initialSnapshot.MetadataReadRevision
 	defer func() {
 		m.reconcileMetadataReadResult(stationResult.Address, metadataReadRevision, s.Snapshot())
 	}()

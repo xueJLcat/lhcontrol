@@ -163,10 +163,19 @@ type scanLifecycle struct {
 	cancel      context.CancelFunc
 	done        chan struct{}
 	startedDone chan struct{}
+	// closeStartedOnce guarantees startedDone closes at most once even if the
+	// synchronous scan path and a stop/shutdown teardown ever race on it; a
+	// double close would panic the scan subsystem.
+	closeStartedOnce sync.Once
 	// statusID is the ScanStatus identity assigned when this scan reserved
 	// the transition lock; terminal callbacks carry it so consumers can match
 	// the status record they read back to this exact scan.
 	statusID uint64
+}
+
+// closeStarted publishes the Started milestone exactly once.
+func (l *scanLifecycle) closeStarted() {
+	l.closeStartedOnce.Do(func() { close(l.startedDone) })
 }
 
 type bulkPowerLifecycle struct {

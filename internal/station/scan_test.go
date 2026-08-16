@@ -588,7 +588,7 @@ func TestScanCompletionCallbackUsesLatestAuthoritativeSnapshot(t *testing.T) {
 	manager.scanLifecycleMutex.Lock()
 	lifecycle := manager.scanLifecycle
 	manager.scanLifecycleMutex.Unlock()
-	close(lifecycle.startedDone)
+	lifecycle.closeStarted()
 	var completed []StationInfo
 	deliver := manager.finishScan(
 		1,
