@@ -222,11 +222,11 @@ func writeCharacteristicValueInternal(ctx context.Context, characteristic charac
 		return transportError("write characteristic", err)
 	}
 	if n != 1 {
+		// A short write cannot be proven unsent on either path; classify both
+		// as possibly sent so replay protection never re-sends a command that
+		// may already have reached the station.
 		shortWriteErr := fmt.Errorf("wrote %d bytes instead of 1", n)
-		if properties.WriteWithoutResponse() {
-			return transportError("write characteristic", &PossiblySentError{Err: shortWriteErr})
-		}
-		return transportError("write characteristic", shortWriteErr)
+		return transportError("write characteristic", &PossiblySentError{Err: shortWriteErr})
 	}
 	return nil
 }
@@ -340,6 +340,24 @@ func confirmPowerStateInternalContext(ctx context.Context, station *BaseStation,
 					// exists for, and a later attempt can still confirm the state.
 				}
 				consecutiveReadErrors = 0
+				// The reconnect resets the boot observation window (disconnect
+				// clears bootingSince), so firmware reporting boot-like values
+				// needs a fresh full fallback window after the reconnect.
+				// Extend the budget to cover it; recompute from the current
+				// policy because the restarted window follows the policy at
+				// decode time, not the snapshot taken before the first
+				// attempt. Reconnects require their own threshold of read
+				// errors, so extensions stay bounded by real failures and the
+				// surrounding context still caps the real wait.
+				if expectedState == PowerStateOn {
+					refreshed := CurrentTiming()
+					if refreshed.ConfirmPollInterval > 0 {
+						fallbackAttempts := int(refreshed.BootFallbackAfter/refreshed.ConfirmPollInterval) + 1
+						if remaining := attempt + 1 + fallbackAttempts; remaining > attempts {
+							attempts = remaining
+						}
+					}
+				}
 			}
 			continue
 		}

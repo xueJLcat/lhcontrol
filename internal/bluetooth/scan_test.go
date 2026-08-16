@@ -836,6 +836,17 @@ func TestScanAbandonsWedgedScanStartAndReleasesSlot(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("abandoned platform scan never reported its late start")
 	}
+	// The late start must trigger the recorded stop intent: without it the
+	// abandoned watcher keeps scanning and blocks every later scan. Wait for
+	// the stop to land on the abandoned session's adapter before swapping it.
+	select {
+	case <-fake.stopped:
+	case <-time.After(time.Second):
+		t.Fatal("late platform start was not stopped by the abandoned session")
+	}
+	if calls := fake.stopCalls.Load(); calls == 0 {
+		t.Fatal("abandoned session never called StopScan for the late start")
+	}
 	// The released slot must let the next scan run to completion.
 	adapter = newFakeBLEAdapter()
 	if _, err := ScanForDuration(time.Millisecond); err != nil {

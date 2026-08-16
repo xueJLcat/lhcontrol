@@ -223,7 +223,12 @@ func (s *scanSession) requestStopAsync(reason scanStopReason) {
 
 func (s *scanSession) issueStop() {
 	s.mutex.Lock()
-	if s.stopStarted || s.finished || !s.started {
+	// No finished guard here: a session abandoned before the watcher started
+	// records its stop intent (abandonStart) and relies on a late markStarted
+	// to issue the real stop once the platform accepts the Start. Every other
+	// caller is gated by requestStopAsync, which rejects finished sessions, so
+	// this only loosens exactly the abandoned-start path.
+	if s.stopStarted || !s.started {
 		s.mutex.Unlock()
 		return
 	}
@@ -247,7 +252,12 @@ func (s *scanSession) issueStop() {
 func (s *scanSession) markStarted() {
 	s.mutex.Lock()
 	s.started = true
-	pendingStop := s.reason.Load() != uint32(scanStopNone) && !s.finished
+	// An abandoned session keeps its recorded stop intent: when the platform
+	// accepts a Start after the scan body already gave up, the watcher is
+	// suddenly live and must be torn down. Gating the stop on !finished here
+	// leaked that watcher forever, and every later scan failed with "scan is
+	// already active" until a process restart.
+	pendingStop := s.reason.Load() != uint32(scanStopNone)
 	s.mutex.Unlock()
 	if pendingStop {
 		s.issueStop()
@@ -281,6 +291,25 @@ func (s *scanSession) durationStopIssuedFlag() bool {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 	return s.durationStopIssued
+}
+
+// abandonStart records that the session is being given up before the platform
+// watcher accepted a Start, keeping a stop intent pending so a late-arriving
+// Start cannot leave an orphaned watcher scanning forever. Without it the
+// transport keeps its watcher registered and every later scan fails with
+// "scan is already active" until a process restart. Callers invoke it before
+// markFinished.
+func (s *scanSession) abandonStart() {
+	s.mutex.Lock()
+	if scanStopReason(s.reason.Load()) == scanStopNone {
+		s.reason.Store(uint32(scanStopCancelled))
+	}
+	started := s.started
+	s.mutex.Unlock()
+	if started {
+		// The Start raced the budget check and just came up; stop it now.
+		s.issueStop()
+	}
 }
 
 // startedFlag reports whether the platform watcher accepted a Start. A scan
@@ -431,6 +460,10 @@ waitScan:
 				// for the normal outcome; the fired timer channel cannot fire again.
 				continue
 			}
+			// Record the stop intent before finishing the session: if the
+			// platform Start lands after this abandonment, markStarted must
+			// still tear the watcher down instead of orphaning it.
+			session.abandonStart()
 			scanWedged = true
 			scanErr = &scanStartTimeoutError{budget: session.startWaitLimit}
 			log.Printf("[BT] ScanForDuration: platform scan did not start within %s; abandoning it", session.startWaitLimit)

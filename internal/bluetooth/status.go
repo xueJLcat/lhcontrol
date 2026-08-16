@@ -180,7 +180,12 @@ func ReadPowerStateContext(ctx context.Context, station *BaseStation) error {
 	if contextErr := ctx.Err(); contextErr != nil {
 		if powerReadErr != nil {
 			powerReadErr = errors.Join(powerReadErr, contextErr)
-			return finishStatusReadResult(station, powerReadErr, nil)
+			// Report the interruption on the channel field too instead of a
+			// nil: a nil channel error looks like a clean observation and
+			// makes callers clear the station's channel-retry state for a
+			// channel that was never read. The pure-context classification
+			// routes upstream to a pending re-read instead.
+			return finishStatusReadResult(station, powerReadErr, contextErr)
 		}
 		if station.Capabilities.ChannelRead {
 			return finishStatusReadResult(station, nil, contextErr)

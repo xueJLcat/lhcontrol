@@ -32,11 +32,8 @@ func connectAndDiscoverInternalContext(ctx context.Context, station *BaseStation
 	if err := ctx.Err(); err != nil {
 		return &connectNotStartedError{Err: err}
 	}
-	if err := waitForInFlightDisconnect(ctx, station); err != nil {
+	if err := connectGate(ctx, station); err != nil {
 		return err
-	}
-	if err := cleanupPendingInternal(station); err != nil {
-		return transportError("finish previous connection cleanup", err)
 	}
 	if station.isConnected && station.device != nil && station.characteristic != nil {
 		connected, err := station.device.Connected()
@@ -62,6 +59,13 @@ func connectAndDiscoverInternalContext(ctx context.Context, station *BaseStation
 	}
 
 	if !station.isConnected || station.device == nil {
+		// The stale-session teardown above releases the station lock around
+		// WinRT calls; an OS disconnect landing in that window can start an
+		// eager cleanup (disconnectInFlight/pendingCleanup) for this station.
+		// Re-run the gate immediately before opening the replacement session.
+		if err := connectGate(ctx, station); err != nil {
+			return err
+		}
 		log.Printf("Bluetooth: Internal connect attempt for %s...", station.Name)
 		device, err := connectContext(ctx, station.Address)
 		if err != nil {
@@ -119,6 +123,13 @@ func connectAndDiscoverInternalContext(ctx context.Context, station *BaseStation
 				if waitErr != nil {
 					return waitErr
 				}
+				// The unlocked sleep window lets an OS disconnect start an eager
+				// cleanup for this station. Re-run the same gate the entry uses:
+				// opening a new GATT session while the previous one is still
+				// released drops or corrupts single-connection peripherals.
+				if gateErr := connectGate(ctx, station); gateErr != nil {
+					return gateErr
+				}
 				device, connectErr := connectContext(ctx, station.Address)
 				if connectErr != nil {
 					if errors.Is(connectErr, context.Canceled) || errors.Is(connectErr, context.DeadlineExceeded) {
@@ -143,37 +154,37 @@ func connectAndDiscoverInternalContext(ctx context.Context, station *BaseStation
 				connectedStationsMutex.Unlock()
 			}
 
-		services, discoverErr := discoverServicesContext(ctx, station.device)
-		if errors.Is(discoverErr, context.Canceled) || errors.Is(discoverErr, context.DeadlineExceeded) {
-			return discoverErr
-		}
-		if discoverErr != nil {
-			err = transportError("discover GATT services", discoverErr)
-			continue
-		}
-		outcome, outcomeErr := discoverServicesOutcome(ctx, station.Name, services)
-		if outcomeErr != nil {
-			if errors.Is(outcomeErr, context.Canceled) || errors.Is(outcomeErr, context.DeadlineExceeded) {
-				return outcomeErr
+			services, discoverErr := discoverServicesContext(ctx, station.device)
+			if errors.Is(discoverErr, context.Canceled) || errors.Is(discoverErr, context.DeadlineExceeded) {
+				return discoverErr
 			}
-			err = transportError("discover control characteristics", outcomeErr)
-			continue
+			if discoverErr != nil {
+				err = transportError("discover GATT services", discoverErr)
+				continue
+			}
+			outcome, outcomeErr := discoverServicesOutcome(ctx, station.Name, services)
+			if outcomeErr != nil {
+				if errors.Is(outcomeErr, context.Canceled) || errors.Is(outcomeErr, context.DeadlineExceeded) {
+					return outcomeErr
+				}
+				err = transportError("discover control characteristics", outcomeErr)
+				continue
+			}
+			if !outcome.controlServiceFound || outcome.power == nil {
+				// Discovery succeeded but the service list is incomplete. The
+				// Windows uncached discovery drops services on unstable links
+				// and freshly booted devices, so a missing control service is
+				// an incomplete result, not an explicit capability rejection.
+				// Keep it retryable; classifying it as unsupported would mark
+				// the station permanently capability-less and stop recovery.
+				err = fmt.Errorf("%s discovery did not return the Lighthouse power control service", station.Name)
+				continue
+			}
+			applyDiscoveryOutcome(station, outcome)
+			err = nil
+			break
 		}
-		if !outcome.controlServiceFound || outcome.power == nil {
-			// Discovery succeeded but the service list is incomplete. The
-			// Windows uncached discovery drops services on unstable links
-			// and freshly booted devices, so a missing control service is
-			// an incomplete result, not an explicit capability rejection.
-			// Keep it retryable; classifying it as unsupported would mark
-			// the station permanently capability-less and stop recovery.
-			err = fmt.Errorf("%s discovery did not return the Lighthouse power control service", station.Name)
-			continue
-		}
-		applyDiscoveryOutcome(station, outcome)
-		err = nil
-		break
-	}
-	if err != nil {
+		if err != nil {
 			permanentlyUnsupported := IsUnsupportedCapabilityError(err)
 			station.CapabilitiesKnown = permanentlyUnsupported
 			if permanentlyUnsupported {
@@ -379,6 +390,23 @@ func waitForInFlightDisconnect(ctx context.Context, s *BaseStation) error {
 			return ctx.Err()
 		}
 		s.mutex.Lock()
+	}
+	return nil
+}
+
+// connectGate centralizes the pre-connect guard every connection must pass:
+// wait for a disconnect that released the station lock, then finish any
+// pending cleanup left by a failed synchronous Disconnect. Skipping it opens
+// a new GATT session while the previous one is still being released, which
+// single-connection peripherals drop or corrupt. Callers must hold
+// station.mutex; the gate may release and reacquire the lock but always
+// returns with it held.
+func connectGate(ctx context.Context, station *BaseStation) error {
+	if err := waitForInFlightDisconnect(ctx, station); err != nil {
+		return err
+	}
+	if err := cleanupPendingInternal(station); err != nil {
+		return transportError("finish previous connection cleanup", err)
 	}
 	return nil
 }
