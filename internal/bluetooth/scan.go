@@ -471,5 +471,3 @@ func scanCompletionError(scanErr error) error {
 	return nil
 }
 
-// readPowerStateInternalContext performs the actual read and update.
-// Assumes caller holds the write lock (station.mutex.Lock()).

@@ -488,7 +488,10 @@ func (a *App) runAutoSleepSession(ctx context.Context, closedAt time.Time) (sett
 
 			// entire automatic-sleep action as if nothing happened.
 
-			emitTerminal(cancelledAutoSleepEvent(result.Results, "watched process restarted or automatic sleep was reconfigured"))
+			// The cancellation can also come from an explicit bulk cancel
+			// while this session runs, so report the interruption itself
+			// instead of asserting one cause.
+			emitTerminal(cancelledAutoSleepEvent(result.Results, "cancelled while power commands were in progress"))
 
 		}
 
