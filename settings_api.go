@@ -15,9 +15,9 @@ func (a *App) GetAPIListenAddress() string {
 }
 
 // defaultAPIBindVerifyWait bounds the bind verification after a same-port
-// listener switch. The loop binds immediately on startup, so this only waits
-// out scheduling; a permanently failing bind is detected through the recorded
-// error long before the deadline.
+// listener switch. The loop binds immediately on startup, so a healthy
+// address verifies at once; the remaining window covers one retry cycle of
+// the listener loop so a transient bind failure can still recover.
 const defaultAPIBindVerifyWait = 3 * time.Second
 
 func (a *App) apiBindVerifyWindow() time.Duration {
@@ -59,7 +59,7 @@ func (a *App) SetAPIListenAddress(address string) error {
 		if err != nil {
 			return err
 		}
-		if a.GetAPIStatus().Address != normalized && !a.shuttingDown.Load() {
+		if published := a.GetAPIStatus().Address; published != normalized && !a.shuttingDown.Load() {
 			a.setAPIAddress(normalized)
 			a.restartAPIServer()
 			bound, bindErr := a.waitForAPIBind()
@@ -67,6 +67,11 @@ func (a *App) SetAPIListenAddress(address string) error {
 				if bindErr == nil {
 					bindErr = fmt.Errorf("%s did not come up within %s", normalized, a.apiBindVerifyWindow())
 				}
+				// Restore the previously serving listener instead of leaving
+				// the API down on an address that cannot bind; the persisted
+				// address stays the configured one so the listener target and
+				// the configuration converge again on the next change.
+				a.rollbackListener(published, normalized)
 				return fmt.Errorf("cannot listen on %s: %v", normalized, bindErr)
 			}
 		}
@@ -193,21 +198,26 @@ func (a *App) rollbackListener(restoreAddress, convergeAddress string) {
 }
 
 // waitForAPIBind polls the freshly restarted listener until it reports a
-// successful bind, records a bind error, or the verification window expires.
-// restartAPIServer waits for the old loop to finish (which clears the status),
-// so the first observed non-empty outcome belongs to the new loop.
+// successful bind or the verification window expires, reporting the first
+// recorded bind error when the window runs out. A recorded error does not end
+// the wait early: runAPIServer retries a failed bind after apiRetryDelay, and
+// the window is sized to cover one retry so transient port contention is not
+// misread as a permanent failure. restartAPIServer waits for the old loop to
+// finish (which clears the status), so every observed outcome belongs to the
+// new loop.
 func (a *App) waitForAPIBind() (bool, error) {
 	deadline := time.Now().Add(a.apiBindVerifyWindow())
+	var firstErr error
 	for {
 		status := a.GetAPIStatus()
 		if status.Running {
 			return true, nil
 		}
-		if status.Error != "" {
-			return false, errors.New(status.Error)
+		if status.Error != "" && firstErr == nil {
+			firstErr = errors.New(status.Error)
 		}
 		if time.Now().After(deadline) {
-			return false, nil
+			return false, firstErr
 		}
 		time.Sleep(10 * time.Millisecond)
 	}

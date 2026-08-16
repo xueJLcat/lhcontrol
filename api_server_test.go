@@ -1159,3 +1159,110 @@ func TestSetAPIListenAddressSamePortRollsBackWhenBindFails(t *testing.T) {
 		t.Fatalf("API status after rollback = %+v, want running on the previous address", status)
 	}
 }
+
+// TestSetAPIListenAddressConvergenceRestoresListenerWhenBindFails covers the
+// diverged re-save path: the persisted address already equals the requested
+// one while the listener serves a different address. When the convergence
+// restart cannot bind, the previously serving listener must be restored
+// instead of leaving the API down retrying an address that cannot bind.
+func TestSetAPIListenAddressConvergenceRestoresListenerWhenBindFails(t *testing.T) {
+	t.Setenv("AppData", t.TempDir())
+	app := NewApp()
+	app.apiRetryDelay = 5 * time.Millisecond
+	app.apiBindVerifyWait = 2 * time.Second
+	bindErr := errors.New("address already in use by another process")
+	app.listen = func(_, address string) (net.Listener, error) {
+		if strings.HasPrefix(address, "127.0.0.2:") {
+			return nil, bindErr
+		}
+		return newFakeAPIListener(address), nil
+	}
+	app.serveListener = func(listener net.Listener) error {
+		fake := listener.(*fakeAPIListener)
+		<-fake.closed
+		return nil
+	}
+	// Pre-diverged state: the persisted address is 127.0.0.2:9002 while the
+	// running listener serves 127.0.0.1:9003.
+	if err := app.config.SetAPIListenAddress("127.0.0.2:9002"); err != nil {
+		t.Fatalf("persisting the diverged address failed: %v", err)
+	}
+	app.apiStatus.Address = "127.0.0.1:9003"
+	app.startAPIServer()
+	t.Cleanup(func() {
+		app.apiLifecycleMutex.Lock()
+		cancel := app.apiCancel
+		app.apiCancel = nil
+		app.apiLifecycleMutex.Unlock()
+		if cancel != nil {
+			cancel()
+		}
+		_ = app.api.Shutdown()
+		app.apiWG.Wait()
+	})
+	deadline := time.Now().Add(2 * time.Second)
+	for !(app.GetAPIStatus().Running && app.GetAPIStatus().Address == "127.0.0.1:9003") && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if status := app.GetAPIStatus(); !status.Running || status.Address != "127.0.0.1:9003" {
+		t.Fatalf("initial diverged API status = %+v, want running on 127.0.0.1:9003", status)
+	}
+
+	err := app.SetAPIListenAddress("127.0.0.2:9002")
+	if err == nil || !strings.Contains(err.Error(), "cannot listen on 127.0.0.2:9002") {
+		t.Fatalf("SetAPIListenAddress() convergence error = %v, want the bind failure", err)
+	}
+	deadline = time.Now().Add(2 * time.Second)
+	for !(app.GetAPIStatus().Running && app.GetAPIStatus().Address == "127.0.0.1:9003") && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if status := app.GetAPIStatus(); !status.Running || status.Address != "127.0.0.1:9003" {
+		t.Fatalf("API status after failed convergence = %+v, want restored on 127.0.0.1:9003", status)
+	}
+	if got := app.GetAPIListenAddress(); got != "127.0.0.2:9002" {
+		t.Fatalf("persisted address after failed convergence = %q, want the configured address retained", got)
+	}
+}
+
+// TestWaitForAPIBindSurvivesTransientBindFailure covers one retry cycle: the
+// first bind fails and records an error, but the listener loop retries inside
+// the verification window and that delayed success must be observed instead of
+// the first recorded error ending the verification early.
+func TestWaitForAPIBindSurvivesTransientBindFailure(t *testing.T) {
+	t.Setenv("AppData", t.TempDir())
+	app := NewApp()
+	app.apiStatus.Address = "127.0.0.1:9004"
+	app.apiRetryDelay = 20 * time.Millisecond
+	app.apiBindVerifyWait = 2 * time.Second
+	var attempts atomic.Int32
+	app.listen = func(_, address string) (net.Listener, error) {
+		if attempts.Add(1) == 1 {
+			return nil, errors.New("address already in use by another process")
+		}
+		return newFakeAPIListener(address), nil
+	}
+	app.serveListener = func(listener net.Listener) error {
+		fake := listener.(*fakeAPIListener)
+		<-fake.closed
+		return nil
+	}
+	app.startAPIServer()
+	t.Cleanup(func() {
+		app.apiLifecycleMutex.Lock()
+		cancel := app.apiCancel
+		app.apiCancel = nil
+		app.apiLifecycleMutex.Unlock()
+		if cancel != nil {
+			cancel()
+		}
+		_ = app.api.Shutdown()
+		app.apiWG.Wait()
+	})
+	bound, err := app.waitForAPIBind()
+	if !bound || err != nil {
+		t.Fatalf("waitForAPIBind() = %v, %v; want the delayed bind to succeed within the window", bound, err)
+	}
+	if status := app.GetAPIStatus(); !status.Running || status.Address != "127.0.0.1:9004" {
+		t.Fatalf("API status after delayed bind = %+v, want running on 127.0.0.1:9004", status)
+	}
+}
