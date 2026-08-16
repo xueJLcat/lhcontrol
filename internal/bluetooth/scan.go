@@ -43,9 +43,25 @@ type scanSession struct {
 	// full duration keep its results when StopScan lands during the
 	// stop-handshake window.
 	durationStopIssued bool
+	// abandonGrace is captured from scanAbandonGrace at session creation,
+	// mirroring stopWaitLimit, so the scan body's bounded wait on a wedged
+	// platform Scan call cannot race a new scan's override of that variable.
+	abandonGrace time.Duration
 }
 
 const defaultScanStopWait = 10 * time.Second
+
+const defaultScanAbandonGrace = 2 * time.Second
+
+// scanAbandonGrace bounds how long the scan body waits for the platform Scan
+// call to return after the stop handshake has finished or been abandoned. The
+// WinRT watcher Stop can hang when the radio is removed mid-scan, which keeps
+// the adapter's Scan call blocked too; once the stop side has reached its own
+// terminal (or abandoned) state the body gives the platform call this short
+// grace to drain, then abandons it and releases the active-scan slot so the
+// next scan can start instead of every scan failing until a process restart.
+// It is a var so tests can exercise the timeout without the production wait.
+var scanAbandonGrace = defaultScanAbandonGrace
 
 // scanStopWaitLimit bounds every wait on the platform stop handshake. The
 // WinRT watcher stop can hang when the radio is removed or reset mid-scan;
@@ -62,7 +78,11 @@ func newScanSession() *scanSession {
 	if limit <= 0 {
 		limit = defaultScanStopWait
 	}
-	return &scanSession{stopDone: make(chan struct{}), stopWaitLimit: limit}
+	grace := scanAbandonGrace
+	if grace <= 0 {
+		grace = defaultScanAbandonGrace
+	}
+	return &scanSession{stopDone: make(chan struct{}), stopWaitLimit: limit, abandonGrace: grace}
 }
 
 // scanStopAbandonedError reports a stop handshake that was given up on after
@@ -263,7 +283,13 @@ func ScanForDurationContext(ctx context.Context, duration time.Duration) ([]Disc
 	go func() {
 		select {
 		case <-ctx.Done():
-			session.requestStopAsync(scanStopCancelled)
+			// requestStop (not requestStopAsync) so the bounded stop-handshake
+			// wait runs here too: when watcher.Stop() hangs, the abandonment is
+			// recorded and stopDone closes, which is what lets the scan body's
+			// bounded wait below give up on the wedged platform call.
+			if err := session.requestStop(scanStopCancelled); err != nil {
+				log.Printf("[BT] ScanForDuration: adapter.StopScan() error: %v", err)
+			}
 		case <-contextWatcherDone:
 		}
 	}()
@@ -299,9 +325,14 @@ func ScanForDurationContext(ctx context.Context, duration time.Duration) ([]Disc
 		localMutex.Unlock()
 	}
 
+	// stopTimer is written by scanStarted, which runs on the platform scan
+	// goroutine now that the blocking Scan call lives there, and read by the
+	// body afterwards; the mutex keeps the handoff race-free.
+	var stopTimerMutex sync.Mutex
 	var stopTimer *time.Timer
 	scanStarted := func() {
 		session.markStarted()
+		stopTimerMutex.Lock()
 		stopTimer = time.AfterFunc(duration, func() {
 			log.Printf("[BT] ScanForDuration: Duration %v elapsed. Calling StopScan...", duration)
 			err := session.requestStop(scanStopDuration)
@@ -309,25 +340,60 @@ func ScanForDurationContext(ctx context.Context, duration time.Duration) ([]Disc
 				log.Printf("[BT] ScanForDuration: adapter.StopScan() error: %v", err)
 			}
 		})
+		stopTimerMutex.Unlock()
 	}
 
-	// Start the blocking scan directly
+	// Start the blocking scan on its own goroutine: adapter.Scan only returns
+	// after the adapter finishes the stop handshake, and a hung watcher.Stop()
+	// (the radio removed or reset mid-scan) keeps both of them blocked
+	// indefinitely. Waiting on the session's stopDone here instead of on the
+	// scan call bounds the scan body by the same stop budget the other waiters
+	// already apply, so one wedged StopScan can no longer keep activeScan set
+	// and turn every later scan into "scan is already active" until a process
+	// restart.
 	log.Println("[BT] ScanForDuration: Calling adapter.Scan()...")
-	scanErr := scanSafely(scanCallback, scanStarted)
+	scanDone := make(chan error, 1)
+	go func() {
+		scanDone <- scanSafely(scanCallback, scanStarted)
+	}()
+	var scanErr error
+	scanWedged := false
+	select {
+	case scanErr = <-scanDone:
+	case <-session.stopDone:
+		// The stop handshake completed or was abandoned. Give the platform scan
+		// call a short grace to drain its own tail; when it never returns,
+		// abandon the blocked goroutine and proceed. The hang stays isolated on
+		// the already-resolved watcher and cannot affect a later scan session.
+		grace := time.NewTimer(session.abandonGrace)
+		select {
+		case scanErr = <-scanDone:
+			grace.Stop()
+		case <-grace.C:
+			scanWedged = true
+			log.Printf("[BT] ScanForDuration: platform scan did not finish within %s of the stop handshake; abandoning it", session.abandonGrace)
+		}
+	}
 	session.markFinished()
-	session.waitForIssuedStop()
-	timerStopped := stopTimer == nil || stopTimer.Stop()
-	if stopTimer != nil && !timerStopped {
+	if !scanWedged {
+		session.waitForIssuedStop()
+	}
+	stopTimerMutex.Lock()
+	durationTimer := stopTimer
+	stopTimerMutex.Unlock()
+	timerStopped := durationTimer == nil || durationTimer.Stop()
+	if durationTimer != nil && !timerStopped {
 		// The timer callback has started. Wait for it so a late StopScan cannot
 		// accidentally stop a subsequent scan. The wait is bounded like every
 		// other stop-handshake wait so a hung platform stop cannot wedge the
 		// scan subsystem.
 		_ = session.awaitStop(session.stopWaitLimit)
 	}
-	if scanErr == nil {
+	if !scanWedged && scanErr == nil {
 		// The adapter-level handshake is authoritative: a clean finish means a
 		// failed first stop was repaired by the adapter's own retry, so the
-		// stale session record must not poison the classification below.
+		// stale session record must not poison the classification below. A wedged
+		// scan has no authoritative finish, so its abandoned-stop record stands.
 		session.clearStopError()
 	}
 

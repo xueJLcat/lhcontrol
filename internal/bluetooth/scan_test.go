@@ -713,6 +713,69 @@ func TestScanForDurationContextCancelButtonAbandonsHungStop(t *testing.T) {
 	}
 }
 
+// TestScanAbandonsWedgedPlatformScanAndReleasesSlot covers the worst-case
+// wedge: watcher.Stop() never returns (radio removed mid-scan), which keeps
+// both StopScan and the platform Scan call blocked. The cancellation must
+// still settle within the bounded stop budget plus the abandon grace, and the
+// active-scan slot must be released so the next scan can run instead of every
+// scan failing with "scan is already active" until a process restart.
+func TestScanAbandonsWedgedPlatformScanAndReleasesSlot(t *testing.T) {
+	originalAdapter := adapter
+	originalWait := scanStopWaitLimit
+	originalGrace := scanAbandonGrace
+	fake := newFakeBLEAdapter()
+	fake.stopHold = make(chan struct{}) // never closed: StopScan hangs, Scan hangs with it
+	adapter = fake
+	scanStopWaitLimit = 50 * time.Millisecond
+	scanAbandonGrace = 50 * time.Millisecond
+	t.Cleanup(func() {
+		adapter = originalAdapter
+		scanStopWaitLimit = originalWait
+		scanAbandonGrace = originalGrace
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		_, err := ScanForDurationContext(ctx, time.Hour)
+		result <- err
+	}()
+	select {
+	case <-fake.started:
+	case <-time.After(time.Second):
+		t.Fatal("scan did not start")
+	}
+	cancel()
+	select {
+	case err := <-result:
+		if !errors.Is(err, ErrScanCancelled) {
+			t.Fatalf("ScanForDurationContext() error = %v, want ErrScanCancelled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("wedged platform scan did not return within the bounded budget")
+	}
+	activeScanMutex.Lock()
+	stillRegistered := activeScan != nil
+	activeScanMutex.Unlock()
+	if stillRegistered {
+		t.Fatal("abandoned platform scan left the scan session registered")
+	}
+	// Release the wedged stop and wait for the fake StopScan to finish so the
+	// abandoned platform goroutine has stopped reading the adapter variable
+	// before it is swapped for the next scan.
+	close(fake.stopHold)
+	select {
+	case <-fake.stopped:
+	case <-time.After(time.Second):
+		t.Fatal("wedged StopScan did not finish after release")
+	}
+	// The released slot must let the next scan run to completion.
+	adapter = newFakeBLEAdapter()
+	if _, err := ScanForDuration(time.Millisecond); err != nil {
+		t.Fatalf("scan after an abandoned platform scan error = %v", err)
+	}
+}
+
 func TestScanSessionStopAfterFinishedDoesNotRecordReason(t *testing.T) {
 	// A stop request that arrives after the scan ended on its own must not
 	// record a stop reason: doing so would misclassify a natural finish as a

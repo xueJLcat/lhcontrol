@@ -114,7 +114,11 @@ func readChannelInternalContext(ctx context.Context, station *BaseStation) error
 	channel, err := DecodeChannel(buf[:n])
 	if err != nil {
 		station.LastChannelReadAt = time.Time{}
-		return fmt.Errorf("invalid channel for %s: %w", station.Name, err)
+		// An out-of-range channel value is malformed device data, like the
+		// length violation above: reconnecting cannot change what the device
+		// reports, so it must carry the DeviceValueError classification that
+		// short-circuits confirmation reconnects and failure accounting.
+		return deviceValueError("read channel characteristic", fmt.Errorf("invalid channel for %s: %w", station.Name, err))
 	}
 	station.Channel = channel
 	station.LastChannelReadAt = time.Now()

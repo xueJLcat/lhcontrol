@@ -180,6 +180,26 @@ func writeCharacteristicValueInternal(ctx context.Context, characteristic charac
 		}
 		return characteristic.Write([]byte{value})
 	}
+	// classifyUnmarkedWriteFailure wraps a write failure that carries neither a
+	// definite rejection nor a definitely-unsent context classification as
+	// possibly sent. Without this, an unclassified failure would let callers
+	// replay a command that may already have reached the station. A bare
+	// cancellation from a contextual writer means the transport never
+	// submitted the write; isDefinitelyUnsentContextError preserves that so
+	// the caller does not report an unsent command as sent-but-unconfirmed.
+	// Both the initial write and the Write-capability fallback below run
+	// through it so the replay protection does not depend on which branch
+	// produced the failure.
+	classifyUnmarkedWriteFailure := func(writeErr error) error {
+		if writeErr == nil || isDefiniteWriteRejection(writeErr) ||
+			isDefinitelyUnsentContextError(ctx, writeErr) {
+			return writeErr
+		}
+		if _, classified := possiblySentClassification(writeErr); classified {
+			return writeErr
+		}
+		return &PossiblySentError{Err: writeErr}
+	}
 	properties := bluetooth.CharacteristicPermissions(characteristic.Properties())
 	var n int
 	var err error
@@ -188,16 +208,8 @@ func writeCharacteristicValueInternal(ctx context.Context, characteristic charac
 		n, err = writeWithoutResponse()
 		if err != nil && properties.Write() && IsCapabilityUnsupported(err) {
 			n, err = writeWithResponse()
-		} else if err != nil && !isDefiniteWriteRejection(err) &&
-			!isDefinitelyUnsentContextError(ctx, err) {
-			// A bare cancellation from a contextual writer means the transport
-			// never submitted the write. Preserve that classification so the
-			// caller does not report an unsent command as sent-but-unconfirmed.
-			_, classified := possiblySentClassification(err)
-			if !classified {
-				err = &PossiblySentError{Err: err}
-			}
 		}
+		err = classifyUnmarkedWriteFailure(err)
 	case properties.Write():
 		n, err = writeWithResponse()
 	default:

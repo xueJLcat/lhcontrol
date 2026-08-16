@@ -1188,4 +1188,10 @@ func TestDecodeChannelStillRejectsInvalidPayload(t *testing.T) {
 	if RequiresReconnect(err) {
 		t.Fatalf("invalid channel value error = %v requires a reconnect", err)
 	}
+	// An out-of-range channel is malformed device data, like an invalid value
+	// length: it must carry the DeviceValueError classification so channel
+	// confirmation loops and fleet recovery treat it as unfixable-by-reconnect.
+	if !IsDeviceValueError(err) {
+		t.Fatalf("invalid channel value error = %v, want a device value error", err)
+	}
 }
