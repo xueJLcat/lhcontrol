@@ -2,6 +2,7 @@ package autosleep
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -736,5 +737,33 @@ func TestCancelledActionKeepsOwedTriggerForReplacement(t *testing.T) {
 	active, closedAt := replacement.Countdown()
 	if !active || !closedAt.Equal(base.Add(time.Second)) {
 		t.Fatalf("replacement after cancelled action = active %v closedAt %v, want armed at %v", active, closedAt, base.Add(time.Second))
+	}
+}
+
+// TestWatcherStopsAfterConsecutiveCheckFailures covers a persistently failing
+// process snapshot (or an unsupported platform): retrying forever only fills
+// the log and can never produce a trigger, so the watcher stops after a
+// bounded number of consecutive check errors.
+func TestWatcherStopsAfterConsecutiveCheckFailures(t *testing.T) {
+	watcher := &Watcher{
+		Settings: Settings{Enabled: true, Target: string(TargetSteamVR), DelaySeconds: 60},
+		Interval: time.Millisecond,
+		IsRunning: func(string) (bool, error) {
+			return false, errors.New("process snapshot failed")
+		},
+		Trigger: func(context.Context, time.Time) bool {
+			t.Error("a failing process check must never trigger")
+			return true
+		},
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		watcher.Run(context.Background())
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("watcher did not stop after repeated process check failures")
 	}
 }

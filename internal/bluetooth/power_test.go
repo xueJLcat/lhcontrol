@@ -553,6 +553,21 @@ func TestWriteCharacteristicPreservesDefinitelyNotSentClassification(t *testing.
 	}
 }
 
+// TestWriteResponseUnclassifiedFailureIsPossiblySent guards the with-response
+// write path: a transport failure carrying no classification must not let a
+// caller replay a command that may already have reached the station.
+func TestWriteResponseUnclassifiedFailureIsPossiblySent(t *testing.T) {
+	writeErr := errors.New("unclassified transport failure")
+	characteristic := &fakeCharacteristic{
+		properties:           uint32(tinybluetooth.CharacteristicWritePermission),
+		writeWithResponseErr: writeErr,
+	}
+	err := writeCharacteristicValueInternal(context.Background(), characteristic, 0x01)
+	if !errors.Is(err, writeErr) || !IsPossiblySent(err) {
+		t.Fatalf("writeCharacteristicValueInternal() error = %v, want possibly-sent replay protection", err)
+	}
+}
+
 func TestDefinitelyUnsentContextErrorHonorsTransportClassification(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

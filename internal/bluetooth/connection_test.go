@@ -1,6 +1,7 @@
 package bluetooth
 
 import (
+	"context"
 	"errors"
 	"testing"
 )
@@ -229,5 +230,30 @@ func TestConnectedQueryFailureKeepsCachedSession(t *testing.T) {
 	}
 	if station.device == nil || !station.isConnected {
 		t.Fatal("status-query failure cleared the cached connection state")
+	}
+}
+
+// TestConnectAndDiscoverMarksPreCancelledRequestNotStarted guards the narrow
+// window where the context expires after the caller's pre-lock check but
+// before discovery starts: the request must be reported as never started so
+// callers keep the healthy session instead of tearing it down as cancelled
+// discovery would.
+func TestConnectAndDiscoverMarksPreCancelledRequestNotStarted(t *testing.T) {
+	station := connectedFakeStation(&fakeCharacteristic{value: []byte{0x09}}, nil, nil, Capabilities{PowerRead: true})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	station.mutex.Lock()
+	err := connectAndDiscoverInternalContext(ctx, station)
+	station.mutex.Unlock()
+
+	if !isConnectNotStarted(err) {
+		t.Fatalf("connectAndDiscoverInternalContext() error = %v, want never-started cancellation", err)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("never-started error = %v, want it to still match context.Canceled", err)
+	}
+	if station.device == nil || !station.isConnected {
+		t.Fatal("never-started cancellation modified the cached connection")
 	}
 }

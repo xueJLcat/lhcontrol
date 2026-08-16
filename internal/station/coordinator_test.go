@@ -360,6 +360,52 @@ func TestForegroundGlobalOperationBoundsDrainWait(t *testing.T) {
 	}
 }
 
+// TestForegroundStationOperationBoundsDrainWait guards the single-station
+// path: when an abandoned status read stays wedged in an adapter call that
+// ignores cancellation, the foreground station action reports a retryable Busy
+// after the bounded drain wait instead of consuming the whole per-station
+// budget and surfacing as an operation timeout.
+func TestForegroundStationOperationBoundsDrainWait(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	manager.statusRecoveryStart.Do(func() {})
+	manager.foregroundDrainWait = 20 * time.Millisecond
+	manager.statusRefreshJoinWait = 20 * time.Millisecond
+	address := "11:22:33:44:55:65"
+	manager.stations[address] = &internalbluetooth.BaseStation{
+		Name: "LHB-65", Address: mustAddress(t, address), Present: true,
+	}
+	manager.bluetoothOps.stationConnected = func(*internalbluetooth.BaseStation) bool { return true }
+	releaseRead := make(chan struct{})
+	manager.bluetoothOps.readPowerStateContext = func(ctx context.Context, _ *internalbluetooth.BaseStation) error {
+		<-releaseRead // wedged adapter call that ignores cancellation
+		return nil
+	}
+	refreshDone := make(chan error, 1)
+	go func() {
+		_, err := manager.CheckAllStationStatuses()
+		refreshDone <- err
+	}()
+	select {
+	case err := <-refreshDone:
+		if !errors.Is(err, ErrOperationInProgress) {
+			t.Fatalf("CheckAllStationStatuses() error = %v, want abandoned refresh Busy", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("status refresh did not abandon the wedged worker")
+	}
+
+	start := time.Now()
+	err := manager.beginForegroundStationOperation(address)
+	if !errors.Is(err, ErrOperationInProgress) {
+		t.Fatalf("foreground station operation error = %v, want retryable Busy", err)
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("foreground station wait took %v, want the bounded drain limit", elapsed)
+	}
+	close(releaseRead)
+	manager.Shutdown()
+}
+
 func TestStatusRecoveryBackfillsBusyCandidatesAndLimitsConcurrency(t *testing.T) {
 	manager := NewManager(config.NewConfig())
 	defer manager.Shutdown()
