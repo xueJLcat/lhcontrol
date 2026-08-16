@@ -235,15 +235,46 @@ func fallbackStationName(address string) string {
 	}
 	return "LHB-" + strings.ToUpper(compact)
 }
+// scanAndFetchStations runs one scan in three phases: release cached
+// connections so stations advertise again, merge the discovery results into
+// the fleet, then read initial power/channel values within a bounded phase.
 func (m *Manager) scanAndFetchStations(ctx context.Context) ([]StationInfo, int, error) {
-	scanDuration := m.config.ScanDuration()
 	if err := scanContextError(ctx); err != nil {
 		return m.GetStationInfo(), 0, err
 	}
-	// A Lighthouse commonly stops advertising while a GATT connection is
-	// active. Release our cached connections before a fresh scan so previously
-	// discovered stations can advertise again and participate in presence and
-	// channel-conflict detection.
+	unreliablePresence, err := m.releaseStationsForScan(ctx)
+	if err != nil {
+		return m.GetStationInfo(), 0, err
+	}
+	discoveredValues, err := m.bluetoothOps.scanForDurationContext(ctx, m.config.ScanDuration())
+	if errors.Is(err, bluetooth.ErrScanCancelled) || errors.Is(err, context.Canceled) {
+		return m.GetStationInfo(), 0, bluetooth.ErrScanCancelled
+	} else if err != nil {
+		m.observeBluetoothError(err)
+		return m.GetStationInfo(), 0, fmt.Errorf("bluetooth scan failed: %w", err)
+	}
+	// The BLE scan completed its full duration, so the discovery results are
+	// merged even if the context was cancelled during the stop handshake; only
+	// the optional initial reads are skipped below.
+	stationsToFetch := m.mergeDiscoveredStations(discoveredValues, unreliablePresence)
+	if len(stationsToFetch) > 0 && scanContextError(ctx) == nil {
+		if err := m.runInitialScanReads(ctx, stationsToFetch); err != nil {
+			// The discovery results above were already merged; only the
+			// optional initial reads were interrupted. Report the merged
+			// count instead of claiming nothing was found.
+			return m.GetStationInfo(), len(discoveredValues), err
+		}
+	}
+	return m.GetStationInfo(), len(discoveredValues), nil
+}
+
+// releaseStationsForScan releases cached GATT connections before a fresh scan:
+// a Lighthouse commonly stops advertising while a GATT connection is active,
+// so previously discovered stations could not advertise again and participate
+// in presence and channel-conflict detection. Stations whose connection could
+// not be released are returned (lowercased address) so the merge phase marks
+// their presence uncertain.
+func (m *Manager) releaseStationsForScan(ctx context.Context) (map[string]struct{}, error) {
 	m.stationsMutex.RLock()
 	connectedStations := make([]*bluetooth.BaseStation, 0, len(m.stations))
 	for _, stationPtr := range m.stations {
@@ -256,7 +287,7 @@ func (m *Manager) scanAndFetchStations(ctx context.Context) ([]StationInfo, int,
 	unreliablePresence := make(map[string]struct{})
 	for _, stationPtr := range connectedStations {
 		if err := scanContextError(ctx); err != nil {
-			return m.GetStationInfo(), 0, err
+			return nil, err
 		}
 		address := stationPtr.Snapshot().Address
 		if releaseErr := m.releaseStationForScanBounded(stationPtr); releaseErr != nil {
@@ -273,18 +304,19 @@ func (m *Manager) scanAndFetchStations(ctx context.Context) ([]StationInfo, int,
 		))
 	}
 	if err := scanContextError(ctx); err != nil {
-		return m.GetStationInfo(), 0, err
+		return nil, err
 	}
-	discoveredValues, err := m.bluetoothOps.scanForDurationContext(ctx, scanDuration)
-	if errors.Is(err, bluetooth.ErrScanCancelled) || errors.Is(err, context.Canceled) {
-		return m.GetStationInfo(), 0, bluetooth.ErrScanCancelled
-	} else if err != nil {
-		m.observeBluetoothError(err)
-		return m.GetStationInfo(), 0, fmt.Errorf("bluetooth scan failed: %w", err)
-	}
-	// The BLE scan completed its full duration, so the discovery results
-	// are merged even if the context was cancelled during the stop
-	// handshake; only the optional initial reads are skipped below.
+	return unreliablePresence, nil
+}
+
+// mergeDiscoveredStations applies one scan's discovery results to the fleet:
+// marks missed stations, registers newly discovered stations, records revivals
+// (re-arming recovery for genuinely absent returners), and returns the
+// disconnected stations that need an initial state read.
+func (m *Manager) mergeDiscoveredStations(
+	discoveredValues []bluetooth.DiscoveredStation,
+	unreliablePresence map[string]struct{},
+) []*bluetooth.BaseStation {
 	stationsToFetch := make([]*bluetooth.BaseStation, 0)
 	scanTime := time.Now()
 	m.stationsMutex.Lock()
@@ -350,115 +382,127 @@ func (m *Manager) scanAndFetchStations(ctx context.Context) ([]StationInfo, int,
 			m.rebaseRecoveryForRevivedStation(snapshot.Address)
 		}
 	}
-	if len(stationsToFetch) > 0 && scanContextError(ctx) == nil {
-		phaseContext, cancelPhase := context.WithTimeout(ctx, m.scanReadPhaseTimeoutDuration())
-		defer cancelPhase()
-		var wg sync.WaitGroup
-		type initialReadResult struct {
-			address               string
-			station               *bluetooth.BaseStation
-			err                   error
-			phaseDeadlineExceeded bool
-		}
-		readResults := make([]initialReadResult, len(stationsToFetch))
-		semaphore := make(chan struct{}, 2)
-		for index, stationToFetch := range stationsToFetch {
-			wg.Add(1)
-			go func(resultIndex int, ptr *bluetooth.BaseStation) {
-				defer wg.Done()
-				readResults[resultIndex].address = ptr.Snapshot().Address
-				readResults[resultIndex].station = ptr
-				select {
-				case semaphore <- struct{}{}:
-				case <-phaseContext.Done():
-					if ctx.Err() != nil {
-						readResults[resultIndex].err = bluetooth.ErrScanCancelled
-					} else {
-						readResults[resultIndex].err = fmt.Errorf("initial read phase deadline exceeded: %w", phaseContext.Err())
-						readResults[resultIndex].phaseDeadlineExceeded = true
-					}
-					return
-				}
-				defer func() { <-semaphore }()
-				if err := scanContextError(ctx); err != nil {
-					readResults[resultIndex].err = err
-					return
-				}
-				readContext, cancelRead := context.WithTimeout(phaseContext, m.initialReadTimeoutDuration())
-				defer cancelRead()
-				// A per-station read can exhaust its own budget at the same instant
-				// the whole phase deadline lands. Attribute the failure to its real
-				// owner by comparing deadlines: only when the phase deadline is the
-				// binding constraint is this a phase-wide timeout; otherwise the
-				// structured per-station handling below must run so the failure is
-				// recorded and retried instead of being folded into the phase.
-				readDeadline, hasReadDeadline := readContext.Deadline()
-				phaseDeadline, hasPhaseDeadline := phaseContext.Deadline()
-				ownBudget := hasReadDeadline && hasPhaseDeadline && readDeadline.Before(phaseDeadline)
-				readResults[resultIndex].err = runSafely("initial station read", func() error {
-					return m.bluetoothOps.fetchInitialPowerState(readContext, ptr)
-				})
-				if ctx.Err() == nil && !ownBudget && errors.Is(phaseContext.Err(), context.DeadlineExceeded) &&
-					errors.Is(readResults[resultIndex].err, context.DeadlineExceeded) {
+	return stationsToFetch
+}
+
+type initialScanReadResult struct {
+	address               string
+	station               *bluetooth.BaseStation
+	err                   error
+	phaseDeadlineExceeded bool
+}
+
+// runInitialScanReads reads initial power/channel values for freshly seen
+// disconnected stations within one bounded phase. It returns nil when the
+// phase ran (results recorded as side effects and warnings) or the scan
+// cancellation error when the phase was interrupted.
+func (m *Manager) runInitialScanReads(ctx context.Context, stationsToFetch []*bluetooth.BaseStation) error {
+	phaseContext, cancelPhase := context.WithTimeout(ctx, m.scanReadPhaseTimeoutDuration())
+	defer cancelPhase()
+	var wg sync.WaitGroup
+	readResults := make([]initialScanReadResult, len(stationsToFetch))
+	semaphore := make(chan struct{}, 2)
+	for index, stationToFetch := range stationsToFetch {
+		wg.Add(1)
+		go func(resultIndex int, ptr *bluetooth.BaseStation) {
+			defer wg.Done()
+			readResults[resultIndex].address = ptr.Snapshot().Address
+			readResults[resultIndex].station = ptr
+			select {
+			case semaphore <- struct{}{}:
+			case <-phaseContext.Done():
+				if ctx.Err() != nil {
+					readResults[resultIndex].err = bluetooth.ErrScanCancelled
+				} else {
+					readResults[resultIndex].err = fmt.Errorf("initial read phase deadline exceeded: %w", phaseContext.Err())
 					readResults[resultIndex].phaseDeadlineExceeded = true
 				}
-			}(index, stationToFetch)
-		}
-		wg.Wait()
-		if err := scanContextError(ctx); err != nil {
-			// The discovery results above were already merged; only the
-			// optional initial reads were interrupted. Report the merged
-			// count instead of claiming nothing was found.
-			return m.GetStationInfo(), len(discoveredValues), err
-		}
-		sort.Slice(readResults, func(i, j int) bool {
-			return strings.ToLower(readResults[i].address) < strings.ToLower(readResults[j].address)
-		})
-		readErrors := make([]error, 0)
-		for _, result := range readResults {
-			if result.err == nil {
-				m.clearStatusFailure(result.address)
-				continue
+				return
 			}
-			if result.phaseDeadlineExceeded {
-				m.noteStatusRefreshPending(result.address)
-				readErrors = append(readErrors, fmt.Errorf("%s: %w", result.address, result.err))
-				continue
+			defer func() { <-semaphore }()
+			if err := scanContextError(ctx); err != nil {
+				readResults[resultIndex].err = err
+				return
 			}
-			m.observeBluetoothError(result.err)
-			var initialErr *bluetooth.InitialReadError
-			if errors.As(result.err, &initialErr) {
-				m.recordStructuredReadResult(result.station, result.address, initialErr.Power, initialErr.Channel)
-				m.recordMetadataReadResult(result.address, initialErr.Metadata)
-				if initialErr.Power == nil && initialErr.Channel == nil {
-					// Device information is optional. Retry it in the background
-					// without turning an otherwise healthy scan into a warning.
-					continue
-				}
-				result.err = &bluetooth.InitialReadError{
-					Power:   initialErr.Power,
-					Channel: initialErr.Channel,
-				}
-			} else if errors.Is(result.err, context.DeadlineExceeded) && !bluetooth.RequiresReconnect(result.err) {
-				// A per-station read-budget deadline is not evidence the link
-				// is broken, matching recoverOneStation and the status-refresh
-				// rule. Back off and let recovery retry instead of disconnecting
-				// a possibly-healthy station.
-				m.noteStatusFailure(result.address)
-			} else {
-				m.recordUnstructuredStationFailure(result.station, result.address, result.err)
+			readContext, cancelRead := context.WithTimeout(phaseContext, m.initialReadTimeoutDuration())
+			defer cancelRead()
+			// A per-station read can exhaust its own budget at the same instant
+			// the whole phase deadline lands. Attribute the failure to its real
+			// owner by comparing deadlines: only when the phase deadline is the
+			// binding constraint is this a phase-wide timeout; otherwise the
+			// structured per-station handling below must run so the failure is
+			// recorded and retried instead of being folded into the phase.
+			readDeadline, hasReadDeadline := readContext.Deadline()
+			phaseDeadline, hasPhaseDeadline := phaseContext.Deadline()
+			ownBudget := hasReadDeadline && hasPhaseDeadline && readDeadline.Before(phaseDeadline)
+			readResults[resultIndex].err = runSafely("initial station read", func() error {
+				return m.bluetoothOps.fetchInitialPowerState(readContext, ptr)
+			})
+			if ctx.Err() == nil && !ownBudget && errors.Is(phaseContext.Err(), context.DeadlineExceeded) &&
+				errors.Is(readResults[resultIndex].err, context.DeadlineExceeded) {
+				readResults[resultIndex].phaseDeadlineExceeded = true
 			}
-			readErrors = append(readErrors, fmt.Errorf("%s: %w", result.address, result.err))
-		}
-		if len(readErrors) > 0 {
-			m.addScanWarning(fmt.Sprintf(
-				"%d station(s) were discovered, but some initial values could not be read: %v",
-				len(readErrors),
-				errors.Join(readErrors...),
-			))
-		}
+		}(index, stationToFetch)
 	}
-	return m.GetStationInfo(), len(discoveredValues), nil
+	wg.Wait()
+	if err := scanContextError(ctx); err != nil {
+		return err
+	}
+	m.recordInitialScanReadResults(readResults)
+	return nil
+}
+
+// recordInitialScanReadResults classifies each initial read outcome: success
+// clears recovery, phase timeouts defer a refresh, structured failures record
+// per-field recovery, and everything else goes through the generic
+// failure path. Failures are aggregated into one scan warning.
+func (m *Manager) recordInitialScanReadResults(readResults []initialScanReadResult) {
+	sort.Slice(readResults, func(i, j int) bool {
+		return strings.ToLower(readResults[i].address) < strings.ToLower(readResults[j].address)
+	})
+	readErrors := make([]error, 0)
+	for _, result := range readResults {
+		if result.err == nil {
+			m.clearStatusFailure(result.address)
+			continue
+		}
+		if result.phaseDeadlineExceeded {
+			m.noteStatusRefreshPending(result.address)
+			readErrors = append(readErrors, fmt.Errorf("%s: %w", result.address, result.err))
+			continue
+		}
+		m.observeBluetoothError(result.err)
+		var initialErr *bluetooth.InitialReadError
+		if errors.As(result.err, &initialErr) {
+			m.recordStructuredReadResult(result.station, result.address, initialErr.Power, initialErr.Channel)
+			m.recordMetadataReadResult(result.address, initialErr.Metadata)
+			if initialErr.Power == nil && initialErr.Channel == nil {
+				// Device information is optional. Retry it in the background
+				// without turning an otherwise healthy scan into a warning.
+				continue
+			}
+			result.err = &bluetooth.InitialReadError{
+				Power:   initialErr.Power,
+				Channel:   initialErr.Channel,
+			}
+		} else if errors.Is(result.err, context.DeadlineExceeded) && !bluetooth.RequiresReconnect(result.err) {
+			// A per-station read-budget deadline is not evidence the link
+			// is broken, matching recoverOneStation and the status-refresh
+			// rule. Back off and let recovery retry instead of disconnecting
+			// a possibly-healthy station.
+			m.noteStatusFailure(result.address)
+		} else {
+			m.recordUnstructuredStationFailure(result.station, result.address, result.err)
+		}
+		readErrors = append(readErrors, fmt.Errorf("%s: %w", result.address, result.err))
+	}
+	if len(readErrors) > 0 {
+		m.addScanWarning(fmt.Sprintf(
+			"%d station(s) were discovered, but some initial values could not be read: %v",
+			len(readErrors),
+			errors.Join(readErrors...),
+		))
+	}
 }
 func scanContextError(ctx context.Context) error {
 	if ctx != nil && ctx.Err() != nil {

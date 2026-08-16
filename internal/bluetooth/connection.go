@@ -124,156 +124,37 @@ func connectAndDiscoverInternalContext(ctx context.Context, station *BaseStation
 				connectedStationsMutex.Unlock()
 			}
 
-			services, discoverErr := discoverServicesContext(ctx, station.device)
-			if errors.Is(discoverErr, context.Canceled) || errors.Is(discoverErr, context.DeadlineExceeded) {
-				return discoverErr
-			}
-			err = transportError("discover GATT services", discoverErr)
-			if err != nil {
-				continue
-			}
-
-			var powerCharacteristic characteristicIO
-			var modeCharacteristic characteristicIO
-			var identifyCharacteristic characteristicIO
-			capabilities := Capabilities{}
-			metadata := DeviceMetadata{}
-			metadataServiceFound := false
-			metadataRecognized := 0
-			metadataSuccessful := 0
-			metadataErrors := make([]error, 0)
-			controlServiceFound := false
-
-			for serviceIndex := range services {
-				service := services[serviceIndex]
-				serviceUUID := service.UUID()
-				if serviceUUID != powerControlServiceUUID && serviceUUID != deviceInformationServiceUUID {
-					continue
-				}
-				if serviceUUID == deviceInformationServiceUUID {
-					metadataServiceFound = true
-				}
-				chars, characteristicErr := discoverCharacteristicsContext(ctx, service)
-				if characteristicErr != nil {
-					if errors.Is(characteristicErr, context.Canceled) || errors.Is(characteristicErr, context.DeadlineExceeded) {
-						return characteristicErr
-					}
-					if serviceUUID == powerControlServiceUUID {
-						err = transportError("discover control characteristics", characteristicErr)
-						break
-					}
-					log.Printf("Bluetooth: Optional device information discovery failed for %s: %v", station.Name, characteristicErr)
-					metadataErrors = append(metadataErrors, fmt.Errorf("discover device information characteristics: %w", characteristicErr))
-					continue
-				}
-
-				if serviceUUID == powerControlServiceUUID {
-					controlServiceFound = true
-					for characteristicIndex := range chars {
-						current := &chars[characteristicIndex]
-						properties := current.Properties()
-						switch current.UUID() {
-						case powerControlCharacteristicUUID:
-							powerCharacteristic = current
-							capabilities.PowerRead = hasRead(properties)
-							capabilities.PowerWrite = hasWrite(properties)
-							capabilities.PowerNotify = hasNotify(properties)
-							capabilities.Standby = capabilities.PowerWrite
-						case modeCharacteristicUUID:
-							modeCharacteristic = current
-							capabilities.ChannelRead = hasRead(properties)
-							capabilities.ChannelWrite = hasWrite(properties)
-							capabilities.ChannelNotify = hasNotify(properties)
-						case identifyCharacteristicUUID:
-							identifyCharacteristic = current
-							capabilities.Identify = hasWrite(properties)
-						}
-					}
-					continue
-				}
-
-				capabilities.DeviceInformation = true
-				for characteristicIndex := range chars {
-					current := &chars[characteristicIndex]
-					switch current.UUID() {
-					case manufacturerCharacteristicUUID, modelCharacteristicUUID,
-						serialCharacteristicUUID, hardwareCharacteristicUUID,
-						firmwareCharacteristicUUID:
-					default:
-						continue
-					}
-					metadataRecognized++
-					value, readErr := readMetadataValueContext(ctx, current)
-					if readErr != nil {
-						if errors.Is(readErr, context.Canceled) || errors.Is(readErr, context.DeadlineExceeded) {
-							return readErr
-						}
-						log.Printf("Bluetooth: Optional metadata read failed for %s (%s): %v", station.Name, current.UUID(), readErr)
-						metadataErrors = append(metadataErrors, fmt.Errorf("read %s: %w", current.UUID(), readErr))
-						continue
-					}
-					metadataSuccessful++
-					switch current.UUID() {
-					case manufacturerCharacteristicUUID:
-						metadata.Manufacturer = value
-					case modelCharacteristicUUID:
-						metadata.Model = value
-					case serialCharacteristicUUID:
-						metadata.SerialNumber = value
-					case hardwareCharacteristicUUID:
-						metadata.HardwareRevision = value
-					case firmwareCharacteristicUUID:
-						metadata.FirmwareRevision = value
-					}
-				}
-			}
-
-			if err != nil {
-				continue
-			}
-			if !controlServiceFound || powerCharacteristic == nil {
-				// Discovery succeeded but the service list is incomplete. The
-				// Windows uncached discovery drops services on unstable links
-				// and freshly booted devices, so a missing control service is
-				// an incomplete result, not an explicit capability rejection.
-				// Keep it retryable; classifying it as unsupported would mark
-				// the station permanently capability-less and stop recovery.
-				err = fmt.Errorf("%s discovery did not return the Lighthouse power control service", station.Name)
-				continue
-			}
-			station.characteristic = powerCharacteristic
-			station.modeCharacteristic = modeCharacteristic
-			station.identifyCharacteristic = identifyCharacteristic
-			station.Capabilities = capabilities
-			station.CapabilitiesKnown = true
-			if !capabilities.PowerRead {
-				// Capability discovery is authoritative for this connection. Do
-				// not retain a power value and freshness timestamp read through an
-				// older GATT database that exposed a readable characteristic.
-				station.clearPowerStateInternal()
-			}
-			if !capabilities.ChannelRead {
-				// Do not retain a channel obtained from an older discovery when
-				// the current firmware/session no longer exposes a readable Mode
-				// characteristic. A stale value must not participate in safety
-				// checks.
-				station.Channel = ChannelUnknown
-				station.LastChannelReadAt = time.Time{}
-			}
-			station.applyMetadataDiscovery(
-				metadata,
-				metadataServiceFound,
-				metadataRecognized,
-				metadataSuccessful,
-				errors.Join(metadataErrors...),
-				time.Now(),
-			)
-			station.setConnectionErrorInternal(nil)
-			err = nil
-			break
+		services, discoverErr := discoverServicesContext(ctx, station.device)
+		if errors.Is(discoverErr, context.Canceled) || errors.Is(discoverErr, context.DeadlineExceeded) {
+			return discoverErr
 		}
-
-		if err != nil {
+		if discoverErr != nil {
+			err = transportError("discover GATT services", discoverErr)
+			continue
+		}
+		outcome, outcomeErr := discoverServicesOutcome(ctx, station.Name, services)
+		if outcomeErr != nil {
+			if errors.Is(outcomeErr, context.Canceled) || errors.Is(outcomeErr, context.DeadlineExceeded) {
+				return outcomeErr
+			}
+			err = transportError("discover control characteristics", outcomeErr)
+			continue
+		}
+		if !outcome.controlServiceFound || outcome.power == nil {
+			// Discovery succeeded but the service list is incomplete. The
+			// Windows uncached discovery drops services on unstable links
+			// and freshly booted devices, so a missing control service is
+			// an incomplete result, not an explicit capability rejection.
+			// Keep it retryable; classifying it as unsupported would mark
+			// the station permanently capability-less and stop recovery.
+			err = fmt.Errorf("%s discovery did not return the Lighthouse power control service", station.Name)
+			continue
+		}
+		applyDiscoveryOutcome(station, outcome)
+		err = nil
+		break
+	}
+	if err != nil {
 			permanentlyUnsupported := IsUnsupportedCapabilityError(err)
 			station.CapabilitiesKnown = permanentlyUnsupported
 			if permanentlyUnsupported {
@@ -299,6 +180,146 @@ func connectAndDiscoverInternalContext(ctx context.Context, station *BaseStation
 		log.Printf("Bluetooth: Internal discovery successful for %s.", station.Name)
 	}
 	return nil
+}
+
+// discoveryOutcome is one GATT discovery pass over a connected session: the
+// control characteristics with their capabilities, and the optional device
+// information values.
+type discoveryOutcome struct {
+	power                characteristicIO
+	mode                 characteristicIO
+	identify             characteristicIO
+	capabilities         Capabilities
+	metadata             DeviceMetadata
+	metadataServiceFound bool
+	metadataRecognized   int
+	metadataSuccessful   int
+	metadataErrors       []error
+	controlServiceFound  bool
+}
+
+// discoverServicesOutcome walks discovered services once, collecting the
+// control characteristics and optional metadata. It returns a context error or
+// a control-characteristic discovery failure; optional device-information
+// failures are collected in the outcome instead.
+func discoverServicesOutcome(ctx context.Context, stationName string, services []bluetooth.DeviceService) (discoveryOutcome, error) {
+	outcome := discoveryOutcome{metadataErrors: make([]error, 0)}
+	for serviceIndex := range services {
+		service := services[serviceIndex]
+		serviceUUID := service.UUID()
+		if serviceUUID != powerControlServiceUUID && serviceUUID != deviceInformationServiceUUID {
+			continue
+		}
+		if serviceUUID == deviceInformationServiceUUID {
+			outcome.metadataServiceFound = true
+		}
+		chars, characteristicErr := discoverCharacteristicsContext(ctx, service)
+		if characteristicErr != nil {
+			if errors.Is(characteristicErr, context.Canceled) || errors.Is(characteristicErr, context.DeadlineExceeded) {
+				return outcome, characteristicErr
+			}
+			if serviceUUID == powerControlServiceUUID {
+				return outcome, characteristicErr
+			}
+			log.Printf("Bluetooth: Optional device information discovery failed for %s: %v", stationName, characteristicErr)
+			outcome.metadataErrors = append(outcome.metadataErrors, fmt.Errorf("discover device information characteristics: %w", characteristicErr))
+			continue
+		}
+
+		if serviceUUID == powerControlServiceUUID {
+			outcome.controlServiceFound = true
+			for characteristicIndex := range chars {
+				current := &chars[characteristicIndex]
+				properties := current.Properties()
+				switch current.UUID() {
+				case powerControlCharacteristicUUID:
+					outcome.power = current
+					outcome.capabilities.PowerRead = hasRead(properties)
+					outcome.capabilities.PowerWrite = hasWrite(properties)
+					outcome.capabilities.PowerNotify = hasNotify(properties)
+					outcome.capabilities.Standby = outcome.capabilities.PowerWrite
+				case modeCharacteristicUUID:
+					outcome.mode = current
+					outcome.capabilities.ChannelRead = hasRead(properties)
+					outcome.capabilities.ChannelWrite = hasWrite(properties)
+					outcome.capabilities.ChannelNotify = hasNotify(properties)
+				case identifyCharacteristicUUID:
+					outcome.identify = current
+					outcome.capabilities.Identify = hasWrite(properties)
+				}
+			}
+			continue
+		}
+
+		outcome.capabilities.DeviceInformation = true
+		for characteristicIndex := range chars {
+			current := &chars[characteristicIndex]
+			switch current.UUID() {
+			case manufacturerCharacteristicUUID, modelCharacteristicUUID,
+				serialCharacteristicUUID, hardwareCharacteristicUUID,
+				firmwareCharacteristicUUID:
+			default:
+				continue
+			}
+			outcome.metadataRecognized++
+			value, readErr := readMetadataValueContext(ctx, current)
+			if readErr != nil {
+				if errors.Is(readErr, context.Canceled) || errors.Is(readErr, context.DeadlineExceeded) {
+					return outcome, readErr
+				}
+				log.Printf("Bluetooth: Optional metadata read failed for %s (%s): %v", stationName, current.UUID(), readErr)
+				outcome.metadataErrors = append(outcome.metadataErrors, fmt.Errorf("read %s: %w", current.UUID(), readErr))
+				continue
+			}
+			outcome.metadataSuccessful++
+			switch current.UUID() {
+			case manufacturerCharacteristicUUID:
+				outcome.metadata.Manufacturer = value
+			case modelCharacteristicUUID:
+				outcome.metadata.Model = value
+			case serialCharacteristicUUID:
+				outcome.metadata.SerialNumber = value
+			case hardwareCharacteristicUUID:
+				outcome.metadata.HardwareRevision = value
+			case firmwareCharacteristicUUID:
+				outcome.metadata.FirmwareRevision = value
+			}
+		}
+	}
+	return outcome, nil
+}
+
+// applyDiscoveryOutcome writes one successful discovery pass onto the station.
+// Assumes the caller holds the station write lock.
+func applyDiscoveryOutcome(station *BaseStation, outcome discoveryOutcome) {
+	station.characteristic = outcome.power
+	station.modeCharacteristic = outcome.mode
+	station.identifyCharacteristic = outcome.identify
+	station.Capabilities = outcome.capabilities
+	station.CapabilitiesKnown = true
+	if !outcome.capabilities.PowerRead {
+		// Capability discovery is authoritative for this connection. Do
+		// not retain a power value and freshness timestamp read through an
+		// older GATT database that exposed a readable characteristic.
+		station.clearPowerStateInternal()
+	}
+	if !outcome.capabilities.ChannelRead {
+		// Do not retain a channel obtained from an older discovery when
+		// the current firmware/session no longer exposes a readable Mode
+		// characteristic. A stale value must not participate in safety
+		// checks.
+		station.Channel = ChannelUnknown
+		station.LastChannelReadAt = time.Time{}
+	}
+	station.applyMetadataDiscovery(
+		outcome.metadata,
+		outcome.metadataServiceFound,
+		outcome.metadataRecognized,
+		outcome.metadataSuccessful,
+		errors.Join(outcome.metadataErrors...),
+		time.Now(),
+	)
+	station.setConnectionErrorInternal(nil)
 }
 
 // InitialReadError reports non-fatal failures after connection and characteristic
