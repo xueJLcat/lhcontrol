@@ -12,7 +12,38 @@ import (
 func (c *Config) Save() error {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
+	c.recoverBlockedPersistenceLocked()
 	return c.saveLocked()
+}
+
+// recoverBlockedPersistenceLocked retries the configuration load while saves
+// are blocked by an unreadable file. The block exists because a startup load
+// failure left only defaults in memory, and saving them would destroy the
+// unreadable file's contents. When the read failure was transient (an AV
+// scanner or sync tool holding the file, a momentary IO error) the next
+// setter should recover within the same session instead of reporting every
+// setting change as blocked until a restart. Setters invoke this after
+// taking the write lock and before mutating their field so the recovered
+// disk contents become authoritative and the pending mutation applies on top
+// of them; a recovery that still fails leaves the block in place. Callers
+// must hold c.mutex.
+func (c *Config) recoverBlockedPersistenceLocked() {
+	if c.persistenceBlockedErr == nil {
+		return
+	}
+	configFilePath, err := getConfigPath()
+	if err != nil {
+		return
+	}
+	previousBlocked := c.persistenceBlockedErr
+	if loadErr := c.loadLocked(configFilePath); loadErr != nil && c.persistenceBlockedErr != nil {
+		// Recovery still failed. Keep the original block reason instead of a
+		// fresh error instance from this attempt so repeated retries report a
+		// stable failure and callers holding the original error keep matching
+		// it. A successful recovery clears both fields inside loadLocked.
+		c.persistenceBlockedErr = previousBlocked
+		c.lastPersistenceErr = previousBlocked
+	}
 }
 
 // PersistenceError reports whether saves are intentionally blocked because an

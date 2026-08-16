@@ -15,10 +15,12 @@ func (c *Config) SetAPIListenAddress(address string) error {
 	}
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
+	c.recoverBlockedPersistenceLocked()
 	// Compare the stored value (not the sanitized getter) so a re-save also
 	// repairs an invalid residual value that the getter masks with the
-	// default.
-	if c.APIListenAddress == address {
+	// default. The short-circuit must not apply while a persistence error is
+	// pending: rewriting the unchanged value is exactly what clears it.
+	if c.APIListenAddress == address && c.lastPersistenceErr == nil && c.persistenceBlockedErr == nil {
 		return nil
 	}
 	previous := c.APIListenAddress

@@ -20,6 +20,7 @@ func (c *Config) SetAutoSleep(settings autosleep.Settings) error {
 	}
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
+	c.recoverBlockedPersistenceLocked()
 	previous := c.AutoSleep
 	c.AutoSleep = settings
 	if err := c.saveLocked(); err != nil {
@@ -45,6 +46,7 @@ func (c *Config) SetLanguage(language string) error {
 	}
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
+	c.recoverBlockedPersistenceLocked()
 	previous := c.Language
 	c.Language = language
 	if err := c.saveLocked(); err != nil {
@@ -63,6 +65,7 @@ func (c *Config) GetScanOnStartup() bool {
 func (c *Config) SetScanOnStartup(enabled bool) error {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
+	c.recoverBlockedPersistenceLocked()
 	previous := c.ScanOnStartup
 	c.ScanOnStartup = enabled
 	if err := c.saveLocked(); err != nil {
@@ -96,6 +99,7 @@ func (c *Config) SetScanDurationSeconds(durationSeconds int) error {
 	}
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
+	c.recoverBlockedPersistenceLocked()
 	previous := c.ScanDurationSeconds
 	c.ScanDurationSeconds = durationSeconds
 	if err := c.saveLocked(); err != nil {
@@ -114,6 +118,7 @@ func (c *Config) GetStatusPollingEnabled() bool {
 func (c *Config) SetStatusPollingEnabled(enabled bool) error {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
+	c.recoverBlockedPersistenceLocked()
 	previous := c.StatusPollingEnabled
 	c.StatusPollingEnabled = enabled
 	if err := c.saveLocked(); err != nil {
@@ -147,6 +152,7 @@ func (c *Config) SetBulkPowerTimeoutSeconds(timeoutSeconds int) error {
 	}
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
+	c.recoverBlockedPersistenceLocked()
 	stationTimeout := sanitizeRangedInt(&c.StationOperationTimeoutSeconds, MinStationOperationTimeoutSeconds, MaxStationOperationTimeoutSeconds, DefaultStationOperationTimeoutSeconds)
 	if timeoutSeconds < stationTimeout {
 		return fmt.Errorf(
@@ -184,6 +190,7 @@ func (c *Config) SetStatusPollIntervalSeconds(intervalSeconds int) error {
 	}
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
+	c.recoverBlockedPersistenceLocked()
 	previous := c.StatusPollIntervalSeconds
 	c.StatusPollIntervalSeconds = intervalSeconds
 	if err := c.saveLocked(); err != nil {
@@ -217,6 +224,7 @@ func (c *Config) SetStationOperationTimeoutSeconds(timeoutSeconds int) error {
 	}
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
+	c.recoverBlockedPersistenceLocked()
 	bulkTimeout := sanitizeRangedInt(&c.BulkPowerTimeoutSeconds, MinBulkPowerTimeoutSeconds, MaxBulkPowerTimeoutSeconds, DefaultBulkPowerTimeoutSeconds)
 	if timeoutSeconds > bulkTimeout {
 		return fmt.Errorf(

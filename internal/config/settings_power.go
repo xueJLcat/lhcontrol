@@ -22,6 +22,7 @@ func (c *Config) SetPowerConfirmAttemptsOn(attempts int) error {
 	}
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
+	c.recoverBlockedPersistenceLocked()
 	previous := c.PowerConfirmAttemptsOn
 	c.PowerConfirmAttemptsOn = attempts
 	if err := c.saveLocked(); err != nil {
@@ -48,6 +49,7 @@ func (c *Config) SetPowerConfirmAttemptsOff(attempts int) error {
 	}
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
+	c.recoverBlockedPersistenceLocked()
 	previous := c.PowerConfirmAttemptsOff
 	c.PowerConfirmAttemptsOff = attempts
 	if err := c.saveLocked(); err != nil {
@@ -78,6 +80,7 @@ func (c *Config) SetPowerConfirmPollIntervalMs(intervalMs int) error {
 	}
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
+	c.recoverBlockedPersistenceLocked()
 	previous := c.PowerConfirmPollIntervalMs
 	c.PowerConfirmPollIntervalMs = intervalMs
 	if err := c.saveLocked(); err != nil {
@@ -108,6 +111,7 @@ func (c *Config) SetBootFallbackSeconds(fallbackSeconds int) error {
 	}
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
+	c.recoverBlockedPersistenceLocked()
 	previous := c.BootFallbackSeconds
 	c.BootFallbackSeconds = fallbackSeconds
 	if err := c.saveLocked(); err != nil {
@@ -138,6 +142,7 @@ func (c *Config) SetSleepFinalWriteTimeoutSeconds(timeoutSeconds int) error {
 	}
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
+	c.recoverBlockedPersistenceLocked()
 	previous := c.SleepFinalWriteTimeoutSeconds
 	c.SleepFinalWriteTimeoutSeconds = timeoutSeconds
 	if err := c.saveLocked(); err != nil {
@@ -168,6 +173,7 @@ func (c *Config) SetSleepPrepareGapMs(gapMs int) error {
 	}
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
+	c.recoverBlockedPersistenceLocked()
 	previous := c.SleepPrepareGapMs
 	c.SleepPrepareGapMs = gapMs
 	if err := c.saveLocked(); err != nil {

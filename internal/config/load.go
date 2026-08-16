@@ -49,7 +49,13 @@ func (c *Config) Load() error {
 	// silently persisted back on the next save.
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
+	return c.loadLocked(configFilePath)
+}
 
+// loadLocked reads, parses, and applies the persisted configuration. Callers
+// must hold c.mutex. It is shared by the startup Load and the blocked-save
+// recovery so both paths apply the exact same sanitizing and block handling.
+func (c *Config) loadLocked(configFilePath string) error {
 	// A previous run dying between CreateTemp and Rename leaves scratch files
 	// behind; the single-instance guard means no other instance is mid-write,
 	// so stale temporaries are safe to sweep here.

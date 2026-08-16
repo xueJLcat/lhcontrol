@@ -22,6 +22,7 @@ func (c *Config) SetDiscoveryAttempts(attempts int) error {
 	}
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
+	c.recoverBlockedPersistenceLocked()
 	previous := c.DiscoveryAttempts
 	c.DiscoveryAttempts = attempts
 	if err := c.saveLocked(); err != nil {
@@ -52,6 +53,7 @@ func (c *Config) SetDiscoveryRetryDelayMs(delayMs int) error {
 	}
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
+	c.recoverBlockedPersistenceLocked()
 	previous := c.DiscoveryRetryDelayMs
 	c.DiscoveryRetryDelayMs = delayMs
 	if err := c.saveLocked(); err != nil {

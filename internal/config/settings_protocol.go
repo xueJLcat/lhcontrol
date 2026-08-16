@@ -20,6 +20,7 @@ func (c *Config) setRanged(name string, value, min, max int, field *int, crossCh
 	}
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
+	c.recoverBlockedPersistenceLocked()
 	if crossCheck != nil {
 		if err := crossCheck(c, value); err != nil {
 			return err

@@ -268,6 +268,94 @@ func TestLoadReadFailureBlocksSavesToProtectExistingConfig(t *testing.T) {
 	}
 }
 
+// TestTransientLoadFailureRecoversOnNextSetter guards the lazy recovery: when
+// the startup Load hit a transient read failure (a backup tool holding the
+// file), saves are blocked to protect the unreadable config, but the very next
+// setting change must re-attempt the load instead of staying blocked until a
+// restart. The recovered disk contents become authoritative, so a pre-existing
+// rename must survive rather than being wiped by the in-memory defaults.
+func TestTransientLoadFailureRecoversOnNextSetter(t *testing.T) {
+	configDirectory := useTemporaryConfigDirectory(t)
+
+	originalReader := configFileReader
+	readErr := errors.New("file locked by backup software")
+	calls := 0
+	configFileReader = func(path string) ([]byte, error) {
+		calls++
+		if calls == 1 {
+			return nil, readErr
+		}
+		return originalReader(path)
+	}
+	t.Cleanup(func() { configFileReader = originalReader })
+
+	// Seed a real config whose read fails once at startup but succeeds later.
+	seed := `{"language":"zh-CN","renamedStations":{"LHB-EXISTING":"Kept"}}`
+	if err := os.WriteFile(filepath.Join(configDirectory, "config.json"), []byte(seed), 0o644); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+
+	cfg := NewConfig()
+	if err := cfg.Load(); err == nil {
+		t.Fatal("Load() unexpectedly succeeded on the transient failure")
+	}
+	if cfg.PersistenceError() == nil {
+		t.Fatal("transient Load failure did not block persistence")
+	}
+
+	// The next setter re-attempts the load; the reader now succeeds, the block
+	// lifts, and the change is applied on top of the recovered disk contents.
+	if err := cfg.SetLanguage(LanguageEnglish); err != nil {
+		t.Fatalf("SetLanguage() after transient recovery error = %v", err)
+	}
+	if err := cfg.PersistenceError(); err != nil {
+		t.Fatalf("recovered persistence still reports an error: %v", err)
+	}
+	if got := cfg.GetLanguage(); got != LanguageEnglish {
+		t.Fatalf("language after recovery = %q, want %q", got, LanguageEnglish)
+	}
+	if got, ok := cfg.GetRenamedStation("LHB-EXISTING"); !ok || got != "Kept" {
+		t.Fatalf("recovered rename = %q,%v; want the disk value preserved", got, ok)
+	}
+}
+
+// TestSameAPIAddressSaveClearsPersistenceError guards the same-value
+// short-circuit: re-saving an unchanged API listen address must still persist
+// when a prior save failure left a pending persistence error, because that
+// rewrite is what clears the error state for the health endpoint and UI.
+func TestSameAPIAddressSaveClearsPersistenceError(t *testing.T) {
+	useTemporaryConfigDirectory(t)
+
+	originalWriter := configFileWriter
+	writeCalls := 0
+	configFileWriter = func(path string, data []byte, perm os.FileMode) error {
+		writeCalls++
+		if writeCalls == 1 {
+			return errors.New("disk full")
+		}
+		return originalWriter(path, data, perm)
+	}
+	t.Cleanup(func() { configFileWriter = originalWriter })
+
+	cfg := NewConfig()
+	// A first save fails and leaves lastPersistenceErr set (value rolled back).
+	if err := cfg.SetLanguage(LanguageEnglish); err == nil {
+		t.Fatal("first save unexpectedly succeeded")
+	}
+	if cfg.PersistenceError() == nil {
+		t.Fatal("failed save did not record a persistence error")
+	}
+
+	// Re-saving the unchanged API address must not short-circuit while an error
+	// is pending: the successful rewrite clears it.
+	if err := cfg.SetAPIListenAddress(DefaultAPIListenAddress); err != nil {
+		t.Fatalf("SetAPIListenAddress() same value error = %v", err)
+	}
+	if err := cfg.PersistenceError(); err != nil {
+		t.Fatalf("same-value API address save retained persistence error: %v", err)
+	}
+}
+
 func TestAddressRenameTakesPriorityOverLegacyName(t *testing.T) {
 	cfg := NewConfig()
 	cfg.RenamedStations["LHB-OLD"] = "Legacy name"
