@@ -110,6 +110,7 @@ func (m *Manager) reserveScan(parent context.Context) (*scanLifecycle, error) {
 	}
 	return lifecycle, nil
 }
+
 // prepareScan reserves the global operation and readies the adapter for a
 // scan. A panic during adapter preparation is converted into a scan failure:
 // without a terminal error the callers would publish no terminal lifecycle
@@ -249,6 +250,7 @@ func fallbackStationName(address string) string {
 	}
 	return "LHB-" + strings.ToUpper(compact)
 }
+
 // scanAndFetchStations runs one scan in three phases: release cached
 // connections so stations advertise again, merge the discovery results into
 // the fleet, then read initial power/channel values within a bounded phase.
@@ -372,9 +374,9 @@ func (m *Manager) mergeDiscoveredStations(
 	// to map work: newly created stations are not published until they are
 	// inserted, and existing pointers stay valid after the unlock.
 	type discoveredMerge struct {
-		value     bluetooth.DiscoveredStation
-		station   *bluetooth.BaseStation
-		isNew     bool
+		value   bluetooth.DiscoveredStation
+		station *bluetooth.BaseStation
+		isNew   bool
 	}
 	merges := make([]discoveredMerge, 0, len(discoveredValues))
 	m.stationsMutex.Lock()
@@ -561,7 +563,7 @@ func (m *Manager) recordInitialScanReadResults(readResults []initialScanReadResu
 			}
 			result.err = &bluetooth.InitialReadError{
 				Power:   initialErr.Power,
-				Channel:   initialErr.Channel,
+				Channel: initialErr.Channel,
 			}
 		} else if errors.Is(result.err, context.DeadlineExceeded) && !bluetooth.RequiresReconnect(result.err) {
 			// A per-station read-budget deadline is not evidence the link
@@ -618,6 +620,11 @@ const stopScanWaitLimit = 30 * time.Second
 // that already failed on its own is not surfaced as a stop failure. When
 // scan processing does not finish within the bounded wait, StopScan reports
 // ErrScanStopTimeout instead of hanging indefinitely.
+// The stop applies to scans already started (or being published) at the
+// time of the call: a scan whose reserveScan begins only after StopScan
+// returned is not covered, so callers needing "no scan after this point"
+// must combine StopScan with their own start suppression (shutdown does so
+// via the shuttingDown flag checked inside reserveScan).
 func (m *Manager) StopScan() error {
 	m.scanLifecycleMutex.Lock()
 	lifecycle := m.scanLifecycle

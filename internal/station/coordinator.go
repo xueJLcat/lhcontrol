@@ -96,20 +96,32 @@ func (m *Manager) attemptForegroundGlobalOperation(ctx context.Context) (<-chan 
 	}
 	m.recoveryOperationMutex.Lock()
 	recoveryDone := m.recoveryOperationDone
+	recoveryCancel := m.cancelRecovery
 	m.recoveryOperationMutex.Unlock()
 	m.statusLifecycleMutex.Lock()
 	statusDone := m.statusOperationDone
+	statusCancel := m.cancelStatusOperation
 	m.statusLifecycleMutex.Unlock()
 	var backgroundDone <-chan struct{}
 	if recoveryDone != nil {
 		backgroundDone = recoveryDone
+		// Only cancel the lifecycle whose done channel is being waited on:
+		// capturing the channel and the cancel together keeps them paired.
+		// Cancelling the stored cancel unconditionally could hit a newer
+		// refresh that replaced an abandoned one while this operation waits
+		// on the abandoned done channel.
+		if recoveryCancel != nil {
+			recoveryCancel()
+		}
 	} else if statusDone != nil {
 		backgroundDone = statusDone
+		if statusCancel != nil {
+			statusCancel()
+		}
 	}
 	if backgroundDone == nil {
 		return nil, err
 	}
-	m.cancelBackgroundReadsForForeground()
 	return backgroundDone, nil
 }
 
@@ -432,6 +444,7 @@ func (m *Manager) beginForegroundStationOperationContext(ctx context.Context, ad
 		m.recoveryOperationMutex.Lock()
 		done := m.recoveryOperationDone
 		generationAfter := m.recoveryGeneration
+		recoveryCancel := m.cancelRecovery
 		m.recoveryOperationMutex.Unlock()
 		if generationAfter != generationBefore {
 			continue
@@ -439,7 +452,12 @@ func (m *Manager) beginForegroundStationOperationContext(ctx context.Context, ad
 		if done == nil {
 			return err
 		}
-		m.cancelRecoveryForForeground()
+		// Cancel the recovery captured together with the done channel above:
+		// reading the stored cancel later could hit a replacement recovery
+		// published while this operation waits on the captured channel.
+		if recoveryCancel != nil {
+			recoveryCancel()
+		}
 		select {
 		case <-done:
 		case <-drainDeadline:
@@ -533,15 +551,6 @@ func (m *Manager) hasForegroundOperation() bool {
 		}
 	}
 	return false
-}
-func (m *Manager) cancelBackgroundReadsForForeground() {
-	m.statusLifecycleMutex.Lock()
-	cancelStatus := m.cancelStatusOperation
-	m.statusLifecycleMutex.Unlock()
-	if cancelStatus != nil {
-		cancelStatus()
-	}
-	m.cancelRecoveryForForeground()
 }
 
 // cancelRecoveryForForeground makes a read-only recovery yield its GATT slot.
