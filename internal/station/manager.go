@@ -544,15 +544,16 @@ func (m *Manager) recordObservedReadResult(
 	channelObserved bool,
 	channelErr error,
 ) {
-	connectionNoted := false
+	connectionFailureNoted := false
+	connectionDisconnected := false
 	if powerObserved {
 		if powerErr == nil || bluetooth.IsUnsupportedCapabilityError(powerErr) || bluetooth.IsDeviceValueError(powerErr) {
 			// Malformed device data (like an unsupported capability) cannot be
 			// repaired by reconnecting; discarding the session here would start
 			// a disconnect/reconnect cycle that fails the same way on every poll.
 			m.clearStatusFailureKind(address, statusRetryConnection)
-		} else if (errors.Is(powerErr, context.DeadlineExceeded) || errors.Is(powerErr, context.Canceled)) &&
-			!bluetooth.RequiresReconnect(powerErr) {
+		} else if ((errors.Is(powerErr, context.DeadlineExceeded) || errors.Is(powerErr, context.Canceled)) &&
+			!bluetooth.RequiresReconnect(powerErr)) || bluetooth.IsProtocolRejection(powerErr) {
 			// A power read stopped by its own budget or by a cancellation is
 			// not evidence the link is broken, matching the bare-deadline rule
 			// used by scan initial reads, recovery, and status refreshes.
@@ -562,12 +563,17 @@ func (m *Manager) recordObservedReadResult(
 			// reachable station must not pay a disconnect/reconnect cycle.
 			// RequiresReconnect stays true for errors joined with a genuine
 			// transport failure, so mixed errors still take the disconnect
-			// branch below.
+			// branch below. Protocol-level rejections (authentication,
+			// encryption, resources, value shape) are peer decisions about
+			// the request with a healthy link; reconnecting could never
+			// change them, so they share the backoff-without-disconnect path.
 			m.noteStatusFailure(address)
+			connectionFailureNoted = true
 		} else {
 			_ = m.disconnectStationBounded(station)
 			m.noteStatusFailure(address)
-			connectionNoted = true
+			connectionFailureNoted = true
+			connectionDisconnected = true
 		}
 	}
 	if channelObserved {
@@ -586,8 +592,14 @@ func (m *Manager) recordObservedReadResult(
 		} else {
 			m.noteChannelFailure(address)
 			if bluetooth.RequiresReconnect(channelErr) || bluetooth.IsAdapterUnavailable(channelErr) {
-				if !connectionNoted {
+				// A power-read deadline already counted one connection
+				// failure for this call without disconnecting; the channel
+				// error's genuine transport failure still earns the
+				// disconnect but must not double the failure count.
+				if !connectionDisconnected {
 					_ = m.disconnectStationBounded(station)
+				}
+				if !connectionFailureNoted {
 					m.noteStatusFailure(address)
 				}
 			}
@@ -630,6 +642,12 @@ func (m *Manager) recordUnstructuredStationFailure(
 	if bluetooth.IsDeviceValueError(err) {
 		// A value formatting violation is device data, not a broken link.
 		m.clearStatusFailureKind(address, statusRetryConnection)
+		return
+	}
+	if bluetooth.IsProtocolRejection(err) {
+		// A security-policy or resource rejection keeps the healthy link;
+		// only the usual failure accounting with backoff applies.
+		m.noteStatusFailure(address)
 		return
 	}
 	_ = m.disconnectStationBounded(station)

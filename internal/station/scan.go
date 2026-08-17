@@ -49,7 +49,11 @@ func (m *Manager) beginScanContext(ctx context.Context, callbacks ScanCallbacks)
 	if err == nil {
 		return nil
 	}
-	cancelled := lifecycle.ctx.Err() != nil || m.shuttingDown.Load()
+	// A caller deadline is reported as a failure (with its timeout error)
+	// instead of a cancellation: the two outcomes normally drive different
+	// retry strategies.
+	cancelled := m.shuttingDown.Load() ||
+		(lifecycle.ctx.Err() != nil && !errors.Is(lifecycle.ctx.Err(), context.DeadlineExceeded))
 	if m.shuttingDown.Load() {
 		err = ErrShuttingDown
 	} else if cancelled {
@@ -62,7 +66,10 @@ func (m *Manager) reserveScan(parent context.Context) (*scanLifecycle, error) {
 	if parent == nil {
 		parent = context.Background()
 	}
-	if parent.Err() != nil {
+	if parentErr := parent.Err(); parentErr != nil {
+		if errors.Is(parentErr, context.DeadlineExceeded) {
+			return nil, fmt.Errorf("scan request deadline exceeded before start: %w", parentErr)
+		}
 		return nil, bluetooth.ErrScanCancelled
 	}
 	m.scanTransitionMutex.Lock()
@@ -134,8 +141,14 @@ func (m *Manager) prepareScan(lifecycle *scanLifecycle) (operationAcquired bool,
 		m.lifecycleMutex.Unlock()
 		return true, ErrShuttingDown
 	}
-	if ctx.Err() != nil {
+	if ctxErr := ctx.Err(); ctxErr != nil {
 		m.lifecycleMutex.Unlock()
+		if errors.Is(ctxErr, context.DeadlineExceeded) {
+			// A caller budget that ran out before the scan body started is a
+			// timeout, not a user cancellation; keep the deadline observable
+			// for HTTP mapping and scan-status reporting.
+			return true, fmt.Errorf("scan start aborted by caller deadline: %w", ctxErr)
+		}
 		return true, bluetooth.ErrScanCancelled
 	}
 	m.lifecycleMutex.Unlock()
@@ -453,7 +466,9 @@ func (m *Manager) runInitialScanReads(ctx context.Context, stationsToFetch []*bl
 			case semaphore <- struct{}{}:
 			case <-phaseContext.Done():
 				if ctx.Err() != nil {
-					readResults[resultIndex].err = bluetooth.ErrScanCancelled
+					// scanContextError keeps a caller deadline classified as a
+					// timeout instead of a user cancellation.
+					readResults[resultIndex].err = scanContextError(ctx)
 				} else {
 					readResults[resultIndex].err = fmt.Errorf("initial read phase deadline exceeded: %w", phaseContext.Err())
 					readResults[resultIndex].phaseDeadlineExceeded = true
@@ -568,10 +583,16 @@ func (m *Manager) recordInitialScanReadResults(readResults []initialScanReadResu
 	}
 }
 func scanContextError(ctx context.Context) error {
-	if ctx != nil && ctx.Err() != nil {
-		return bluetooth.ErrScanCancelled
+	if ctx == nil || ctx.Err() == nil {
+		return nil
 	}
-	return nil
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		// A caller budget expiring mid-scan is a timeout, not a user
+		// cancellation; the distinct error keeps the two retry strategies
+		// apart downstream.
+		return fmt.Errorf("scan interrupted by caller deadline: %w", context.DeadlineExceeded)
+	}
+	return bluetooth.ErrScanCancelled
 }
 func (m *Manager) currentScanContext() context.Context {
 	m.scanLifecycleMutex.Lock()
@@ -701,7 +722,8 @@ func (m *Manager) StartScan(callbacks ScanCallbacks) error {
 	go func() {
 		operationAcquired, prepareErr := m.prepareScan(lifecycle)
 		if prepareErr != nil {
-			cancelled := lifecycle.ctx.Err() != nil || m.shuttingDown.Load()
+			cancelled := m.shuttingDown.Load() ||
+				(lifecycle.ctx.Err() != nil && !errors.Is(lifecycle.ctx.Err(), context.DeadlineExceeded))
 			if m.shuttingDown.Load() {
 				prepareErr = ErrShuttingDown
 			} else if cancelled {

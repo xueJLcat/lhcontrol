@@ -205,7 +205,11 @@ func (m *Manager) SetStationChannel(
 		if bluetooth.IsUnsupportedCapabilityError(err) && !writeResult.CommandSent {
 			return result, fmt.Errorf("%w: %v", ErrUnsupported, err)
 		}
-		return result, err
+		// Normalize an expired operation budget or a shutdown cancellation the
+		// same way the other single-station operations do, so Wails and HTTP
+		// consumers observe the public sentinels instead of raw context
+		// errors.
+		return result, m.stationOperationContextError(err)
 	}
 	m.clearStatusFailureKind(canonicalAddress, statusRetryConnection|statusRetryChannel)
 	return result, nil

@@ -57,6 +57,32 @@ func TestStopScanCancelsPendingInitializationBeforeScanStarts(t *testing.T) {
 	}
 }
 
+// TestScanWithExpiredCallerDeadlineReportsTimeout guards the timeout
+// classification: a caller budget that expired before or during a scan is a
+// failure, not a user cancellation, so callers applying different retry
+// strategies can tell the two apart.
+func TestScanWithExpiredCallerDeadlineReportsTimeout(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	manager.bluetoothOps.scanForDurationContext = func(context.Context, time.Duration) ([]internalbluetooth.DiscoveredStation, error) {
+		return nil, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+	defer cancel()
+	time.Sleep(2 * time.Millisecond)
+
+	_, err := manager.ScanAndFetchStationsContext(ctx)
+	if err == nil {
+		t.Fatal("scan with an expired caller deadline unexpectedly succeeded")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("ScanAndFetchStationsContext() error = %v, want the caller deadline observable", err)
+	}
+	if errors.Is(err, internalbluetooth.ErrScanCancelled) {
+		t.Fatalf("expired caller deadline misclassified as cancellation: %v", err)
+	}
+}
+
 func TestStopScanWaitsForScanLifecyclePublication(t *testing.T) {
 	manager := NewManager(config.NewConfig())
 	publishingStarted := make(chan struct{})

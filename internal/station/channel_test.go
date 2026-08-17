@@ -60,8 +60,9 @@ func TestChannelOperationHasHardTimeoutAndReleasesOperation(t *testing.T) {
 		return internalbluetooth.ChannelWriteResult{}, ctx.Err()
 	}
 
-	if _, err := manager.SetStationChannel(address, 4, false); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("SetStationChannel() error = %v, want context deadline", err)
+	_, err := manager.SetStationChannel(address, 4, false)
+	if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, ErrStationOperationTimeout) {
+		t.Fatalf("SetStationChannel() error = %v, want the deadline mapped to the operation timeout sentinel", err)
 	}
 	manager.bluetoothOps.setChannel = func(context.Context, *internalbluetooth.BaseStation, int) (internalbluetooth.ChannelWriteResult, error) {
 		return internalbluetooth.ChannelWriteResult{PreviousChannel: 3, Channel: 4, CommandSent: true}, nil
