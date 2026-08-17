@@ -1,6 +1,9 @@
 package main
 
 import (
+	"net"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -528,5 +531,93 @@ func TestAdvancedStationBindingsPersist(t *testing.T) {
 			restarted.GetRecoveryRetryBaseSeconds(), restarted.GetRecoveryRetryMaxSeconds(), restarted.GetAbsentStationRetryLimit(),
 			restarted.GetInitialReadTimeoutSeconds(), restarted.GetScanReadPhaseTimeoutSeconds(), restarted.GetStatusReadTimeoutSeconds(),
 			restarted.GetStatusRefreshTimeoutSeconds(), restarted.GetChannelScanFreshnessSeconds(), restarted.GetBluetoothInitRetrySeconds())
+	}
+}
+
+// TestBlockedConfigRecoveryReappliesRuntimeSettings guards the blocked-save
+// recovery replay: when the startup Load could not read the file and a later
+// setter lifts the block, the runtime state derived at startup (Bluetooth
+// timing, the auto-sleep watcher, the API listener) must be re-applied from
+// the recovered contents instead of silently staying on the defaults.
+func TestBlockedConfigRecoveryReappliesRuntimeSettings(t *testing.T) {
+	configDirectory := t.TempDir()
+	t.Setenv("AppData", configDirectory)
+
+	appConfigDir := filepath.Join(configDirectory, "lhcontrol")
+	// A directory where config.json belongs makes the startup load unreadable
+	// without touching the real persistence hooks.
+	if err := os.MkdirAll(filepath.Join(appConfigDir, "config.json"), 0o755); err != nil {
+		t.Fatalf("seed unreadable config path: %v", err)
+	}
+
+	app := NewApp()
+	app.apiRetryDelay = 5 * time.Millisecond
+	app.apiBindVerifyWait = 2 * time.Second
+	app.listen = func(_, address string) (net.Listener, error) {
+		return newFakeAPIListener(address), nil
+	}
+	app.serveListener = func(listener net.Listener) error {
+		fake := listener.(*fakeAPIListener)
+		<-fake.closed
+		return nil
+	}
+	if err := app.config.Load(); err == nil {
+		t.Fatal("config.Load() unexpectedly succeeded on the unreadable file")
+	}
+	app.configReplayGeneration.Store(app.config.RecoveryGeneration())
+	app.startAPIServer()
+	t.Cleanup(func() {
+		app.stopAutoSleep()
+		app.apiLifecycleMutex.Lock()
+		cancel := app.apiCancel
+		app.apiCancel = nil
+		app.apiLifecycleMutex.Unlock()
+		if cancel != nil {
+			cancel()
+		}
+		_ = app.api.Shutdown()
+		app.apiWG.Wait()
+	})
+	deadline := time.Now().Add(2 * time.Second)
+	for !app.GetAPIStatus().Running && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if status := app.GetAPIStatus(); !status.Running || status.Address != config.DefaultAPIListenAddress {
+		t.Fatalf("initial API status = %+v, want running on %s", status, config.DefaultAPIListenAddress)
+	}
+
+	// Heal the file with recovered contents that differ from every default.
+	if err := os.RemoveAll(filepath.Join(appConfigDir, "config.json")); err != nil {
+		t.Fatalf("clear unreadable config: %v", err)
+	}
+	seed := `{"powerConfirmAttemptsOn":77,"apiListenAddress":"127.0.0.1:7979","autoSleep":{"enabled":true,"target":"steam","delaySeconds":60}}`
+	if err := os.WriteFile(filepath.Join(appConfigDir, "config.json"), []byte(seed), 0o644); err != nil {
+		t.Fatalf("seed recovered config: %v", err)
+	}
+
+	// An unrelated setter lifts the block; the replay must follow.
+	if err := app.SetLanguage(config.LanguageEnglish); err != nil {
+		t.Fatalf("SetLanguage() error = %v", err)
+	}
+
+	if got := bluetooth.CurrentTiming().ConfirmAttemptsOn; got != 77 {
+		t.Fatalf("recovered Bluetooth timing ConfirmAttemptsOn = %d, want 77", got)
+	}
+	app.autoSleepMutex.Lock()
+	watcherRunning := app.autoSleepWatcher != nil
+	watcherSettings := autosleep.Settings{}
+	if watcherRunning {
+		watcherSettings = app.autoSleepWatcher.Settings
+	}
+	app.autoSleepMutex.Unlock()
+	if !watcherRunning || !watcherSettings.Enabled || watcherSettings.Target != "steam" || watcherSettings.DelaySeconds != 60 {
+		t.Fatalf("recovered auto-sleep state: running=%v settings=%+v, want an enabled steam watcher with 60s delay", watcherRunning, watcherSettings)
+	}
+	deadline = time.Now().Add(2 * time.Second)
+	for !(app.GetAPIStatus().Running && app.GetAPIStatus().Address == "127.0.0.1:7979") && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if status := app.GetAPIStatus(); !status.Running || status.Address != "127.0.0.1:7979" {
+		t.Fatalf("API status after recovery = %+v, want running on 127.0.0.1:7979", status)
 	}
 }

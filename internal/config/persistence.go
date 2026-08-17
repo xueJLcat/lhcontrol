@@ -44,6 +44,25 @@ func (c *Config) recoverBlockedPersistenceLocked() {
 		c.persistenceBlockedErr = previousBlocked
 		c.lastPersistenceErr = previousBlocked
 	}
+	if c.persistenceBlockedErr == nil {
+		// The persisted contents are authoritative again. Notify runtime
+		// observers that the in-memory configuration no longer matches what
+		// startup applied, so they can re-apply their derived side effects
+		// (Bluetooth timing, auto-sleep watcher, API listener).
+		c.recoveryGeneration++
+	}
+}
+
+// RecoveryGeneration reports how many times a blocked-save recovery has
+// replaced the in-memory configuration since process start. Runtime layers
+// that derive state from the configuration at startup compare observed values
+// to detect a recovery and re-apply their side effects; without that replay a
+// recovered configuration would stay inert until the next restart. It is safe
+// to call while another goroutine mutates the configuration.
+func (c *Config) RecoveryGeneration() uint64 {
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	return c.recoveryGeneration
 }
 
 // PersistenceError reports whether saves are intentionally blocked because an

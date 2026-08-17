@@ -302,6 +302,7 @@ func TestTransientLoadFailureRecoversOnNextSetter(t *testing.T) {
 	if cfg.PersistenceError() == nil {
 		t.Fatal("transient Load failure did not block persistence")
 	}
+	generationBefore := cfg.RecoveryGeneration()
 
 	// The next setter re-attempts the load; the reader now succeeds, the block
 	// lifts, and the change is applied on top of the recovered disk contents.
@@ -316,6 +317,19 @@ func TestTransientLoadFailureRecoversOnNextSetter(t *testing.T) {
 	}
 	if got, ok := cfg.GetRenamedStation("LHB-EXISTING"); !ok || got != "Kept" {
 		t.Fatalf("recovered rename = %q,%v; want the disk value preserved", got, ok)
+	}
+	// The recovery must be observable so runtime layers re-apply their
+	// startup-derived side effects on the recovered contents.
+	if got := cfg.RecoveryGeneration(); got != generationBefore+1 {
+		t.Fatalf("RecoveryGeneration() after recovery = %d, want %d", got, generationBefore+1)
+	}
+
+	// A later setter that does not recover again must not bump the generation.
+	if err := cfg.SetLanguage(LanguageSimplifiedChinese); err != nil {
+		t.Fatalf("SetLanguage() error = %v", err)
+	}
+	if got := cfg.RecoveryGeneration(); got != generationBefore+1 {
+		t.Fatalf("RecoveryGeneration() after a plain setter = %d, want unchanged %d", got, generationBefore+1)
 	}
 }
 

@@ -53,17 +53,23 @@ type App struct {
 	activeExternalOperations  map[uint64]string
 	externalOperationRevision uint64
 	shuttingDown              atomic.Bool
-	autoSleepMutex            sync.Mutex
-	autoSleepCancel           context.CancelFunc
-	autoSleepWatcher          *autosleep.Watcher
-	autoSleepStopWait         time.Duration
-	autoSleepWG               sync.WaitGroup
-	autoSleepActionID         atomic.Uint64
-	autoSleepActionSlot       chan struct{}
-	autoSleepSettledSession   time.Time
-	scanForAutoSleep          func(context.Context) ([]station.StationInfo, error)
-	setPowerForAutoSleep      func(context.Context, string) (station.BulkPowerResult, error)
-	autoSleepEventSink        func(autoSleepEvent)
+	// configReplayGeneration tracks the last observed config recovery
+	// generation so a blocked-save recovery that replaced the startup
+	// defaults with the persisted file contents replays the runtime side
+	// effects (Bluetooth timing, auto-sleep watcher, API listener) exactly
+	// once.
+	configReplayGeneration  atomic.Uint64
+	autoSleepMutex          sync.Mutex
+	autoSleepCancel         context.CancelFunc
+	autoSleepWatcher        *autosleep.Watcher
+	autoSleepStopWait       time.Duration
+	autoSleepWG             sync.WaitGroup
+	autoSleepActionID       atomic.Uint64
+	autoSleepActionSlot     chan struct{}
+	autoSleepSettledSession time.Time
+	scanForAutoSleep        func(context.Context) ([]station.StationInfo, error)
+	setPowerForAutoSleep    func(context.Context, string) (station.BulkPowerResult, error)
+	autoSleepEventSink      func(autoSleepEvent)
 }
 
 func NewApp() *App {
@@ -132,6 +138,11 @@ func (a *App) startup(ctx context.Context) {
 	if configLoadErr != nil {
 		log.Printf("Error loading config: %v", configLoadErr)
 	}
+	// Seed the replay generation after the startup load: the explicit
+	// applyBluetoothTiming/setAPIAddress/applyAutoSleep calls below already
+	// derive the runtime state from the loaded configuration, so only later
+	// blocked-save recoveries need a replay.
+	a.configReplayGeneration.Store(a.config.RecoveryGeneration())
 
 	a.applyBluetoothTiming()
 
@@ -242,7 +253,6 @@ func (a *App) setConfigLoadStatus(err error) {
 
 func (a *App) setConfigPersistenceStatus() {
 	a.apiStatusMutex.Lock()
-	defer a.apiStatusMutex.Unlock()
 	persistenceErr := a.config.PersistenceError()
 	if persistenceErr != nil {
 		a.configSaveWarning = fmt.Sprintf("Configuration changes could not be saved: %v", persistenceErr)
@@ -250,6 +260,58 @@ func (a *App) setConfigPersistenceStatus() {
 		a.configSaveWarning = ""
 	}
 	a.refreshConfigStatusLocked(persistenceErr)
+	a.apiStatusMutex.Unlock()
+	// A blocked-save recovery can land inside the setter that triggered this
+	// status refresh; re-apply the startup-derived runtime side effects after
+	// releasing the status lock so the recovered configuration takes effect.
+	a.replayRecoveredConfigRuntime()
+}
+
+// replayRecoveredConfigRuntime re-applies the runtime side effects that
+// startup derived from the configuration when a blocked-save recovery has
+// replaced the startup defaults with the persisted contents since the last
+// observation. The generation check makes concurrent setters replay exactly
+// once per recovery. Subsystems whose owning setter may itself be holding its
+// serialization mutex (auto-sleep, API address) are skipped under TryLock
+// contention: the owner re-applies the post-recovery state itself once its
+// mutation and save complete.
+func (a *App) replayRecoveredConfigRuntime() {
+	generation := a.config.RecoveryGeneration()
+	if a.configReplayGeneration.Swap(generation) == generation {
+		return
+	}
+	log.Printf("Configuration recovered from a blocked load; re-applying runtime settings")
+	a.applyBluetoothTiming()
+	a.stationManager.ApplyRecoverySettings()
+	a.stationManager.ApplyPresenceMissThreshold()
+	if a.autoSleepSettingsMutex.TryLock() {
+		a.applyAutoSleep(a.config.GetAutoSleep())
+		a.autoSleepSettingsMutex.Unlock()
+	}
+	if a.apiSettingsMutex.TryLock() {
+		a.convergeAPIListenerAfterRecovery()
+		a.apiSettingsMutex.Unlock()
+	}
+}
+
+// convergeAPIListenerAfterRecovery restarts the API listener onto the
+// recovered listen address when it still serves the pre-recovery one. A
+// recovered address that cannot bind restores the previously serving address
+// so the API stays reachable; the persisted address remains the recovered one
+// and the listener converges onto it on the next address change.
+func (a *App) convergeAPIListenerAfterRecovery() {
+	configured := a.config.GetAPIListenAddress()
+	status := a.GetAPIStatus()
+	if status.Address == configured || a.shuttingDown.Load() {
+		return
+	}
+	previous := status.Address
+	a.setAPIAddress(configured)
+	a.restartAPIServer()
+	if bound, _ := a.waitForAPIBind(); bound {
+		return
+	}
+	a.rollbackListener(previous, previous)
 }
 
 func (a *App) refreshConfigStatusLocked(persistenceErr error) {

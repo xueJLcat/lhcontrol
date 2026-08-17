@@ -141,7 +141,13 @@ type Config struct {
 	BluetoothInitRetrySeconds      int                `json:"bluetoothInitRetrySeconds"`
 	persistenceBlockedErr          error
 	lastPersistenceErr             error
-	mutex                          sync.RWMutex
+	// recoveryGeneration advances every time a blocked-save recovery replaces
+	// the startup defaults with the persisted file contents. Runtime layers
+	// that derive state from the configuration at startup (Bluetooth timing,
+	// the auto-sleep watcher, the API listener) observe it to re-apply their
+	// side effects after a recovery.
+	recoveryGeneration uint64
+	mutex              sync.RWMutex
 }
 
 type persistedConfig struct {
