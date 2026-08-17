@@ -35,6 +35,7 @@ func TestScanFindsServiceOnlyAdvertisement(t *testing.T) {
 		t.Fatalf("service-only scan results = %+v", results)
 	}
 }
+
 // TestScanStartFailureBeatsConcurrentCancellation guards the cancel/start
 // race: when the platform watcher never accepted a Start (for example the
 // radio became unavailable) and a cancellation lands at the same moment, the
@@ -688,6 +689,7 @@ func TestScanDurationStartsAfterWatcherReportsStarted(t *testing.T) {
 		t.Fatalf("StopScan calls = %d, want 1", got)
 	}
 }
+
 // TestScanForDurationAbandonsHungStopAndKeepsResults guards against a WinRT
 // StopScan that never returns (radio removed mid-scan): the scan must finish
 // within its bounded stop budget, keep the discovery results from the
@@ -880,6 +882,84 @@ func TestScanSessionStopAfterFinishedDoesNotRecordReason(t *testing.T) {
 	}
 	if got := session.stopReason(); got != scanStopNone {
 		t.Fatalf("stop reason after finish = %v, want none", got)
+	}
+}
+
+// TestScanSessionPlatformOutcomeBlocksStopReason guards the duration-timer
+// race: once the platform Scan call has delivered its outcome (typically a
+// radio removed mid-scan), a duration or cancellation stop that lands before
+// markFinished must not record a stop reason or latch the duration flag.
+// Latching would reclassify the real platform failure as a completed duration
+// scan and keep the adapter-unavailable handling downstream from ever seeing
+// it.
+func TestScanSessionPlatformOutcomeBlocksStopReason(t *testing.T) {
+	session := newScanSession()
+	session.markStarted()
+	session.markPlatformDone()
+	session.requestStopAsync(scanStopDuration)
+	if session.durationStopIssuedFlag() {
+		t.Fatal("duration stop after the platform outcome latched the duration reason")
+	}
+	if got := session.stopReason(); got != scanStopNone {
+		t.Fatalf("stop reason after the platform outcome = %v, want none", got)
+	}
+	session.requestStopAsync(scanStopCancelled)
+	if got := session.stopReason(); got != scanStopNone {
+		t.Fatalf("cancellation after the platform outcome = %v, want none", got)
+	}
+}
+
+// TestScanMidScanFailureNotMaskedByDurationResults covers a platform failure
+// (a radio removed mid-scan) that lands while discovery results were already
+// collected: the failure is the real outcome and must be reported instead of
+// being masked as a successful full-duration scan by the stop that the
+// duration timer issues moments later.
+func TestScanMidScanFailureNotMaskedByDurationResults(t *testing.T) {
+	originalAdapter := adapter
+	adapterErr := errors.New("radio removed mid-scan")
+	fake := newFakeBLEAdapter()
+	fake.releaseOn = make(chan struct{})
+	fake.releaseErr = adapterErr
+	adapter = fake
+	t.Cleanup(func() { adapter = originalAdapter })
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+	mac, err := tinybluetooth.ParseMAC("11:22:33:44:55:6C")
+	if err != nil {
+		t.Fatalf("ParseMAC() error = %v", err)
+	}
+	fake.results = []tinybluetooth.ScanResult{{
+		Address: tinybluetooth.Address{MACAddress: tinybluetooth.MACAddress{MAC: mac}},
+		AdvertisementPayload: &fakeAdvertisementPayload{
+			name:     "LHB-MID-FAIL",
+			services: []tinybluetooth.UUID{powerControlServiceUUID},
+		},
+	}}
+	type scanOutcome struct {
+		results []DiscoveredStation
+		err     error
+	}
+	outcome := make(chan scanOutcome, 1)
+	go func() {
+		results, scanErr := ScanForDuration(time.Hour)
+		outcome <- scanOutcome{results, scanErr}
+	}()
+	// Let the scan start and deliver its discovery results, then fail the
+	// platform call as a radio removal mid-scan.
+	select {
+	case <-fake.started:
+	case <-time.After(time.Second):
+		t.Fatal("scan did not start")
+	}
+	close(fake.releaseOn)
+	select {
+	case got := <-outcome:
+		if !errors.Is(got.err, adapterErr) {
+			t.Fatalf("ScanForDuration() error = %v, want the mid-scan adapter failure", got.err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("scan did not return after the mid-scan failure")
 	}
 }
 

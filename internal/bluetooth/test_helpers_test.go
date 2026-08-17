@@ -35,27 +35,30 @@ func (p *fakeAdvertisementPayload) ServiceData() []tinybluetooth.ServiceDataElem
 }
 
 type fakeBLEAdapter struct {
-	results        []tinybluetooth.ScanResult
-	scanErr        error
-	stopErr        error
+	results []tinybluetooth.ScanResult
+	scanErr error
+	stopErr error
 	// startErr fails the scan before the platform watcher ever starts, so the
 	// session's started flag stays false like a real Start rejection.
-	startErr       error
-	panicScan      bool
-	panicStop      bool
-	returnEarly    bool
-	started        chan struct{}
-	stopped        chan struct{}
-	startOnce      sync.Once
-	once           sync.Once
-	stopCalls      atomic.Int32
-	startDelay     chan struct{}
-	stopHold       chan struct{}
+	startErr    error
+	panicScan   bool
+	panicStop   bool
+	returnEarly bool
+	started     chan struct{}
+	stopped     chan struct{}
+	startOnce   sync.Once
+	once        sync.Once
+	stopCalls   atomic.Int32
+	startDelay  chan struct{}
+	stopHold    chan struct{}
 	// releaseOn, when set, ends the blocking Scan once closed instead of
 	// waiting for the stop handshake. It emulates the platform watcher whose
 	// Scan call returns on its own budget while StopScan is still running (or
 	// hung), which is exactly the state a removed or wedged radio produces.
+	// releaseErr is the outcome reported then; nil keeps the historical
+	// clean-return behavior.
 	releaseOn      chan struct{}
+	releaseErr     error
 	connectHandler func(tinybluetooth.Device, bool)
 }
 
@@ -102,7 +105,7 @@ func (a *fakeBLEAdapter) ScanWithStart(callback func(*tinybluetooth.Adapter, tin
 	}
 	if a.releaseOn != nil {
 		<-a.releaseOn
-		return nil
+		return a.releaseErr
 	}
 	<-a.stopped
 	return nil
@@ -343,6 +346,7 @@ func (f *fakeCharacteristic) write(value []byte) (int, error) {
 	}
 	return len(value), nil
 }
+
 // deadLinkDevice reports the definitive closed-session error: the library
 // already knows the link is gone, which is not a transient status-query blip.
 type deadLinkDevice struct {

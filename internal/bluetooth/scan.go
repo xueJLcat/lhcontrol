@@ -43,6 +43,14 @@ type scanSession struct {
 	// full duration keep its results when StopScan lands during the
 	// stop-handshake window.
 	durationStopIssued bool
+	// platformDone records that the platform Scan call already delivered its
+	// outcome. A duration timer that fires after this moment raced a scan
+	// that ended on its own (typically a radio pulled mid-scan delivering a
+	// watcher error just before the duration elapsed); it must not latch
+	// durationStopIssued, or the real platform failure would be reclassified
+	// as a completed duration scan and the adapter-lost handling downstream
+	// would never see it.
+	platformDone bool
 	// abandonGrace is captured from scanAbandonGrace at session creation,
 	// mirroring stopWaitLimit, so the scan body's bounded wait on a wedged
 	// platform Scan call cannot race a new scan's override of that variable.
@@ -197,9 +205,12 @@ func (s *scanSession) clearStopError() {
 
 func (s *scanSession) requestStopAsync(reason scanStopReason) {
 	s.mutex.Lock()
-	if s.finished {
+	if s.finished || s.platformDone {
 		// The scan already ended on its own; recording a stop reason here
 		// would misclassify that natural finish as a duration/cancel stop.
+		// A platform outcome delivered before this request means the stop
+		// raced a scan that terminated on its own: the duration latch in
+		// particular would mask the platform error as a completed scan.
 		s.mutex.Unlock()
 		return
 	}
@@ -272,6 +283,17 @@ func (s *scanSession) markFinished() {
 	if !stopStarted {
 		s.doneOnce.Do(func() { close(s.stopDone) })
 	}
+}
+
+// markPlatformDone records that the platform Scan call delivered its outcome
+// (with or without an error). Callers invoke it right after receiving from
+// scanDone, before markFinished, so a duration timer that fires in that
+// narrow window cannot latch durationStopIssued and mask the platform
+// outcome as a completed duration scan.
+func (s *scanSession) markPlatformDone() {
+	s.mutex.Lock()
+	s.platformDone = true
+	s.mutex.Unlock()
 }
 
 func (s *scanSession) waitForIssuedStop() {
@@ -439,6 +461,7 @@ waitScan:
 	for {
 		select {
 		case scanErr = <-scanDone:
+			session.markPlatformDone()
 			break waitScan
 		case <-session.stopDone:
 			// The stop handshake completed or was abandoned. Give the platform
@@ -460,6 +483,7 @@ waitScan:
 			select {
 			case scanErr = <-scanDone:
 				grace.Stop()
+				session.markPlatformDone()
 			case <-grace.C:
 				scanWedged = true
 				log.Printf("[BT] ScanForDuration: platform scan did not finish within %s of the stop handshake; abandoning it", graceBudget)
@@ -476,7 +500,21 @@ waitScan:
 			// still tear the watcher down instead of orphaning it.
 			session.abandonStart()
 			scanWedged = true
-			scanErr = &scanStartTimeoutError{budget: session.startWaitLimit}
+			select {
+			case scanErr = <-scanDone:
+				// A platform outcome landed concurrently with the start
+				// deadline. The real failure (for example a radio that
+				// became unavailable while the watcher was coming up) is
+				// the authoritative result and must win over the start
+				// timeout so the adapter-unavailable classification still
+				// runs; only a nil outcome keeps the timeout.
+				session.markPlatformDone()
+				if scanErr == nil {
+					scanErr = &scanStartTimeoutError{budget: session.startWaitLimit}
+				}
+			default:
+				scanErr = &scanStartTimeoutError{budget: session.startWaitLimit}
+			}
 			log.Printf("[BT] ScanForDuration: platform scan did not start within %s; abandoning it", session.startWaitLimit)
 			break waitScan
 		}
@@ -651,4 +689,3 @@ func scanCompletionError(scanErr error) error {
 	}
 	return nil
 }
-
