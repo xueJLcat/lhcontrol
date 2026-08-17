@@ -441,17 +441,28 @@ waitScan:
 		case scanErr = <-scanDone:
 			break waitScan
 		case <-session.stopDone:
-			// The stop handshake completed or was abandoned. Give the platform scan
-			// call a short grace to drain its own tail; when it never returns,
-			// abandon the blocked goroutine and proceed. The hang stays isolated on
-			// the already-resolved watcher and cannot affect a later scan session.
-			grace := time.NewTimer(session.abandonGrace)
+			// The stop handshake completed or was abandoned. Give the platform
+			// scan call a grace to drain its own tail; when it never returns,
+			// abandon the blocked goroutine and proceed. The hang stays isolated
+			// on the already-resolved watcher and cannot affect a later scan
+			// session. A scan whose duration elapsed gets the stop-handshake
+			// budget instead of the short abandonment grace: the adapter layer
+			// can still be repairing a failed first stop (its retry and drain
+			// budgets exceed the abandonment grace), and abandoning early would
+			// discard a completed scan's discovery results through the stale
+			// first-stop error. Cancelled scans keep the short grace so the
+			// active-scan slot frees quickly.
+			graceBudget := session.abandonGrace
+			if session.durationStopIssuedFlag() {
+				graceBudget = session.stopWaitLimit
+			}
+			grace := time.NewTimer(graceBudget)
 			select {
 			case scanErr = <-scanDone:
 				grace.Stop()
 			case <-grace.C:
 				scanWedged = true
-				log.Printf("[BT] ScanForDuration: platform scan did not finish within %s of the stop handshake; abandoning it", session.abandonGrace)
+				log.Printf("[BT] ScanForDuration: platform scan did not finish within %s of the stop handshake; abandoning it", graceBudget)
 			}
 			break waitScan
 		case <-startWatch.C:
@@ -546,6 +557,13 @@ waitScan:
 			if err := scanCompletionError(scanErr); err != nil {
 				return nil, err
 			}
+		}
+		// A caller deadline expiring is a timeout, not a user cancellation:
+		// the context watcher records both as a cancellation stop, so classify
+		// the deadline here. Callers normally retry cancelled work but treat
+		// timeouts as a distinct failure mode.
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return nil, fmt.Errorf("Bluetooth scan timed out: %w", context.DeadlineExceeded)
 		}
 		if stopErr != nil && !abandonedStop {
 			return nil, fmt.Errorf("failed to stop Bluetooth scan after cancellation: %w", stopErr)

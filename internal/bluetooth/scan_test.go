@@ -239,6 +239,96 @@ func TestScanKeepsResultsWhenFirstStopFailsButHandshakeRecovers(t *testing.T) {
 	}
 }
 
+// TestScanKeepsResultsWhenFirstStopFailsAndPlatformDrainsSlowly covers the
+// wedge variant where the first watcher.Stop() fails and the platform Scan
+// call only returns after the adapter-level retry and drain — later than the
+// short abandonment grace. A duration scan keeps its results there: the
+// duration stop gets the stop-handshake budget instead of the abandonment
+// grace, so the late clean finish clears the stale first-stop error instead
+// of discarding a completed scan's discovery results.
+func TestScanKeepsResultsWhenFirstStopFailsAndPlatformDrainsSlowly(t *testing.T) {
+	originalAdapter := adapter
+	originalWait := scanStopWaitLimit
+	originalGrace := scanAbandonGrace
+	fake := newFakeBLEAdapter()
+	fake.stopErr = errors.New("transient first stop failure")
+	fake.releaseOn = make(chan struct{})
+	adapter = fake
+	scanStopWaitLimit = 2 * time.Second
+	scanAbandonGrace = 50 * time.Millisecond
+	t.Cleanup(func() {
+		adapter = originalAdapter
+		scanStopWaitLimit = originalWait
+		scanAbandonGrace = originalGrace
+	})
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+	mac, err := tinybluetooth.ParseMAC("11:22:33:44:55:72")
+	if err != nil {
+		t.Fatalf("ParseMAC() error = %v", err)
+	}
+	fake.results = []tinybluetooth.ScanResult{{
+		Address: tinybluetooth.Address{MACAddress: tinybluetooth.MACAddress{MAC: mac}},
+		AdvertisementPayload: &fakeAdvertisementPayload{
+			name:     "LHB-SLOW-DRAIN",
+			services: []tinybluetooth.UUID{powerControlServiceUUID},
+		},
+	}}
+	type scanOutcome struct {
+		stations []DiscoveredStation
+		err      error
+	}
+	outcome := make(chan scanOutcome, 1)
+	go func() {
+		stations, scanErr := ScanForDuration(20 * time.Millisecond)
+		outcome <- scanOutcome{stations, scanErr}
+	}()
+	select {
+	case <-fake.stopped:
+	case <-time.After(2 * time.Second):
+		t.Fatal("duration stop was never issued")
+	}
+	// Release the platform Scan call after the abandonment grace but inside
+	// the duration stop's stop-handshake budget.
+	time.Sleep(150 * time.Millisecond)
+	close(fake.releaseOn)
+	select {
+	case got := <-outcome:
+		if got.err != nil {
+			t.Fatalf("ScanForDuration() error = %v, want results kept after the slow platform drain", got.err)
+		}
+		if len(got.stations) != 1 || got.stations[0].Name != "LHB-SLOW-DRAIN" {
+			t.Fatalf("slow-drain scan results = %+v", got.stations)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("slow-drain scan did not finish")
+	}
+}
+
+// TestScanForDurationContextReportsDeadlineAsTimeout guards the timeout
+// classification: a caller budget expiring mid-scan is a timeout, not a user
+// cancellation, even though the context watcher records the resulting stop
+// as a cancellation.
+func TestScanForDurationContextReportsDeadlineAsTimeout(t *testing.T) {
+	originalAdapter := adapter
+	fake := newFakeBLEAdapter()
+	adapter = fake
+	t.Cleanup(func() { adapter = originalAdapter })
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	_, err := ScanForDurationContext(ctx, time.Hour)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("ScanForDurationContext() error = %v, want a deadline timeout", err)
+	}
+	if errors.Is(err, ErrScanCancelled) {
+		t.Fatalf("deadline scan misclassified as cancelled: %v", err)
+	}
+}
+
 // TestCancelScanReportsCancellationWhenFirstStopFails guards the same
 // reconciliation for cancellations: a stale first-stop failure must not turn
 // a clean cancellation (the adapter handshake recovered) into a stop-failure
