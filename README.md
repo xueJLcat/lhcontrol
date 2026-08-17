@@ -293,7 +293,7 @@ lhcontrol.log.1
 http://127.0.0.1:7575
 ```
 
-API 仅监听本机回环地址。JSON 请求体上限为 16 KiB。常见错误会以 `{"error":"..."}` 返回；当已有前台蓝牙操作时通常返回 `409 Conflict`。
+API 默认监听本机回环地址（`127.0.0.1:7575`），可在设置中修改监听地址（保存后立即重启到新地址）。JSON 请求体上限为 16 KiB。常见错误会以 `{"error":"..."}` 返回；当已有前台蓝牙操作时通常返回 `409 Conflict`。
 
 ## `GET /health`
 
@@ -311,7 +311,7 @@ API 仅监听本机回环地址。JSON 请求体上限为 16 KiB。常见错误�
 }
 ```
 
-该接口适合启动探测及诊断；`running` 表示 API 监听器当前是否正常运行，`warnings` 会包含配置加载或保存警告。`activeOperations` 列出当前正在执行的外部可见操作（每项包含 `id` 和 `kind`，例如扫描或自动休眠）；`operationRevision` 是单调递增的操作序号，界面用它对外部站点快照做版本门控，客户端合并状态时应比较该值而不是假设某个原子时刻。
+该接口适合启动探测及诊断；`running` 表示 API 监听器当前是否正常运行，`warnings` 会包含配置加载或保存警告。`activeOperations` 列出当前正在执行的外部可见操作（每项包含 `id` 和 `kind`，例如批量电源、单站电源或自动休眠；扫描走独立的扫描事件流，不在该列表中）；`operationRevision` 是单调递增的操作序号，界面用它对外部站点快照做版本门控，客户端合并状态时应比较该值而不是假设某个原子时刻。
 
 ---
 
@@ -1007,7 +1007,7 @@ For integration with external scripts or applications, `lhcontrol` exposes a sim
 http://127.0.0.1:7575
 ```
 
-The API listens only on the local loopback address. JSON request bodies are limited to 16 KiB. Errors use the `{"error":"..."}` shape; requests normally return `409 Conflict` while another foreground Bluetooth operation is active.
+The API listens on the local loopback address (`127.0.0.1:7575`) by default; the listen address can be changed in Settings (the server restarts on the new address after saving). JSON request bodies are limited to 16 KiB. Errors use the `{"error":"..."}` shape; requests normally return `409 Conflict` while another foreground Bluetooth operation is active.
 
 ## `GET /health`
 
@@ -1025,7 +1025,7 @@ Returns local API and configuration-persistence health:
 }
 ```
 
-Use this endpoint for startup probes and diagnostics. `running` describes the API listener, while `warnings` reports configuration load or save problems. `activeOperations` lists the externally visible operations currently in flight (each with an `id` and a `kind`, such as a scan or auto-sleep); `operationRevision` is a monotonically increasing operation sequence number that the UI uses to version-gate external station snapshots, and clients merging state should compare it rather than assume a single atomic instant.
+Use this endpoint for startup probes and diagnostics. `running` describes the API listener, while `warnings` reports configuration load or save problems. `activeOperations` lists the externally visible operations currently in flight (each with an `id` and a `kind`, such as bulk power, single-station power, or auto-sleep; scans run through the separate scan event stream and are not listed here); `operationRevision` is a monotonically increasing operation sequence number that the UI uses to version-gate external station snapshots, and clients merging state should compare it rather than assume a single atomic instant.
 
 ---
 
