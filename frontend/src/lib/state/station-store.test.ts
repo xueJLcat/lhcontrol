@@ -933,6 +933,86 @@ describe('StationStore bulk power', () => {
     expect(store.bulkTarget).toBe('on');
     expect(pushToast).not.toHaveBeenCalled();
   });
+
+  it('keeps the successor cancel watchdog when a wedged predecessor settles late', async () => {
+    // The first bulk wedges, its cancel times out, and the watchdog
+    // force-resets the state. A replacement bulk then wedges too and gets its
+    // own cancel watchdog. When the first bulk finally settles, its cleanup
+    // must not cancel the watchdog its successor owns, or a second wedged bulk
+    // would lose its only recovery path and lock the UI permanently.
+    const wedgedFirst = deferred<{ target: string; results: never[] }>();
+    backend.SetAllStationsPowerDetailed.mockReturnValueOnce(wedgedFirst.promise);
+    backend.CancelBulkPower.mockRejectedValue(new Error('bulk operation did not stop within 1m0s after cancellation'));
+    const { store } = mountStore();
+    await vi.waitFor(() => expect(store.stations).toHaveLength(1));
+
+    void store.runBulkPower('on');
+    await vi.waitFor(() => expect(store.globalOperation).toBe('bulk-power'));
+
+    vi.useFakeTimers();
+    void store.cancelBulkPower();
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(90_000);
+    vi.useRealTimers();
+    expect(store.globalOperation).toBe('idle');
+
+    backend.SetAllStationsPowerDetailed.mockReturnValueOnce(new Promise(() => {}));
+    void store.runBulkPower('on');
+    await vi.waitFor(() => expect(backend.SetAllStationsPowerDetailed).toHaveBeenCalledTimes(2));
+    expect(store.globalOperation).toBe('bulk-power');
+
+    vi.useFakeTimers();
+    void store.cancelBulkPower();
+    await vi.advanceTimersByTimeAsync(0);
+
+    // The first bulk's promise settles late; its generation no longer matches,
+    // so its cleanup must leave the successor's armed watchdog untouched.
+    wedgedFirst.resolve({ target: 'on', results: [] });
+    await vi.advanceTimersByTimeAsync(0);
+
+    await vi.advanceTimersByTimeAsync(90_000);
+    vi.useRealTimers();
+
+    expect(store.globalOperation).toBe('idle');
+    expect(store.bulkTarget).toBeNull();
+    expect(store.statusMessage).toContain('Stopping bulk power timed out');
+  });
+
+  it('keeps a newer cancel flag when a superseded cancel request settles late', async () => {
+    // The first cancel request never settles; the watchdog force-resets the
+    // wedged bulk. A replacement bulk starts and is cancelled in turn. When
+    // the superseded first cancel finally settles, it must not clear the
+    // newer cancel's flag.
+    const firstCancel = deferred<void>();
+    backend.SetAllStationsPowerDetailed.mockReturnValueOnce(new Promise(() => {}));
+    backend.CancelBulkPower.mockReturnValueOnce(firstCancel.promise);
+    const { store } = mountStore();
+    await vi.waitFor(() => expect(store.stations).toHaveLength(1));
+
+    void store.runBulkPower('on');
+    await vi.waitFor(() => expect(store.globalOperation).toBe('bulk-power'));
+
+    vi.useFakeTimers();
+    void store.cancelBulkPower();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(store.cancellingBulk).toBe(true);
+    await vi.advanceTimersByTimeAsync(90_000);
+    vi.useRealTimers();
+    expect(store.globalOperation).toBe('idle');
+    expect(store.cancellingBulk).toBe(false);
+
+    backend.SetAllStationsPowerDetailed.mockReturnValueOnce(new Promise(() => {}));
+    backend.CancelBulkPower.mockReturnValueOnce(new Promise(() => {}));
+    void store.runBulkPower('on');
+    await vi.waitFor(() => expect(backend.SetAllStationsPowerDetailed).toHaveBeenCalledTimes(2));
+    void store.cancelBulkPower();
+    await vi.waitFor(() => expect(store.cancellingBulk).toBe(true));
+
+    firstCancel.resolve(undefined);
+    await new Promise<void>((done) => setTimeout(done, 20));
+
+    expect(store.cancellingBulk).toBe(true);
+  });
 });
 
 describe('StationStore fleet aggregates', () => {
@@ -1097,12 +1177,16 @@ describe('StationStore auto sleep events', () => {
     expect(store.autoSleepRunning).toBe(true);
 
     // Simulate a lost terminal event: only the authoritative health snapshot
-    // still knows the action settled. Reconciling against a snapshot with no
-    // active auto-sleep operation must clear the flag so the UI unlocks.
+    // still knows the action settled. Reconciling against snapshots with no
+    // active auto-sleep operation must clear the flag so the UI unlocks. Two
+    // consecutive idle snapshots are required: a single one could be a stale
+    // poll issued before the action started (racing its "started" event).
     backend.GetAPIStatus.mockResolvedValue({
       running: true, address: '127.0.0.1:7575', error: '', warnings: [], configWritable: true,
       activeOperations: [], operationRevision: 9
     });
+    await store.apiStatus.refresh();
+    expect(store.autoSleepRunning).toBe(true);
     await store.apiStatus.refresh();
 
     expect(store.autoSleepRunning).toBe(false);

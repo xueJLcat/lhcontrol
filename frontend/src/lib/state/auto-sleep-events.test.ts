@@ -198,6 +198,10 @@ describe('AutoSleepEventCoordinator', () => {
     const coordinator = new AutoSleepEventCoordinator(dependencies);
 
     coordinator.handle({ id: 1, phase: 'started' });
+    // Two consecutive idle snapshots are required before clearing, so the
+    // first one alone leaves the action armed.
+    coordinator.reconcileIdle();
+    expect(dependencies.setRunning).toHaveBeenLastCalledWith(true);
     coordinator.reconcileIdle();
     expect(dependencies.setRunning).toHaveBeenLastCalledWith(false);
 
@@ -205,6 +209,35 @@ describe('AutoSleepEventCoordinator', () => {
     coordinator.handle({ id: 2, phase: 'started' });
     coordinator.handle({ id: 2, phase: 'completed', success: 1 });
 
+    expect(dependencies.setRunning).toHaveBeenLastCalledWith(false);
+  });
+
+  it('does not unlock on a single stale idle snapshot that raced a started event', () => {
+    const dependencies = {
+      isDisposed: vi.fn(() => false),
+      setRunning: vi.fn(),
+      beginStatusOperation: vi.fn(),
+      setStatusMessage: vi.fn(),
+      applyStations: vi.fn(),
+      foregroundOwnsStatusLine: vi.fn(() => false)
+    };
+    const coordinator = new AutoSleepEventCoordinator(dependencies);
+
+    // A started event lands while an older health snapshot (issued before the
+    // action started) is still in flight. That stale snapshot reports no
+    // auto-sleep operation; a single idle reconciliation must not clear the
+    // flag the started event just armed.
+    coordinator.handle({ id: 4, phase: 'started' });
+    expect(dependencies.setRunning).toHaveBeenLastCalledWith(true);
+    vi.clearAllMocks();
+
+    coordinator.reconcileIdle();
+    expect(dependencies.setRunning).not.toHaveBeenCalledWith(false);
+
+    // The running action becomes visible in the next snapshot, resetting the
+    // idle count; an eventual end then needs two fresh idle snapshots again.
+    coordinator.noteActiveSnapshot();
+    coordinator.handle({ id: 4, phase: 'completed', success: 1 });
     expect(dependencies.setRunning).toHaveBeenLastCalledWith(false);
   });
 

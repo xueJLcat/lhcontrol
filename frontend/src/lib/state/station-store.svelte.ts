@@ -632,8 +632,12 @@ export class StationStore {
     // Reconcile it against the authoritative operation snapshot: the backend
     // tracks the running auto-sleep action as a kind="auto-sleep" operation,
     // so its absence means the action settled and the flag must clear. Only
-    // ever clear here; the event stream still owns arming the flag.
-    if (!operations.some((operation) => operation.kind === 'auto-sleep')) {
+    // ever clear here; the event stream still owns arming the flag. A snapshot
+    // that still lists the action resets the idle count so a single stale
+    // snapshot (issued before the action started) cannot clear the flag.
+    if (operations.some((operation) => operation.kind === 'auto-sleep')) {
+      this.autoSleepEvents.noteActiveSnapshot();
+    } else {
       this.autoSleepEvents.reconcileIdle();
     }
     // A deferred startup scan can run once this snapshot shows the locks clear.
@@ -870,7 +874,6 @@ export class StationStore {
       // lock before the initial external-scan check can start the local scan.
       this.startupPending = false;
       startupDecisionApplied = true;
-      this.runOwedImmediateStatusCheck();
       // An external scan event may have arrived while this initial query was
       // pending. Do not let its older result overwrite the newer event state.
       if (this.disposed || startupScanEpoch !== this.gates.currentScanEpoch) return;
@@ -893,6 +896,12 @@ export class StationStore {
       } else {
         void this.recoverPreMountScanOutcome();
       }
+      // Fulfill the owed immediate status refresh only after the startup scan
+      // decision has been attempted: it flips globalOperation to
+      // 'status-refresh' synchronously, which would otherwise trip the
+      // scanLocked guard and push the configured startup scan into the slower
+      // deferred-retry path.
+      this.runOwedImmediateStatusCheck();
     })();
   }
 

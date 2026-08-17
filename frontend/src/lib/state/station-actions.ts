@@ -364,9 +364,12 @@ export class StationActionController {
       // The bulk settled, so the cancel watchdog no longer needs to recover
       // it; a pending cancel request keeps its own cancellingBulk flag. A
       // superseded run (watchdog force-reset, replacement bulk started) must
-      // not reset the state its successor now owns.
-      this.cancelBulkCancelWatchdog();
+      // not reset the state its successor now owns. That includes the cancel
+      // watchdog itself: a wedged predecessor settling late must not cancel a
+      // watchdog that a newer bulk's cancel request armed, or a second wedged
+      // bulk would lose its only recovery path and lock the UI permanently.
       if (!this.host.disposed && this.bulkRunGeneration === runGeneration) {
+        this.cancelBulkCancelWatchdog();
         if (this.host.globalOperation === 'bulk-power') this.host.globalOperation = 'idle';
         this.host.bulkTarget = null;
         // Intentionally leave cancellingBulk alone: cancelBulkPower owns it
@@ -403,7 +406,14 @@ export class StationActionController {
         pushToast(message);
       }
     } finally {
-      if (!this.host.disposed) this.host.cancellingBulk = false;
+      // Gate the cleanup on the cancel generation like the catch path: a
+      // cancel request that settles after the watchdog force-reset belongs to
+      // the superseded bulk and must not clear a newer cancel's flag (the
+      // watchdog already cleared it, and a replacement bulk's cancel re-armed
+      // it in the meantime).
+      if (!this.host.disposed && cancelGeneration === this.bulkCancelGeneration) {
+        this.host.cancellingBulk = false;
+      }
     }
   }
 

@@ -34,6 +34,12 @@ export class AutoSleepEventCoordinator {
   private readonly activeActionIds = new Set<number>();
   private latestStatusId = 0;
   private latestStatusPhase: AutoSleepEvent['phase'] | null = null;
+  // Health snapshots can race the event stream: a poll issued before an
+  // auto-sleep action starts commits after the "started" event and reports no
+  // auto-sleep operation. Clearing on that single stale snapshot would unlock
+  // the UI for the whole (minutes-long) run. Require two consecutive idle
+  // snapshots before clearing; observing an active action resets the count.
+  private consecutiveIdleSnapshots = 0;
 
   constructor(private dependencies: AutoSleepEventDependencies) {}
 
@@ -41,10 +47,21 @@ export class AutoSleepEventCoordinator {
   // auto-sleep action is active. Clear the tracked IDs as well as the visible
   // flag so a lost terminal event cannot poison every later lifecycle. Keep
   // the latest lifecycle revision: delayed events still need to be rejected.
+  // A single idle snapshot can be stale (in flight while the action started),
+  // so only the second consecutive one clears the state.
   reconcileIdle() {
     if (this.dependencies.isDisposed()) return;
+    this.consecutiveIdleSnapshots += 1;
+    if (this.consecutiveIdleSnapshots < 2) return;
     this.activeActionIds.clear();
     this.dependencies.setRunning(false);
+  }
+
+  // A snapshot that lists an auto-sleep action proves the run active; discard
+  // any accumulated idle-snapshot count so the following clear needs two fresh
+  // idle observations again.
+  noteActiveSnapshot() {
+    this.consecutiveIdleSnapshots = 0;
   }
 
   handle(event: AutoSleepEvent) {
@@ -62,6 +79,7 @@ export class AutoSleepEventCoordinator {
         // admitting it would leave the controls locked with no future
         // terminal event to remove it.
         if (id <= this.latestStatusId) return;
+        this.consecutiveIdleSnapshots = 0;
         this.activeActionIds.add(id);
       } else {
         // Older terminal events still release the action they own even when
@@ -87,6 +105,7 @@ export class AutoSleepEventCoordinator {
       // an unsequenced event must neither unlock it prematurely nor re-lock it
       // after it drained, so only act while no sequenced action is active.
       if (this.activeActionIds.size === 0) {
+        if (event.phase === 'started') this.consecutiveIdleSnapshots = 0;
         this.dependencies.setRunning(event.phase === 'started');
       }
     }
