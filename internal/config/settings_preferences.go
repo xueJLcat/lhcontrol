@@ -18,6 +18,14 @@ func (c *Config) SetAutoSleep(settings autosleep.Settings) error {
 	if err := settings.Validate(); err != nil {
 		return err
 	}
+	if settings.DelaySeconds < autosleep.MinDelaySeconds || settings.DelaySeconds > autosleep.MaxDelaySeconds {
+		// Validation tolerates an out-of-range delay while the feature is
+		// disabled because the watcher never consults it; normalize before
+		// persisting so re-enabling from the stored value starts with a
+		// valid delay instead of failing validation, matching the
+		// load-time sanitization.
+		settings.DelaySeconds = autosleep.DefaultDelaySeconds
+	}
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 	c.recoverBlockedPersistenceLocked()

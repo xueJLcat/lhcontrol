@@ -45,14 +45,27 @@ func TestSettingsValidate(t *testing.T) {
 	for name, mutate := range map[string]func(*Settings){
 		"unknown target": func(s *Settings) { s.Target = "chrome" },
 		"empty target":   func(s *Settings) { s.Target = "" },
-		"delay too low":  func(s *Settings) { s.DelaySeconds = MinDelaySeconds - 1 },
-		"delay too high": func(s *Settings) { s.DelaySeconds = MaxDelaySeconds + 1 },
-		"delay zero":     func(s *Settings) { s.DelaySeconds = 0 },
+		"delay too low":  func(s *Settings) { s.Enabled = true; s.DelaySeconds = MinDelaySeconds - 1 },
+		"delay too high": func(s *Settings) { s.Enabled = true; s.DelaySeconds = MaxDelaySeconds + 1 },
+		"delay zero":     func(s *Settings) { s.Enabled = true; s.DelaySeconds = 0 },
 	} {
 		settings := DefaultSettings()
 		mutate(&settings)
 		if err := settings.Validate(); err == nil {
 			t.Fatalf("Validate() for %s unexpectedly succeeded", name)
+		}
+	}
+}
+
+// TestSettingsValidateAllowsDisablingWithStaleDelay guards the "turn the
+// feature off" path: a disabled configuration carrying a stale or zero delay
+// must validate, otherwise integrations that reset the form while disabling
+// could never save the disabled state.
+func TestSettingsValidateAllowsDisablingWithStaleDelay(t *testing.T) {
+	for _, delay := range []int{0, MinDelaySeconds - 1, MaxDelaySeconds + 1} {
+		settings := Settings{Enabled: false, Target: string(DefaultTarget), DelaySeconds: delay}
+		if err := settings.Validate(); err != nil {
+			t.Fatalf("Validate() for disabled settings with delay %d = %v, want nil", delay, err)
 		}
 	}
 }

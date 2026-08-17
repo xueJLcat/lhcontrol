@@ -69,11 +69,35 @@ func TestAutoSleepSettingsBindings(t *testing.T) {
 
 	invalid = defaults
 
+	invalid.Enabled = true
+
 	invalid.DelaySeconds = 5
 
 	if err := app.SetAutoSleepSettings(invalid); err == nil {
 
-		t.Fatal("SetAutoSleepSettings() accepted a below-minimum delay")
+		t.Fatal("SetAutoSleepSettings() accepted a below-minimum delay for an enabled configuration")
+
+	}
+
+	// Disabling with a stale or zero delay must succeed: the delay is not
+	// consulted while the feature is off, and rejecting it would make the
+	// feature impossible to turn off. The persisted delay is normalized so a
+	// later re-enable starts from a valid value.
+	staleDelay := defaults
+
+	staleDelay.Enabled = false
+
+	staleDelay.DelaySeconds = 0
+
+	if err := app.SetAutoSleepSettings(staleDelay); err != nil {
+
+		t.Fatalf("SetAutoSleepSettings() rejected a disabled configuration with a stale delay: %v", err)
+
+	}
+
+	if got := app.GetAutoSleepSettings(); got.DelaySeconds != autosleep.DefaultDelaySeconds {
+
+		t.Fatalf("disabled settings persisted delay %d, want normalization to %d", got.DelaySeconds, autosleep.DefaultDelaySeconds)
 
 	}
 

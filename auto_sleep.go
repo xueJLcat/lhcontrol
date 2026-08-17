@@ -228,8 +228,50 @@ func (a *App) reapStoppedAutoSleepWatcher(watcher *autosleep.Watcher) {
 	// settings calls and the sink must not be able to deadlock on it.
 	if cleared {
 		a.emitAutoSleep(autoSleepEvent{Phase: "failed", Error: fmt.Sprintf("automatic sleep stopped watching: %v", err)})
+		a.scheduleAutoSleepRebuild()
 	}
 
+}
+
+// autoSleepRestartDelay spaces automatic watcher rebuilds after a self-stop.
+// Persistent process-check failures (for example an AV product briefly
+// breaking Toolhelp snapshots) self-stop the watcher; without a rebuild the
+// feature would stay silently disabled until somebody re-opened settings and
+// saved again. The delay bounds the rebuild rate when failures persist: each
+// failed watcher takes at least maxConsecutiveCheckErrors polls to self-stop,
+// so the loop stays slow and cheap, and a single successful check afterwards
+// restores normal monitoring.
+const autoSleepRestartDelay = 30 * time.Second
+
+// scheduleAutoSleepRebuild re-applies the persisted auto-sleep settings after
+// a cooldown so a self-stopped watcher is replaced instead of leaving the
+// feature disabled. The rebuild funnels through SetAutoSleepSettings, whose
+// autoSleepMatches check makes it a no-op when a settings change or shutdown
+// already rebuilt or detached the watcher in the meantime.
+func (a *App) scheduleAutoSleepRebuild() {
+	if a.shuttingDown.Load() {
+		return
+	}
+	a.autoSleepWG.Add(1)
+	time.AfterFunc(autoSleepRestartDelay, func() {
+		defer a.autoSleepWG.Done()
+		if a.shuttingDown.Load() {
+			return
+		}
+		settings := a.config.GetAutoSleep()
+		if !settings.Enabled {
+			return
+		}
+		if _, err := autosleep.Target(settings.Target).ProcessName(); err != nil {
+			// A configuration error cannot be repaired by a rebuild; it would
+			// only loop. Re-saving valid settings remains the recovery path.
+			return
+		}
+		log.Println("Auto-sleep watcher rebuilding after an unexpected stop")
+		if err := a.SetAutoSleepSettings(settings); err != nil {
+			log.Printf("Auto-sleep watcher rebuild failed: %v", err)
+		}
+	})
 }
 
 // stopAutoSleep terminates the auto-sleep watcher and waits for it,

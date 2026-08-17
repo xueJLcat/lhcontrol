@@ -608,9 +608,23 @@ func TestSetAutoSleepRejectsInvalidSettings(t *testing.T) {
 		t.Fatal("SetAutoSleep() accepted an unknown target")
 	}
 	bad = cfg.GetAutoSleep()
+	bad.Enabled = true
 	bad.DelaySeconds = 1
 	if err := cfg.SetAutoSleep(bad); err == nil {
-		t.Fatal("SetAutoSleep() accepted a below-minimum delay")
+		t.Fatal("SetAutoSleep() accepted a below-minimum delay for an enabled configuration")
+	}
+	// A disabled configuration may carry a stale delay: validation accepts it
+	// because the watcher never consults the delay while the feature is off,
+	// and rejecting it would make the feature impossible to disable. The
+	// persisted delay is normalized so re-enabling starts from a valid value.
+	staleDelay := cfg.GetAutoSleep()
+	staleDelay.Enabled = false
+	staleDelay.DelaySeconds = 1
+	if err := cfg.SetAutoSleep(staleDelay); err != nil {
+		t.Fatalf("SetAutoSleep() rejected a disabled configuration with a stale delay: %v", err)
+	}
+	if got := cfg.GetAutoSleep(); got.DelaySeconds != autosleep.DefaultDelaySeconds {
+		t.Fatalf("disabled settings persisted delay %d, want normalization to %d", got.DelaySeconds, autosleep.DefaultDelaySeconds)
 	}
 }
 

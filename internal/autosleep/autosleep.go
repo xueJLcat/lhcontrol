@@ -63,10 +63,17 @@ func DefaultSettings() Settings {
 	}
 }
 
-// Validate returns a non-nil error when the settings cannot be applied.
+// Validate returns a non-nil error when the settings cannot be applied. A
+// disabled configuration only needs a parseable target: the delay is not
+// consulted while the watcher is off, so rejecting a "turn the feature off"
+// request that carries a stale or zero delay would make the feature
+// impossible to disable. Load-time sanitization repairs the delay anyway.
 func (s Settings) Validate() error {
 	if _, err := Target(s.Target).ProcessName(); err != nil {
 		return err
+	}
+	if !s.Enabled {
+		return nil
 	}
 	if s.DelaySeconds < MinDelaySeconds || s.DelaySeconds > MaxDelaySeconds {
 		return fmt.Errorf(
