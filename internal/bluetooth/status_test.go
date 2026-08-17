@@ -3,6 +3,7 @@ package bluetooth
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -1167,6 +1168,41 @@ func TestOverlongReadValuesAreDataErrorsAndPreserveTheLink(t *testing.T) {
 	}
 	if !station.LastPowerReadAt.IsZero() || !station.LastChannelReadAt.IsZero() {
 		t.Fatal("malformed read values left fresh read timestamps behind")
+	}
+}
+
+// TestOverlongTransportReadsAreDataErrors guards the case where the device
+// value exceeds even the oversized read buffer: the transport reports a
+// buffer-overflow error (ErrReadValueTooLong), and it must still classify as
+// malformed device data instead of a transport failure that would reconnect
+// on every read without ever changing the reported value.
+func TestOverlongTransportReadsAreDataErrors(t *testing.T) {
+	tooLong := fmt.Errorf("bluetooth: read value is %d bytes, buffer holds %d: %w", 128, statusValueReadSize, tinybluetooth.ErrReadValueTooLong)
+	station := connectedFakeStation(
+		&fakeCharacteristic{readErr: tooLong},
+		&fakeCharacteristic{readErr: tooLong},
+		nil,
+		Capabilities{PowerRead: true, ChannelRead: true},
+	)
+
+	station.mutex.Lock()
+	powerErr := readPowerStateInternalContext(context.Background(), station)
+	channelErr := readChannelInternalContext(context.Background(), station)
+	station.mutex.Unlock()
+
+	for name, err := range map[string]error{"power": powerErr, "channel": channelErr} {
+		if !IsDeviceValueError(err) {
+			t.Fatalf("%s read error = %v, want a device value error", name, err)
+		}
+		if RequiresReconnect(err) {
+			t.Fatalf("%s overlong value error requires a reconnect", name)
+		}
+	}
+	station.mutex.RLock()
+	connected := station.isConnected && station.device != nil
+	station.mutex.RUnlock()
+	if !connected {
+		t.Fatal("overlong transport reads discarded the healthy connection")
 	}
 }
 

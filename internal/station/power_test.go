@@ -20,6 +20,18 @@ func TestSetAllStationsPowerValidatesState(t *testing.T) {
 	if err := manager.SetAllStationsPower("invalid"); !errors.Is(err, ErrInvalidArgument) {
 		t.Fatalf("SetAllStationsPower() error = %v, want ErrInvalidArgument", err)
 	}
+	result, err := manager.SetAllStationsPowerDetailed("invalid")
+	if !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("SetAllStationsPowerDetailed() error = %v, want ErrInvalidArgument", err)
+	}
+	// An unparseable target must not be reported as if a real target were
+	// requested; keep the rejection shape identical to the busy rejection.
+	if result.Target != "" {
+		t.Fatalf("SetAllStationsPowerDetailed() Target = %q, want empty for an invalid state", result.Target)
+	}
+	if result.Results == nil || len(result.Results) != 0 {
+		t.Fatalf("SetAllStationsPowerDetailed() Results = %v, want an empty non-nil slice", result.Results)
+	}
 }
 
 func TestSinglePowerOperationHasHardTimeoutAndReleasesOperation(t *testing.T) {

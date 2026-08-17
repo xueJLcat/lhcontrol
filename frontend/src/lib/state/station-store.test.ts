@@ -1184,6 +1184,40 @@ describe('StationStore external HTTP operation events', () => {
     expect(store.globalOperation).toBe('idle');
   });
 
+  it('does not adopt a still-draining scan while a local stop is pending', async () => {
+    const { store } = mountStore();
+    await vi.waitFor(() => expect(store.stations).toHaveLength(1));
+    // The local scan promise settled but StopScan is still draining, so the
+    // backend can transiently keep reporting a running scan. That is the
+    // stopping local scan, not an unknown external one.
+    store.stoppingScan = true;
+    store.stopRequestPending = true;
+    backend.IsScanning.mockResolvedValueOnce(true);
+
+    await (store as unknown as { periodicStatusCheck(): Promise<void> }).periodicStatusCheck();
+
+    // Adoption would run the external-scan begin sequence and clear the stop.
+    expect(store.stoppingScan).toBe(true);
+    expect(store.statusMessage).not.toBe('Preparing external scan...');
+    expect(store.globalOperation).toBe('idle');
+  });
+
+  it('does not consume the revision gate for an unknown operation phase', async () => {
+    const { store } = mountStore();
+    await vi.waitFor(() => expect(runtime.handlers.has('external-operation')).toBe(true));
+
+    runtime.handlers.get('external-operation')?.({ id: 31, phase: 'paused', kind: 'power', revision: 4 });
+    expect(store.externalOperationRunning).toBe(false);
+
+    // An unapplied event must not consume its revision: the same revision
+    // delivered as a legitimate started event must still apply.
+    runtime.handlers.get('external-operation')?.({ id: 31, phase: 'started', kind: 'power', revision: 4 });
+    expect(store.externalOperationRunning).toBe(true);
+
+    runtime.handlers.get('external-operation')?.({ id: 31, phase: 'finished', kind: 'power', revision: 5 });
+    expect(store.externalOperationRunning).toBe(false);
+  });
+
   it('does not discard an accepted local scan when a delayed HTTP snapshot arrives', async () => {
     let resolveScan!: (stations: ReturnType<typeof createStation>[]) => void;
     backend.ScanAndFetchStations.mockReturnValueOnce(new Promise((resolve) => { resolveScan = resolve; }));

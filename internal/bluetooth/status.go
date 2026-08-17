@@ -7,13 +7,17 @@ import (
 	"log"
 	"strings"
 	"time"
+
+	"tinygo.org/x/bluetooth"
 )
 
 // statusValueReadSize generously exceeds any plausible value of the power
 // and mode characteristics so a device reporting an overlong value surfaces
 // as application-level validation (a DeviceValueError) instead of a transport
-// buffer error. Classifying the latter as a transport failure would discard a
-// healthy connection and reconnect on every read without ever changing the
+// buffer error. Values that still exceed this buffer carry the transport's
+// ErrReadValueTooLong marker and receive the same DeviceValueError
+// classification below: classifying them as a transport failure would discard
+// a healthy connection and reconnect on every read without ever changing the
 // value the device reports.
 const statusValueReadSize = 64
 
@@ -31,6 +35,9 @@ func readPowerStateInternalContext(ctx context.Context, station *BaseStation) er
 			station.Capabilities.PowerRead = false
 			station.clearPowerStateInternal()
 			return unsupportedCapability("power read", err)
+		}
+		if errors.Is(err, bluetooth.ErrReadValueTooLong) {
+			return deviceValueError("read power characteristic", fmt.Errorf("overlong value for %s: %w", station.Name, err))
 		}
 		return transportError("read power characteristic", fmt.Errorf("%s: %w", station.Name, err))
 	}
@@ -103,6 +110,9 @@ func readChannelInternalContext(ctx context.Context, station *BaseStation) error
 			station.Capabilities.ChannelRead = false
 			station.Channel = ChannelUnknown
 			return unsupportedCapability("channel read", err)
+		}
+		if errors.Is(err, bluetooth.ErrReadValueTooLong) {
+			return deviceValueError("read channel characteristic", fmt.Errorf("overlong value for %s: %w", station.Name, err))
 		}
 		return transportError("read channel characteristic", fmt.Errorf("%s: %w", station.Name, err))
 	}

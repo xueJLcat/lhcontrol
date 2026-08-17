@@ -766,7 +766,7 @@ func (c DeviceCharacteristic) ReadContext(ctx context.Context, data []byte) (int
 		return 0, err
 	}
 	if len(readBuffer) > len(data) {
-		return 0, fmt.Errorf("bluetooth: read value is %d bytes, buffer holds %d", len(readBuffer), len(data))
+		return 0, fmt.Errorf("bluetooth: read value is %d bytes, buffer holds %d: %w", len(readBuffer), len(data), ErrReadValueTooLong)
 	}
 
 	return copy(data, readBuffer), nil

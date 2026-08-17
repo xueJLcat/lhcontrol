@@ -187,7 +187,8 @@ export class StationStore {
     localScanRunning: () => this.globalOperation === 'scanning',
     canAdoptUnknownScan: () => this.startupScanOwnershipKnown &&
       !this.autoSleepRunning && !this.externalOperationRunning &&
-      !this.isLoading && !this.isBulkLoading && !this.anyDeviceOperation,
+      !this.isLoading && !this.isBulkLoading && !this.anyDeviceOperation &&
+      !this.stoppingScan && !this.stopRequestPending,
     externalScanning: () => this.externalScanning,
     setExternalScanning: (value) => this.externalScanning = value,
     scanEpoch: () => this.gates.currentScanEpoch,
@@ -779,14 +780,17 @@ export class StationStore {
       if (this.disposed || !Number.isFinite(event?.id)) return;
       const id = Number(event.id);
       const revision = Number(event.revision ?? 0);
+      // Validate the phase before consuming the revision: an unapplied event
+      // must not advance the gate, or a later replay of the same revision
+      // could never be applied.
+      if (event.phase !== 'started' && event.phase !== 'finished') return;
       if (revision > 0 && revision <= this.externalOperationRevision) return;
       if (revision > 0) this.externalOperationRevision = revision;
       if (event.phase === 'started') {
         const newlyStarted = !this.externalOperationIds.has(id);
         this.externalOperationIds.add(id);
         if (newlyStarted) this.invalidateForExternalOperation();
-      } else if (event.phase === 'finished') this.externalOperationIds.delete(id);
-      else return;
+      } else this.externalOperationIds.delete(id);
       this.externalOperationRunning = this.externalOperationIds.size > 0;
       if (!this.externalOperationRunning) this.maybeRunDeferredStartupScan();
     });

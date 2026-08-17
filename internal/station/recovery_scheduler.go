@@ -186,17 +186,26 @@ func (m *Manager) nextStatusRecoveryDelay() (time.Duration, bool) {
 		return 0, false
 	}
 	eligible := make(map[string]struct{}, len(retries))
+	// Copy the station pointers under the read lock and snapshot them after
+	// releasing it, matching selectStatusRefreshCandidates: Snapshot takes each
+	// station's own mutex, which an abandoned WinRT cleanup can hold for a long
+	// time, and holding the fleet lock meanwhile would stall every other fleet
+	// reader and writer behind that one station.
 	m.stationsMutex.RLock()
+	stationPtrs := make([]*bluetooth.BaseStation, 0, len(m.stations))
 	for _, station := range m.stations {
 		if station == nil {
 			continue
 		}
+		stationPtrs = append(stationPtrs, station)
+	}
+	m.stationsMutex.RUnlock()
+	for _, station := range stationPtrs {
 		address := station.Snapshot().Address
 		if _, tracked := retries[address]; tracked {
 			eligible[address] = struct{}{}
 		}
 	}
-	m.stationsMutex.RUnlock()
 	now := time.Now()
 	var earliest time.Time
 	for address, retry := range retries {
@@ -263,12 +272,22 @@ func (m *Manager) runStatusRecoveryRound() time.Duration {
 		retries[address] = retry
 	}
 	m.statusRetryMutex.Unlock()
-	candidates := make([]recoveryCandidate, 0)
+	// Copy the station pointers under the read lock and snapshot them after
+	// releasing it, matching selectStatusRefreshCandidates: Snapshot takes each
+	// station's own mutex, which an abandoned WinRT cleanup can hold for a long
+	// time, and holding the fleet lock meanwhile would stall every other fleet
+	// reader and writer behind that one station.
 	m.stationsMutex.RLock()
+	stationPtrs := make([]*bluetooth.BaseStation, 0, len(m.stations))
 	for _, station := range m.stations {
 		if station == nil {
 			continue
 		}
+		stationPtrs = append(stationPtrs, station)
+	}
+	m.stationsMutex.RUnlock()
+	candidates := make([]recoveryCandidate, 0)
+	for _, station := range stationPtrs {
 		snapshot := station.Snapshot()
 		retry, tracked := retries[snapshot.Address]
 		kind, _, _, nextAt := statusRetryOrderAndKind(retry)
@@ -288,7 +307,6 @@ func (m *Manager) runStatusRecoveryRound() time.Duration {
 			kind:    kind,
 		})
 	}
-	m.stationsMutex.RUnlock()
 	if len(candidates) == 0 {
 		return 0
 	}

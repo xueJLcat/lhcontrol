@@ -238,10 +238,14 @@ func failUntouchedBulkResults(results []BulkPowerStationResult, err error) {
 // context that happened to finish after all station work was already done.
 func (m *Manager) setAllStationsPowerDetailed(ctx context.Context, state string) (BulkPowerResult, bool, error) {
 	target, err := bluetooth.ParsePowerTarget(state)
-	result := BulkPowerResult{Target: target.String(), Results: []BulkPowerStationResult{}}
 	if err != nil {
-		return result, false, fmt.Errorf("%w: %v", ErrInvalidArgument, err)
+		// Report no target for an unparseable one, matching the busy-rejection
+		// payload: a zero-value PowerState would otherwise advertise "unknown"
+		// as if it were the requested state.
+		return BulkPowerResult{Results: []BulkPowerStationResult{}}, false,
+			fmt.Errorf("%w: %v", ErrInvalidArgument, err)
 	}
+	result := BulkPowerResult{Target: target.String(), Results: []BulkPowerStationResult{}}
 	if m.shuttingDown.Load() {
 		return result, true, ErrShuttingDown
 	}

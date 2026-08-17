@@ -278,7 +278,12 @@ export class StationScanController {
       if (this.host.autoSleepRunning || this.host.externalOperationRunning ||
         this.host.isLoading || this.host.isBulkLoading || this.host.anyDeviceOperation) return;
       const wasExternalScanning = this.host.externalScanning;
-      if (scanning && !this.host.isLoading && !this.host.externalScanning) {
+      // While a local stop is still draining, the backend can transiently keep
+      // reporting a running scan after the local scan promise settled. That is
+      // our own scan winding down, not an unknown external one: adopting it
+      // would flip the fleet into the adopted state and clear the pending stop.
+      if (scanning && !this.host.isLoading && !this.host.externalScanning &&
+        !this.host.stoppingScan && !this.host.stopRequestPending) {
         await this.host.externalScan.adoptUnknown();
         return;
       }

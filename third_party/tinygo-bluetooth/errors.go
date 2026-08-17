@@ -26,6 +26,11 @@ var (
 	// definitive statement about the link: operations must treat it as a dead
 	// session instead of a transient query failure.
 	ErrDeviceDisconnected = errors.New("bluetooth: device is disconnected")
+	// ErrReadValueTooLong reports that a characteristic read delivered a value
+	// larger than the caller's buffer. The transport itself succeeded, so this
+	// classifies as malformed/oversized device data rather than a link failure;
+	// reconnecting cannot change what the device reports.
+	ErrReadValueTooLong = errors.New("bluetooth: read value does not fit the caller buffer")
 )
 
 // DisconnectCleanupError reports a warning returned after all WinRT objects
