@@ -704,6 +704,35 @@ func TestSetLanguageRollsBackWhenPersistenceFails(t *testing.T) {
 	}
 }
 
+// TestFailedSaveRestoresNormalizedUnrelatedFields covers the saveLocked
+// normalization that runs in place before the write: when the write fails,
+// every setter only rolls back its own field, so the normalization of
+// unrelated fields must be rolled back too. Otherwise memory silently holds
+// values that were never persisted and diverges from the file.
+func TestFailedSaveRestoresNormalizedUnrelatedFields(t *testing.T) {
+	t.Setenv("AppData", t.TempDir())
+	originalWriter := configFileWriter
+	configFileWriter = func(string, []byte, os.FileMode) error { return errors.New("disk full") }
+	t.Cleanup(func() { configFileWriter = originalWriter })
+	cfg := NewConfig()
+	// Simulate a directly-assigned out-of-range field: saveLocked sanitizes
+	// it in place before the write.
+	cfg.ScanDurationSeconds = 0
+	original := cfg.ScanDurationSeconds
+	if err := cfg.SetLanguage(LanguageSimplifiedChinese); err == nil {
+		t.Fatal("SetLanguage() unexpectedly succeeded")
+	}
+	if cfg.ScanDurationSeconds != original {
+		t.Fatalf(
+			"failed save left unrelated normalized field changed: ScanDurationSeconds = %d, want restored %d",
+			cfg.ScanDurationSeconds, original,
+		)
+	}
+	if cfg.GetLanguage() != "" {
+		t.Fatalf("failed save retained language %q", cfg.GetLanguage())
+	}
+}
+
 func TestBulkPowerTimeoutPersistsAndValidates(t *testing.T) {
 	useTemporaryConfigDirectory(t)
 	cfg := NewConfig()
@@ -1099,7 +1128,12 @@ func TestAPIListenAddressValidatesAndPersists(t *testing.T) {
 	if got := cfg.GetAPIListenAddress(); got != DefaultAPIListenAddress {
 		t.Fatalf("default API listen address = %q", got)
 	}
-	for _, invalid := range []string{"", "no-port", "127.0.0.1:http", "127.0.0.1:80", ":7575", "[::1]:99999"} {
+	for _, invalid := range []string{
+		"", "no-port", "127.0.0.1:http", "127.0.0.1:80", ":7575", "[::1]:99999",
+		// Hostnames are rejected: net.Listen would block the listener loop in
+		// an uncancellable DNS resolution, hanging restart and shutdown.
+		"localhost:7575", "example.invalid:7575",
+	} {
 		if err := cfg.SetAPIListenAddress(invalid); err == nil {
 			t.Fatalf("SetAPIListenAddress(%q) unexpectedly succeeded", invalid)
 		}

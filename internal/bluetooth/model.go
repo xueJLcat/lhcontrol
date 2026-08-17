@@ -138,12 +138,14 @@ func (bs *BaseStation) IsConnected() bool {
 	if err == nil && connected {
 		return true
 	}
-	if err != nil {
+	if err != nil && !errors.Is(err, bluetooth.ErrDeviceDisconnected) {
 		// Match connectAndDiscoverInternalContext's fast path: a transient
 		// status-query failure (a COM/RPC blip) is not proof the link dropped.
 		// Tearing the session down here would make every transient blip pay a
 		// full reconnect, and nothing observed the link itself failing, so no
-		// connection error is recorded either.
+		// connection error is recorded either. The closed-session sentinel is
+		// the exception: the link is definitively dead, so tear the session
+		// down instead of reporting a cached connection that cannot work.
 		log.Printf("Bluetooth: Connection status query failed for %s, keeping cached session: %v", bs.Name, err)
 		return false
 	}

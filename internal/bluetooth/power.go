@@ -263,6 +263,14 @@ func writePowerValueInternal(ctx context.Context, station *BaseStation, value by
 	return writeCharacteristicValueInternal(ctx, station.characteristic, value)
 }
 
+// maxConfirmReconnectExtensions caps how many times the confirmation loop may
+// extend its attempt budget after consecutive read errors. Without the cap a
+// permanently unreachable station (every reconnect fails, each followed by two
+// fast read failures and the next reconnect) would extend the budget forever
+// and never terminate: the public wrappers such as SetPowerState run on
+// context.Background, so termination cannot rely on a caller deadline alone.
+const maxConfirmReconnectExtensions = 3
+
 // confirmPowerStateInternalContext polls briefly because Lighthouse state
 // transitions are not always visible immediately after a successful GATT write.
 // Assumes caller holds station.mutex. Inter-attempt sleeps release the lock so
@@ -289,6 +297,7 @@ func confirmPowerStateInternalContext(ctx context.Context, station *BaseStation,
 	}
 	var lastErr error
 	consecutiveReadErrors := 0
+	reconnectExtensions := 0
 	for attempt := 0; attempt < attempts; attempt++ {
 		if contextErr := ctx.Err(); contextErr != nil {
 			if lastErr != nil {
@@ -347,14 +356,18 @@ func confirmPowerStateInternalContext(ctx context.Context, station *BaseStation,
 				// policy because the restarted window follows the policy at
 				// decode time, not the snapshot taken before the first
 				// attempt. Reconnects require their own threshold of read
-				// errors, so extensions stay bounded by real failures and the
-				// surrounding context still caps the real wait.
-				if expectedState == PowerStateOn {
+				// errors, so extensions stay bounded by real failures. The
+				// extension count is itself capped (maxConfirmReconnectExtensions)
+				// so a permanently unreachable station terminates even when the
+				// caller supplies no deadline, as the context.Background wrappers
+				// do.
+				if expectedState == PowerStateOn && reconnectExtensions < maxConfirmReconnectExtensions {
 					refreshed := CurrentTiming()
 					if refreshed.ConfirmPollInterval > 0 {
 						fallbackAttempts := int(refreshed.BootFallbackAfter/refreshed.ConfirmPollInterval) + 1
 						if remaining := attempt + 1 + fallbackAttempts; remaining > attempts {
 							attempts = remaining
+							reconnectExtensions++
 						}
 					}
 				}

@@ -1051,12 +1051,12 @@ func (s *deviceState) drainCallbacksForCleanup(unregister func()) {
 
 func (d Device) beginOperation() (*deviceState, error) {
 	if d.state == nil || d.state.closed.Load() {
-		return nil, errors.New("bluetooth: device is disconnected")
+		return nil, ErrDeviceDisconnected
 	}
 	d.state.operationMutex.Lock()
 	if d.state.closed.Load() {
 		d.state.operationMutex.Unlock()
-		return nil, errors.New("bluetooth: device is disconnected")
+		return nil, ErrDeviceDisconnected
 	}
 	leaveThread, err := enterWinRTThread()
 	if err != nil {
@@ -1080,7 +1080,7 @@ func (d Device) endOperation() {
 
 func (d Device) registerService(service *genericattributeprofile.GattDeviceService) error {
 	if d.state == nil || d.state.closed.Load() {
-		return errors.New("bluetooth: device is disconnected")
+		return ErrDeviceDisconnected
 	}
 	d.state.services = append(d.state.services, service)
 	return nil
@@ -1088,7 +1088,7 @@ func (d Device) registerService(service *genericattributeprofile.GattDeviceServi
 
 func (d Device) registerCharacteristic(characteristic *genericattributeprofile.GattCharacteristic) error {
 	if d.state == nil || d.state.closed.Load() {
-		return errors.New("bluetooth: device is disconnected")
+		return ErrDeviceDisconnected
 	}
 	d.state.characteristics = append(d.state.characteristics, characteristic)
 	return nil
@@ -1096,7 +1096,7 @@ func (d Device) registerCharacteristic(characteristic *genericattributeprofile.G
 
 func (d Device) registerNotification(registration notificationRegistration) error {
 	if d.state == nil || d.state.closed.Load() {
-		return errors.New("bluetooth: device is disconnected")
+		return ErrDeviceDisconnected
 	}
 	// Re-enabling notifications for a characteristic must replace the previous
 	// registration. Keeping both would invoke one callback per prior

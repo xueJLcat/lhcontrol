@@ -42,14 +42,17 @@ func connectAndDiscoverInternalContext(ctx context.Context, station *BaseStation
 				station.setConnectionErrorInternal(nil)
 				return nil // Already good
 			}
-		} else {
+		} else if !errors.Is(err, bluetooth.ErrDeviceDisconnected) {
 			// A status-query failure (a transient COM/RPC error around
 			// GetConnectionStatus) is not proof the link dropped; keep the
 			// cached session and let the next operation's own error
 			// classification decide whether a reconnect is needed. Tearing the
 			// session down here would make every transient query blip pay a
 			// full reconnect and rediscovery. Do not record it as a connection
-			// error either: nothing observed the link itself failing.
+			// error either: nothing observed the link itself failing. The
+			// closed-session sentinel is the exception: the library already
+			// knows the link is dead, so the cache must fall through to the
+			// teardown and reconnect below.
 			log.Printf("Bluetooth: Connection status query failed for %s, keeping cached session: %v", station.Name, err)
 			return nil
 		}
@@ -438,7 +441,13 @@ func disconnectInternal(s *BaseStation) error {
 			trackPendingCleanupStation(s)
 		}
 	} else {
-		detachConnectionStateInternal(s)
+		// No device handle remains, so there is nothing to tear down: keep
+		// the read timestamps intact. finishInterruptedInitialRead restores
+		// them deliberately after a disconnect for observations that completed
+		// before the cancellation, and a later redundant disconnect (explicit
+		// disconnect, scan pre-release, or fleet invalidation on an already
+		// disconnected station) must not wipe that freshness signal.
+		detachConnectionHandlesInternal(s)
 	}
 
 	connectedStationsMutex.Lock()
@@ -475,6 +484,22 @@ func detachConnectionStateInternal(s *BaseStation) {
 	// The boot fallback window is connection-scoped: a disconnect can outlast
 	// the window, and carrying the old timestamp would fast-forward the first
 	// boot-like read after reconnect to a trusted On.
+	s.bootingSince = time.Time{}
+}
+
+// detachConnectionHandlesInternal clears the connection handle state without
+// touching the last read timestamps, for stations whose device handle is
+// already gone. Observations recorded before the handle disappeared remain
+// authoritative (and callers use their timestamps to avoid duplicate
+// commands), so a redundant disconnect must not expire them. Callers must
+// hold s.mutex for writing.
+func detachConnectionHandlesInternal(s *BaseStation) {
+	s.isConnected = false
+	s.device = nil
+	s.characteristic = nil
+	s.modeCharacteristic = nil
+	s.identifyCharacteristic = nil
+	s.bootRawTrustedOn = false
 	s.bootingSince = time.Time{}
 }
 

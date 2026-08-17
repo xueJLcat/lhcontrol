@@ -96,6 +96,11 @@ func (a *App) restartAPIServer() {
 
 	}
 
+	// The wait is bounded because every runAPIServer exit path observes the
+	// cancellation: the retry waits select on the context, the listener is
+	// closed by the context watcher when serving, and net.Listen itself is
+	// restricted to IP literal bind targets (validateAPIListenAddress), so it
+	// never blocks in an uncancellable hostname resolution.
 	a.apiWG.Wait()
 
 	if a.shuttingDown.Load() {

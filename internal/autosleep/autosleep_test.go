@@ -306,7 +306,10 @@ func TestWatcherReplacementPreservesRunningSessionAcrossCancelledPoll(t *testing
 	// must retain stateRunning; otherwise its first false observation would be
 	// treated as idle and this whole session close would be lost.
 	cancel()
-	replacement := watcher.ReplacementMonitor(2 * time.Minute)
+	replacement, carried := watcher.ReplacementMonitor(2 * time.Minute)
+	if carried {
+		t.Fatal("ReplacementMonitor reported a carried debt for a same-session debt")
+	}
 	close(releaseCheck)
 	select {
 	case <-done:
@@ -333,7 +336,10 @@ func TestWatcherReplacementRearmsOwedTrigger(t *testing.T) {
 	}
 	watcher := &Watcher{Settings: Settings{Target: string(TargetSteamVR), DelaySeconds: 60}, Monitor: monitor}
 	watcher.markTriggerOwed(true)
-	replacement := watcher.ReplacementMonitor(3 * time.Minute)
+	replacement, carried := watcher.ReplacementMonitor(3 * time.Minute)
+	if carried {
+		t.Fatal("ReplacementMonitor reported a carried debt for a same-session debt")
+	}
 	active, closedAt := replacement.Countdown()
 	if !active || !closedAt.Equal(base.Add(time.Second)) {
 		t.Fatalf("owed replacement = active %v closedAt %v", active, closedAt)
@@ -379,6 +385,7 @@ func TestWatcherOwedSessionSurvivesTargetSwitch(t *testing.T) {
 			return true
 		},
 	}
+	watcher.SeedOwedSession()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
@@ -733,10 +740,96 @@ func TestCancelledActionKeepsOwedTriggerForReplacement(t *testing.T) {
 	}
 
 	// The replacement watcher must re-arm the owed session.
-	replacement := watcher.ReplacementMonitor(3 * time.Minute)
+	replacement, carried := watcher.ReplacementMonitor(3 * time.Minute)
+	if carried {
+		t.Fatal("ReplacementMonitor reported a carried debt for a same-session debt")
+	}
 	active, closedAt := replacement.Countdown()
 	if !active || !closedAt.Equal(base.Add(time.Second)) {
 		t.Fatalf("replacement after cancelled action = active %v closedAt %v, want armed at %v", active, closedAt, base.Add(time.Second))
+	}
+}
+
+// TestWatchedDebtSurvivesTargetSwitchWhileNewProcessRuns covers the exact
+// case the OwedSession contract exists for: the owed sleep is unsettled when
+// the user changes the watched target, and the new target's process is
+// already running (the common steamvr->steam switch with the Steam client
+// resident). The debt must stay owed while the new process runs and fire
+// through the re-arm path once it stops, instead of being silently dropped.
+func TestWatchedDebtSurvivesTargetSwitchWhileNewProcessRuns(t *testing.T) {
+	base := time.Now()
+	originalClose := base.Add(time.Second)
+	monitor := NewMonitor(time.Minute)
+	monitor.Poll(true, base)
+	monitor.Poll(false, originalClose)
+	if got := monitor.Poll(false, base.Add(2*time.Minute)); got != ActionTrigger {
+		t.Fatalf("source monitor = %v, want ActionTrigger", got)
+	}
+	source := &Watcher{Settings: Settings{Target: string(TargetSteamVR), DelaySeconds: 60}, Monitor: monitor}
+	source.markTriggerOwed(true)
+	owed, owedClosedAt := source.OwedSession()
+	if !owed || !owedClosedAt.Equal(originalClose) {
+		t.Fatalf("OwedSession() = %v, %v, want owed at %v", owed, owedClosedAt, originalClose)
+	}
+
+	var running atomic.Bool
+	running.Store(true)
+	var ticks atomic.Int64
+	var calls atomic.Int32
+	rearmRan := make(chan struct{})
+	var rearmOnce sync.Once
+	watcher := &Watcher{
+		Settings:  Settings{Enabled: true, Target: string(TargetSteam), DelaySeconds: 180},
+		Interval:  time.Millisecond,
+		IsRunning: func(string) (bool, error) { return running.Load(), nil },
+		Now:       func() time.Time { return base.Add(3*time.Minute + time.Duration(ticks.Add(1))*time.Minute) },
+		Monitor:   NewMonitorContinuing(3*time.Minute, owedClosedAt),
+		Trigger: func(_ context.Context, _ time.Time) bool {
+			if calls.Add(1) == 1 {
+				rearmOnce.Do(func() { close(rearmRan) })
+			}
+			return true
+		},
+	}
+	watcher.SeedOwedSession()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		watcher.Run(ctx)
+	}()
+	defer func() {
+		cancel()
+		<-done
+	}()
+
+	// While the new target runs the debt must stay owed, not fire, and not
+	// be cleared as a relaunched session would clear it.
+	time.Sleep(30 * time.Millisecond)
+	if got := calls.Load(); got != 0 {
+		t.Fatalf("trigger fired %d time(s) while the new target was still running", got)
+	}
+	if !watcher.OwesTrigger() {
+		t.Fatal("carried debt was cleared by the new target's running process")
+	}
+
+	// Once the new target stops, the re-arm path fires the owed sleep.
+	running.Store(false)
+	select {
+	case <-rearmRan:
+	case <-time.After(2 * time.Second):
+		t.Fatal("carried debt did not fire after the new target stopped running")
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for watcher.OwesTrigger() {
+		if time.Now().After(deadline) {
+			t.Fatal("carried debt stayed owed after the action settled")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("trigger calls = %d, want exactly 1", got)
 	}
 }
 

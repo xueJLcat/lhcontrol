@@ -333,65 +333,96 @@ func (m *Manager) mergeDiscoveredStations(
 ) []*bluetooth.BaseStation {
 	stationsToFetch := make([]*bluetooth.BaseStation, 0)
 	scanTime := time.Now()
-	m.stationsMutex.Lock()
+	// Copy the fleet pointers under the read lock: Snapshot and the Mark*
+	// calls below take each station's own mutex, which an abandoned WinRT
+	// cleanup can hold for a long time, and running them while holding the
+	// fleet write lock would stall every fleet reader and writer (and keep
+	// the scan marked in progress) behind that one wedged station. Station
+	// pointers are never removed from the map, so using them afterwards is
+	// safe.
+	m.stationsMutex.RLock()
+	stationPtrs := make([]*bluetooth.BaseStation, 0, len(m.stations))
+	for _, stationPtr := range m.stations {
+		if stationPtr == nil {
+			continue
+		}
+		stationPtrs = append(stationPtrs, stationPtr)
+	}
+	m.stationsMutex.RUnlock()
 	// Snapshot absence before the miss marking below: a station seen this
 	// round can still cross the miss threshold during MarkMissed, and MarkSeen
 	// would then report an absent-to-present transition that never happened.
 	// Only genuinely absent stations are revivals worth re-arming recovery
 	// for; the others already participate in this scan's own initial reads.
-	previouslyAbsent := make(map[*bluetooth.BaseStation]bool, len(m.stations))
-	for _, stationPtr := range m.stations {
-		if stationPtr == nil {
-			continue
-		}
-		if _, unreliable := unreliablePresence[strings.ToLower(stationPtr.Snapshot().Address)]; unreliable {
+	previouslyAbsent := make(map[*bluetooth.BaseStation]bool, len(stationPtrs))
+	for _, stationPtr := range stationPtrs {
+		snapshot := stationPtr.Snapshot()
+		if _, unreliable := unreliablePresence[strings.ToLower(snapshot.Address)]; unreliable {
 			// An unreliable station still needs its absence snapshotted: when
 			// its cached connection could not be released, a genuinely absent
 			// station this scan sees advertising again must still count as a
 			// revival so recovery is re-armed below.
-			if !stationPtr.Snapshot().Present {
+			if !snapshot.Present {
 				previouslyAbsent[stationPtr] = true
 			}
 			stationPtr.MarkPresenceUncertain()
 			continue
 		}
-		if !stationPtr.Snapshot().Present {
+		if !snapshot.Present {
 			previouslyAbsent[stationPtr] = true
 		}
 		stationPtr.MarkMissed()
 	}
-	revivedStations := make([]*bluetooth.BaseStation, 0)
+	// Resolve map membership under the write lock, but restrict that section
+	// to map work: newly created stations are not published until they are
+	// inserted, and existing pointers stay valid after the unlock.
+	type discoveredMerge struct {
+		value     bluetooth.DiscoveredStation
+		station   *bluetooth.BaseStation
+		isNew     bool
+	}
+	merges := make([]discoveredMerge, 0, len(discoveredValues))
+	m.stationsMutex.Lock()
 	for _, currentScanStation := range discoveredValues {
 		addrStr := currentScanStation.Address.String()
 		if existingStation, found := m.stations[addrStr]; found {
-			if currentScanStation.Name != "" {
-				existingStation.UpdateName(currentScanStation.Name)
-			}
-			if existingStation.MarkSeen(scanTime) && previouslyAbsent[existingStation] {
-				revivedStations = append(revivedStations, existingStation)
-			}
-			if !existingStation.Snapshot().Connected {
-				stationsToFetch = append(stationsToFetch, existingStation)
-			}
-		} else {
-			name := currentScanStation.Name
-			if name == "" {
-				name = fallbackStationName(addrStr)
-			}
-			newStationPtr := &bluetooth.BaseStation{
-				Name:          name,
-				Address:       currentScanStation.Address,
-				PowerState:    bluetooth.PowerStateUnknown,
-				RawPowerState: bluetooth.RawPowerStateUnknown,
-				Channel:       bluetooth.ChannelUnknown,
-				Present:       true,
-				LastSeenAt:    scanTime,
-			}
-			m.stations[addrStr] = newStationPtr
-			stationsToFetch = append(stationsToFetch, newStationPtr)
+			merges = append(merges, discoveredMerge{value: currentScanStation, station: existingStation})
+			continue
 		}
+		name := currentScanStation.Name
+		if name == "" {
+			name = fallbackStationName(addrStr)
+		}
+		newStationPtr := &bluetooth.BaseStation{
+			Name:          name,
+			Address:       currentScanStation.Address,
+			PowerState:    bluetooth.PowerStateUnknown,
+			RawPowerState: bluetooth.RawPowerStateUnknown,
+			Channel:       bluetooth.ChannelUnknown,
+			Present:       true,
+			LastSeenAt:    scanTime,
+		}
+		m.stations[addrStr] = newStationPtr
+		merges = append(merges, discoveredMerge{value: currentScanStation, station: newStationPtr, isNew: true})
 	}
 	m.stationsMutex.Unlock()
+	revivedStations := make([]*bluetooth.BaseStation, 0)
+	for _, merge := range merges {
+		stationPtr := merge.station
+		if merge.isNew {
+			stationsToFetch = append(stationsToFetch, stationPtr)
+			continue
+		}
+		if merge.value.Name != "" {
+			stationPtr.UpdateName(merge.value.Name)
+		}
+		if stationPtr.MarkSeen(scanTime) && previouslyAbsent[stationPtr] {
+			revivedStations = append(revivedStations, stationPtr)
+		}
+		if !stationPtr.Snapshot().Connected {
+			stationsToFetch = append(stationsToFetch, stationPtr)
+		}
+	}
 	// A station that returns after its absent recovery was pruned or exhausted
 	// has no retry entry left, and the initial read below can still be skipped
 	// (a cancellation landing in the merge window, or an already connected

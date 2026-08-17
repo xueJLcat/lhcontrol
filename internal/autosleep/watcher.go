@@ -51,11 +51,16 @@ type Watcher struct {
 	// mutex guards the trigger debt so a replacement watcher can snapshot it
 	// while the poll loop and the action goroutine update it. The generation
 	// prevents an older action completion from clearing a newer trigger that
-	// became pending while that action was still draining.
+	// became pending while that action was still draining. carriedDebt marks a
+	// debt inherited from a watcher that watched a different process: the new
+	// target running is not a relaunch of that owed session, so the running
+	// branch must keep the debt owed until the action settles instead of
+	// dropping it.
 	lifecycleMutex    sync.Mutex
 	mutex             sync.Mutex
 	triggerOwed       bool
 	triggerGeneration uint64
+	carriedDebt       bool
 
 	// done closes when Run returns, for any reason. Owners observe it to tell
 	// a watcher that stopped on its own (invalid target, persistent
@@ -71,8 +76,11 @@ type Watcher struct {
 // watcher with a different delay. Callers cancel this watcher first. The poll
 // loop checks that cancellation while holding lifecycleMutex, so a process
 // observation cannot be committed after this snapshot and then disappear
-// between the old and new watchers.
-func (w *Watcher) ReplacementMonitor(delay time.Duration) *Monitor {
+// between the old and new watchers. The second return reports whether the
+// unsettled debt (if any) was carried over from a different watched process;
+// the replacement seeds SeedOwedSession in that case so the debt keeps its
+// carry semantics across the replacement.
+func (w *Watcher) ReplacementMonitor(delay time.Duration) (*Monitor, bool) {
 	w.lifecycleMutex.Lock()
 	defer w.lifecycleMutex.Unlock()
 	monitor := w.Monitor
@@ -82,8 +90,24 @@ func (w *Watcher) ReplacementMonitor(delay time.Duration) *Monitor {
 	}
 	w.mutex.Lock()
 	triggerOwed := w.triggerOwed
+	carried := w.carriedDebt && triggerOwed
 	w.mutex.Unlock()
-	return monitor.replacement(delay, triggerOwed)
+	return monitor.replacement(delay, triggerOwed), carried
+}
+
+// SeedOwedSession seeds an unsettled sleep debt inherited from a watcher for
+// a different watched process (a target change). The monitor countdown cannot
+// express the debt (it belongs to the action bookkeeping, and the new
+// target's observations must not re-derive it), so the replacement watcher is
+// seeded directly: while the new target runs, the debt stays owed instead of
+// being cleared as a relaunched session, and the re-arm path fires it once
+// the new target stops running. Call before Run.
+func (w *Watcher) SeedOwedSession() {
+	w.mutex.Lock()
+	w.triggerGeneration++
+	w.triggerOwed = true
+	w.carriedDebt = true
+	w.mutex.Unlock()
 }
 
 // Done returns a channel closed once Run returns, whether the context was
@@ -182,7 +206,21 @@ func (w *Watcher) finishTrigger(generation uint64, settled bool) {
 		w.triggerGeneration++
 		if settled {
 			w.triggerOwed = false
+			w.carriedDebt = false
 		}
+	}
+	w.mutex.Unlock()
+}
+
+// clearSessionDebtUnlessCarried clears the debt a relaunched session
+// invalidates, but leaves a carried debt owed: another process running is not
+// a relaunch of the session that debt belongs to, and dropping it there would
+// silently strand the stations awake on every target switch.
+func (w *Watcher) clearSessionDebtUnlessCarried() {
+	w.mutex.Lock()
+	if !w.carriedDebt {
+		w.triggerGeneration++
+		w.triggerOwed = false
 	}
 	w.mutex.Unlock()
 }
@@ -274,7 +312,10 @@ func (w *Watcher) Run(ctx context.Context) {
 		}
 		// Keep monitoring while the Bluetooth action runs. A new session
 		// invalidates the old session's pending sleep immediately, including
-		// work that is already scanning or waiting for a GATT slot.
+		// work that is already scanning or waiting for a GATT slot. A debt
+		// carried over from a different watched process stays owed: this
+		// process is not a relaunch of that session, and the re-arm below
+		// fires the debt once this process stops running.
 		if running {
 			if triggerCancel != nil {
 				triggerCancel()
@@ -282,7 +323,7 @@ func (w *Watcher) Run(ctx context.Context) {
 			pendingTrigger = false
 			pendingTriggerGeneration = 0
 			pendingTriggerClosedAt = time.Time{}
-			w.markTriggerOwed(false)
+			w.clearSessionDebtUnlessCarried()
 		}
 		if monitor.Poll(running, now) == ActionTrigger {
 			pendingTrigger = true

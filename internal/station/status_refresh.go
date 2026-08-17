@@ -190,13 +190,23 @@ dispatch:
 // stations eligible for a status read and addresses first observed
 // disconnected, which need recovery tracking instead.
 func (m *Manager) selectStatusRefreshCandidates() ([]*bluetooth.BaseStation, []string) {
-	stationsToRead := make([]*bluetooth.BaseStation, 0)
-	disconnectedAddresses := make([]string, 0)
+	// Copy the station pointers under the read lock and snapshot them after
+	// releasing it, matching GetStationInfo: Snapshot and stationConnected
+	// take each station's own mutex, which an abandoned WinRT cleanup can
+	// hold for a long time, and holding the fleet lock meanwhile would stall
+	// every other fleet reader and writer behind that one station.
 	m.stationsMutex.RLock()
+	stationPtrs := make([]*bluetooth.BaseStation, 0, len(m.stations))
 	for _, stationPtr := range m.stations {
 		if stationPtr == nil {
 			continue
 		}
+		stationPtrs = append(stationPtrs, stationPtr)
+	}
+	m.stationsMutex.RUnlock()
+	stationsToRead := make([]*bluetooth.BaseStation, 0)
+	disconnectedAddresses := make([]string, 0)
+	for _, stationPtr := range stationPtrs {
 		snapshot := stationPtr.Snapshot()
 		if !snapshot.Present {
 			continue
@@ -207,7 +217,6 @@ func (m *Manager) selectStatusRefreshCandidates() ([]*bluetooth.BaseStation, []s
 			disconnectedAddresses = append(disconnectedAddresses, snapshot.Address)
 		}
 	}
-	m.stationsMutex.RUnlock()
 	sort.Strings(disconnectedAddresses)
 	return stationsToRead, disconnectedAddresses
 }

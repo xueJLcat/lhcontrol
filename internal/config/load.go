@@ -206,6 +206,13 @@ func validateAPIListenAddress(address string) error {
 	if host == "" {
 		return fmt.Errorf("listen address %q is missing a host", address)
 	}
+	// The bind target must be an IP literal: net.Listen performs an
+	// uncancellable, context-free DNS resolution for hostnames, which could
+	// block the listener loop (and every restart/shutdown waiting on it)
+	// indefinitely. A local bind target never needs name resolution.
+	if net.ParseIP(host) == nil {
+		return fmt.Errorf("listen address %q must use an IP literal host", address)
+	}
 	port, err := strconv.ParseUint(portText, 10, 16)
 	if err != nil || port < 1024 {
 		return fmt.Errorf("listen address %q must use a port between 1024 and 65535", address)

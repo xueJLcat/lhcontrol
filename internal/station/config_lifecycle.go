@@ -136,7 +136,10 @@ func (m *Manager) runShutdownDrain(done chan struct{}) {
 	// invoked from a scan callback, so waiting for callbacks would
 	// self-deadlock. Event emissions are guarded by the caller's shutdown
 	// flag instead.
-	if err := bluetooth.DisconnectAllStations(); err != nil {
+	// Wrap the fleet disconnect in the same panic guard every other adapter
+	// cleanup uses: a driver panic here would crash the process mid-drain
+	// instead of finishing the shutdown bookkeeping and closing done.
+	if err := runSafely("shutdown disconnect", bluetooth.DisconnectAllStations); err != nil {
 		log.Printf("Bluetooth shutdown cleanup was incomplete: %v", err)
 	}
 }

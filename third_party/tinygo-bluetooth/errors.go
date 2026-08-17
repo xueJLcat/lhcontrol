@@ -21,6 +21,11 @@ var (
 	ErrGATTAccessDenied = errors.New("Bluetooth GATT access denied")
 	// ErrGATTCommunication covers communication statuses unknown to this build.
 	ErrGATTCommunication = errors.New("Bluetooth GATT communication failed")
+	// ErrDeviceDisconnected reports that the device session backing an
+	// operation has already been closed. Unlike a transport error, this is a
+	// definitive statement about the link: operations must treat it as a dead
+	// session instead of a transient query failure.
+	ErrDeviceDisconnected = errors.New("bluetooth: device is disconnected")
 )
 
 // DisconnectCleanupError reports a warning returned after all WinRT objects

@@ -111,6 +111,7 @@ func (a *App) applyAutoSleep(settings autosleep.Settings) {
 	defer a.autoSleepMutex.Unlock()
 
 	var monitor *autosleep.Monitor
+	seedOwedSession := false
 	if previous := a.autoSleepWatcher; previous != nil {
 		// Cancel before taking the replacement snapshot. Watcher polls perform
 		// their final cancellation check under the same lifecycle lock used by
@@ -119,15 +120,23 @@ func (a *App) applyAutoSleep(settings autosleep.Settings) {
 		a.autoSleepCancel()
 		if previous.Settings.Target == settings.Target {
 			// Preserve idle/running/countdown state, and re-arm a consumed
-			// trigger whose action is still running or queued.
-			monitor = previous.ReplacementMonitor(settings.Delay())
+			// trigger whose action is still running or queued. A debt already
+			// carried from another target keeps its carry semantics.
+			var carried bool
+			monitor, carried = previous.ReplacementMonitor(settings.Delay())
+			seedOwedSession = carried
 		} else if owed, closedAt := previous.OwedSession(); owed {
 			// A target change discards the old process observation (it belongs
 			// to a different session source), but an owed unsettled sleep must
 			// survive: seed the session-close time so the replacement watcher
 			// re-arms the debt (and keeps the closedAt de-duplication key)
 			// instead of dropping it until the new target's next full session.
+			// The debt is also seeded as carried: if the new target's process
+			// is already running, observing it must keep the debt owed (a
+			// different process is not a relaunch) until the re-arm path fires
+			// it once that process stops.
 			monitor = autosleep.NewMonitorContinuing(settings.Delay(), closedAt)
+			seedOwedSession = true
 		}
 		a.autoSleepCancel = nil
 		a.autoSleepWatcher = nil
@@ -154,6 +163,9 @@ func (a *App) applyAutoSleep(settings autosleep.Settings) {
 			return platform.IsProcessRunning(name)
 		},
 		Trigger: a.runAutoSleepSession,
+	}
+	if seedOwedSession {
+		watcher.SeedOwedSession()
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())

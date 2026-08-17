@@ -306,15 +306,25 @@ func (m *Manager) setAllStationsPowerDetailed(ctx context.Context, state string)
 	return result, false, nil
 }
 
-// selectBulkPowerCandidates snapshots every known station under the fleet
-// lock, applies display-name overrides, and orders the batch deterministically.
+// selectBulkPowerCandidates snapshots every known station, applies
+// display-name overrides, and orders the batch deterministically.
 func (m *Manager) selectBulkPowerCandidates() []bulkPowerCandidate {
+	// Copy the station pointers under the read lock and snapshot them after
+	// releasing it, matching GetStationInfo: Snapshot takes each station's
+	// own mutex, which an abandoned WinRT cleanup can hold for a long time,
+	// and holding the fleet lock meanwhile would stall every other fleet
+	// reader and writer behind that one station.
 	m.stationsMutex.RLock()
-	candidates := make([]bulkPowerCandidate, 0, len(m.stations))
+	stationPtrs := make([]*bluetooth.BaseStation, 0, len(m.stations))
 	for _, stationPtr := range m.stations {
 		if stationPtr == nil {
 			continue
 		}
+		stationPtrs = append(stationPtrs, stationPtr)
+	}
+	m.stationsMutex.RUnlock()
+	candidates := make([]bulkPowerCandidate, 0, len(stationPtrs))
+	for _, stationPtr := range stationPtrs {
 		snapshot := stationPtr.Snapshot()
 		name := snapshot.Name
 		if renamedName, ok := m.config.GetStationDisplayName(snapshot.Address, snapshot.Name); ok {
@@ -322,7 +332,6 @@ func (m *Manager) selectBulkPowerCandidates() []bulkPowerCandidate {
 		}
 		candidates = append(candidates, bulkPowerCandidate{station: stationPtr, snapshot: snapshot, name: name})
 	}
-	m.stationsMutex.RUnlock()
 	sort.Slice(candidates, func(i, j int) bool {
 		left, right := candidates[i], candidates[j]
 		return stationValuesLess(

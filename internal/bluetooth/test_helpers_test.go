@@ -343,6 +343,94 @@ func (f *fakeCharacteristic) write(value []byte) (int, error) {
 	}
 	return len(value), nil
 }
+// deadLinkDevice reports the definitive closed-session error: the library
+// already knows the link is gone, which is not a transient status-query blip.
+type deadLinkDevice struct {
+	trackingConnectedDevice
+}
+
+func (*deadLinkDevice) Connected() (bool, error) { return false, tinybluetooth.ErrDeviceDisconnected }
+
+// transientStatusQueryDevice fails the status query with an unspecific RPC
+// error, which must be treated as a blip instead of proof the link dropped.
+type transientStatusQueryDevice struct {
+	trackingConnectedDevice
+}
+
+func (*transientStatusQueryDevice) Connected() (bool, error) {
+	return false, errors.New("bluetooth: GetConnectionStatus RPC failed")
+}
+
+func TestIsConnectedTearsDownDefinitivelyDeadSession(t *testing.T) {
+	station := connectedFakeStation(&fakeCharacteristic{}, nil, nil, Capabilities{PowerRead: true})
+	device := &deadLinkDevice{}
+	station.device = device
+	if station.IsConnected() {
+		t.Fatal("IsConnected() = true for a session whose link is definitively disconnected")
+	}
+	station.mutex.Lock()
+	deviceGone := station.device == nil
+	station.mutex.Unlock()
+	if !deviceGone || !device.disconnected {
+		t.Fatalf("dead session was not torn down: deviceGone=%v disconnected=%v", deviceGone, device.disconnected)
+	}
+}
+
+func TestIsConnectedKeepsSessionOnTransientStatusQueryFailure(t *testing.T) {
+	station := connectedFakeStation(&fakeCharacteristic{}, nil, nil, Capabilities{PowerRead: true})
+	device := &transientStatusQueryDevice{}
+	station.device = device
+	if station.IsConnected() {
+		t.Fatal("IsConnected() = true for a failed status query")
+	}
+	station.mutex.Lock()
+	deviceGone := station.device == nil
+	station.mutex.Unlock()
+	if deviceGone || device.disconnected {
+		t.Fatal("transient status query failure tore down the cached session")
+	}
+}
+
+func TestConnectFastPathRebuildsDefinitivelyDeadSession(t *testing.T) {
+	station := connectedFakeStation(&fakeCharacteristic{}, nil, nil, Capabilities{PowerWrite: true})
+	device := &deadLinkDevice{}
+	station.device = device
+	originalAdapter := adapter
+	fake := newFakeBLEAdapter()
+	adapter = fake
+	t.Cleanup(func() { adapter = originalAdapter })
+	station.mutex.Lock()
+	err := connectAndDiscoverInternal(station)
+	station.mutex.Unlock()
+	if err == nil {
+		t.Fatal("connectAndDiscoverInternal() kept a definitively dead session instead of rebuilding it")
+	}
+	station.mutex.Lock()
+	deviceGone := station.device == nil
+	station.mutex.Unlock()
+	if !deviceGone || !device.disconnected {
+		t.Fatalf("dead session was not torn down before the rebuild: deviceGone=%v disconnected=%v", deviceGone, device.disconnected)
+	}
+}
+
+func TestConnectFastPathKeepsSessionOnTransientStatusQueryFailure(t *testing.T) {
+	station := connectedFakeStation(&fakeCharacteristic{}, nil, nil, Capabilities{PowerWrite: true})
+	device := &transientStatusQueryDevice{}
+	station.device = device
+	station.mutex.Lock()
+	err := connectAndDiscoverInternal(station)
+	station.mutex.Unlock()
+	if err != nil {
+		t.Fatalf("connectAndDiscoverInternal() error = %v, want the cached session kept", err)
+	}
+	station.mutex.Lock()
+	deviceKept := station.device != nil
+	station.mutex.Unlock()
+	if !deviceKept {
+		t.Fatal("transient status query failure tore down the cached session")
+	}
+}
+
 func connectedFakeStation(power, mode, identify characteristicIO, capabilities Capabilities) *BaseStation {
 	setFakeProperties := func(characteristic characteristicIO, readable, writable bool) {
 		fake, ok := characteristic.(*fakeCharacteristic)

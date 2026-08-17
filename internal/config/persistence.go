@@ -75,7 +75,20 @@ func (c *Config) saveLocked() error {
 	// directly-assigned or zero-value field can never write an out-of-range
 	// value that Load would later silently replace, then build the snapshot
 	// from the normalized runtime values (fields.go is the single declaration
-	// of the ranged settings).
+	// of the ranged settings). Snapshot the pre-normalization values first:
+	// when the write below fails, every setter only rolls back its own field,
+	// so the in-place normalization of unrelated fields must be undone too or
+	// memory silently diverges from the file that was never written.
+	bindings := c.intSettingBindings(nil)
+	originalValues := make([]int, len(bindings))
+	for index, binding := range bindings {
+		originalValues[index] = *binding.runtime
+	}
+	restoreNormalizedRuntime := func() {
+		for index, binding := range bindings {
+			*binding.runtime = originalValues[index]
+		}
+	}
 	c.sanitizeRuntimeInPlace()
 	c.repairCrossItemInvariants()
 
@@ -103,6 +116,7 @@ func (c *Config) saveLocked() error {
 
 	configFile, err := json.MarshalIndent(snapshot, "", "  ")
 	if err != nil {
+		restoreNormalizedRuntime()
 		saveErr := fmt.Errorf("error marshalling config: %w", err)
 		c.lastPersistenceErr = saveErr
 		return saveErr
@@ -111,6 +125,7 @@ func (c *Config) saveLocked() error {
 	log.Printf("Saving config to: %s", configFilePath)
 	err = configFileWriter(configFilePath, configFile, 0644)
 	if err != nil {
+		restoreNormalizedRuntime()
 		saveErr := fmt.Errorf("failed to write config file '%s': %w", configFilePath, err)
 		c.lastPersistenceErr = saveErr
 		return saveErr
