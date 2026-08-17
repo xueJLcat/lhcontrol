@@ -125,19 +125,17 @@ func (m *Manager) SetStationChannel(
 	}
 	hasUnknown := false
 	conflictCheckTime := time.Now()
-	// Copy only the pointers under the map lock and snapshot them afterwards:
-	// Snapshot takes each station's own mutex, which a wedged WinRT cleanup on
-	// another station can hold far longer than this operation's budget. This
-	// mirrors GetStationInfo's pattern; station pointers are never removed.
-	m.stationsMutex.RLock()
-	otherStations := make([]*bluetooth.BaseStation, 0, len(m.stations))
-	for _, other := range m.stations {
-		if other == nil || other == stationPtr {
+	// Snapshot each other station outside the fleet lock: a wedged WinRT
+	// cleanup on another station can hold its mutex far longer than this
+	// operation's budget.
+	fleetPointers := m.stationPointers()
+	otherStations := make([]*bluetooth.BaseStation, 0, len(fleetPointers))
+	for _, other := range fleetPointers {
+		if other == stationPtr {
 			continue
 		}
 		otherStations = append(otherStations, other)
 	}
-	m.stationsMutex.RUnlock()
 	for _, other := range otherStations {
 		snapshot := other.Snapshot()
 		if !snapshot.Present {

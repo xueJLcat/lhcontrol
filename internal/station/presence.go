@@ -1,7 +1,5 @@
 package station
 
-import "lhcontrol/internal/bluetooth"
-
 // ApplyPresenceMissThreshold re-evaluates cached presence immediately after
 // the user changes the consecutive-miss threshold. Raising the threshold can
 // revive a disconnected station whose recovery was previously exhausted, so
@@ -9,16 +7,7 @@ import "lhcontrol/internal/bluetooth"
 // any stale absent-era backoff deadlines to run immediately.
 func (m *Manager) ApplyPresenceMissThreshold() {
 	threshold := m.config.GetPresenceMissThreshold()
-	m.stationsMutex.RLock()
-	stations := make([]*bluetooth.BaseStation, 0, len(m.stations))
-	for _, station := range m.stations {
-		if station != nil {
-			stations = append(stations, station)
-		}
-	}
-	m.stationsMutex.RUnlock()
-
-	for _, current := range stations {
+	for _, current := range m.stationPointers() {
 		if !current.ApplyPresenceMissThreshold(threshold) {
 			continue
 		}

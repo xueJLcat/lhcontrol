@@ -46,6 +46,25 @@ func NewManager(cfg *config.Config) *Manager {
 	return manager
 }
 
+// stationPointers copies the fleet pointers under the read lock and releases
+// it before the caller snapshots each station: Snapshot takes each station's
+// own mutex, which an abandoned WinRT cleanup can hold for a long time, and
+// holding the fleet lock meanwhile would stall every other fleet reader and
+// writer behind that one wedged station. Station pointers are never removed
+// from the map, so using them after the unlock is safe.
+func (m *Manager) stationPointers() []*bluetooth.BaseStation {
+	m.stationsMutex.RLock()
+	defer m.stationsMutex.RUnlock()
+	stationPtrs := make([]*bluetooth.BaseStation, 0, len(m.stations))
+	for _, stationPtr := range m.stations {
+		if stationPtr == nil {
+			continue
+		}
+		stationPtrs = append(stationPtrs, stationPtr)
+	}
+	return stationPtrs
+}
+
 // newStationOperationContext gives one physical-device action a hard upper
 // bound. The timeout follows the user-configured value; tests that construct
 // a Manager directly can still pin it through the injectable field and fall
@@ -235,14 +254,7 @@ func (m *Manager) initializeRetryCooldown() time.Duration {
 // delay only affected failures recorded after the setting changed, leaving an
 // existing station or adapter retry asleep on the previous schedule.
 func (m *Manager) ApplyRecoverySettings() {
-	m.stationsMutex.RLock()
-	stationPtrs := make([]*bluetooth.BaseStation, 0, len(m.stations))
-	for _, station := range m.stations {
-		if station != nil {
-			stationPtrs = append(stationPtrs, station)
-		}
-	}
-	m.stationsMutex.RUnlock()
+	stationPtrs := m.stationPointers()
 	absent := make(map[string]bool, len(stationPtrs))
 	for _, station := range stationPtrs {
 		snapshot := station.Snapshot()
@@ -302,15 +314,7 @@ func (m *Manager) ApplyRecoverySettings() {
 // immediately. Both limited kinds are restored because an exhausted entry no
 // longer records whether its last failure was transport- or channel-specific.
 func (m *Manager) ReviveAbsentStationRecovery() {
-	m.stationsMutex.RLock()
-	stationPtrs := make([]*bluetooth.BaseStation, 0, len(m.stations))
-	for _, station := range m.stations {
-		if station != nil {
-			stationPtrs = append(stationPtrs, station)
-		}
-	}
-	m.stationsMutex.RUnlock()
-
+	stationPtrs := m.stationPointers()
 	absentStations := make([]string, 0, len(stationPtrs))
 	for _, station := range stationPtrs {
 		snapshot := station.Snapshot()

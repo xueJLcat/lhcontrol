@@ -12,21 +12,7 @@ import (
 )
 
 func (m *Manager) GetStationInfo() []StationInfo {
-	// Copy the station pointers under the read lock and snapshot them after
-	// releasing it: Snapshot takes each station's mutex, which a slow GATT
-	// operation can hold for seconds, and holding stationsMutex meanwhile would
-	// queue every scan merge and other reader behind the whole fleet. Station
-	// pointers are never removed from the map, so using them after the unlock
-	// is safe.
-	m.stationsMutex.RLock()
-	stationPtrs := make([]*bluetooth.BaseStation, 0, len(m.stations))
-	for _, stationPtr := range m.stations {
-		if stationPtr == nil {
-			continue
-		}
-		stationPtrs = append(stationPtrs, stationPtr)
-	}
-	m.stationsMutex.RUnlock()
+	stationPtrs := m.stationPointers()
 	snapshots := make([]bluetooth.BaseStationSnapshot, 0, len(stationPtrs))
 	for _, stationPtr := range stationPtrs {
 		snapshots = append(snapshots, stationPtr.Snapshot())

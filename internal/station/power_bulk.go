@@ -313,20 +313,7 @@ func (m *Manager) setAllStationsPowerDetailed(ctx context.Context, state string)
 // selectBulkPowerCandidates snapshots every known station, applies
 // display-name overrides, and orders the batch deterministically.
 func (m *Manager) selectBulkPowerCandidates() []bulkPowerCandidate {
-	// Copy the station pointers under the read lock and snapshot them after
-	// releasing it, matching GetStationInfo: Snapshot takes each station's
-	// own mutex, which an abandoned WinRT cleanup can hold for a long time,
-	// and holding the fleet lock meanwhile would stall every other fleet
-	// reader and writer behind that one station.
-	m.stationsMutex.RLock()
-	stationPtrs := make([]*bluetooth.BaseStation, 0, len(m.stations))
-	for _, stationPtr := range m.stations {
-		if stationPtr == nil {
-			continue
-		}
-		stationPtrs = append(stationPtrs, stationPtr)
-	}
-	m.stationsMutex.RUnlock()
+	stationPtrs := m.stationPointers()
 	candidates := make([]bulkPowerCandidate, 0, len(stationPtrs))
 	for _, stationPtr := range stationPtrs {
 		snapshot := stationPtr.Snapshot()

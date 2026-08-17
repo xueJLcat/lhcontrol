@@ -12,18 +12,7 @@ func (m *Manager) RenameStation(originalName string, newName string) error {
 		return err
 	}
 	defer m.endForegroundSharedOperation()
-	// Copy only the pointers under the map lock and snapshot them afterwards:
-	// Snapshot takes each station's own mutex, which a wedged WinRT cleanup can
-	// hold far longer than this operation should block on the fleet map lock.
-	m.stationsMutex.RLock()
-	stationPtrs := make([]*bluetooth.BaseStation, 0, len(m.stations))
-	for _, stationPtr := range m.stations {
-		if stationPtr == nil {
-			continue
-		}
-		stationPtrs = append(stationPtrs, stationPtr)
-	}
-	m.stationsMutex.RUnlock()
+	stationPtrs := m.stationPointers()
 	addresses := make([]string, 0)
 	for _, stationPtr := range stationPtrs {
 		snapshot := stationPtr.Snapshot()

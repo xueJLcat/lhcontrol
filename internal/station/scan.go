@@ -276,14 +276,7 @@ func (m *Manager) scanAndFetchStations(ctx context.Context) ([]StationInfo, int,
 // not be released are returned (lowercased address) so the merge phase marks
 // their presence uncertain.
 func (m *Manager) releaseStationsForScan(ctx context.Context) (map[string]struct{}, error) {
-	m.stationsMutex.RLock()
-	connectedStations := make([]*bluetooth.BaseStation, 0, len(m.stations))
-	for _, stationPtr := range m.stations {
-		if stationPtr != nil {
-			connectedStations = append(connectedStations, stationPtr)
-		}
-	}
-	m.stationsMutex.RUnlock()
+	connectedStations := m.stationPointers()
 	releaseErrors := make([]error, 0)
 	unreliablePresence := make(map[string]struct{})
 	for index, stationPtr := range connectedStations {
@@ -333,22 +326,11 @@ func (m *Manager) mergeDiscoveredStations(
 ) []*bluetooth.BaseStation {
 	stationsToFetch := make([]*bluetooth.BaseStation, 0)
 	scanTime := time.Now()
-	// Copy the fleet pointers under the read lock: Snapshot and the Mark*
-	// calls below take each station's own mutex, which an abandoned WinRT
-	// cleanup can hold for a long time, and running them while holding the
-	// fleet write lock would stall every fleet reader and writer (and keep
-	// the scan marked in progress) behind that one wedged station. Station
-	// pointers are never removed from the map, so using them afterwards is
-	// safe.
-	m.stationsMutex.RLock()
-	stationPtrs := make([]*bluetooth.BaseStation, 0, len(m.stations))
-	for _, stationPtr := range m.stations {
-		if stationPtr == nil {
-			continue
-		}
-		stationPtrs = append(stationPtrs, stationPtr)
-	}
-	m.stationsMutex.RUnlock()
+	// Snapshot and Mark* calls below take each station's own mutex, which an
+	// abandoned WinRT cleanup can hold for a long time; running them outside
+	// the fleet lock keeps every fleet reader and writer (and the scan's
+	// in-progress state) from queueing behind one wedged station.
+	stationPtrs := m.stationPointers()
 	// Snapshot absence before the miss marking below: a station seen this
 	// round can still cross the miss threshold during MarkMissed, and MarkSeen
 	// would then report an absent-to-present transition that never happened.

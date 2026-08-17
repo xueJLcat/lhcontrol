@@ -186,21 +186,7 @@ func (m *Manager) nextStatusRecoveryDelay() (time.Duration, bool) {
 		return 0, false
 	}
 	eligible := make(map[string]struct{}, len(retries))
-	// Copy the station pointers under the read lock and snapshot them after
-	// releasing it, matching selectStatusRefreshCandidates: Snapshot takes each
-	// station's own mutex, which an abandoned WinRT cleanup can hold for a long
-	// time, and holding the fleet lock meanwhile would stall every other fleet
-	// reader and writer behind that one station.
-	m.stationsMutex.RLock()
-	stationPtrs := make([]*bluetooth.BaseStation, 0, len(m.stations))
-	for _, station := range m.stations {
-		if station == nil {
-			continue
-		}
-		stationPtrs = append(stationPtrs, station)
-	}
-	m.stationsMutex.RUnlock()
-	for _, station := range stationPtrs {
+	for _, station := range m.stationPointers() {
 		address := station.Snapshot().Address
 		if _, tracked := retries[address]; tracked {
 			eligible[address] = struct{}{}
@@ -261,10 +247,14 @@ func (m *Manager) runStatusRecoveryRound() time.Duration {
 	}
 	now := time.Now()
 	type recoveryCandidate struct {
-		station *bluetooth.BaseStation
-		address string
-		retry   statusRetry
-		kind    statusRetryKind
+		station     *bluetooth.BaseStation
+		address     string
+		sortKey     string
+		retry       statusRetry
+		kind        statusRetryKind
+		failures    int
+		lastAttempt time.Time
+		nextAt      time.Time
 	}
 	m.statusRetryMutex.Lock()
 	retries := make(map[string]statusRetry, len(m.statusRetries))
@@ -272,26 +262,15 @@ func (m *Manager) runStatusRecoveryRound() time.Duration {
 		retries[address] = retry
 	}
 	m.statusRetryMutex.Unlock()
-	// Copy the station pointers under the read lock and snapshot them after
-	// releasing it, matching selectStatusRefreshCandidates: Snapshot takes each
-	// station's own mutex, which an abandoned WinRT cleanup can hold for a long
-	// time, and holding the fleet lock meanwhile would stall every other fleet
-	// reader and writer behind that one station.
-	m.stationsMutex.RLock()
-	stationPtrs := make([]*bluetooth.BaseStation, 0, len(m.stations))
-	for _, station := range m.stations {
-		if station == nil {
-			continue
-		}
-		stationPtrs = append(stationPtrs, station)
-	}
-	m.stationsMutex.RUnlock()
 	candidates := make([]recoveryCandidate, 0)
-	for _, station := range stationPtrs {
+	for _, station := range m.stationPointers() {
 		snapshot := station.Snapshot()
 		retry, tracked := retries[snapshot.Address]
-		kind, _, _, nextAt := statusRetryOrderAndKind(retry)
-		if !tracked || now.Before(nextAt) {
+		if !tracked {
+			continue
+		}
+		kind, failures, lastAttempt, nextAt := statusRetryOrderAndKind(retry)
+		if now.Before(nextAt) {
 			continue
 		}
 		// Connection retries are deliberately not filtered by Connected.
@@ -301,29 +280,33 @@ func (m *Manager) runStatusRecoveryRound() time.Duration {
 		// recovery must still run so its read either clears the retry or
 		// turns the stale connection into a real disconnect.
 		candidates = append(candidates, recoveryCandidate{
-			station: station,
-			address: snapshot.Address,
-			retry:   retry,
-			kind:    kind,
+			station:     station,
+			address:     snapshot.Address,
+			sortKey:     strings.ToLower(snapshot.Address),
+			retry:       retry,
+			kind:        kind,
+			failures:    failures,
+			lastAttempt: lastAttempt,
+			nextAt:      nextAt,
 		})
 	}
 	if len(candidates) == 0 {
 		return 0
 	}
+	// Order by the schedule captured above so the comparator stays a plain
+	// field comparison instead of re-deriving the retry order per comparison.
 	sort.Slice(candidates, func(i, j int) bool {
 		left, right := candidates[i], candidates[j]
-		leftFailures, leftLastAttempt, leftNextAt := statusRetryOrder(left.retry)
-		rightFailures, rightLastAttempt, rightNextAt := statusRetryOrder(right.retry)
-		if !leftNextAt.Equal(rightNextAt) {
-			return leftNextAt.Before(rightNextAt)
+		if !left.nextAt.Equal(right.nextAt) {
+			return left.nextAt.Before(right.nextAt)
 		}
-		if leftFailures != rightFailures {
-			return leftFailures < rightFailures
+		if left.failures != right.failures {
+			return left.failures < right.failures
 		}
-		if !leftLastAttempt.Equal(rightLastAttempt) {
-			return leftLastAttempt.Before(rightLastAttempt)
+		if !left.lastAttempt.Equal(right.lastAttempt) {
+			return left.lastAttempt.Before(right.lastAttempt)
 		}
-		return strings.ToLower(left.address) < strings.ToLower(right.address)
+		return left.sortKey < right.sortKey
 	})
 	for _, candidate := range candidates {
 		if err := m.beginRecoveryStationOperation(candidate.address); err != nil {

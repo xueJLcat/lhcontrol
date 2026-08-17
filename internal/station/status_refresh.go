@@ -77,17 +77,24 @@ func (m *Manager) CheckAllStationStatuses() ([]StationInfo, error) {
 	if err := m.ensureReady(); err != nil {
 		return m.GetStationInfo(), err
 	}
-	stationsToRead, disconnectedAddresses := m.selectStatusRefreshCandidates()
-	if len(stationsToRead) == 0 {
+	candidates, disconnectedAddresses := m.selectStatusRefreshCandidates()
+	if len(candidates) == 0 {
 		for _, address := range disconnectedAddresses {
 			m.ensureStatusRecoveryTracked(address)
 		}
 		return m.GetStationInfo(), nil
 	}
-	sort.Slice(stationsToRead, func(i, j int) bool {
-		return strings.ToLower(stationsToRead[i].Snapshot().Address) <
-			strings.ToLower(stationsToRead[j].Snapshot().Address)
+	// Sort by the addresses captured during candidate selection: a comparator
+	// that re-snapshotted each station would take every station's own mutex
+	// O(n log n) times, and one wedged WinRT cleanup could stall the whole
+	// refresh inside sort.Slice.
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].sortKey < candidates[j].sortKey
 	})
+	stationsToRead := make([]*bluetooth.BaseStation, 0, len(candidates))
+	for _, candidate := range candidates {
+		stationsToRead = append(stationsToRead, candidate.station)
+	}
 	type statusReadWork struct {
 		index   int
 		station *bluetooth.BaseStation
@@ -186,25 +193,23 @@ dispatch:
 	return statusInfos, nil
 }
 
+// statusRefreshCandidate carries the station together with the address
+// captured at selection time so ordering never re-snapshots a station.
+type statusRefreshCandidate struct {
+	station *bluetooth.BaseStation
+	sortKey string
+}
+
 // selectStatusRefreshCandidates splits present stations into connected
 // stations eligible for a status read and addresses first observed
 // disconnected, which need recovery tracking instead.
-func (m *Manager) selectStatusRefreshCandidates() ([]*bluetooth.BaseStation, []string) {
-	// Copy the station pointers under the read lock and snapshot them after
-	// releasing it, matching GetStationInfo: Snapshot and stationConnected
-	// take each station's own mutex, which an abandoned WinRT cleanup can
-	// hold for a long time, and holding the fleet lock meanwhile would stall
-	// every other fleet reader and writer behind that one station.
-	m.stationsMutex.RLock()
-	stationPtrs := make([]*bluetooth.BaseStation, 0, len(m.stations))
-	for _, stationPtr := range m.stations {
-		if stationPtr == nil {
-			continue
-		}
-		stationPtrs = append(stationPtrs, stationPtr)
-	}
-	m.stationsMutex.RUnlock()
-	stationsToRead := make([]*bluetooth.BaseStation, 0)
+func (m *Manager) selectStatusRefreshCandidates() ([]statusRefreshCandidate, []string) {
+	// Snapshot and stationConnected take each station's own mutex, which an
+	// abandoned WinRT cleanup can hold for a long time; run them outside the
+	// fleet lock so one wedged station cannot stall every fleet reader and
+	// writer.
+	stationPtrs := m.stationPointers()
+	candidates := make([]statusRefreshCandidate, 0)
 	disconnectedAddresses := make([]string, 0)
 	for _, stationPtr := range stationPtrs {
 		snapshot := stationPtr.Snapshot()
@@ -212,13 +217,16 @@ func (m *Manager) selectStatusRefreshCandidates() ([]*bluetooth.BaseStation, []s
 			continue
 		}
 		if m.bluetoothOps.stationConnected(stationPtr) {
-			stationsToRead = append(stationsToRead, stationPtr)
+			candidates = append(candidates, statusRefreshCandidate{
+				station: stationPtr,
+				sortKey: strings.ToLower(snapshot.Address),
+			})
 		} else {
 			disconnectedAddresses = append(disconnectedAddresses, snapshot.Address)
 		}
 	}
 	sort.Strings(disconnectedAddresses)
-	return stationsToRead, disconnectedAddresses
+	return candidates, disconnectedAddresses
 }
 
 // readStationStatus performs one station's refresh read and returns the
