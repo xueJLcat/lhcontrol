@@ -541,7 +541,8 @@ func RequiresReconnect(err error) bool {
 	if errors.Is(err, bluetooth.ErrGATTUnreachable) ||
 		errors.Is(err, bluetooth.ErrGATTProtocol) ||
 		errors.Is(err, bluetooth.ErrGATTAccessDenied) ||
-		errors.Is(err, bluetooth.ErrGATTCommunication) {
+		errors.Is(err, bluetooth.ErrGATTCommunication) ||
+		errors.Is(err, bluetooth.ErrDeviceDisconnected) {
 		return true
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
