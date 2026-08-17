@@ -80,6 +80,13 @@ export class StationActionController {
   // it: a late error landing after the reset must not surface a stale
   // "cancel failed" toast over the recovered (or a newly started) state.
   private bulkCancelGeneration = 0;
+  // Identifies the currently authoritative bulk run. The cancel watchdog
+  // invalidates a wedged bulk by bumping it; executeBulkPower bumps it again
+  // when a replacement bulk starts. A late settlement whose generation no
+  // longer matches belongs to a superseded bulk: its finally must not reset
+  // state owned by the newer bulk, and its stale result toast must not
+  // surface over the recovered or newly started operation.
+  private bulkRunGeneration = 0;
 
   constructor(private host: StationActionHost) {}
 
@@ -96,11 +103,12 @@ export class StationActionController {
   // Invalidate the wedged bulk's pending commits, claim the status line, and
   // restore the idle state; the periodic health poll reconciles the real
   // backend state afterwards. A late bulk settlement is a no-op: its commits
-  // fail the bumped scan epoch and its finally observes globalOperation no
-  // longer 'bulk-power'.
+  // fail the bumped scan epoch and its finally/result toast observe a newer
+  // bulk run generation.
   private runBulkCancelWatchdog() {
     this.bulkCancelWatchdogTimer = null;
     this.bulkCancelGeneration += 1;
+    this.bulkRunGeneration += 1;
     const host = this.host;
     if (host.disposed || host.globalOperation !== 'bulk-power') return;
     host.gates.beginScanEpoch();
@@ -275,6 +283,10 @@ export class StationActionController {
   }
 
   private async executeBulkPower(state: PowerTarget) {
+    // Claim a fresh run generation so a wedged predecessor that settles late
+    // can be told apart from this bulk and cannot clobber its state.
+    this.bulkRunGeneration += 1;
+    const runGeneration = this.bulkRunGeneration;
     this.host.globalOperation = 'bulk-power';
     this.host.cancellingBulk = false;
     const statusOperation = this.host.gates.beginStatusOperation();
@@ -326,9 +338,13 @@ export class StationActionController {
       // status-line ownership: an external scan advancing while the bulk ran
       // would otherwise swallow the outcome entirely (including partial
       // failures) with no visible feedback. Only the list and status-line
-      // writes are gated.
-      pushToast(toastMessage, toastKind);
-      if (committable && this.host.gates.canCommitStatus(statusOperation)) {
+      // writes are gated. It IS gated by the run generation: a wedged bulk
+      // already force-reset by the watchdog (and possibly replaced by a newer
+      // bulk) must not surface a stale summary over the current state.
+      if (this.bulkRunGeneration === runGeneration) {
+        pushToast(toastMessage, toastKind);
+      }
+      if (this.bulkRunGeneration === runGeneration && committable && this.host.gates.canCommitStatus(statusOperation)) {
         this.host.statusMessage = statusText;
       }
     } catch (error) {
@@ -341,12 +357,16 @@ export class StationActionController {
       if (this.host.gates.canCommitOperation(operationEpoch) && this.host.gates.canCommitStatus(statusOperation)) {
         this.host.statusMessage = failureMessage;
       }
-      pushToast(failureMessage);
+      if (this.bulkRunGeneration === runGeneration) {
+        pushToast(failureMessage);
+      }
     } finally {
       // The bulk settled, so the cancel watchdog no longer needs to recover
-      // it; a pending cancel request keeps its own cancellingBulk flag.
+      // it; a pending cancel request keeps its own cancellingBulk flag. A
+      // superseded run (watchdog force-reset, replacement bulk started) must
+      // not reset the state its successor now owns.
       this.cancelBulkCancelWatchdog();
-      if (!this.host.disposed) {
+      if (!this.host.disposed && this.bulkRunGeneration === runGeneration) {
         if (this.host.globalOperation === 'bulk-power') this.host.globalOperation = 'idle';
         this.host.bulkTarget = null;
         // Intentionally leave cancellingBulk alone: cancelBulkPower owns it

@@ -896,6 +896,43 @@ describe('StationStore bulk power', () => {
     expect(store.bulkTarget).toBeNull();
     expect(store.statusMessage).toContain('Stopping bulk power timed out');
   });
+
+  it('keeps a replacement bulk state when a wedged predecessor settles late', async () => {
+    // The first bulk's promise never settles (workers wedged in adapter
+    // calls); the cancel watchdog force-resets the UI. A replacement bulk
+    // then claims the state. When the wedged predecessor finally settles it
+    // must not reset the replacement's operation state or surface a stale
+    // result toast.
+    const wedged = deferred<{ target: string; results: never[] }>();
+    backend.SetAllStationsPowerDetailed.mockReturnValueOnce(wedged.promise);
+    backend.CancelBulkPower.mockRejectedValueOnce(new Error('bulk operation did not stop within 1m0s after cancellation'));
+    const { store } = mountStore();
+    await vi.waitFor(() => expect(store.stations).toHaveLength(1));
+
+    void store.runBulkPower('on');
+    await vi.waitFor(() => expect(store.globalOperation).toBe('bulk-power'));
+
+    vi.useFakeTimers();
+    void store.cancelBulkPower();
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(90_000);
+    vi.useRealTimers();
+    expect(store.globalOperation).toBe('idle');
+
+    backend.SetAllStationsPowerDetailed.mockReturnValueOnce(new Promise(() => {}));
+    void store.runBulkPower('on');
+    await vi.waitFor(() => expect(backend.SetAllStationsPowerDetailed).toHaveBeenCalledTimes(2));
+    expect(store.globalOperation).toBe('bulk-power');
+    expect(store.bulkTarget).toBe('on');
+
+    vi.mocked(pushToast).mockClear();
+    wedged.resolve({ target: 'on', results: [] });
+    await new Promise<void>((done) => setTimeout(done, 20));
+
+    expect(store.globalOperation).toBe('bulk-power');
+    expect(store.bulkTarget).toBe('on');
+    expect(pushToast).not.toHaveBeenCalled();
+  });
 });
 
 describe('StationStore fleet aggregates', () => {
