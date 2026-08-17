@@ -328,15 +328,23 @@ func toolhelpProcessNames() (map[string]struct{}, error) {
 	return names, nil
 }
 
+// windowWaitBudget bounds how long a second launch waits for the running
+// instance's window. The instance mutex is acquired before the Wails window
+// exists, and a cold start (WebView2 runtime initialization, AV scanner
+// interference, slow disks) can take far longer than the original 5 seconds;
+// giving up early made the second launch exit without focusing or running
+// anything.
+const windowWaitBudget = 30 * time.Second
+
 // BringWindowToFront finds the existing window, tries to set foreground, and flashes it (Windows specific)
 func BringWindowToFront(appTitle string) bool {
-	hwnd, err := waitForWindow(appTitle, 5*time.Second, 250*time.Millisecond, findWindow, time.Sleep)
+	hwnd, err := waitForWindow(appTitle, windowWaitBudget, 250*time.Millisecond, findWindow, time.Sleep)
 	if err != nil {
 		log.Printf("Error finding window: %v", err)
 		return false
 	}
 	if hwnd == 0 {
-		log.Println("Existing instance owns the mutex, but its window did not appear within 5 seconds.")
+		log.Printf("Existing instance owns the mutex, but its window did not appear within %s.", windowWaitBudget)
 		return false
 	}
 
