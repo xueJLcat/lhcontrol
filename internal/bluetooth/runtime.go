@@ -433,6 +433,38 @@ func IsCapabilityUnsupported(err error) bool {
 	}
 }
 
+// IsProtocolRejection reports ATT responses that reject the request for
+// protocol, security-policy, or resource reasons (authentication,
+// authorization, encryption, value shape, queue capacity). The peer received
+// the request and answered it, so the link is healthy: reconnecting cannot
+// change pairing, encryption, or device resource state and would only start a
+// disconnect/reconnect cycle that fails the same way on every poll.
+func IsProtocolRejection(err error) bool {
+	var protocolErr bluetooth.AttributeProtocolError
+	if !errors.As(err, &protocolErr) {
+		return false
+	}
+	return isProtocolRejectionCode(protocolErr)
+}
+
+func isProtocolRejectionCode(protocolErr bluetooth.AttributeProtocolError) bool {
+	switch protocolErr {
+	case bluetooth.ErrAttInsufficientAuthentication,
+		bluetooth.ErrAttInsufficientAuthorization,
+		bluetooth.ErrAttInsufficientEncryption,
+		bluetooth.ErrAttInsufficientEncKeySize,
+		bluetooth.ErrAttInsufficientResources,
+		bluetooth.ErrAttInvalidLength,
+		bluetooth.ErrAttInvalidOffset,
+		bluetooth.ErrAttInvalidPDU,
+		bluetooth.ErrAttPrepareQueueFull,
+		bluetooth.ErrAttUnsupportedGroupType:
+		return true
+	default:
+		return false
+	}
+}
+
 // RequiresReconnect reports failures for which cached WinRT service and
 // characteristic handles must not be reused by the next device operation.
 func RequiresReconnect(err error) bool {
@@ -454,6 +486,13 @@ func RequiresReconnect(err error) bool {
 		// IsCapabilityUnsupported so power writes keep their dedicated standby
 		// downgrade instead of disabling every power write.
 		if protocolErr == bluetooth.ErrAttValueNotAllowed {
+			return false
+		}
+		// Security-policy and resource rejections are decisions about the
+		// request, not a broken link; the reconnect they used to trigger
+		// could never change authentication, encryption, or device resources
+		// and only caused repeated session teardown on healthy connections.
+		if isProtocolRejectionCode(protocolErr) {
 			return false
 		}
 		return !IsCapabilityUnsupported(protocolErr)
@@ -489,6 +528,12 @@ func RequiresReconnect(err error) bool {
 		if errors.Is(transportErr.Err, bluetooth.ErrAttValueNotAllowed) {
 			// A peer rejection of the requested value is a protocol decision,
 			// never a broken link; the bare-code branch above documents why.
+			return false
+		}
+		if IsProtocolRejection(transportErr.Err) {
+			// Security-policy and resource rejections wrapped by the transport
+			// are protocol decisions too; the bare-code branch documents why a
+			// healthy link must not pay a reconnect for them.
 			return false
 		}
 		return true

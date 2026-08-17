@@ -269,6 +269,48 @@ func TestATTCapabilityErrorsDoNotRequireReconnect(t *testing.T) {
 		}
 	}
 }
+
+// TestATTProtocolRejectionsDoNotRequireReconnect guards the security-policy
+// and resource rejections: the peer received the request and answered it, so
+// the link is healthy and a reconnect could never change authentication,
+// encryption, or device resource state. Before this classification those
+// codes were treated as transport failures and caused repeated
+// disconnect/reconnect cycles on healthy connections.
+func TestATTProtocolRejectionsDoNotRequireReconnect(t *testing.T) {
+	for _, protocolErr := range []tinybluetooth.AttributeProtocolError{
+		tinybluetooth.ErrAttInsufficientAuthentication,
+		tinybluetooth.ErrAttInsufficientAuthorization,
+		tinybluetooth.ErrAttInsufficientEncryption,
+		tinybluetooth.ErrAttInsufficientEncKeySize,
+		tinybluetooth.ErrAttInsufficientResources,
+		tinybluetooth.ErrAttInvalidLength,
+		tinybluetooth.ErrAttInvalidOffset,
+		tinybluetooth.ErrAttInvalidPDU,
+		tinybluetooth.ErrAttPrepareQueueFull,
+		tinybluetooth.ErrAttUnsupportedGroupType,
+	} {
+		if !IsProtocolRejection(protocolErr) {
+			t.Fatalf("%v was not classified as a protocol rejection", protocolErr)
+		}
+		if RequiresReconnect(protocolErr) {
+			t.Fatalf("%v incorrectly required reconnect", protocolErr)
+		}
+		if RequiresReconnect(transportError("read power characteristic", protocolErr)) {
+			t.Fatalf("transport-wrapped %v incorrectly required reconnect", protocolErr)
+		}
+	}
+	// The link-health classifications must stay distinct from capability
+	// support: a protocol rejection is not an unsupported capability.
+	if IsCapabilityUnsupported(tinybluetooth.ErrAttInsufficientAuthentication) {
+		t.Fatal("authentication rejection misclassified as unsupported capability")
+	}
+	if IsProtocolRejection(tinybluetooth.ErrAttInvalidHandle) ||
+		IsProtocolRejection(tinybluetooth.ErrAttNotFound) ||
+		IsProtocolRejection(tinybluetooth.ErrAttUnlikelyError) ||
+		IsProtocolRejection(tinybluetooth.ErrAttOutOfSync) {
+		t.Fatal("cache-invalidating ATT codes misclassified as protocol rejections")
+	}
+}
 func TestCleanupTransportFailureIsNotMaskedByUnsupportedCapability(t *testing.T) {
 	err := fmt.Errorf(
 		"capability discovery failed: %w",
