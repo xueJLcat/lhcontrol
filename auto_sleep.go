@@ -190,6 +190,9 @@ func (a *App) applyAutoSleep(settings autosleep.Settings) {
 			monitor = autosleep.NewMonitor(settings.Delay())
 		}
 	}
+	// A watcher built here (whether by an explicit settings change or by a
+	// self-stop rebuild) supersedes any failed rebuild cycle.
+	a.autoSleepRebuildFailures = 0
 	watcher := &autosleep.Watcher{
 		Settings: settings,
 		Monitor:  monitor,
@@ -269,6 +272,9 @@ func (a *App) reapStoppedAutoSleepWatcher(watcher *autosleep.Watcher) {
 	cleared := a.autoSleepWatcher == watcher
 	if cleared {
 		log.Printf("Auto-sleep watcher stopped unexpectedly (%v); clearing it so re-applying settings restarts it", err)
+		// A watcher that ran and then self-stopped starts a fresh rebuild
+		// cycle: the previous failure count belongs to the old cycle.
+		a.autoSleepRebuildFailures = 0
 		a.autoSleepWatcher = nil
 		if a.autoSleepCancel != nil {
 			a.autoSleepCancel()
@@ -301,6 +307,13 @@ func (a *App) reapStoppedAutoSleepWatcher(watcher *autosleep.Watcher) {
 // so the loop stays slow and cheap, and a single successful check afterwards
 // restores normal monitoring.
 const autoSleepRestartDelay = 30 * time.Second
+
+// maxAutoSleepRebuildRetries caps consecutive failed self-stop rebuilds. A
+// rebuild failure (typically a transiently blocked configuration save) is
+// retried after the restart delay; once the cap is reached the retry stops
+// and re-saving the settings becomes the recovery path, matching the manual
+// behavior the feature had before automatic retries existed.
+const maxAutoSleepRebuildRetries = 3
 
 // scheduleAutoSleepRebuild re-applies the persisted auto-sleep settings after
 // a cooldown so a self-stopped watcher is replaced instead of leaving the
@@ -343,6 +356,18 @@ func (a *App) scheduleAutoSleepRebuild() {
 		log.Println("Auto-sleep watcher rebuilding after an unexpected stop")
 		if err := a.SetAutoSleepSettings(settings); err != nil {
 			log.Printf("Auto-sleep watcher rebuild failed: %v", err)
+			// A failed rebuild (typically a transiently blocked configuration
+			// save) must not disable the feature permanently: retry after the
+			// same cooldown until the cap is reached.
+			a.autoSleepMutex.Lock()
+			a.autoSleepRebuildFailures++
+			giveUp := a.autoSleepRebuildFailures >= maxAutoSleepRebuildRetries
+			a.autoSleepMutex.Unlock()
+			if giveUp {
+				log.Printf("Auto-sleep watcher rebuild failed %d times in a row; re-saving the settings restarts it", maxAutoSleepRebuildRetries)
+				return
+			}
+			a.scheduleAutoSleepRebuild()
 		}
 	})
 	a.autoSleepRebuildTimer = rebuildTimer
@@ -384,6 +409,7 @@ func (a *App) stopAutoSleep() {
 	// Cancel a pending self-stop rebuild first: its wait-group count would
 	// otherwise keep the shutdown wait blocked until the timer fired.
 	a.stopScheduledAutoSleepRebuildLocked()
+	a.autoSleepRebuildFailures = 0
 	a.autoSleepSelfStopOwed = false
 	a.autoSleepSelfStopClosedAt = time.Time{}
 	a.autoSleepSelfStopCountdownAt = time.Time{}

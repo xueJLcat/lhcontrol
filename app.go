@@ -77,6 +77,10 @@ type App struct {
 	// either by the timer callback or by stopScheduledAutoSleepRebuildLocked
 	// when the timer is cancelled before firing.
 	autoSleepRebuildTimer *time.Timer
+	// autoSleepRebuildFailures counts consecutive failed self-stop rebuilds
+	// so a persistent failure cannot retry forever; a successful watcher
+	// application or a new watcher self-stop resets the count.
+	autoSleepRebuildFailures int
 	// autoSleepSelfStopOwed remembers an unsettled sleep debt left behind by
 	// a self-stopped watcher so the rebuilt watcher re-arms it instead of
 	// dropping it until the watched process runs a full new session.
