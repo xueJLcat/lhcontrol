@@ -233,6 +233,56 @@ func TestConnectedQueryFailureKeepsCachedSession(t *testing.T) {
 	}
 }
 
+// reconnectDuringCleanupDevice completes a fake concurrent reconnect for the
+// station while its pending cleanup has released the station lock, emulating
+// a second operation that finishes connecting inside the gate window.
+type reconnectDuringCleanupDevice struct {
+	trackingConnectedDevice
+	station *BaseStation
+}
+
+func (device *reconnectDuringCleanupDevice) Disconnect() error {
+	device.station.mutex.Lock()
+	device.station.device = fakeConnectedDevice{}
+	device.station.isConnected = true
+	device.station.characteristic = &fakeCharacteristic{value: []byte{0x0B}}
+	device.station.Capabilities = Capabilities{PowerRead: true}
+	device.station.CapabilitiesKnown = true
+	device.station.mutex.Unlock()
+	device.trackingConnectedDevice.Disconnect()
+	return nil
+}
+
+// TestConnectReusesSessionCompletedInsideGateWindow guards the lock-release
+// window of the connect gate: the pending cleanup releases the station lock
+// around its WinRT call, and a concurrent operation can complete a full
+// reconnect inside that window. The connect path must re-check the connection
+// state after the gate instead of opening a duplicate GATT session that
+// overwrites the fresh one and orphans its WinRT objects.
+func TestConnectReusesSessionCompletedInsideGateWindow(t *testing.T) {
+	originalAdapter := adapter
+	adapter = newFakeBLEAdapter()
+	t.Cleanup(func() { adapter = originalAdapter })
+
+	station := &BaseStation{
+		Name:          "LHB-GATE-RACE",
+		RawPowerState: RawPowerStateUnknown,
+		Channel:       ChannelUnknown,
+	}
+	station.pendingCleanup = &reconnectDuringCleanupDevice{station: station}
+
+	station.mutex.Lock()
+	err := connectAndDiscoverInternalContext(context.Background(), station)
+	station.mutex.Unlock()
+
+	if err != nil {
+		t.Fatalf("connectAndDiscoverInternalContext() error = %v, want the concurrent session reused", err)
+	}
+	if station.device == nil || !station.isConnected || station.characteristic == nil {
+		t.Fatal("session completed inside the gate window was not adopted")
+	}
+}
+
 // TestConnectAndDiscoverMarksPreCancelledRequestNotStarted guards the narrow
 // window where the context expires after the caller's pre-lock check but
 // before discovery starts: the request must be reported as never started so

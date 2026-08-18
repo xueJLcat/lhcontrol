@@ -69,36 +69,43 @@ func connectAndDiscoverInternalContext(ctx context.Context, station *BaseStation
 		if err := connectGate(ctx, station); err != nil {
 			return err
 		}
-		log.Printf("Bluetooth: Internal connect attempt for %s...", station.Name)
-		device, err := connectContext(ctx, station.Address)
-		if err != nil {
-			station.isConnected = false
-			station.device = nil
-			station.characteristic = nil
-			station.modeCharacteristic = nil
-			station.identifyCharacteristic = nil
-			station.LastPowerReadAt = time.Time{}
-			station.LastChannelReadAt = time.Time{}
-			if ctx.Err() == nil {
-				station.setConnectionErrorInternal(err)
+		// The gate releases the lock around its own WinRT cleanup; a
+		// concurrent operation can complete a full reconnect inside that
+		// window. Re-check the connection state before opening another
+		// session: a duplicate GATT session would overwrite station.device
+		// and orphan the first session's WinRT objects until process exit.
+		if !station.isConnected || station.device == nil {
+			log.Printf("Bluetooth: Internal connect attempt for %s...", station.Name)
+			device, err := connectContext(ctx, station.Address)
+			if err != nil {
+				station.isConnected = false
+				station.device = nil
+				station.characteristic = nil
+				station.modeCharacteristic = nil
+				station.identifyCharacteristic = nil
+				station.LastPowerReadAt = time.Time{}
+				station.LastChannelReadAt = time.Time{}
+				if ctx.Err() == nil {
+					station.setConnectionErrorInternal(err)
+				}
+				return transportError("connect station", err)
 			}
-			return transportError("connect station", err)
-		}
-		station.device = device
-		station.isConnected = true
-		log.Printf("Bluetooth: Internal connect successful for %s.", station.Name)
-		connectedStationsMutex.Lock()
-		found := false
-		for _, cs := range connectedStations {
-			if cs.Address == station.Address {
-				found = true
-				break
+			station.device = device
+			station.isConnected = true
+			log.Printf("Bluetooth: Internal connect successful for %s.", station.Name)
+			connectedStationsMutex.Lock()
+			found := false
+			for _, cs := range connectedStations {
+				if cs.Address == station.Address {
+					found = true
+					break
+				}
 			}
+			if !found {
+				connectedStations = append(connectedStations, station)
+			}
+			connectedStationsMutex.Unlock()
 		}
-		if !found {
-			connectedStations = append(connectedStations, station)
-		}
-		connectedStationsMutex.Unlock()
 	}
 
 	if station.characteristic == nil {
@@ -133,28 +140,38 @@ func connectAndDiscoverInternalContext(ctx context.Context, station *BaseStation
 				if gateErr := connectGate(ctx, station); gateErr != nil {
 					return gateErr
 				}
-				device, connectErr := connectContext(ctx, station.Address)
-				if connectErr != nil {
-					if errors.Is(connectErr, context.Canceled) || errors.Is(connectErr, context.DeadlineExceeded) {
-						return connectErr
+				// The unlocked windows also let a concurrent operation complete
+				// a full reconnect for this station. Reuse that session instead
+				// of opening a duplicate GATT session that would orphan the
+				// first session's WinRT objects until process exit.
+				if station.isConnected && station.device != nil {
+					if station.characteristic != nil {
+						return nil
 					}
-					err = transportError("retry station connection", connectErr)
-					continue
-				}
-				station.device = device
-				station.isConnected = true
-				connectedStationsMutex.Lock()
-				found := false
-				for _, connected := range connectedStations {
-					if connected.Address == station.Address {
-						found = true
-						break
+				} else {
+					device, connectErr := connectContext(ctx, station.Address)
+					if connectErr != nil {
+						if errors.Is(connectErr, context.Canceled) || errors.Is(connectErr, context.DeadlineExceeded) {
+							return connectErr
+						}
+						err = transportError("retry station connection", connectErr)
+						continue
 					}
+					station.device = device
+					station.isConnected = true
+					connectedStationsMutex.Lock()
+					found := false
+					for _, connected := range connectedStations {
+						if connected.Address == station.Address {
+							found = true
+							break
+						}
+					}
+					if !found {
+						connectedStations = append(connectedStations, station)
+					}
+					connectedStationsMutex.Unlock()
 				}
-				if !found {
-					connectedStations = append(connectedStations, station)
-				}
-				connectedStationsMutex.Unlock()
 			}
 
 			services, discoverErr := discoverServicesContext(ctx, station.device)
