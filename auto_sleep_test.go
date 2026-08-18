@@ -391,6 +391,100 @@ func TestSelfStoppedWatcherDebtSurvivesRebuild(t *testing.T) {
 	}
 }
 
+// TestSelfStoppedWatcherCountdownSurvivesRebuild guards the countdown
+// invariant across a watcher self-stop: a closed-session countdown that had
+// not fired yet (delay not elapsed, so no debt exists) must be stashed by the
+// reap and continued by the replacement watcher. Restarting the replacement
+// monitor from idle would never fire for the already-closed session and the
+// stations would stay awake until the watched process runs a brand-new
+// session.
+func TestSelfStoppedWatcherCountdownSurvivesRebuild(t *testing.T) {
+	app := NewApp()
+	// Keep the replacement watcher's polls quiet so the continued countdown
+	// cannot be disturbed by real process observations.
+	app.autoSleepIsRunning = func(string) (bool, error) { return false, nil }
+
+	var checkCalls atomic.Int32
+	watcher := &autosleep.Watcher{
+		Settings: autosleep.Settings{Enabled: true, Target: string(autosleep.TargetSteamVR), DelaySeconds: autosleep.MaxDelaySeconds},
+		Interval: time.Millisecond,
+		IsRunning: func(string) (bool, error) {
+			call := checkCalls.Add(1)
+			switch {
+			case call == 1:
+				return true, nil
+			case call == 2:
+				return false, nil
+			default:
+				return false, errors.New("process snapshot unavailable")
+			}
+		},
+		Trigger: func(context.Context, time.Time) bool { return true },
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	go watcher.Run(ctx)
+	select {
+	case <-watcher.Done():
+	case <-time.After(2 * time.Second):
+		cancel()
+		t.Fatal("watcher did not self-stop after persistent check failures")
+	}
+	cancel()
+
+	active, closedAt := watcher.Monitor.Countdown()
+	if !active || closedAt.IsZero() {
+		t.Fatalf("watcher self-stopped without an in-flight countdown: active=%v closedAt=%v", active, closedAt)
+	}
+
+	app.autoSleepMutex.Lock()
+	app.autoSleepWatcher = watcher
+	app.autoSleepCancel = func() {}
+	app.autoSleepMutex.Unlock()
+
+	app.reapStoppedAutoSleepWatcher(watcher)
+
+	app.autoSleepMutex.Lock()
+	stillSet := app.autoSleepWatcher == watcher
+	stashed := app.autoSleepSelfStopCountdownAt
+	owed := app.autoSleepSelfStopOwed
+	app.autoSleepMutex.Unlock()
+	if stillSet {
+		t.Fatal("self-stopped watcher was not cleared")
+	}
+	if owed {
+		t.Fatal("countdown without a consumed trigger was stashed as a debt")
+	}
+	if !stashed.Equal(closedAt) {
+		t.Fatalf("stashed countdown = %v, want %v", stashed, closedAt)
+	}
+
+	settings := autosleep.Settings{Enabled: true, Target: string(autosleep.TargetSteamVR), DelaySeconds: autosleep.MaxDelaySeconds}
+	app.applyAutoSleep(settings)
+	defer app.stopAutoSleep()
+
+	app.autoSleepMutex.Lock()
+	rebuilt := app.autoSleepWatcher
+	stashedAfter := app.autoSleepSelfStopCountdownAt
+	app.autoSleepMutex.Unlock()
+	if rebuilt == nil {
+		t.Fatal("rebuild did not create a replacement watcher")
+	}
+	if !stashedAfter.IsZero() {
+		t.Fatal("replacement watcher did not consume the stashed countdown")
+	}
+	// Give the replacement one poll window; its countdown must survive it
+	// (the long delay keeps the trigger from firing during the test).
+	time.Sleep(20 * time.Millisecond)
+	rebuiltActive, rebuiltClosedAt := rebuilt.Monitor.Countdown()
+	if !rebuiltActive || !rebuiltClosedAt.Equal(closedAt) {
+		t.Fatalf("replacement monitor countdown = (%v, %v), want the continued session (%v, %v)",
+			rebuiltActive, rebuiltClosedAt, true, closedAt)
+	}
+	if rebuilt.OwesTrigger() {
+		t.Fatal("continued countdown unexpectedly carried a sleep debt")
+	}
+}
+
 // TestStopAutoSleepCancelsPendingRebuild guards shutdown against a pending
 // self-stop rebuild timer: without cancelling it, the shutdown wait would
 // block until the timer fires.

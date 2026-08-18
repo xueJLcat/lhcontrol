@@ -76,11 +76,17 @@ type App struct {
 	// dropping it until the watched process runs a full new session.
 	autoSleepSelfStopOwed     bool
 	autoSleepSelfStopClosedAt time.Time
+	// autoSleepSelfStopCountdownAt remembers a closed-session countdown that
+	// had not fired when a watcher self-stopped, so the rebuilt watcher
+	// continues counting it down instead of restarting from idle and never
+	// firing for the already-closed session.
+	autoSleepSelfStopCountdownAt time.Time
 	autoSleepActionID         atomic.Uint64
 	autoSleepActionSlot       chan struct{}
 	autoSleepSettledSession   time.Time
 	scanForAutoSleep          func(context.Context) ([]station.StationInfo, error)
 	setPowerForAutoSleep      func(context.Context, string) (station.BulkPowerResult, error)
+	autoSleepIsRunning        func(string) (bool, error)
 	autoSleepEventSink        func(autoSleepEvent)
 }
 

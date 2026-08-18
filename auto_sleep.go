@@ -160,8 +160,10 @@ func (a *App) applyAutoSleep(settings autosleep.Settings) {
 	if !settings.Enabled || a.shuttingDown.Load() {
 		// Detaching the feature drops a debt a self-stopped watcher left
 		// behind: with monitoring disabled there is no session to settle it.
+		// A countdown that had not fired yet is dropped for the same reason.
 		a.autoSleepSelfStopOwed = false
 		a.autoSleepSelfStopClosedAt = time.Time{}
+		a.autoSleepSelfStopCountdownAt = time.Time{}
 		return
 
 	}
@@ -176,6 +178,14 @@ func (a *App) applyAutoSleep(settings autosleep.Settings) {
 			seedOwedSession = true
 			a.autoSleepSelfStopOwed = false
 			a.autoSleepSelfStopClosedAt = time.Time{}
+		} else if !a.autoSleepSelfStopCountdownAt.IsZero() {
+			// The previous watcher self-stopped with a closed-session
+			// countdown in flight (the delay had not elapsed yet, so no debt
+			// exists). Continue that countdown instead of restarting from
+			// idle: an idle monitor only fires after a fresh running->closed
+			// transition and would never sleep the already-closed session.
+			monitor = autosleep.NewMonitorContinuing(settings.Delay(), a.autoSleepSelfStopCountdownAt)
+			a.autoSleepSelfStopCountdownAt = time.Time{}
 		} else {
 			monitor = autosleep.NewMonitor(settings.Delay())
 		}
@@ -184,6 +194,9 @@ func (a *App) applyAutoSleep(settings autosleep.Settings) {
 		Settings: settings,
 		Monitor:  monitor,
 		IsRunning: func(name string) (bool, error) {
+			if a.autoSleepIsRunning != nil {
+				return a.autoSleepIsRunning(name)
+			}
 			return platform.IsProcessRunning(name)
 		},
 		Trigger: a.runAutoSleepSession,
@@ -239,8 +252,18 @@ func (a *App) reapStoppedAutoSleepWatcher(watcher *autosleep.Watcher) {
 	// A self-stop cancels any action the watcher was still running, and an
 	// action cancelled before settling leaves its sleep owed. Snapshot that
 	// debt before clearing the watcher so the rebuild can re-arm it instead
-	// of dropping it until the watched process runs a full new session.
+	// of dropping it until the watched process runs a full new session. A
+	// countdown that had not fired yet (delay not elapsed, no debt) is
+	// snapshotted too: the rebuild continues it instead of restarting the
+	// monitor from idle, which would never fire for the already-closed
+	// session. Run has returned, so the monitor state no longer changes.
 	owed, closedAt := watcher.OwedSession()
+	var countdownClosedAt time.Time
+	if !owed && watcher.Monitor != nil {
+		if active, monitorClosedAt := watcher.Monitor.Countdown(); active {
+			countdownClosedAt = monitorClosedAt
+		}
+	}
 
 	a.autoSleepMutex.Lock()
 	cleared := a.autoSleepWatcher == watcher
@@ -254,6 +277,8 @@ func (a *App) reapStoppedAutoSleepWatcher(watcher *autosleep.Watcher) {
 		if owed {
 			a.autoSleepSelfStopOwed = true
 			a.autoSleepSelfStopClosedAt = closedAt
+		} else if !countdownClosedAt.IsZero() {
+			a.autoSleepSelfStopCountdownAt = countdownClosedAt
 		}
 	}
 	a.autoSleepMutex.Unlock()
@@ -361,6 +386,7 @@ func (a *App) stopAutoSleep() {
 	a.stopScheduledAutoSleepRebuildLocked()
 	a.autoSleepSelfStopOwed = false
 	a.autoSleepSelfStopClosedAt = time.Time{}
+	a.autoSleepSelfStopCountdownAt = time.Time{}
 
 	if a.autoSleepCancel != nil {
 
