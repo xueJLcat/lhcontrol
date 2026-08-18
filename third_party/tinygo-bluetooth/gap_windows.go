@@ -57,9 +57,6 @@ var (
 	// retry loop treats a timed-out read like any other status error and
 	// terminates on its own deadline instead of hanging inside the call.
 	watcherStatusCallLimit = 2 * time.Second
-	// lateStartRescueLimit bounds the background teardown of a watcher whose
-	// Start returned only after the start budget abandoned it.
-	lateStartRescueLimit = 30 * time.Second
 )
 
 // WatcherCallTimeoutError reports a watcher COM call that did not return
@@ -82,9 +79,15 @@ func boundedWatcherCall(limit time.Duration, call func() error) error {
 	done := make(chan error, 1)
 	go func() {
 		leaveThread, threadErr := enterWinRTThread()
-		if threadErr == nil {
-			defer leaveThread()
+		if threadErr != nil {
+			// Running the COM call on an uninitialized or foreign-apartment
+			// thread produces opaque HRESULT failures; report the thread
+			// initialization failure instead, matching the other thread-aware
+			// paths in this file.
+			done <- threadErr
+			return
 		}
+		defer leaveThread()
 		done <- call()
 	}()
 	timer := time.NewTimer(limit)
@@ -288,15 +291,16 @@ func (control *scanControl) ensureStopped() {
 // rescueLateStart tears down a watcher whose Start only completed after the
 // start budget abandoned the scan. The watcher came up orphaned (the owning
 // ScanWithStart already returned and skipped the watcher release), so leaving
-// it alone would keep the radio scanning with no owner. Polling and the stop
-// are bounded: a permanently wedged Start never produces a running watcher,
-// and the rescue gives up after its limit.
+// it alone would keep the radio scanning with no owner. The rescue polls
+// until the watcher reaches a state it can act on: a wedged Start that
+// self-heals late must still be stopped, because a late Success leaves the
+// watcher Started with no owner scanning indefinitely. Each poll is bounded;
+// a permanently wedged Start never produces a running watcher, so the rescue
+// stays parked on its ticker without ever issuing a stop.
 func (control *scanControl) rescueLateStart(watcher *advertisement.BluetoothLEAdvertisementWatcher) {
 	defer func() {
 		_ = recover()
 	}()
-	deadline := time.NewTimer(lateStartRescueLimit)
-	defer deadline.Stop()
 	ticker := time.NewTicker(scanStopPollInterval)
 	defer ticker.Stop()
 	for {
@@ -316,11 +320,7 @@ func (control *scanControl) rescueLateStart(watcher *advertisement.BluetoothLEAd
 				return
 			}
 		}
-		select {
-		case <-deadline.C:
-			return
-		case <-ticker.C:
-		}
+		<-ticker.C
 	}
 }
 
