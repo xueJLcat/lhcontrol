@@ -1472,6 +1472,98 @@ describe('StationStore external HTTP operation events', () => {
     expect(store.externalScanning).toBe(true);
   });
 
+  it('does not adopt our own scan while a settled local stop is still draining', async () => {
+    const { store } = mountStore();
+    await vi.waitFor(() => expect(store.stations).toHaveLength(1));
+
+    let resolveScan!: (stations: ReturnType<typeof createStation>[]) => void;
+    backend.ScanAndFetchStations.mockReturnValueOnce(new Promise((resolve) => { resolveScan = resolve; }));
+    backend.IsScanning.mockResolvedValue(true);
+    void store.startScan();
+    await vi.waitFor(() => expect(backend.ScanAndFetchStations).toHaveBeenCalledTimes(2));
+
+    // StopScan settles while the scan workflow is still running; the stop
+    // marker stays until the workflow settles.
+    await store.stopScan();
+    expect(store.stoppingScan).toBe(true);
+
+    vi.useFakeTimers();
+    try {
+      // The scan promise settles, but the backend can keep reporting the scan
+      // briefly while it drains. The marker must survive that window so the
+      // poll does not adopt our own draining scan as an external one.
+      resolveScan([createStation()]);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(store.stoppingScan).toBe(true);
+      expect(store.globalOperation).toBe('idle');
+
+      await (store as unknown as { periodicStatusCheck(): Promise<void> }).periodicStatusCheck();
+      expect(store.externalScanning).toBe(false);
+      expect(store.stoppingScan).toBe(true);
+      expect(store.statusMessage).not.toBe('Preparing external scan...');
+
+      // The recheck chain clears the marker once the backend reports no scan.
+      backend.IsScanning.mockResolvedValue(false);
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(store.stoppingScan).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('releases stale operation locks after persistent health probe failures', async () => {
+    const { store } = mountStore();
+    await vi.waitFor(() => expect(runtime.handlers.has('external-operation')).toBe(true));
+    await vi.waitFor(() => expect(store.stations).toHaveLength(1));
+
+    runtime.handlers.get('external-operation')?.({ id: 51, phase: 'started', kind: 'power', revision: 2 });
+    store.autoSleepRunning = true;
+    await vi.waitFor(() => expect(store.externalOperationRunning).toBe(true));
+    expect(store.scanLocked).toBe(true);
+
+    // A persistently unreachable backend cannot have in-flight external
+    // operations; the locks must release instead of freezing the controls,
+    // the periodic status check, and the deferred startup scan for the
+    // rest of the session.
+    backend.GetAPIStatus.mockRejectedValue(new Error('listener unreachable'));
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await store.apiStatus.refresh();
+    }
+    expect(store.externalOperationRunning).toBe(false);
+
+    // Auto-sleep clears after two consecutive idle observations; only then
+    // are the derived scan/bulk locks fully released.
+    await store.apiStatus.refresh();
+    expect(store.autoSleepRunning).toBe(false);
+    expect(store.scanLocked).toBe(false);
+    expect(store.bulkLocked).toBe(false);
+  });
+
+  it('re-arms the deferred startup scan when the retry rejects', async () => {
+    const { store } = mountStore();
+    await vi.waitFor(() => expect(store.stations).toHaveLength(1));
+
+    const internals = store as unknown as {
+      startupScanDeferred: boolean;
+      scanOnStartupEnabled: boolean;
+      deferredStartupScanTimer: unknown;
+      maybeRunDeferredStartupScan(): void;
+      disarmDeferredStartupScanRetry(): void;
+      scans: { startScan(): Promise<boolean> };
+    };
+    vi.spyOn(internals.scans, 'startScan').mockRejectedValueOnce(new Error('scan binding exploded'));
+    internals.scanOnStartupEnabled = true;
+    internals.startupScanDeferred = true;
+
+    internals.maybeRunDeferredStartupScan();
+
+    // A rejecting scan promise must not drop the configured startup scan: the
+    // deferral is re-armed and the retry interval stays scheduled.
+    await vi.waitFor(() => expect(internals.startupScanDeferred).toBe(true));
+    expect(internals.deferredStartupScanTimer).not.toBeNull();
+    internals.disarmDeferredStartupScanRetry();
+  });
+
   it('does not consume the revision gate for an unknown operation phase', async () => {
     const { store } = mountStore();
     await vi.waitFor(() => expect(runtime.handlers.has('external-operation')).toBe(true));

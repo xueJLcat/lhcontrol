@@ -248,10 +248,19 @@ export class StationStore {
       // short failure streak; otherwise a persistently failing probe leaves
       // ownership unknown and stalls the deferred startup scan for the session.
       this.healthProbeFailures += 1;
-      if (!this.startupScanOwnershipKnown && this.healthProbeFailures >= STARTUP_OWNERSHIP_FAILURE_THRESHOLD) {
-        this.startupScanOwnershipKnown = true;
-        this.maybeRunDeferredStartupScan();
+      if (this.healthProbeFailures < STARTUP_OWNERSHIP_FAILURE_THRESHOLD) return;
+      this.startupScanOwnershipKnown = true;
+      // The same persistent failure must also release the operation locks a
+      // lost terminal event (or a missed snapshot) left armed: while the
+      // backend is unreachable no external operation can be in flight, and
+      // keeping the flags would lock the scan/bulk controls and skip the
+      // periodic status check for the rest of the session.
+      if (this.externalOperationRunning || this.externalOperationIds.size > 0) {
+        this.externalOperationIds.clear();
+        this.externalOperationRunning = false;
       }
+      this.autoSleepEvents.reconcileIdle();
+      this.maybeRunDeferredStartupScan();
     },
     reportConfigWarning: (warning) => pushToast(backendCopy(warning), 'warning')
   });
@@ -957,6 +966,13 @@ export class StationStore {
       // interval instead of an immediate attempt: a busy backend is still
       // holding its lock, and looping would hammer it without delay.
       if (!started && !this.disposed && this.scanOnStartupEnabled) {
+        this.startupScanDeferred = true;
+        this.armDeferredStartupScanRetry();
+      }
+    }).catch(() => {
+      // A rejected scan promise must not drop the configured startup scan:
+      // re-arm the deferral the same way a busy rejection does.
+      if (!this.disposed && this.scanOnStartupEnabled) {
         this.startupScanDeferred = true;
         this.armDeferredStartupScanRetry();
       }
