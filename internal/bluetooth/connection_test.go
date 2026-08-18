@@ -309,3 +309,41 @@ func TestConnectAndDiscoverMarksPreCancelledRequestNotStarted(t *testing.T) {
 		t.Fatal("never-started cancellation modified the cached connection")
 	}
 }
+
+// TestConnectFailurePreservesReadTimestamps guards the observation
+// preservation contract: a failed connect does not invalidate values read
+// from an earlier session, so the read timestamps must survive. Wiping them
+// disables the cached-state duplicate-command suppression for a station that
+// is merely unreachable right now, and contradicts the interrupted-read and
+// discovery-retry paths that deliberately keep them.
+func TestConnectFailurePreservesReadTimestamps(t *testing.T) {
+	originalAdapter := adapter
+	adapter = &reconnectCountingAdapter{connectErr: errors.New("radio unavailable")}
+	t.Cleanup(func() { adapter = originalAdapter })
+
+	powerReadAt := time.Now()
+	channelReadAt := time.Now()
+	station := &BaseStation{
+		Name:              "LHB-TIMESTAMPS",
+		PowerState:        PowerStateOn,
+		RawPowerState:     0x0B,
+		Channel:           4,
+		LastPowerReadAt:   powerReadAt,
+		LastChannelReadAt: channelReadAt,
+	}
+
+	station.mutex.Lock()
+	err := connectAndDiscoverInternalContext(context.Background(), station)
+	station.mutex.Unlock()
+
+	if err == nil {
+		t.Fatal("connect unexpectedly succeeded")
+	}
+	snapshot := station.Snapshot()
+	if !snapshot.LastPowerReadAt.Equal(powerReadAt) || !snapshot.LastChannelReadAt.Equal(channelReadAt) {
+		t.Fatalf("failed connect wiped read timestamps: power=%v channel=%v", snapshot.LastPowerReadAt, snapshot.LastChannelReadAt)
+	}
+	if snapshot.PowerState != PowerStateOn || snapshot.Channel != 4 {
+		t.Fatalf("failed connect clobbered cached observations: %+v", snapshot)
+	}
+}

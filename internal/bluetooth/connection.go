@@ -83,8 +83,11 @@ func connectAndDiscoverInternalContext(ctx context.Context, station *BaseStation
 				station.characteristic = nil
 				station.modeCharacteristic = nil
 				station.identifyCharacteristic = nil
-				station.LastPowerReadAt = time.Time{}
-				station.LastChannelReadAt = time.Time{}
+				// A failed connect does not invalidate earlier observations:
+				// keep the read timestamps so cached-state classification and
+				// the duplicate-command suppression stay authoritative,
+				// matching the discovery-retry failure path and the
+				// interrupted-read preservation contract.
 				if ctx.Err() == nil {
 					station.setConnectionErrorInternal(err)
 				}
