@@ -506,6 +506,34 @@ describe('StationStore startup', () => {
     expect(backend.ScanAndFetchStations).not.toHaveBeenCalled();
   });
 
+  it('does not fire a deferred startup scan after a manual scan ran during the barrier', async () => {
+    vi.useFakeTimers();
+    // Hold the startup scanning probe so the barrier stays pending until the
+    // manual scan is already running.
+    const probe = deferred<boolean>();
+    backend.IsScanning.mockReturnValue(probe.promise);
+    let resolveScan!: (stations: ReturnType<typeof createStation>[]) => void;
+    backend.ScanAndFetchStations.mockReturnValue(new Promise((resolve) => { resolveScan = resolve; }));
+    const { store } = mountStore();
+
+    // The user starts a scan while the startup barrier is still pending.
+    void store.startScan();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(backend.ScanAndFetchStations).toHaveBeenCalledOnce();
+
+    // The barrier settles while the manual scan is still in flight. The
+    // manual scan already owns the scan epoch, so the startup decision must
+    // defer to it instead of arming (and later firing) a redundant automatic
+    // scan right after the user's own scan.
+    probe.resolve(false);
+    resolveScan([createStation()]);
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    expect(backend.ScanAndFetchStations).toHaveBeenCalledOnce();
+    const internals = store as unknown as { startupScanDeferred: boolean };
+    expect(internals.startupScanDeferred).toBe(false);
+  });
+
   it('retries a lock-deferred startup scan on a short timer instead of the poll interval', async () => {
     const { store } = mountStore();
     await vi.waitFor(() => expect(store.stations).toHaveLength(1));
@@ -1413,6 +1441,35 @@ describe('StationStore external HTTP operation events', () => {
     expect(store.stoppingScan).toBe(true);
     expect(store.statusMessage).not.toBe('Preparing external scan...');
     expect(store.globalOperation).toBe('idle');
+  });
+
+  it('does not flag a draining local stop as an external scan', async () => {
+    const { store } = mountStore();
+    await vi.waitFor(() => expect(store.stations).toHaveLength(1));
+    // Same draining window as above: flagging the winding-down local scan as
+    // external would route its stop through the external finishStop path and
+    // arm a pending-terminal marker that swallows the next untracked external
+    // scan's terminal event.
+    store.stoppingScan = true;
+    store.stopRequestPending = true;
+    backend.IsScanning.mockResolvedValueOnce(true);
+
+    await (store as unknown as { periodicStatusCheck(): Promise<void> }).periodicStatusCheck();
+
+    expect(store.externalScanning).toBe(false);
+  });
+
+  it('keeps a tracked external scan flagged while its stop drains', async () => {
+    const { store } = mountStore();
+    await vi.waitFor(() => expect(store.stations).toHaveLength(1));
+    store.externalScanning = true;
+    store.stoppingScan = true;
+    backend.IsScanning.mockResolvedValueOnce(true);
+
+    await (store as unknown as { periodicStatusCheck(): Promise<void> }).periodicStatusCheck();
+
+    // The stop's recheck chain must stay on the external path.
+    expect(store.externalScanning).toBe(true);
   });
 
   it('does not consume the revision gate for an unknown operation phase', async () => {

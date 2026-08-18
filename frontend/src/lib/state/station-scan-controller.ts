@@ -316,7 +316,14 @@ export class StationScanController {
         await this.host.externalScan.adoptUnknown();
         return;
       }
-      this.host.externalScanning = scanning && !this.host.isLoading;
+      // The same draining window must not newly flag our own scan as external
+      // either: the stop would take the external finishStop path (wrong stop
+      // copy, and a pending-terminal marker that swallows the next untracked
+      // external scan's terminal event). A flag that is already set belongs
+      // to a tracked external scan whose own stop is draining; keep it so the
+      // recheck chain stays on the external path.
+      this.host.externalScanning = scanning && !this.host.isLoading &&
+        (this.host.externalScanning || (!this.host.stoppingScan && !this.host.stopRequestPending));
       if (!scanning) {
         this.host.stoppingScan = false;
         if (wasExternalScanning) {
