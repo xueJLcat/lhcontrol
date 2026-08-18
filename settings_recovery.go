@@ -52,17 +52,16 @@ func (a *App) SetAbsentStationRetryLimit(limit int) error {
 	a.recoverySettingsMutex.Lock()
 	defer a.recoverySettingsMutex.Unlock()
 
-	// The setter reports the baseline itself: a blocked-save recovery inside
-	// it can restore the persisted limit after this layer last read the
-	// field, and comparing against that stale read would misjudge a raise.
-	previousLimit, err := a.config.SetAbsentStationRetryLimitWithPrevious(limit)
+	// WithPrevious performs any blocked-save recovery atomically with the
+	// write; the converge below compares against the runtime baseline, so a
+	// recovery that restored a higher persisted limit still revives entries
+	// that exhausted under the lower one.
+	_, err := a.config.SetAbsentStationRetryLimitWithPrevious(limit)
 
 	a.setConfigPersistenceStatus()
 	if err == nil {
 		a.stationManager.ApplyRecoverySettings()
-		if a.config.GetAbsentStationRetryLimit() > previousLimit {
-			a.stationManager.ReviveAbsentStationRecovery()
-		}
+		a.convergeAbsentStationRetryLimit()
 	}
 
 	return err

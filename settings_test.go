@@ -280,6 +280,51 @@ func TestRecoveryReplayDoesNotCancelMatchingAutoSleepWatcher(t *testing.T) {
 	}
 }
 
+// TestRecoveryReplayConvergesAbsentStationRetryLimit guards the replay
+// invariant for the absent-station retry limit: a blocked-save recovery that
+// restores a different persisted limit must re-converge the runtime baseline
+// so a raised limit revives recovery entries that exhausted under the lower
+// one (mirroring the explicit setter), and a lowered limit hands no fresh
+// retry budget back.
+func TestRecoveryReplayConvergesAbsentStationRetryLimit(t *testing.T) {
+	t.Setenv("AppData", t.TempDir())
+	app := NewApp()
+
+	limit := app.config.GetAbsentStationRetryLimit()
+	raised := limit + 3
+	if err := app.config.SetAbsentStationRetryLimit(raised); err != nil {
+		t.Fatalf("config.SetAbsentStationRetryLimit() error = %v", err)
+	}
+	app.absentRetryLimitMutex.Lock()
+	app.absentRetryLimitApplied = limit
+	app.absentRetryLimitMutex.Unlock()
+	// Force one replay pass: the observed generation lags the real one.
+	app.configReplayGeneration.Store(app.config.RecoveryGeneration() + 1)
+
+	app.replayRecoveredConfigRuntime()
+
+	app.absentRetryLimitMutex.Lock()
+	converged := app.absentRetryLimitApplied
+	app.absentRetryLimitMutex.Unlock()
+	if converged != raised {
+		t.Fatalf("replay converged retry limit = %d, want the recovered %d", converged, raised)
+	}
+
+	if err := app.config.SetAbsentStationRetryLimit(limit); err != nil {
+		t.Fatalf("config.SetAbsentStationRetryLimit() error = %v", err)
+	}
+	app.configReplayGeneration.Store(app.config.RecoveryGeneration() + 1)
+
+	app.replayRecoveredConfigRuntime()
+
+	app.absentRetryLimitMutex.Lock()
+	lowered := app.absentRetryLimitApplied
+	app.absentRetryLimitMutex.Unlock()
+	if lowered != limit {
+		t.Fatalf("replay converged retry limit = %d, want the lowered %d", lowered, limit)
+	}
+}
+
 func TestLanguageBindingsPersistAndValidate(t *testing.T) {
 
 	t.Setenv("AppData", t.TempDir())

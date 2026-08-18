@@ -59,6 +59,12 @@ type App struct {
 	// effects (Bluetooth timing, auto-sleep watcher, API listener) exactly
 	// once.
 	configReplayGeneration atomic.Uint64
+	// absentRetryLimitMutex guards absentRetryLimitApplied, the absent-station
+	// retry limit the runtime last converged on. A blocked-save recovery that
+	// restores a higher persisted limit must revive recovery entries that
+	// exhausted under the lower one, mirroring the explicit setter.
+	absentRetryLimitMutex   sync.Mutex
+	absentRetryLimitApplied int
 	// autoSleepMutex protects autoSleepCancel, autoSleepWatcher,
 	// autoSleepRebuildTimer and the self-stop debt fields below.
 	autoSleepMutex    sync.Mutex
@@ -161,6 +167,12 @@ func (a *App) startup(ctx context.Context) {
 	// derive the runtime state from the loaded configuration, so only later
 	// blocked-save recoveries need a replay.
 	a.configReplayGeneration.Store(a.config.RecoveryGeneration())
+	// Seed the applied retry-limit baseline the same way: only a later
+	// recovery that raises the limit revives exhausted absent-station
+	// recovery entries.
+	a.absentRetryLimitMutex.Lock()
+	a.absentRetryLimitApplied = a.config.GetAbsentStationRetryLimit()
+	a.absentRetryLimitMutex.Unlock()
 
 	a.applyBluetoothTiming()
 
@@ -302,6 +314,7 @@ func (a *App) replayRecoveredConfigRuntime() {
 	}
 	a.applyBluetoothTiming()
 	a.stationManager.ApplyRecoverySettings()
+	a.convergeAbsentStationRetryLimit()
 	a.stationManager.ApplyPresenceMissThreshold()
 	replayed := true
 	if a.autoSleepSettingsMutex.TryLock() {
@@ -347,6 +360,23 @@ func (a *App) convergeAPIListenerAfterRecovery() {
 		return
 	}
 	a.rollbackListener(previous, previous)
+}
+
+// convergeAbsentStationRetryLimit applies the persisted absent-station retry
+// limit to the runtime baseline and revives exhausted absent-station recovery
+// entries when the limit rises. A recovery that lowered the limit must not
+// hand fresh retry budget back, so only a raise revives. Callers: the
+// explicit retry-limit setter and the blocked-save recovery replay, keeping
+// both paths on the same invariant.
+func (a *App) convergeAbsentStationRetryLimit() {
+	current := a.config.GetAbsentStationRetryLimit()
+	a.absentRetryLimitMutex.Lock()
+	previous := a.absentRetryLimitApplied
+	a.absentRetryLimitApplied = current
+	a.absentRetryLimitMutex.Unlock()
+	if current > previous {
+		a.stationManager.ReviveAbsentStationRecovery()
+	}
 }
 
 func (a *App) refreshConfigStatusLocked(persistenceErr error) {
