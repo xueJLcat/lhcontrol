@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 )
 
 func TestReadPowerStatePreservesConnectionOnChannelFailure(t *testing.T) {
@@ -233,15 +234,15 @@ func TestConnectedQueryFailureKeepsCachedSession(t *testing.T) {
 	}
 }
 
-// reconnectDuringCleanupDevice completes a fake concurrent reconnect for the
-// station while its pending cleanup has released the station lock, emulating
-// a second operation that finishes connecting inside the gate window.
-type reconnectDuringCleanupDevice struct {
+// reconnectOnDisconnectDevice completes a fake concurrent reconnect for the
+// station while a teardown has released the station lock, emulating a second
+// operation that finishes connecting inside one of the unlocked windows.
+type reconnectOnDisconnectDevice struct {
 	trackingConnectedDevice
 	station *BaseStation
 }
 
-func (device *reconnectDuringCleanupDevice) Disconnect() error {
+func (device *reconnectOnDisconnectDevice) Disconnect() error {
 	device.station.mutex.Lock()
 	device.station.device = fakeConnectedDevice{}
 	device.station.isConnected = true
@@ -253,23 +254,24 @@ func (device *reconnectDuringCleanupDevice) Disconnect() error {
 	return nil
 }
 
-// TestConnectReusesSessionCompletedInsideGateWindow guards the lock-release
-// window of the connect gate: the pending cleanup releases the station lock
-// around its WinRT call, and a concurrent operation can complete a full
-// reconnect inside that window. The connect path must re-check the connection
-// state after the gate instead of opening a duplicate GATT session that
-// overwrites the fresh one and orphans its WinRT objects.
-func TestConnectReusesSessionCompletedInsideGateWindow(t *testing.T) {
+// TestDiscoveryRetryReusesSessionCompletedInsideUnlockedWindow guards the
+// discovery-retry path: the retry releases the station lock around the stale
+// teardown, the retry delay, and the gate, and a concurrent operation can
+// complete a full reconnect inside those windows. The retry must re-check the
+// connection state afterwards and reuse that session instead of opening a
+// duplicate GATT session that overwrites the fresh one and orphans its WinRT
+// objects until process exit.
+func TestDiscoveryRetryReusesSessionCompletedInsideUnlockedWindow(t *testing.T) {
 	originalAdapter := adapter
 	adapter = newFakeBLEAdapter()
 	t.Cleanup(func() { adapter = originalAdapter })
+	ConfigureTiming(TimingPolicy{DiscoveryRetryDelay: time.Millisecond})
+	t.Cleanup(func() { ConfigureTiming(TimingPolicy{}) })
 
-	station := &BaseStation{
-		Name:          "LHB-GATE-RACE",
-		RawPowerState: RawPowerStateUnknown,
-		Channel:       ChannelUnknown,
-	}
-	station.pendingCleanup = &reconnectDuringCleanupDevice{station: station}
+	station := connectedFakeStation(nil, nil, nil, Capabilities{})
+	station.device = &reconnectOnDisconnectDevice{station: station}
+	station.characteristic = nil
+	station.CapabilitiesKnown = false
 
 	station.mutex.Lock()
 	err := connectAndDiscoverInternalContext(context.Background(), station)
@@ -279,7 +281,7 @@ func TestConnectReusesSessionCompletedInsideGateWindow(t *testing.T) {
 		t.Fatalf("connectAndDiscoverInternalContext() error = %v, want the concurrent session reused", err)
 	}
 	if station.device == nil || !station.isConnected || station.characteristic == nil {
-		t.Fatal("session completed inside the gate window was not adopted")
+		t.Fatal("session completed inside the retry window was not adopted")
 	}
 }
 
