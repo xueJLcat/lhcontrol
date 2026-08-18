@@ -147,7 +147,13 @@ type Config struct {
 	// the auto-sleep watcher, the API listener) observe it to re-apply their
 	// side effects after a recovery.
 	recoveryGeneration uint64
-	mutex              sync.RWMutex
+	// recoveryLoadWarning records a blocked-save recovery that unblocked
+	// persistence by quarantining an unreadable file and falling back to
+	// defaults. The block is gone (saves succeed), but the persisted contents
+	// were not recoverable, which the user must still be told about; keep the
+	// warning for the session.
+	recoveryLoadWarning string
+	mutex               sync.RWMutex
 }
 
 type persistedConfig struct {

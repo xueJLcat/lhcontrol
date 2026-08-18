@@ -36,13 +36,22 @@ func (c *Config) recoverBlockedPersistenceLocked() {
 		return
 	}
 	previousBlocked := c.persistenceBlockedErr
-	if loadErr := c.loadLocked(configFilePath); loadErr != nil && c.persistenceBlockedErr != nil {
+	loadErr := c.loadLocked(configFilePath)
+	if loadErr != nil && c.persistenceBlockedErr != nil {
 		// Recovery still failed. Keep the original block reason instead of a
 		// fresh error instance from this attempt so repeated retries report a
 		// stable failure and callers holding the original error keep matching
 		// it. A successful recovery clears both fields inside loadLocked.
 		c.persistenceBlockedErr = previousBlocked
 		c.lastPersistenceErr = previousBlocked
+	} else if loadErr != nil {
+		// Recovery unblocked persistence (the unreadable file was quarantined
+		// and defaults were applied), but the persisted contents were lost.
+		// The upcoming save succeeds, so no persistence error would surface
+		// it; record a session warning instead so the quarantine is not
+		// silent.
+		c.recoveryLoadWarning = fmt.Sprintf("Configuration was reset to defaults during recovery: %v", loadErr)
+		log.Printf("Blocked-save recovery quarantined the config: %v", loadErr)
 	}
 	if c.persistenceBlockedErr == nil {
 		// The persisted contents are authoritative again. Notify runtime
@@ -75,6 +84,16 @@ func (c *Config) PersistenceError() error {
 		return c.persistenceBlockedErr
 	}
 	return c.lastPersistenceErr
+}
+
+// RecoveryLoadWarning reports a blocked-save recovery that had to quarantine
+// the persisted configuration and fall back to defaults mid-session. It
+// remains set for the session: saves succeed again, but the original contents
+// were lost and only the timestamped quarantine copy preserves them.
+func (c *Config) RecoveryLoadWarning() string {
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	return c.recoveryLoadWarning
 }
 
 // saveLocked persists exactly the state protected by mutex. Keeping mutation

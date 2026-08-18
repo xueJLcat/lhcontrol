@@ -543,6 +543,56 @@ func TestLoadToleratesUTF8ByteOrderMark(t *testing.T) {
 	}
 }
 
+// TestBlockedSaveRecoveryQuarantineSurfacesWarning guards the mid-session
+// recovery path: when an unreadable startup load is later unblocked by a file
+// whose contents cannot be parsed, the recovery quarantines the file and
+// applies defaults. Saves succeed again afterwards, so no persistence error
+// would surface the lost contents; a session warning must instead.
+func TestBlockedSaveRecoveryQuarantineSurfacesWarning(t *testing.T) {
+	blockedRoot := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(blockedRoot, []byte("occupied"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AppData", blockedRoot)
+
+	cfg := NewConfig()
+	if err := cfg.Load(); err == nil {
+		t.Fatal("Config.Load() unexpectedly succeeded against an unreadable path")
+	}
+	if cfg.PersistenceError() == nil {
+		t.Fatal("unreadable config path did not block persistence")
+	}
+
+	validRoot := t.TempDir()
+	t.Setenv("AppData", validRoot)
+	configDirectory := filepath.Join(validRoot, "lhcontrol")
+	if err := os.MkdirAll(configDirectory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(configDirectory, "config.json")
+	if err := os.WriteFile(configPath, []byte("{not-json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := cfg.SetLanguage(LanguageEnglish); err != nil {
+		t.Fatalf("SetLanguage() error = %v, want the recovery to unblock the save", err)
+	}
+	if cfg.PersistenceError() != nil {
+		t.Fatalf("recovery kept persistence blocked: %v", cfg.PersistenceError())
+	}
+	warning := cfg.RecoveryLoadWarning()
+	if warning == "" || !strings.Contains(warning, "reset to defaults") {
+		t.Fatalf("RecoveryLoadWarning() = %q, want the quarantine surfaced", warning)
+	}
+	preserved, err := filepath.Glob(configPath + ".invalid-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(preserved) != 1 {
+		t.Fatalf("quarantined files = %v, want exactly one", preserved)
+	}
+}
+
 func TestInvalidConfigIsPreservedBeforeLaterSave(t *testing.T) {
 	configRoot := t.TempDir()
 	t.Setenv("AppData", configRoot)

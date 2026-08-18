@@ -145,6 +145,75 @@ func TestConfigLoadWarningClearsOncePersistenceRecovers(t *testing.T) {
 
 }
 
+func TestBlockedSaveRecoveryQuarantinePublishesWarning(t *testing.T) {
+
+	blockedRoot := filepath.Join(t.TempDir(), "not-a-directory")
+
+	if err := os.WriteFile(blockedRoot, []byte("occupied"), 0o644); err != nil {
+
+		t.Fatal(err)
+
+	}
+
+	t.Setenv("AppData", blockedRoot)
+
+	app := NewApp()
+
+	loadErr := app.config.Load()
+
+	if loadErr == nil {
+
+		t.Fatal("config Load() unexpectedly succeeded")
+
+	}
+
+	app.setConfigLoadStatus(loadErr)
+
+	// Point persistence at a real directory whose config file is corrupt: a
+	// setter's recovery quarantines it and applies defaults, unblocking saves.
+
+	validRoot := t.TempDir()
+
+	t.Setenv("AppData", validRoot)
+
+	configDirectory := filepath.Join(validRoot, "lhcontrol")
+
+	if err := os.MkdirAll(configDirectory, 0o755); err != nil {
+
+		t.Fatal(err)
+
+	}
+
+	if err := os.WriteFile(filepath.Join(configDirectory, "config.json"), []byte("{not-json"), 0o644); err != nil {
+
+		t.Fatal(err)
+
+	}
+
+	if err := app.config.SetLanguage("en"); err != nil {
+
+		t.Fatalf("SetLanguage() error = %v, want the recovery to unblock the save", err)
+
+	}
+
+	app.setConfigPersistenceStatus()
+
+	status := app.GetAPIStatus()
+
+	if !status.ConfigWritable {
+
+		t.Fatalf("recovered persistence reported as blocked: %+v", status)
+
+	}
+
+	if len(status.Warnings) != 1 || !strings.Contains(status.Warnings[0], "reset to defaults") {
+
+		t.Fatalf("recovery warnings = %v, want the quarantine warning surfaced", status.Warnings)
+
+	}
+
+}
+
 func TestGetAPIStatusIncludesRecoverableExternalOperations(t *testing.T) {
 
 	app := NewApp()

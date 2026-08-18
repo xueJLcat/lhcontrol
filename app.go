@@ -414,12 +414,19 @@ func (a *App) refreshConfigStatusLocked(persistenceErr error) {
 	// A concurrent successful save cannot otherwise clear one between two
 	// independent reads and briefly publish a contradictory API status.
 	a.apiStatus.ConfigWritable = persistenceErr == nil
-	a.apiStatus.Warnings = make([]string, 0, 2)
+	a.apiStatus.Warnings = make([]string, 0, 3)
 	if a.configLoadWarning != "" {
 		a.apiStatus.Warnings = append(a.apiStatus.Warnings, a.configLoadWarning)
 	}
 	if a.configSaveWarning != "" && a.configSaveWarning != a.configLoadWarning {
 		a.apiStatus.Warnings = append(a.apiStatus.Warnings, a.configSaveWarning)
+	}
+	// A blocked-save recovery that quarantined the config and fell back to
+	// defaults leaves persistence healthy, so neither warning above surfaces
+	// it; publish the recovery warning explicitly so the reset is not silent.
+	if recoveryWarning := a.config.RecoveryLoadWarning(); recoveryWarning != "" &&
+		recoveryWarning != a.configLoadWarning && recoveryWarning != a.configSaveWarning {
+		a.apiStatus.Warnings = append(a.apiStatus.Warnings, recoveryWarning)
 	}
 }
 
