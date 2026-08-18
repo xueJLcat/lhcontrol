@@ -37,6 +37,15 @@ func (m *Manager) setAllStationsPower(state string) error {
 	for _, stationResult := range result.Results {
 		if !stationResult.Success && !stationResult.Skipped {
 			operationErrors = append(operationErrors, fmt.Errorf("%s: %s", stationResult.Address, stationResult.Error))
+			continue
+		}
+		// A timeout stop interrupted an attempt in flight and is not a benign
+		// skip: a station whose own budget expired while the batch stayed
+		// healthy carries no top-level error, so the error-only contract would
+		// otherwise report the whole batch as successful.
+		if !stationResult.Success &&
+			(stationResult.Reason == ReasonStationOperationTimeout || stationResult.Reason == ReasonBulkOperationTimeout) {
+			operationErrors = append(operationErrors, fmt.Errorf("%s: %s", stationResult.Address, stationResult.Reason))
 		}
 	}
 	if len(operationErrors) > 0 {
@@ -122,10 +131,13 @@ func (m *Manager) SetAllStationsPowerDetailedContext(ctx context.Context, state 
 		result.Cancelled = true
 		result.TimedOut = errors.Is(contextErr, context.DeadlineExceeded)
 		reason := ReasonOperationCancelled
-		if result.TimedOut {
-			reason = ReasonBulkOperationTimeout
-		} else if m.shuttingDown.Load() {
+		// Keep the precedence aligned with bulkInterruptionReason: shutdown
+		// wins over a concurrent deadline, so worker-produced entries and this
+		// backfill attribute the same interruption to the same reason.
+		if m.shuttingDown.Load() {
 			reason = ReasonShuttingDown
+		} else if result.TimedOut {
+			reason = ReasonBulkOperationTimeout
 		}
 		// Cancellation can occur before worker goroutines start (for example
 		// while the adapter is being initialized) or before candidates are

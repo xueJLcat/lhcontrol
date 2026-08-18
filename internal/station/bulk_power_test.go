@@ -1215,6 +1215,51 @@ func TestBulkCancelOwnsSkipWhenStationBudgetAlsoExpires(t *testing.T) {
 	}
 }
 
+// TestBulkStationTimeoutSurfacesInLegacyErrorContract guards the legacy
+// error-only contract: a per-station operation timeout that lands while the
+// bulk batch is still healthy carries no top-level error and arrives as a
+// timeout-skipped entry. The aggregation must report it instead of swallowing
+// it as an overall success.
+func TestBulkStationTimeoutSurfacesInLegacyErrorContract(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	manager.stationOperationTimeout = 20 * time.Millisecond
+	address := "11:22:33:44:AA:09"
+	manager.stations[address] = &internalbluetooth.BaseStation{
+		Name: "LHB-STATION-TIMEOUT", Address: mustAddress(t, address), Present: true,
+		PowerState: internalbluetooth.PowerStateSleep, RawPowerState: 0x00,
+		LastPowerReadAt:   time.Now(),
+		Capabilities:      internalbluetooth.Capabilities{PowerWrite: true},
+		CapabilitiesKnown: true,
+	}
+	manager.bluetoothOps.setPowerState = func(ctx context.Context, _ *internalbluetooth.BaseStation, _ internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
+		<-ctx.Done()
+		return internalbluetooth.PowerControlResult{}, ctx.Err()
+	}
+
+	err := manager.SetAllStationsPower("on")
+	if err == nil {
+		t.Fatal("SetAllStationsPower() unexpectedly reported success for a timed-out station")
+	}
+	if !strings.Contains(err.Error(), ReasonStationOperationTimeout) {
+		t.Fatalf("SetAllStationsPower() error = %v, want the station timeout surfaced", err)
+	}
+
+	// The detailed form keeps its structured shape: skipped with the timeout
+	// reason, no batch-level cancellation or timeout flag.
+	result, detailedErr := manager.SetAllStationsPowerDetailed("on")
+	if detailedErr != nil {
+		t.Fatalf("SetAllStationsPowerDetailed() error = %v, want nil for a healthy batch", detailedErr)
+	}
+	if len(result.Results) != 1 || !result.Results[0].Skipped ||
+		result.Results[0].Reason != ReasonStationOperationTimeout {
+		t.Fatalf("detailed result = %+v, want a station-timeout skip", result.Results)
+	}
+	if result.Cancelled || result.TimedOut {
+		t.Fatalf("healthy batch was mislabelled as interrupted: %+v", result)
+	}
+}
+
 // TestBulkPowerInvalidTargetRejectedWhileBusy guards the entry validation
 // order: an unparseable target is a permanent argument error and must not be
 // masked as a retryable busy rejection just because another batch happens to
