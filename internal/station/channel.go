@@ -42,8 +42,15 @@ func (m *Manager) SetStationChannel(
 		m.reconcileMetadataReadResult(canonicalAddress, metadataReadRevision, stationPtr.Snapshot())
 	}()
 	result.Address = targetSnapshot.Address
+	// The no-op shortcut must pass the same presence gate as the write path:
+	// a station the fleet already considers absent would be rejected below,
+	// so confirming it here without a write would report an inconsistent
+	// outcome for the same state.
 	if targetSnapshot.Channel == channel &&
-		isOperationallyFresh(targetSnapshot.LastChannelReadAt, time.Now()) {
+		isOperationallyFresh(targetSnapshot.LastChannelReadAt, time.Now()) &&
+		targetSnapshot.Present && targetSnapshot.MissedScans == 0 &&
+		!targetSnapshot.PresenceUncertain &&
+		isRecent(targetSnapshot.LastSeenAt, time.Now(), m.channelScanFreshnessWindowDuration()) {
 		result.PreviousChannel = channel
 		result.Channel = channel
 		result.Confirmed = true

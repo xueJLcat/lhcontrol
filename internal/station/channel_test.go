@@ -159,11 +159,16 @@ func TestSetStationChannelAlreadyAtFreshTargetIsNoOp(t *testing.T) {
 		return nil
 	}
 	address := "AA:BB:CC:DD:EE:09"
+	now := time.Now()
 	manager.stations[address] = &internalbluetooth.BaseStation{
 		Address:           mustAddress(t, address),
 		Name:              "LHB-SAME-CHANNEL",
 		Channel:           7,
-		LastChannelReadAt: time.Now(),
+		LastChannelReadAt: now,
+		// The no-op fast path passes the same presence gate as the write
+		// path: an absent station must not be confirmed without a write.
+		Present:    true,
+		LastSeenAt: now,
 	}
 	manager.bluetoothOps.refreshCapabilities = func(context.Context, *internalbluetooth.BaseStation) (internalbluetooth.Capabilities, error) {
 		t.Fatal("capability refresh was attempted for a channel no-op")
@@ -181,6 +186,33 @@ func TestSetStationChannelAlreadyAtFreshTargetIsNoOp(t *testing.T) {
 	if result.Address != address || result.PreviousChannel != 7 || result.Channel != 7 ||
 		result.CommandSent || !result.Confirmed || len(result.Warnings) != 0 {
 		t.Fatalf("channel no-op result = %+v", result)
+	}
+}
+
+// TestSetStationChannelNoOpRequiresPresence guards the presence gate on the
+// no-op fast path: a station the fleet considers absent must be rejected the
+// same way a real write would, instead of reporting a confirmed no-op for a
+// station that was not seen in the latest scan.
+func TestSetStationChannelNoOpRequiresPresence(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	now := time.Now()
+	address := "AA:BB:CC:DD:EE:0A"
+	manager.stations[address] = &internalbluetooth.BaseStation{
+		Address:           mustAddress(t, address),
+		Name:              "LHB-ABSENT",
+		Channel:           7,
+		LastChannelReadAt: now,
+		MissedScans:       2,
+	}
+	manager.bluetoothOps.setChannel = func(context.Context, *internalbluetooth.BaseStation, int) (internalbluetooth.ChannelWriteResult, error) {
+		t.Fatal("channel operation was attempted for an absent station")
+		return internalbluetooth.ChannelWriteResult{}, nil
+	}
+
+	_, err := manager.SetStationChannel(address, 7, false)
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("SetStationChannel() error = %v, want ErrNotFound for an absent station", err)
 	}
 }
 
