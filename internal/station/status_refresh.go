@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -100,6 +101,7 @@ func (m *Manager) CheckAllStationStatuses() ([]StationInfo, error) {
 		station *bluetooth.BaseStation
 	}
 	statusErrors := make([]error, len(stationsToRead))
+	stationCompleted := make([]atomic.Bool, len(stationsToRead))
 	work := make(chan statusReadWork)
 	// Keep one GATT slot available for foreground commands while the periodic
 	// refresh reads connected stations. The early return above guarantees at
@@ -114,6 +116,7 @@ func (m *Manager) CheckAllStationStatuses() ([]StationInfo, error) {
 				if readErr := m.readStationStatus(refreshContext, item.station); readErr != nil {
 					statusErrors[item.index] = readErr
 				}
+				stationCompleted[item.index].Store(true)
 			}
 		}()
 	}
@@ -145,11 +148,18 @@ dispatch:
 		// that ignores cancellation). Abandon the refresh instead of holding
 		// statusOperationMutex until it unblocks: the worker keeps running and
 		// releases its slot when the OS call returns, and registering every
-		// candidate for recovery lets the scheduler re-read each station. Do
+		// unsettled candidate for recovery lets the scheduler re-read it. Do
 		// not touch statusErrors from here on: the abandoned worker may still
 		// be writing its entry.
 		log.Printf("Bluetooth status refresh worker did not finish within %s; abandoning the refresh", joinLimit)
-		for _, stationPtr := range stationsToRead {
+		for index, stationPtr := range stationsToRead {
+			if stationCompleted[index].Load() {
+				// A finished read already settled its own outcome: successes
+				// need no follow-up, and failures recorded their own backoff.
+				// Re-marking them due now would override that schedule and
+				// immediately reconnect stations the refresh already handled.
+				continue
+			}
 			m.trackStatusRefreshPending(stationPtr.Snapshot().Address)
 		}
 		// Stations first observed disconnected in this abandoned refresh still
@@ -302,6 +312,12 @@ func (m *Manager) readStationStatus(refreshContext context.Context, stationPtr *
 			!bluetooth.RequiresReconnect(readErr.Power) {
 			m.noteStatusFailure(address)
 			m.trackStatusRefreshPending(address)
+			// The refresh marker must not fall due before the connection
+			// backoff just recorded: recovery picks the earliest due
+			// schedule, so an immediate marker would re-run the read that
+			// just timed out, negate the backoff, and count failures
+			// against the absent-station budget ahead of schedule.
+			m.deferStatusRecovery(address, m.statusConnectionRetryDelay(address))
 			return fmt.Errorf("%s: status read deadline exceeded: %w", address, workerErr)
 		}
 		m.recordStructuredReadResult(stationPtr, address, readErr.Power, readErr.Channel)
@@ -313,6 +329,7 @@ func (m *Manager) readStationStatus(refreshContext context.Context, stationPtr *
 		// timeout above instead of disconnecting a healthy station.
 		m.noteStatusFailure(address)
 		m.trackStatusRefreshPending(address)
+		m.deferStatusRecovery(address, m.statusConnectionRetryDelay(address))
 	} else {
 		m.recordUnstructuredStationFailure(stationPtr, address, workerErr)
 	}

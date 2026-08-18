@@ -180,6 +180,21 @@ func (m *Manager) noteStatusFailureKind(address string, kind statusRetryKind) {
 	m.statusRetryMutex.Unlock()
 	m.scheduleStatusRecovery()
 }
+
+// statusConnectionRetryDelay returns the connection backoff currently
+// recorded for the address, the same value noteStatusFailure uses for the
+// next connection deadline. Callers defer adjacent refresh markers by it so
+// they respect the backoff instead of falling due immediately.
+func (m *Manager) statusConnectionRetryDelay(address string) time.Duration {
+	m.statusRetryMutex.Lock()
+	defer m.statusRetryMutex.Unlock()
+	retry := m.statusRetries[address]
+	if retry.failures <= 0 {
+		return m.statusRetryDelay(1)
+	}
+	return m.statusRetryDelay(retry.failures)
+}
+
 func (m *Manager) statusRetryDelay(failures int) time.Duration {
 	base := m.statusRetryBaseDelay()
 	maxDelay := m.statusRetryMaxDelay()
