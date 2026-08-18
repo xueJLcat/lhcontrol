@@ -148,6 +148,13 @@ func (m *Manager) recordPowerVerificationResult(
 	var channelErr error
 	var initialErr *bluetooth.InitialReadError
 	if err != nil && !errors.As(err, &initialErr) {
+		// A failure before any structured read starts (a failed connect or
+		// discovery) surfaces as a bare transport error. It is deliberately
+		// not recorded here: the caller always runs another Bluetooth step
+		// (capability refresh or the power write) that observes the same
+		// link and records it once. Recording it here as well would count
+		// one dead link twice, doubling the exponential backoff and
+		// abandoning absent stations early.
 		return
 	}
 	if initialErr != nil {
