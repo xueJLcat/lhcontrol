@@ -36,6 +36,21 @@ func (f *cancelAfterSuccessfulRead) ReadContext(_ context.Context, destination [
 	return n, err
 }
 
+// TestReadPowerStateDisconnectedPreflightIsClassifiable guards the preflight
+// contract: a read that never reaches the transport must carry the typed
+// not-connected error so scheduling layers can treat it as a disconnect
+// observation instead of a transport failure with backoff.
+func TestReadPowerStateDisconnectedPreflightIsClassifiable(t *testing.T) {
+	station := &BaseStation{Name: "LHB-PREFLIGHT"}
+	err := ReadPowerStateContext(context.Background(), station)
+	if !IsStationNotConnected(err) {
+		t.Fatalf("ReadPowerStateContext() error = %v, want a StationNotConnectedError", err)
+	}
+	if RequiresReconnect(err) || IsAdapterUnavailable(err) {
+		t.Fatalf("preflight error must not classify as transport failure: %v", err)
+	}
+}
+
 func TestReadMetadataValueFailureIsIsolated(t *testing.T) {
 	good := &fakeCharacteristic{value: []byte(" Valve Corp. \x00\r\n")}
 	value, err := readMetadataValue(good)

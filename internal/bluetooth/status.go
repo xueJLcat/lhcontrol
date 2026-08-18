@@ -136,6 +136,26 @@ func readChannelInternalContext(ctx context.Context, station *BaseStation) error
 	return nil
 }
 
+// StationNotConnectedError reports a read that never reached the transport
+// because the cached connection was already gone when the read started. It is
+// a disconnect observation, not a transport failure: callers that schedule
+// recovery should treat it like a station first seen disconnected (immediate
+// reconnect) instead of counting a failed attempt with backoff.
+type StationNotConnectedError struct {
+	Name string
+}
+
+func (e *StationNotConnectedError) Error() string {
+	return fmt.Sprintf("station %s is not connected", e.Name)
+}
+
+// IsStationNotConnected reports whether a read stopped at the preflight
+// connection check before any transport work started.
+func IsStationNotConnected(err error) bool {
+	var notConnected *StationNotConnectedError
+	return errors.As(err, &notConnected)
+}
+
 // ReadPowerState attempts to read the current power state for an already connected station.
 func ReadPowerState(station *BaseStation) error {
 	return ReadPowerStateContext(context.Background(), station)
@@ -173,7 +193,7 @@ func ReadPowerStateContext(ctx context.Context, station *BaseStation) error {
 	}
 
 	if !station.isConnected || station.device == nil {
-		return fmt.Errorf("station %s is not connected", station.Name)
+		return &StationNotConnectedError{Name: station.Name}
 	}
 	var powerReadErr error
 	var channelReadErr error

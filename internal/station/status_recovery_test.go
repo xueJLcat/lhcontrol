@@ -322,6 +322,46 @@ func TestStatusCheckReadsConnectedAndTracksDisconnectedStationsTogether(t *testi
 	manager.Shutdown()
 }
 
+// TestStatusRefreshDisconnectWindowSchedulesImmediateRecovery guards the race
+// where the OS drops a station between candidate selection and the read: the
+// preflight "not connected" failure must be classified like a station first
+// seen disconnected (immediate reconnect, no failure count) instead of a
+// transport failure with backoff.
+func TestStatusRefreshDisconnectWindowSchedulesImmediateRecovery(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	manager.statusRecoveryStart.Do(func() {})
+	manager.statusReadTimeout = time.Hour
+	manager.statusRefreshTimeout = time.Hour
+	address := "11:22:33:44:55:7A"
+	manager.stations[address] = &internalbluetooth.BaseStation{
+		Name: "LHB-DROP-RACE", Address: mustAddress(t, address), Present: true,
+	}
+	manager.bluetoothOps.stationConnected = func(*internalbluetooth.BaseStation) bool { return true }
+	manager.bluetoothOps.readPowerStateContext = func(context.Context, *internalbluetooth.BaseStation) error {
+		return &internalbluetooth.StationNotConnectedError{Name: "LHB-DROP-RACE"}
+	}
+
+	if _, err := manager.CheckAllStationStatuses(); err != nil {
+		t.Fatalf("CheckAllStationStatuses() error = %v, want the disconnect window treated as tracked recovery", err)
+	}
+	manager.statusRetryMutex.Lock()
+	retry, tracked := manager.statusRetries[address]
+	manager.statusRetryMutex.Unlock()
+	if !tracked {
+		t.Fatal("disconnect-window read did not register recovery tracking")
+	}
+	if effectiveStatusRetryKinds(retry)&statusRetryConnection == 0 {
+		t.Fatalf("disconnect-window retry kinds = %v, want connection recovery", retry.kinds)
+	}
+	if retry.failures != 0 {
+		t.Fatalf("disconnect-window failures = %d, want no transport failure counted", retry.failures)
+	}
+	if !retry.nextAt.IsZero() && time.Until(retry.nextAt) > 0 {
+		t.Fatalf("disconnect-window next retry at %v, want an immediate attempt", retry.nextAt)
+	}
+}
+
 func TestStatusRefreshTimeoutBoundsWholeFleet(t *testing.T) {
 	manager := NewManager(config.NewConfig())
 	defer manager.Shutdown()

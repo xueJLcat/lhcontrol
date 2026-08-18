@@ -282,6 +282,15 @@ func (m *Manager) readStationStatus(refreshContext context.Context, stationPtr *
 		return fmt.Errorf("%s: status refresh deadline exceeded: %w", address, workerErr)
 	}
 	m.observeBluetoothError(workerErr)
+	if bluetooth.IsStationNotConnected(workerErr) {
+		// The link dropped between candidate selection and this read. That is
+		// the same observation the selection-time disconnect branch makes, so
+		// route it to the same immediate reconnect path instead of counting a
+		// transport failure with backoff: the read never reached the link and
+		// must not consume the absent-station retry budget either.
+		m.ensureStatusRecoveryTracked(address)
+		return nil
+	}
 	var readErr *bluetooth.StatusReadError
 	if errors.As(workerErr, &readErr) {
 		// A per-station read-budget deadline is not evidence the link
