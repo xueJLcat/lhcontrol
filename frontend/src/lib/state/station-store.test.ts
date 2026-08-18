@@ -258,6 +258,23 @@ describe('StationStore locale changes', () => {
   });
 });
 
+describe('StationStore lifecycle', () => {
+  it('does not register dead listeners when mounting a disposed store', () => {
+    const local = new StationStore(createUi());
+    local.mount();
+    local.dispose();
+    runtime.handlers.clear();
+
+    // The gates and pollers were permanently torn down; a re-mount must
+    // refuse instead of silently registering listeners whose callbacks no-op
+    // on the disposed flag.
+    local.mount();
+
+    expect(runtime.handlers.size).toBe(0);
+    expect(local.disposed).toBe(true);
+  });
+});
+
 afterEach(() => {
   store?.dispose();
   store = null;
@@ -417,6 +434,53 @@ describe('StationStore startup', () => {
     expect(backend.ScanAndFetchStations).not.toHaveBeenCalled();
   });
 
+  it('arms the auto-sleep busy flag from the health snapshot when the start event was missed', async () => {
+    backend.GetScanOnStartup.mockResolvedValue(false);
+    backend.GetAPIStatus.mockResolvedValue({
+      running: true,
+      address: '127.0.0.1:7575',
+      error: '',
+      warnings: [],
+      configWritable: true,
+      activeOperations: [{ id: 61, kind: 'auto-sleep' }],
+      operationRevision: 2
+    });
+
+    const { store } = mountStore();
+    await vi.waitFor(() => expect(store.autoSleepRunning).toBe(true));
+
+    expect(store.scanLocked).toBe(true);
+    expect(store.bulkLocked).toBe(true);
+    expect(store.externalScanning).toBe(false);
+  });
+
+  it('defers and retries the startup scan when the scanning probe rejects', async () => {
+    vi.useFakeTimers();
+    // A rejected probe must land in the "no authoritative observation"
+    // bucket: classifying it as idle would start the scan against an
+    // unknown backend state, and a busy rejection would then drop the
+    // configured startup scan for the whole session.
+    backend.IsScanning.mockRejectedValue(new Error('bindings unavailable'));
+    backend.ScanAndFetchStations
+      .mockRejectedValueOnce(new Error('scan is already in progress'))
+      .mockResolvedValue([createStation()]);
+    mountStore();
+    await vi.waitFor(() => expect(backend.ScanAndFetchStations).toHaveBeenCalledTimes(1));
+    const internals = store as unknown as {
+      startupScanDeferred: boolean;
+      deferredStartupScanTimer: ReturnType<typeof setInterval> | null;
+    };
+    // The busy rejection re-arms the deferred retry instead of giving up.
+    expect(internals.startupScanDeferred).toBe(true);
+    expect(internals.deferredStartupScanTimer).not.toBeNull();
+
+    await vi.advanceTimersByTimeAsync(3_000);
+    await vi.waitFor(() => expect(backend.ScanAndFetchStations).toHaveBeenCalledTimes(2));
+    expect(store?.scanError).toBeNull();
+    expect(store?.stations).toHaveLength(1);
+    expect(internals.startupScanDeferred).toBe(false);
+  });
+
   it('cancels a deferred startup scan when the preference is disabled before the lock clears', async () => {
     backend.GetAPIStatus.mockResolvedValue({
       running: true,
@@ -554,6 +618,34 @@ describe('StationStore external scan stop', () => {
     expect(store.stoppingScan).toBe(false);
     expect(store.scanRunning).toBe(false);
     expect(backend.ScanAndFetchStations).not.toHaveBeenCalled();
+  });
+
+  it('recovers a stop whose StopScan promise never settles', async () => {
+    vi.useFakeTimers();
+    backend.IsScanning.mockResolvedValue(true);
+    backend.StopScan.mockReturnValue(new Promise(() => {}));
+    const { store } = mountStore();
+    await vi.waitFor(() => expect(store.externalScanning).toBe(true));
+
+    const stopping = store.stopScan();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(backend.StopScan).toHaveBeenCalledOnce();
+    expect(store.stoppingScan).toBe(true);
+
+    // Well past the backend's bounded stop wait the watchdog must give up
+    // on the hung promise; the stop stays pending for the recheck chain.
+    await vi.advanceTimersByTimeAsync(45_000);
+    await stopping;
+    expect(store.stoppingScan).toBe(true);
+
+    // The backend finishes behind the scenes; the recheck chain settles the
+    // header instead of leaving it disabled on "Stopping..." forever.
+    backend.IsScanning.mockResolvedValue(false);
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    expect(store.stoppingScan).toBe(false);
+    expect(store.externalScanning).toBe(false);
+    expect(store.scanRunning).toBe(false);
   });
 });
 

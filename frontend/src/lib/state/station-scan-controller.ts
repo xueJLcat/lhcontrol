@@ -36,6 +36,14 @@ const STOP_RECHECK_MAX_ATTEMPTS = 10;
 const SCAN_WATCHDOG_DELAY_MS = 90000;
 const SCAN_WATCHDOG_RECHECK_DELAY_MS = 5000;
 const SCAN_WATCHDOG_MAX_ATTEMPTS = 24;
+// The backend bounds every StopScan wait (30s in the station layer), so a
+// Wails promise still pending past this window belongs to a wedged binding.
+// Like the local-scan and bulk-cancel watchdogs, recover instead of waiting
+// on the hung promise: a stop whose promise never settles keeps the header
+// disabled on "Stopping..." forever otherwise (the stop-recheck chain and the
+// periodic poll only run once this call returns, and the poll cannot clear
+// stoppingScan while the backend keeps reporting the scan).
+const STOP_SCAN_WATCHDOG_DELAY_MS = 45000;
 
 export interface StationScanHost {
   stations: StationInfo[];
@@ -88,6 +96,27 @@ export class StationScanController {
   private cancelScanWatchdog() {
     if (this.scanWatchdogTimer !== null) clearTimeout(this.scanWatchdogTimer);
     this.scanWatchdogTimer = null;
+  }
+
+  // Races StopScan against a bounded watchdog. A wedged Wails binding
+  // resolves as 'watchdog' instead of keeping the stop flow pending forever;
+  // a backend error still rejects so the existing catch classifies it. The
+  // underlying promise's late settlement is ignored and cannot become an
+  // unhandled rejection.
+  private awaitStopScanWithWatchdog(): Promise<'settled' | 'watchdog'> {
+    return new Promise<'settled' | 'watchdog'>((resolve, reject) => {
+      const timer = setTimeout(() => resolve('watchdog'), STOP_SCAN_WATCHDOG_DELAY_MS);
+      void StopScan().then(
+        () => {
+          clearTimeout(timer);
+          resolve('settled');
+        },
+        (error: unknown) => {
+          clearTimeout(timer);
+          reject(error);
+        }
+      );
+    });
   }
 
   private armScanWatchdog(operationEpoch: number, statusOperation: number) {
@@ -411,6 +440,11 @@ export class StationScanController {
         this.host.statusMessage = classified.kind === 'unknown'
           ? t('Scan failed.')
           : t('Scan failed: {heading}', { heading: scanErrorCopy(classified).heading });
+        // A busy rejection is a lock the synchronous entry guard could not
+        // see (another backend owner). Honor the documented contract and
+        // report it as "did not start" so the startup flow can defer and
+        // retry instead of dropping the configured scan for the session.
+        if (classified.kind === 'busy') return false;
       }
     } finally {
       this.cancelScanWatchdog();
@@ -439,7 +473,18 @@ export class StationScanController {
     this.host.stopRequestPending = true;
     this.host.statusMessage = t('Stopping scan...');
     try {
-      await StopScan();
+      if (await this.awaitStopScanWithWatchdog() === 'watchdog') {
+        // The stop request may still drain on the backend; keep the stopping
+        // state and let the recheck chain (or the periodic poll) observe the
+        // terminal outcome instead of pinning the header on this hung call.
+        if (!this.host.gates.canCommitOperation(operationEpoch)) return;
+        this.host.stopRequestPending = false;
+        if (this.host.gates.canCommitStatus(statusOperation)) {
+          this.host.statusMessage = t('Stopping scan...');
+        }
+        this.scheduleStopRecheck(operationEpoch, statusOperation, requestGeneration, 1);
+        return;
+      }
       if (!this.host.gates.canCommitOperation(operationEpoch)) return;
       this.host.stopRequestPending = false;
       if (!this.host.stoppingScan) return;

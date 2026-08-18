@@ -241,6 +241,55 @@ describe('AutoSleepEventCoordinator', () => {
     expect(dependencies.setRunning).toHaveBeenLastCalledWith(false);
   });
 
+  it('arms the running flag from an authoritative snapshot when the start event was missed', () => {
+    const dependencies = {
+      isDisposed: vi.fn(() => false),
+      setRunning: vi.fn(),
+      beginStatusOperation: vi.fn(),
+      setStatusMessage: vi.fn(),
+      applyStations: vi.fn(),
+      foregroundOwnsStatusLine: vi.fn(() => false)
+    };
+    const coordinator = new AutoSleepEventCoordinator(dependencies);
+
+    // A UI (re)mount that missed the "started" lifecycle event recovers the
+    // locked state from the health snapshot listing the action.
+    coordinator.noteActiveSnapshot();
+    expect(dependencies.setRunning).toHaveBeenCalledWith(true);
+
+    // While a sequenced action is tracked the snapshot must not re-arm it.
+    vi.clearAllMocks();
+    coordinator.handle({ id: 3, phase: 'started' });
+    expect(dependencies.setRunning).toHaveBeenLastCalledWith(true);
+    vi.clearAllMocks();
+    coordinator.noteActiveSnapshot();
+    expect(dependencies.setRunning).not.toHaveBeenCalled();
+
+    // The terminal event clears the flag.
+    coordinator.handle({ id: 3, phase: 'completed', success: 1 });
+    expect(dependencies.setRunning).toHaveBeenLastCalledWith(false);
+  });
+
+  it('clears a snapshot-armed run after two consecutive idle snapshots', () => {
+    const dependencies = {
+      isDisposed: vi.fn(() => false),
+      setRunning: vi.fn(),
+      beginStatusOperation: vi.fn(),
+      setStatusMessage: vi.fn(),
+      applyStations: vi.fn(),
+      foregroundOwnsStatusLine: vi.fn(() => false)
+    };
+    const coordinator = new AutoSleepEventCoordinator(dependencies);
+
+    coordinator.noteActiveSnapshot();
+    vi.clearAllMocks();
+
+    coordinator.reconcileIdle();
+    expect(dependencies.setRunning).not.toHaveBeenCalledWith(false);
+    coordinator.reconcileIdle();
+    expect(dependencies.setRunning).toHaveBeenLastCalledWith(false);
+  });
+
   it('keeps a foreground operation status line when auto sleep skips while it runs', () => {
     const dependencies = {
       isDisposed: vi.fn(() => false),

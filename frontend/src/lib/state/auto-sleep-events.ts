@@ -59,9 +59,17 @@ export class AutoSleepEventCoordinator {
 
   // A snapshot that lists an auto-sleep action proves the run active; discard
   // any accumulated idle-snapshot count so the following clear needs two fresh
-  // idle observations again.
+  // idle observations again. Arm the visible flag when no sequenced action is
+  // tracked: a UI (re)mount that missed the "started" lifecycle event then
+  // recovers the locked state from the authoritative snapshot instead of
+  // waiting for an event that will never arrive. The terminal event still
+  // clears the flag through its own ID handling, and two consecutive idle
+  // snapshots clear it when that event is lost as well.
   noteActiveSnapshot() {
     this.consecutiveIdleSnapshots = 0;
+    if (this.activeActionIds.size === 0) {
+      this.dependencies.setRunning(true);
+    }
   }
 
   handle(event: AutoSleepEvent) {

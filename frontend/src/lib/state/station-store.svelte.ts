@@ -758,7 +758,11 @@ export class StationStore {
   }
 
   mount() {
-    if (this.mounted) return;
+    // A disposed store stays inert: its gates and pollers were permanently
+    // torn down, so re-mounting could only register listeners whose
+    // callbacks no-op on the disposed flag. Refuse instead of silently
+    // leaking dead subscriptions.
+    if (this.mounted || this.disposed) return;
     this.mounted = true;
     const startupScanEpoch = this.gates.currentScanEpoch;
     this.cancelExternalScanStartedListener = EventsOn('external-scan-started', (value: unknown) => {
@@ -849,7 +853,12 @@ export class StationStore {
     // happened so startup waits for the response that can actually commit.
     const startupAPIStatusReady = statusPollIntervalReady.then(() => this.startupAPIStatusReady);
     void (async () => {
-      const startupScanningProbe = IsScanning().catch(() => false);
+      // A rejected probe belongs in the "no authoritative observation" bucket
+      // (null), matching the timeout fallback below: classifying it as "not
+      // scanning" would start the configured startup scan against a backend
+      // whose state is unknown, and a busy rejection would then drop the
+      // scan for the session instead of deferring it.
+      const startupScanningProbe: Promise<boolean | null> = IsScanning().catch(() => null);
       const startupBarrier = Promise.all([
         startupScanningProbe,
         startupScanPreferenceReady,
@@ -942,9 +951,15 @@ export class StationStore {
     }
     this.setStartupScanDeferred(false);
     void this.startScan().then((started) => {
-      // A lock can land between the guard above and the scan start; re-arm so
-      // the configured startup scan is not silently dropped by the race.
-      if (!started && !this.disposed && this.scanOnStartupEnabled) this.setStartupScanDeferred(true);
+      // A lock can land between the guard above and the scan start, or the
+      // backend can reject a started attempt as busy; re-arm so the
+      // configured startup scan is not silently dropped. Retry through the
+      // interval instead of an immediate attempt: a busy backend is still
+      // holding its lock, and looping would hammer it without delay.
+      if (!started && !this.disposed && this.scanOnStartupEnabled) {
+        this.startupScanDeferred = true;
+        this.armDeferredStartupScanRetry();
+      }
     });
   }
 
