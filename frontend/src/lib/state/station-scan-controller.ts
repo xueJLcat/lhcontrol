@@ -236,7 +236,11 @@ export class StationScanController {
     const scanning = await IsScanning().catch(() => true);
     if (host.disposed || !host.stoppingScan || host.stopRequestGeneration !== requestGeneration) return;
     if (!host.gates.canCommitOperation(operationEpoch)) return;
-    if (scanning && host.globalOperation === 'scanning') {
+    if (scanning) {
+      // The backend can keep reporting the scan briefly after the local
+      // workflow settled (or while it still runs). Keep the draining marker
+      // and recheck: the periodic poll must not adopt or flag our own scan
+      // while the stop is winding down.
       this.scheduleStopRecheck(operationEpoch, statusOperation, requestGeneration, attempt + 1);
       return;
     }
@@ -307,6 +311,10 @@ export class StationScanController {
       if (this.host.autoSleepRunning || this.host.externalOperationRunning ||
         this.host.isLoading || this.host.isBulkLoading || this.host.anyDeviceOperation) return;
       const wasExternalScanning = this.host.externalScanning;
+      // Captured next to the flag: a terminal event handler that runs before
+      // the !scanning branch below bumps the scan epoch and arms its own
+      // recovery claim (or commits the outcome outright).
+      const externalScanEpoch = this.host.gates.currentScanEpoch;
       // While a local stop is still draining, the backend can transiently keep
       // reporting a running scan after the local scan promise settled. That is
       // our own scan winding down, not an unknown external one: adopting it
@@ -326,7 +334,12 @@ export class StationScanController {
         (this.host.externalScanning || (!this.host.stoppingScan && !this.host.stopRequestPending));
       if (!scanning) {
         this.host.stoppingScan = false;
-        if (wasExternalScanning) {
+        // Mark a recovery only while the displayed scan is still unclaimed. A
+        // terminal event handler that already ran advanced the scan epoch when
+        // claiming the outcome, and armed its own recovery epochs; re-marking
+        // would replay a full recovery against the committed outcome, or
+        // against a newer scan's epoch when one started meanwhile.
+        if (wasExternalScanning && this.host.gates.currentScanEpoch === externalScanEpoch) {
           this.host.externalScan.markRecoveryPending();
         }
         if (this.host.externalScan.hasPendingRecovery()) {
@@ -461,7 +474,13 @@ export class StationScanController {
       // scanning state.
       if (!this.host.disposed && this.host.gates.canCommitOperation(operationEpoch)) {
         if (this.host.globalOperation === 'scanning') this.host.globalOperation = 'idle';
-        if (!this.host.stopRequestPending && !this.host.externalScanning) this.host.stoppingScan = false;
+        if (!this.host.stopRequestPending && !this.host.externalScanning && this.host.stoppingScan) {
+          // A stop was requested for this scan, but the backend can keep
+          // reporting it briefly after the workflow settles. Hand the marker
+          // to the stop-recheck chain instead of clearing it: the periodic
+          // poll must not adopt our own draining scan as an external one.
+          this.scheduleStopRecheck(operationEpoch, statusOperation, this.host.stopRequestGeneration, 0);
+        }
       }
       this.host.maybeEndScanTimer();
     }
@@ -503,7 +522,18 @@ export class StationScanController {
         );
         if (outcome === 'still-scanning') this.scheduleStopRecheck(operationEpoch, statusOperation, requestGeneration, 1);
       } else {
-        if (this.host.globalOperation !== 'scanning') this.host.stoppingScan = false;
+        if (this.host.globalOperation !== 'scanning') {
+          if (this.host.stoppingScan) {
+            // The scan workflow already settled locally, but the backend can
+            // keep reporting it briefly while it drains. Hand the stopping
+            // marker to the recheck chain instead of clearing it here: the
+            // periodic poll must not adopt our own draining scan as an
+            // external one. The chain writes the terminal summary once the
+            // backend reports no scan.
+            this.scheduleStopRecheck(operationEpoch, statusOperation, requestGeneration, 1);
+            return;
+          }
+        }
         if (this.host.gates.canCommitStatus(statusOperation)) {
           // The scan can complete on its own while the stop is in flight;
           // report its real outcome instead of a plain "stopped" message.
