@@ -116,7 +116,7 @@ describe('App asynchronous operations', () => {
     for (const button of scanningButtons) expect(button).toBeEnabled();
   });
 
-  it('serializes a slow API status poll and commits one trailing result', async () => {
+  it('bounds a hung API status probe and keeps polling afterwards', async () => {
     vi.useFakeTimers();
     let resolveFirst!: (value: unknown) => void;
     api.GetAPIStatus
@@ -124,12 +124,17 @@ describe('App asynchronous operations', () => {
       .mockResolvedValueOnce({ running: false, address: '127.0.0.1:7575', error: 'new failure' });
 
     render(App);
-    await vi.advanceTimersByTimeAsync(15_000);
+    // The hung probe must not wedge the poller: its read timeout commits a
+    // failure, and the next interval tick issues a fresh probe.
+    await vi.advanceTimersByTimeAsync(10_000);
     expect(api.GetAPIStatus).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(api.GetAPIStatus).toHaveBeenCalledTimes(2);
 
+    // The late resolution of the timed-out probe is stale and must not
+    // overwrite the newer probe's committed failure.
     resolveFirst({ running: true, address: '127.0.0.1:7575', error: '' });
     await vi.advanceTimersByTimeAsync(0);
-    await vi.waitFor(() => expect(api.GetAPIStatus).toHaveBeenCalledTimes(2));
     await vi.waitFor(() => expect(screen.getByText('API offline')).toHaveAttribute('title', 'new failure'));
     expect(screen.getByText('API offline')).toHaveAttribute('title', 'new failure');
   });

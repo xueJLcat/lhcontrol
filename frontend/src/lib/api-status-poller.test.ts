@@ -197,4 +197,24 @@ describe('ApiStatusPoller', () => {
     expect(backend.GetAPIStatus).toHaveBeenCalledTimes(3);
     poller.dispose();
   });
+
+  it('bounds a hung status read and stays usable afterwards', async () => {
+    vi.useFakeTimers();
+    backend.GetAPIStatus
+      .mockReturnValueOnce(new Promise(() => {}))
+      .mockResolvedValueOnce(status());
+    const host = makeHost();
+    const poller = new ApiStatusPoller(host);
+
+    const wedged = poller.refresh();
+    await vi.advanceTimersByTimeAsync(10_000);
+    await wedged;
+    expect(host.commitFailure).toHaveBeenCalledWith('Error: API status read timed out');
+
+    // The timed-out request must not strand the poller: later probes run and
+    // commit normally instead of joining a completion that never resolves.
+    await poller.refresh();
+    expect(host.commitStatus).toHaveBeenCalledWith(status());
+    poller.dispose();
+  });
 });

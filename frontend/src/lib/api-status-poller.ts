@@ -14,6 +14,29 @@ interface RefreshCompletion {
   resolve(): void;
 }
 
+// Wails bindings carry no timeout of their own. A hung GetAPIStatus would
+// keep activeRevision set forever, so every later tick and explicit refresh
+// joins a trailing completion that never resolves: the health pills freeze
+// and awaiters (the API listen-address save) stay busy for the session.
+// Bound the physical request and treat a timeout as an ordinary probe failure.
+const API_STATUS_READ_TIMEOUT_MS = 10_000;
+
+function readAPIStatusWithTimeout(): Promise<main.APIStatus> {
+  return new Promise<main.APIStatus>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('API status read timed out')), API_STATUS_READ_TIMEOUT_MS);
+    void GetAPIStatus().then(
+      (status) => {
+        clearTimeout(timer);
+        resolve(status);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      }
+    );
+  });
+}
+
 function createRefreshCompletion(): RefreshCompletion {
   let resolve!: () => void;
   const promise = new Promise<void>((settle) => { resolve = settle; });
@@ -84,7 +107,7 @@ export class ApiStatusPoller {
       // inside it is not a rejection of GetAPIStatus and would otherwise
       // escape every handler as an unobserved failure, leaving this poll
       // neither committed nor marked failed.
-      request = GetAPIStatus().then((status) => {
+      request = readAPIStatusWithTimeout().then((status) => {
         if (this.host.isDisposed() || !this.revisions.isCurrent(revision)) return;
         this.host.commitStatus(status);
         const current = new Set(status.warnings ?? []);
