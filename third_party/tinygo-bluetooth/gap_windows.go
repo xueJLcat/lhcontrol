@@ -36,7 +36,73 @@ var (
 	// failed stop; cutting the drain short reports a timeout for a scan that
 	// is ending cleanly and leaves the watcher draining while it is released.
 	scanStopDrainTimeout = 10 * time.Second
+	// watcherSetupCallLimit bounds each watcher property/event registration
+	// COM call. They normally complete in microseconds; a wedged radio or
+	// driver must not keep ScanWithStart blocked (and the adapter scan slot
+	// claimed) until a process restart.
+	watcherSetupCallLimit = 2 * time.Second
+	// watcherStartCallLimit bounds watcher.Start(). The start sequence can
+	// hang when the radio is removed or the driver wedges; the budget lets
+	// ScanWithStart return and release the adapter slot so later scans can
+	// proceed. The hung Start keeps running in the background; if it still
+	// succeeds late, rescueLateStart tears the orphaned watcher down.
+	watcherStartCallLimit = 8 * time.Second
+	// watcherStopCallLimit bounds every watcher.Stop() attempt. A hung Stop
+	// must not keep stopRequests undelivered: waitForScanStop only leaves
+	// its initial wait once a stop outcome arrives, and without a budget one
+	// wedged Stop would keep ScanWithStart blocked forever with the adapter
+	// slot claimed.
+	watcherStopCallLimit = 5 * time.Second
+	// watcherStatusCallLimit bounds a single watcher status read. The stop
+	// retry loop treats a timed-out read like any other status error and
+	// terminates on its own deadline instead of hanging inside the call.
+	watcherStatusCallLimit = 2 * time.Second
+	// lateStartRescueLimit bounds the background teardown of a watcher whose
+	// Start returned only after the start budget abandoned it.
+	lateStartRescueLimit = 30 * time.Second
 )
+
+// WatcherCallTimeoutError reports a watcher COM call that did not return
+// before its budget elapsed. The call keeps running on its COM thread; the
+// scan session no longer waits on it.
+type WatcherCallTimeoutError struct {
+	Budget time.Duration
+}
+
+func (e *WatcherCallTimeoutError) Error() string {
+	return fmt.Sprintf("Bluetooth watcher call did not return within %s", e.Budget)
+}
+
+// boundedWatcherCall runs a watcher COM call on its own goroutine and waits
+// at most limit for it. COM calls run on the caller's apartment, so the
+// helper initializes its own thread before invoking the call; a wedged radio
+// or driver keeps the background thread blocked, but the scan session
+// proceeds with a timeout instead of hanging until a process restart.
+func boundedWatcherCall(limit time.Duration, call func() error) error {
+	done := make(chan error, 1)
+	go func() {
+		leaveThread, threadErr := enterWinRTThread()
+		if threadErr == nil {
+			defer leaveThread()
+		}
+		done <- call()
+	}()
+	timer := time.NewTimer(limit)
+	defer timer.Stop()
+	select {
+	case err := <-done:
+		return err
+	case <-timer.C:
+		return &WatcherCallTimeoutError{Budget: limit}
+	}
+}
+
+// isWatcherCallTimeout reports an error produced by a bounded watcher call
+// that expired before the COM call returned.
+func isWatcherCallTimeout(err error) bool {
+	var timeoutErr *WatcherCallTimeoutError
+	return errors.As(err, &timeoutErr)
+}
 
 type scanControl struct {
 	watcher      *advertisement.BluetoothLEAdvertisementWatcher
@@ -52,6 +118,11 @@ type scanControl struct {
 	stopIssued  bool  // watcher.Stop() has been attempted after Start
 	stopErr     error // result of the first watcher.Stop() attempt
 	terminal    bool  // watcher confirmed Stopped/Aborted
+	// startWedged records that watcher.Start() exhausted its bounded budget.
+	// The COM call may still succeed late in the background, so the watcher
+	// must not be released by cleanup (it can still be live); a rescue
+	// goroutine owns its teardown instead.
+	startWedged bool
 }
 
 // stopWatcher issues watcher.Stop() once watcher.Start() has been accepted.
@@ -63,19 +134,23 @@ type scanControl struct {
 // yet, so the caller must not deliver one.
 func (control *scanControl) stopWatcher() (stopErr error, deferred bool) {
 	control.mutex.Lock()
-	defer control.mutex.Unlock()
 	if control.terminal {
 		// The watcher already reached Stopped/Aborted on its own; issuing
 		// another Stop can be rejected by WinRT and turn a clean finish into
 		// a spurious stop failure. Report the recorded result instead.
-		return control.stopErr, false
+		stopErr = control.stopErr
+		control.mutex.Unlock()
+		return stopErr, false
 	}
 	if !control.started {
 		control.pendingStop = true
+		control.mutex.Unlock()
 		return nil, true
 	}
 	if control.stopIssued {
-		return control.stopErr, false
+		stopErr = control.stopErr
+		control.mutex.Unlock()
+		return stopErr, false
 	}
 	if alreadyTerminal(control.watcher) {
 		// The watcher stopped or aborted on its own (radio removed, disabled
@@ -83,11 +158,31 @@ func (control *scanControl) stopWatcher() (stopErr error, deferred bool) {
 		// can reject a redundant Stop and turn a clean end into a spurious
 		// stop failure.
 		control.terminal = true
+		control.mutex.Unlock()
 		return nil, false
 	}
 	control.stopIssued = true
-	control.stopErr = control.watcher.Stop()
-	return control.stopErr, false
+	watcher := control.watcher
+	control.mutex.Unlock()
+
+	// The bounded call can take up to the stop budget; running it outside the
+	// control mutex keeps concurrent status reads and stop dedupe checks from
+	// queueing behind a wedged COM call.
+	stopErr = stopWatcherBounded(watcher)
+
+	control.mutex.Lock()
+	control.stopErr = stopErr
+	control.mutex.Unlock()
+	return stopErr, false
+}
+
+// stopWatcherBounded bounds a watcher.Stop() attempt by the stop budget. A
+// wedged Stop keeps running in the background; the caller proceeds with a
+// typed timeout so the stop outcome is always delivered.
+func stopWatcherBounded(watcher *advertisement.BluetoothLEAdvertisementWatcher) error {
+	return boundedWatcherCall(watcherStopCallLimit, func() error {
+		return stopWatcherSafely(watcher)
+	})
 }
 
 // stopWatcherSafely bounds a watcher.Stop() COM call so a panic inside WinRT
@@ -114,35 +209,53 @@ func stopWatcherSafely(watcher *advertisement.BluetoothLEAdvertisementWatcher) (
 // Stop was never retried.
 func (control *scanControl) forceStop() error {
 	control.mutex.Lock()
-	defer control.mutex.Unlock()
 	if !control.started || control.terminal {
-		return control.stopErr
+		stopErr := control.stopErr
+		control.mutex.Unlock()
+		return stopErr
 	}
 	if control.stopIssued && control.stopErr == nil {
 		// A prior Stop was accepted; stacking another would risk a WinRT
-		// rejection while the watcher drains through Stopping.
+		// rejection while the watcher drains through Stopping. A prior Stop
+		// still inside its bounded budget also reports nil here, which keeps
+		// retry ticks from stacking redundant bounded Stop attempts.
+		control.mutex.Unlock()
 		return nil
 	}
 	if alreadyTerminal(control.watcher) {
 		// The watcher finished on its own while the earlier Stop was failing
 		// or missing; re-issuing would risk a spurious rejection.
 		control.terminal = true
+		control.mutex.Unlock()
 		return nil
 	}
 	control.stopIssued = true
-	control.stopErr = stopWatcherSafely(control.watcher)
-	return control.stopErr
+	watcher := control.watcher
+	control.mutex.Unlock()
+
+	stopErr := stopWatcherBounded(watcher)
+
+	control.mutex.Lock()
+	control.stopErr = stopErr
+	control.mutex.Unlock()
+	return stopErr
 }
 
 // alreadyTerminal reports a watcher that has already reached a terminal state
 // (Stopped or Aborted), so a further Stop call would be redundant. A status
-// read failure is treated as "not terminal" so the caller still attempts the
-// stop instead of silently skipping it.
+// read failure (including a bounded-read timeout) is treated as "not
+// terminal" so the caller still attempts the stop instead of silently
+// skipping it.
 func alreadyTerminal(watcher *advertisement.BluetoothLEAdvertisementWatcher) bool {
 	if watcher == nil {
 		return false
 	}
-	status, err := watcher.GetStatus()
+	status := advertisement.BluetoothLEAdvertisementWatcherStatusCreated
+	err := boundedWatcherCall(watcherStatusCallLimit, func() error {
+		readStatus, readErr := watcher.GetStatus()
+		status = readStatus
+		return readErr
+	})
 	if err != nil {
 		return false
 	}
@@ -169,7 +282,46 @@ func (control *scanControl) ensureStopped() {
 	}
 	watcher := control.watcher
 	control.mutex.Unlock()
-	_ = stopWatcherSafely(watcher)
+	_ = stopWatcherBounded(watcher)
+}
+
+// rescueLateStart tears down a watcher whose Start only completed after the
+// start budget abandoned the scan. The watcher came up orphaned (the owning
+// ScanWithStart already returned and skipped the watcher release), so leaving
+// it alone would keep the radio scanning with no owner. Polling and the stop
+// are bounded: a permanently wedged Start never produces a running watcher,
+// and the rescue gives up after its limit.
+func (control *scanControl) rescueLateStart(watcher *advertisement.BluetoothLEAdvertisementWatcher) {
+	defer func() {
+		_ = recover()
+	}()
+	deadline := time.NewTimer(lateStartRescueLimit)
+	defer deadline.Stop()
+	ticker := time.NewTicker(scanStopPollInterval)
+	defer ticker.Stop()
+	for {
+		status := advertisement.BluetoothLEAdvertisementWatcherStatusCreated
+		statusErr := boundedWatcherCall(watcherStatusCallLimit, func() error {
+			readStatus, readErr := watcher.GetStatus()
+			status = readStatus
+			return readErr
+		})
+		if statusErr == nil {
+			switch status {
+			case advertisement.BluetoothLEAdvertisementWatcherStatusStarted:
+				_ = stopWatcherBounded(watcher)
+				return
+			case advertisement.BluetoothLEAdvertisementWatcherStatusStopped,
+				advertisement.BluetoothLEAdvertisementWatcherStatusAborted:
+				return
+			}
+		}
+		select {
+		case <-deadline.C:
+			return
+		case <-ticker.C:
+		}
+	}
 }
 
 // releaseWatcher frees the watcher COM reference only when it is safe: when
@@ -178,14 +330,17 @@ func (control *scanControl) ensureStopped() {
 // is still draining can cut the drain short so the radio keeps scanning and
 // rejects the next Start with ResourceInUse; a watcher that never reaches a
 // terminal state within the wait is abandoned (reference leaked) rather than
-// released, letting WinRT finish draining on its own.
+// released, letting WinRT finish draining on its own. A wedged-start watcher
+// is always abandoned: its Start call may still be in flight, and releasing
+// the object could free it underneath the pending COM call.
 func (control *scanControl) releaseWatcher(watcher *advertisement.BluetoothLEAdvertisementWatcher) {
 	control.mutex.Lock()
 	started := control.started
 	terminal := control.terminal
+	wedged := control.startWedged
 	control.mutex.Unlock()
-	if watcher == nil || !started || terminal {
-		if watcher != nil {
+	if watcher == nil || wedged || !started || terminal {
+		if watcher != nil && !wedged {
 			watcher.Release()
 		}
 		return
@@ -437,12 +592,40 @@ func (a *Adapter) Scan(callback func(*Adapter, ScanResult)) (err error) {
 	return a.ScanWithStart(callback, nil)
 }
 
+// ScanSession identifies one transport scan slot so a stop can target the
+// scan it belongs to instead of whatever scan happens to own the adapter
+// slot when the stop finally runs. Implementations are opaque; callers hand
+// the value back through StopScanSession.
+type ScanSession interface {
+	// ScanSessionState returns the transport-private scan control. Callers
+	// must treat it as opaque.
+	ScanSessionState() any
+}
+
+type scanSessionToken struct {
+	control *scanControl
+}
+
+func (token scanSessionToken) ScanSessionState() any { return token.control }
+
 // ScanWithStart is the Windows scan implementation with an optional callback
 // that runs after watcher.Start() has been accepted. The watcher may still
 // abort afterwards; readiness is not guaranteed by the Start call alone.
 // Applications that implement a fixed scan duration should start their timer
 // from this callback, not before WinRT watcher setup.
 func (a *Adapter) ScanWithStart(callback func(*Adapter, ScanResult), started func()) (err error) {
+	return a.ScanWithStartSession(callback, func(ScanSession) {
+		if started != nil {
+			started()
+		}
+	})
+}
+
+// ScanWithStartSession behaves like ScanWithStart and additionally hands the
+// started hook the session identity. Callers keep it so their stop requests
+// can use StopScanSession and never resolve against a later scan that already
+// owns the adapter slot.
+func (a *Adapter) ScanWithStartSession(callback func(*Adapter, ScanResult), started func(ScanSession)) (err error) {
 	leaveThread, err := enterWinRTThread()
 	if err != nil {
 		return err
@@ -462,8 +645,16 @@ func (a *Adapter) ScanWithStart(callback func(*Adapter, ScanResult), started fun
 	// when the radio is removed or the driver wedges. Run it outside the
 	// watcher lock so a hung creation cannot pin every concurrent Scan and
 	// StopScan caller; a racing scan that wins the slot below gets priority
-	// and the extra watcher is released.
-	watcher, err := advertisement.NewBluetoothLEAdvertisementWatcher()
+	// and the extra watcher is released. The creation itself is bounded too:
+	// a wedged creation must not keep the adapter scan slot claimed forever.
+	var watcher *advertisement.BluetoothLEAdvertisementWatcher
+	err = boundedWatcherCall(watcherSetupCallLimit, func() error {
+		created, createErr := advertisement.NewBluetoothLEAdvertisementWatcher()
+		if createErr == nil {
+			watcher = created
+		}
+		return createErr
+	})
 	if err != nil {
 		return err
 	}
@@ -495,7 +686,9 @@ func (a *Adapter) ScanWithStart(callback func(*Adapter, ScanResult), started fun
 
 	// Set scanning mode to active so we receive scan responses
 	// from devices in advertising mode
-	err = watcher.SetScanningMode(advertisement.BluetoothLEScanningModeActive)
+	err = boundedWatcherCall(watcherSetupCallLimit, func() error {
+		return watcher.SetScanningMode(advertisement.BluetoothLEScanningModeActive)
+	})
 	if err != nil {
 		return
 	}
@@ -532,7 +725,14 @@ func (a *Adapter) ScanWithStart(callback func(*Adapter, ScanResult), started fun
 		}
 	})
 
-	receivedToken, err := watcher.AddReceived(handler)
+	var receivedToken foundation.EventRegistrationToken
+	err = boundedWatcherCall(watcherSetupCallLimit, func() error {
+		token, addErr := watcher.AddReceived(handler)
+		if addErr == nil {
+			receivedToken = token
+		}
+		return addErr
+	})
 	if err != nil {
 		handler.Release()
 		return
@@ -544,16 +744,29 @@ func (a *Adapter) ScanWithStart(callback func(*Adapter, ScanResult), started fun
 		// Prevent callback bodies from starting before unregistering both
 		// events. Remove the registrations first, then wait for callbacks that
 		// were already dispatched before releasing handlers or the watcher.
+		// Both removals are bounded: a wedged radio can hang them the same
+		// way it hangs Start/Stop. A removal that times out leaves its
+		// registration live, so its handler must be leaked rather than
+		// released: WinRT could still dispatch it once the watcher comes up,
+		// and a freed handler would turn that dispatch into a crash. The
+		// closed callback gate keeps any such late dispatch a no-op.
 		callbacks.close()
-		_ = watcher.RemoveReceived(receivedToken)
+		receivedRemoved := boundedWatcherCall(watcherSetupCallLimit, func() error {
+			return watcher.RemoveReceived(receivedToken)
+		}) == nil
+		stoppedRemoved := true
 		if stoppedAdded {
-			_ = watcher.RemoveStopped(stoppedToken)
+			stoppedRemoved = boundedWatcherCall(watcherSetupCallLimit, func() error {
+				return watcher.RemoveStopped(stoppedToken)
+			}) == nil
 		}
 		callbacks.wait()
-		if stoppedHandler != nil {
+		if stoppedHandler != nil && stoppedRemoved {
 			stoppedHandler.Release()
 		}
-		handler.Release()
+		if receivedRemoved {
+			handler.Release()
+		}
 	}()
 
 	// Wait for when advertisement has stopped by a call to StopScan().
@@ -602,14 +815,34 @@ func (a *Adapter) ScanWithStart(callback func(*Adapter, ScanResult), started fun
 		})
 	})
 
-	stoppedToken, err = watcher.AddStopped(stoppedHandler)
+	err = boundedWatcherCall(watcherSetupCallLimit, func() error {
+		token, addErr := watcher.AddStopped(stoppedHandler)
+		if addErr == nil {
+			stoppedToken = token
+		}
+		return addErr
+	})
 	if err != nil {
 		return
 	}
 	stoppedAdded = true
 
-	err = watcher.Start()
+	err = boundedWatcherCall(watcherStartCallLimit, watcher.Start)
 	if err != nil {
+		if isWatcherCallTimeout(err) {
+			// The Start COM call is still in flight on its own thread and may
+			// still succeed late. The watcher cannot be released safely then
+			// (releaseWatcher abandons a wedged-start watcher), so a rescue
+			// goroutine owns tearing it down once it reports Started. Record
+			// the stop intent too: a stop that lands before the late start is
+			// honored by the same pendingStop machinery a pre-Start StopScan
+			// uses, except the rescue (not this call) will issue it.
+			control.mutex.Lock()
+			control.startWedged = true
+			control.pendingStop = true
+			control.mutex.Unlock()
+			go control.rescueLateStart(watcher)
+		}
 		return err
 	}
 	control.mutex.Lock()
@@ -627,13 +860,23 @@ func (a *Adapter) ScanWithStart(callback func(*Adapter, ScanResult), started fun
 		control.stopOnce.Do(func() { control.stopRequests <- stopErr })
 	}
 	if started != nil {
-		started()
+		started(scanSessionToken{control: control})
 	}
 
 	// Wait until advertisement has stopped, and finish. Once StopScan is
 	// requested, status polling and retries bound cleanup even if WinRT omits
-	// the Stopped event.
-	err = waitForScanStop(stoppingChan, control.stopRequests, control.forceStop, watcher.GetStatus)
+	// the Stopped event. The status reads are bounded too so a wedged radio
+	// cannot hang the loop between its ticker and deadline selects.
+	readStatus := func() (advertisement.BluetoothLEAdvertisementWatcherStatus, error) {
+		status := advertisement.BluetoothLEAdvertisementWatcherStatusCreated
+		statusErr := boundedWatcherCall(watcherStatusCallLimit, func() error {
+			readResult, readErr := watcher.GetStatus()
+			status = readResult
+			return readErr
+		})
+		return status, statusErr
+	}
+	err = waitForScanStop(stoppingChan, control.stopRequests, control.forceStop, readStatus)
 	var stopTimeout *ScanStopTimeoutError
 	if !errors.As(err, &stopTimeout) {
 		control.markTerminal()
@@ -882,6 +1125,45 @@ func GUIDToUUID(guid syscall.GUID) UUID {
 	})
 }
 
+// stopScanControlWithoutThread handles a stop request whose caller cannot
+// enter its WinRT thread. The outcome mirrors a regular stop: a watcher that
+// has not accepted Start records the stop as pending (ScanWithStart issues
+// the real stop after Start succeeds and delivers its actual result;
+// consuming stopOnce on the thread error alone would make that clean result
+// undeliverable), a terminal scan reports not-scanning, and anything else
+// communicates the thread failure as the stop outcome.
+func stopScanControlWithoutThread(control *scanControl, threadErr error) error {
+	control.mutex.Lock()
+	if !control.started && !control.terminal {
+		control.pendingStop = true
+		control.mutex.Unlock()
+		return nil
+	}
+	terminal := control.terminal
+	control.mutex.Unlock()
+	if terminal {
+		// The scan already finished cleanly; a late stop that cannot enter
+		// its WinRT thread is an idempotent no-op, not a failure.
+		return ErrNotScanning
+	}
+	control.stopOnce.Do(func() { control.stopRequests <- threadErr })
+	return threadErr
+}
+
+// stopScanControl issues a stop against one specific scan control. stopWatcher
+// dedupes concurrent callers so at most one watcher.Stop() COM call is issued
+// per scan; a stop before Start is recorded and executed right after Start
+// instead of being lost. A deferred stop has no result yet, so only a stop
+// that was actually issued delivers one; ScanWithStart delivers the deferred
+// stop's real result after Start.
+func stopScanControl(control *scanControl) error {
+	err, deferred := control.stopWatcher()
+	if !deferred {
+		control.stopOnce.Do(func() { control.stopRequests <- err })
+	}
+	return err
+}
+
 // StopScan stops any in-progress scan. It can be called from within a Scan
 // callback to stop the current scan. If no scan is in progress, an error will
 // be returned.
@@ -890,57 +1172,49 @@ func (a *Adapter) StopScan() error {
 	if err != nil {
 		a.watcherMutex.RLock()
 		control := a.scan
+		a.watcherMutex.RUnlock()
 		if control == nil || control.watcher == nil {
 			// No scan is active, so the stop is a no-op regardless of the
 			// thread failure; reporting the initialization error would make
 			// idempotent stops (shutdown, late stop requests) surface bogus
 			// failures instead of the documented not-scanning outcome.
-			a.watcherMutex.RUnlock()
 			return ErrNotScanning
 		}
-		control.mutex.Lock()
-		if !control.started && !control.terminal {
-			// The watcher has not accepted Start yet. Record the stop as
-			// pending instead of consuming stopOnce on a thread failure:
-			// ScanWithStart issues the real stop after Start succeeds and
-			// delivers its actual result. Consuming the once here would make
-			// that clean result undeliverable and misreport the scan as
-			// failed on the thread error alone.
-			control.pendingStop = true
-			control.mutex.Unlock()
-			a.watcherMutex.RUnlock()
-			return nil
-		}
-		terminal := control.terminal
-		control.mutex.Unlock()
-		if terminal {
-			// The scan already finished cleanly; a late stop that cannot enter
-			// its WinRT thread is an idempotent no-op, not a failure.
-			a.watcherMutex.RUnlock()
-			return ErrNotScanning
-		}
-		control.stopOnce.Do(func() { control.stopRequests <- err })
-		a.watcherMutex.RUnlock()
-		return err
+		return stopScanControlWithoutThread(control, err)
 	}
 	defer leaveThread()
 
 	a.watcherMutex.RLock()
-	defer a.watcherMutex.RUnlock()
 	control := a.scan
+	a.watcherMutex.RUnlock()
 	if control == nil || control.watcher == nil {
 		return ErrNotScanning
 	}
-	// stopWatcher dedupes concurrent callers so at most one watcher.Stop()
-	// COM call is issued per scan; a stop before Start is recorded and
-	// executed right after Start instead of being lost. A deferred stop has no
-	// result yet, so only a stop that was actually issued delivers one;
-	// ScanWithStart delivers the deferred stop's real result after Start.
-	err, deferred := control.stopWatcher()
-	if !deferred {
-		control.stopOnce.Do(func() { control.stopRequests <- err })
+	// The stop acts on the snapshotted control; the adapter read lock is not
+	// held across the (bounded) Stop call so a slow stop cannot queue a new
+	// scan's slot claim behind it.
+	return stopScanControl(control)
+}
+
+// StopScanSession stops the scan identified by session. It acts on the
+// session's own control instead of resolving the scan through the adapter's
+// global slot, so a stop that runs late (for example after a COM thread
+// initialization stall) can never stop a newer scan that already owns the
+// slot. Sessions come from ScanWithStartSession's started hook.
+func (a *Adapter) StopScanSession(session ScanSession) error {
+	if session == nil {
+		return ErrNotScanning
 	}
-	return err
+	control, _ := session.ScanSessionState().(*scanControl)
+	if control == nil {
+		return ErrNotScanning
+	}
+	leaveThread, err := enterWinRTThread()
+	if err != nil {
+		return stopScanControlWithoutThread(control, err)
+	}
+	defer leaveThread()
+	return stopScanControl(control)
 }
 
 var _ GAPDevice = Device{}

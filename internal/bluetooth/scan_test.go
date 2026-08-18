@@ -158,7 +158,7 @@ func TestScanSafelyConvertsPanicToError(t *testing.T) {
 	fake.panicScan = true
 	adapter = fake
 	t.Cleanup(func() { adapter = originalAdapter })
-	if err := scanSafely(func(*tinybluetooth.Adapter, tinybluetooth.ScanResult) {}, func() {}); err == nil {
+	if err := scanSafely(nil, func(*tinybluetooth.Adapter, tinybluetooth.ScanResult) {}, func() {}); err == nil {
 		t.Fatal("scanSafely() unexpectedly ignored panic")
 	}
 }
@@ -1105,5 +1105,109 @@ func TestScanAbandonsWedgedScanStartAndReleasesSlot(t *testing.T) {
 	adapter = newFakeBLEAdapter()
 	if _, err := ScanForDuration(time.Millisecond); err != nil {
 		t.Fatalf("scan after an abandoned scan start error = %v", err)
+	}
+}
+
+// TestScanStopUsesSessionTargetedStop guards the stop identity: stops issued
+// for a session must carry the session's platform identity so a delayed stop
+// can never resolve against a newer scan that already owns the adapter slot.
+func TestScanStopUsesSessionTargetedStop(t *testing.T) {
+	originalAdapter := adapter
+	fake := newFakeBLEAdapter()
+	adapter = fake
+	t.Cleanup(func() { adapter = originalAdapter })
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	scanDone := make(chan error, 1)
+	go func() {
+		_, err := ScanForDurationContext(ctx, time.Hour)
+		scanDone <- err
+	}()
+	select {
+	case <-fake.started:
+	case <-time.After(time.Second):
+		t.Fatal("scan did not start")
+	}
+	cancel()
+	select {
+	case err := <-scanDone:
+		if !errors.Is(err, ErrScanCancelled) {
+			t.Fatalf("ScanForDurationContext() error = %v, want ErrScanCancelled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("scan did not finish after cancellation")
+	}
+	if stops := fake.sessionStops.Load(); stops == 0 {
+		t.Fatal("cancellation was not delivered through the session-targeted stop")
+	}
+	// Drain the platform scan and stop goroutines so they stop touching the
+	// fake adapter before the test swaps it back.
+	select {
+	case <-fake.stopped:
+	case <-time.After(time.Second):
+		t.Fatal("cancelled platform scan did not finish")
+	}
+}
+
+// TestScanStartTimeoutSurvivesLateStart guards the start-budget classification:
+// when the watcher accepts its Start just as the start budget expires, the
+// session was abandoned as a start timeout and must report that timeout even
+// though the started flag flipped before teardown. Reporting a plain
+// cancellation instead would mislead callers that retry cancellations but
+// treat timeouts as a distinct failure mode.
+func TestScanStartTimeoutSurvivesLateStart(t *testing.T) {
+	originalAdapter := adapter
+	originalStartWait := scanStartWaitLimit
+	fake := newFakeBLEAdapter()
+	releaseStart := make(chan struct{})
+	fake.startDelay = releaseStart
+	adapter = fake
+	scanStartWaitLimit = 20 * time.Millisecond
+	t.Cleanup(func() {
+		adapter = originalAdapter
+		scanStartWaitLimit = originalStartWait
+	})
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+	scanDone := make(chan error, 1)
+	go func() {
+		_, err := ScanForDurationContext(context.Background(), time.Second)
+		scanDone <- err
+	}()
+	// Let the start budget expire while the platform Start is held, then
+	// release the Start so it lands during teardown and flips the started
+	// flag before the classification runs.
+	time.Sleep(40 * time.Millisecond)
+	close(releaseStart)
+	select {
+	case err := <-scanDone:
+		if err == nil {
+			t.Fatal("scan unexpectedly succeeded after a start timeout")
+		}
+		if errors.Is(err, ErrScanCancelled) {
+			t.Fatalf("ScanForDurationContext() error = %v, want the start timeout instead of a cancellation", err)
+		}
+		if !isScanStartTimeout(err) {
+			t.Fatalf("ScanForDurationContext() error = %v, want the start timeout preserved", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("scan did not finish after the late start")
+	}
+	// The late start must trigger the recorded stop intent and drain both the
+	// platform scan goroutine and the stop goroutine before the adapter is
+	// swapped back.
+	select {
+	case <-fake.started:
+	case <-time.After(time.Second):
+		t.Fatal("abandoned platform scan never reported its late start")
+	}
+	select {
+	case <-fake.stopped:
+	case <-time.After(time.Second):
+		t.Fatal("late platform start was not stopped by the abandoned session")
 	}
 }

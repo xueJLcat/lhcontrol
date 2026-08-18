@@ -59,6 +59,11 @@ type scanSession struct {
 	// mirroring the other budgets, so the scan body's bounded wait for the
 	// platform watcher to accept a Start cannot race a new scan's override.
 	startWaitLimit time.Duration
+	// transportSession is the platform scan identity handed over by the
+	// started hook. Stops use it to target this session's platform scan
+	// directly; a late stop from this session must never resolve against a
+	// newer scan that already owns the adapter's global scan slot.
+	transportSession bluetooth.ScanSession
 }
 
 const defaultScanStopWait = 10 * time.Second
@@ -147,6 +152,20 @@ func (e *scanStartTimeoutError) Error() string {
 func isScanStartTimeout(err error) bool {
 	var startTimeout *scanStartTimeoutError
 	return errors.As(err, &startTimeout)
+}
+
+// isWedgedStopError reports a stop outcome that proves the platform teardown
+// never completed (a watcher call budget expired instead of watcher.Stop()
+// returning). Such stops are treated like abandoned stops: the attempt was
+// given up on, so a requested cancellation still reports the cancellation
+// instead of the teardown failure.
+func isWedgedStopError(err error) bool {
+	var stopTimeout *bluetooth.ScanStopTimeoutError
+	if errors.As(err, &stopTimeout) {
+		return true
+	}
+	var watcherTimeout *bluetooth.WatcherCallTimeoutError
+	return errors.As(err, &watcherTimeout)
 }
 
 func (s *scanSession) requestStop(reason scanStopReason) error {
@@ -244,9 +263,10 @@ func (s *scanSession) issueStop() {
 		return
 	}
 	s.stopStarted = true
+	target := s.transportSession
 	s.mutex.Unlock()
 	go func() {
-		err := stopScanSafely()
+		err := stopScanSessionSafely(target)
 		s.mutex.Lock()
 		// A bounded waiter can have recorded an abandonment first; whichever
 		// finalization lands first owns the outcome, so a late platform result
@@ -258,6 +278,16 @@ func (s *scanSession) issueStop() {
 		s.mutex.Unlock()
 		s.doneOnce.Do(func() { close(s.stopDone) })
 	}()
+}
+
+// bindTransportSession records the platform scan identity once the platform
+// watcher accepts a Start. The started hook runs on the platform scan
+// goroutine while stops run on their own goroutines, so the handoff happens
+// under the session lock.
+func (s *scanSession) bindTransportSession(session bluetooth.ScanSession) {
+	s.mutex.Lock()
+	s.transportSession = session
+	s.mutex.Unlock()
 }
 
 func (s *scanSession) markStarted() {
@@ -454,7 +484,7 @@ func ScanForDurationContext(ctx context.Context, duration time.Duration) ([]Disc
 	log.Println("[BT] ScanForDuration: Calling adapter.Scan()...")
 	scanDone := make(chan error, 1)
 	go func() {
-		scanErr := scanSafely(scanCallback, scanStarted)
+		scanErr := scanSafely(session, scanCallback, scanStarted)
 		// Mark the platform outcome delivered before publishing it (see
 		// markPlatformDone): a duration timer firing after this moment cannot
 		// latch durationStopIssued and reclassify the outcome.
@@ -573,7 +603,7 @@ waitScan:
 
 	reason := session.stopReason()
 	stopErr := session.stopError()
-	abandonedStop := isScanStopAbandoned(stopErr)
+	abandonedStop := isScanStopAbandoned(stopErr) || isWedgedStopError(stopErr)
 	// A scan whose duration elapsed keeps its discovery results no matter how
 	// the stop tail finished: the duration fully ran, so discarding valid
 	// stations would lose them for no reason. This covers a watcher that
@@ -602,8 +632,12 @@ waitScan:
 		// and the start failure raced a cancellation): report it instead of a
 		// plain cancellation, which would never reach the adapter retry path.
 		// An adapter-unavailable failure keeps priority over cancellation even
-		// after a start so a pulled or disabled radio is still classified.
-		if scanErr != nil && (IsAdapterUnavailable(scanErr) || !session.startedFlag()) {
+		// after a start so a pulled or disabled radio is still classified. A
+		// start timeout that raced the watcher accepting its Start is the
+		// session's real outcome too: the scan never ran its duration window,
+		// so reporting a plain cancellation would mislead callers that retry
+		// cancellations but treat timeouts as a distinct failure mode.
+		if scanErr != nil && (IsAdapterUnavailable(scanErr) || isScanStartTimeout(scanErr) || !session.startedFlag()) {
 			if err := scanCompletionError(scanErr); err != nil {
 				return nil, err
 			}
@@ -637,12 +671,25 @@ waitScan:
 	return results, nil
 }
 
-func scanSafely(callback func(*bluetooth.Adapter, bluetooth.ScanResult), started func()) (returnErr error) {
+func scanSafely(session *scanSession, callback func(*bluetooth.Adapter, bluetooth.ScanResult), started func()) (returnErr error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			returnErr = fmt.Errorf("Bluetooth scan panicked: %v\n%s", recovered, debug.Stack())
 		}
 	}()
+	// A session-aware platform scan hands back its identity so later stops
+	// target this exact scan; a platform without that API still stops through
+	// the global adapter slot.
+	if session != nil {
+		if sessionAware, ok := adapter.(interface {
+			ScanWithStartSession(func(*bluetooth.Adapter, bluetooth.ScanResult), func(bluetooth.ScanSession)) error
+		}); ok {
+			return sessionAware.ScanWithStartSession(callback, func(transportSession bluetooth.ScanSession) {
+				session.bindTransportSession(transportSession)
+				started()
+			})
+		}
+	}
 	if startAware, ok := adapter.(interface {
 		ScanWithStart(func(*bluetooth.Adapter, bluetooth.ScanResult), func()) error
 	}); ok {
@@ -652,13 +699,30 @@ func scanSafely(callback func(*bluetooth.Adapter, bluetooth.ScanResult), started
 	return adapter.Scan(callback)
 }
 
-func stopScanSafely() (returnErr error) {
+func stopScanSafely() error {
+	return stopScanSessionSafely(nil)
+}
+
+// stopScanSessionSafely stops the platform scan identified by session. A nil
+// session (platform without session support, or a scan that never handed
+// back its identity) falls back to the global stop.
+func stopScanSessionSafely(session bluetooth.ScanSession) (returnErr error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			returnErr = fmt.Errorf("Bluetooth StopScan panicked: %v\n%s", recovered, debug.Stack())
 		}
 	}()
-	err := adapter.StopScan()
+	if session != nil {
+		if sessionStopper, ok := adapter.(interface {
+			StopScanSession(bluetooth.ScanSession) error
+		}); ok {
+			return settleNotScanning(sessionStopper.StopScanSession(session))
+		}
+	}
+	return settleNotScanning(adapter.StopScan())
+}
+
+func settleNotScanning(err error) error {
 	if errors.Is(err, bluetooth.ErrNotScanning) {
 		// The platform watcher already ended on its own (a radio event or a
 		// racing stop finished it first). A late stop found no scan to halt,

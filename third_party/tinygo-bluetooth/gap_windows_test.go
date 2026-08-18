@@ -231,6 +231,84 @@ func TestGATTContextOperationsHonorPreCancellation(t *testing.T) {
 	}
 }
 
+// TestBoundedWatcherCallBoundsWedgedWatcherCalls guards the wedge budget: a
+// watcher COM call that never returns must surface as a typed timeout once
+// the budget elapses so the scan session can proceed, while a call that
+// completes normally passes its result through unchanged.
+func TestBoundedWatcherCallBoundsWedgedWatcherCalls(t *testing.T) {
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	started := time.Now()
+	err := boundedWatcherCall(30*time.Millisecond, func() error {
+		<-release
+		return nil
+	})
+	var timeoutErr *WatcherCallTimeoutError
+	if !errors.As(err, &timeoutErr) {
+		t.Fatalf("boundedWatcherCall() error = %v, want a typed timeout", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("bounded call took %v, want the budget", elapsed)
+	}
+
+	callErr := errors.New("watcher failure")
+	if err := boundedWatcherCall(time.Second, func() error { return callErr }); !errors.Is(err, callErr) {
+		t.Fatalf("boundedWatcherCall() error = %v, want %v", err, callErr)
+	}
+}
+
+// TestStopScanSessionTargetsItsOwnScan guards session-targeted stops: a stop
+// must act on the session's own control instead of the adapter's global scan
+// slot, so a delayed stop from an older session can never stop a newer scan
+// that already owns the slot.
+func TestStopScanSessionTargetsItsOwnScan(t *testing.T) {
+	originalEnter := enterWinRTThread
+	enterWinRTThread = func() (func(), error) { return func() {}, nil }
+	t.Cleanup(func() { enterWinRTThread = originalEnter })
+
+	adapter := &Adapter{}
+	// A not-yet-started control records the stop as pending without
+	// delivering anything, matching the global stop's deferred contract.
+	pending := &scanControl{watcher: &advertisement.BluetoothLEAdvertisementWatcher{}, stopRequests: make(chan error, 1)}
+	if err := adapter.StopScanSession(scanSessionToken{control: pending}); err != nil {
+		t.Fatalf("StopScanSession() before Start error = %v, want a deferred stop", err)
+	}
+	pending.mutex.Lock()
+	recorded := pending.pendingStop
+	pending.mutex.Unlock()
+	if !recorded {
+		t.Fatal("session stop before Start was not recorded as pending")
+	}
+	select {
+	case err := <-pending.stopRequests:
+		t.Fatalf("pending session stop consumed stopRequests with %v", err)
+	default:
+	}
+
+	// A started control receives its own stop outcome even though the
+	// adapter's global slot does not reference it (a newer scan owns the
+	// slot). The nil watcher makes watcher.Stop() panic inside the bounded
+	// call, standing in for a wedged radio; the recovered error is the
+	// delivered outcome.
+	startedControl := &scanControl{stopRequests: make(chan error, 1), started: true}
+	err := adapter.StopScanSession(scanSessionToken{control: startedControl})
+	if err == nil {
+		t.Fatal("StopScanSession() on a broken watcher unexpectedly succeeded")
+	}
+	select {
+	case delivered := <-startedControl.stopRequests:
+		if delivered != err {
+			t.Fatalf("delivered stop outcome = %v, want %v", delivered, err)
+		}
+	default:
+		t.Fatal("session stop did not deliver its outcome to its own scan")
+	}
+
+	if err := adapter.StopScanSession(nil); !errors.Is(err, ErrNotScanning) {
+		t.Fatalf("StopScanSession(nil) error = %v, want ErrNotScanning", err)
+	}
+}
+
 func TestWaitForScanStopReturnsStopErrorWithoutStoppedEvent(t *testing.T) {
 	originalTimeout := scanStopTimeout
 	originalPoll := scanStopPollInterval

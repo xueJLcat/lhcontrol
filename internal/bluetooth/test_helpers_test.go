@@ -49,8 +49,11 @@ type fakeBLEAdapter struct {
 	startOnce   sync.Once
 	once        sync.Once
 	stopCalls   atomic.Int32
-	startDelay  chan struct{}
-	stopHold    chan struct{}
+	// sessionStops counts stops delivered through the session-targeted path;
+	// a session stop still delegates to StopScan, so stopCalls tracks both.
+	sessionStops atomic.Int32
+	startDelay   chan struct{}
+	stopHold     chan struct{}
 	// releaseOn, when set, ends the blocking Scan once closed instead of
 	// waiting for the stop handshake. It emulates the platform watcher whose
 	// Scan call returns on its own budget while StopScan is still running (or
@@ -61,6 +64,16 @@ type fakeBLEAdapter struct {
 	releaseErr     error
 	connectHandler func(tinybluetooth.Device, bool)
 }
+
+// fakeScanSessionToken is the fake transport's session identity: it is handed
+// to the started hook and must come back unchanged through StopScanSession.
+type fakeScanSessionToken struct {
+	id int
+}
+
+const fakeScanSessionID = 7
+
+func (token fakeScanSessionToken) ScanSessionState() any { return token }
 
 func newFakeBLEAdapter(results ...tinybluetooth.ScanResult) *fakeBLEAdapter {
 	return &fakeBLEAdapter{results: results, started: make(chan struct{}), stopped: make(chan struct{})}
@@ -120,6 +133,21 @@ func (a *fakeBLEAdapter) StopScan() error {
 	}
 	a.once.Do(func() { close(a.stopped) })
 	return a.stopErr
+}
+func (a *fakeBLEAdapter) ScanWithStartSession(callback func(*tinybluetooth.Adapter, tinybluetooth.ScanResult), started func(tinybluetooth.ScanSession)) error {
+	return a.ScanWithStart(callback, func() {
+		if started != nil {
+			started(fakeScanSessionToken{id: fakeScanSessionID})
+		}
+	})
+}
+func (a *fakeBLEAdapter) StopScanSession(session tinybluetooth.ScanSession) error {
+	token, ok := session.ScanSessionState().(fakeScanSessionToken)
+	if !ok || token.id != fakeScanSessionID {
+		return tinybluetooth.ErrNotScanning
+	}
+	a.sessionStops.Add(1)
+	return a.StopScan()
 }
 
 type fakeCharacteristic struct {
