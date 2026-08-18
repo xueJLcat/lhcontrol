@@ -140,8 +140,19 @@ func (m *Manager) trackStatusRefreshPending(address string) {
 	retry := m.statusRetries[address]
 	retry.kinds |= statusRetryRefresh
 	now := time.Now()
-	if retry.refreshNextAt.IsZero() || retry.refreshNextAt.After(now) {
-		retry.refreshNextAt = now
+	// The marker must not fall due before a recorded connection backoff:
+	// recovery picks the earliest due schedule, so an immediate marker would
+	// re-run the read that just failed, negate the backoff, and count
+	// failures against the absent-station budget ahead of schedule. This
+	// keeps every pending-refresh marker consistent with the backoff the
+	// deadline branches enforce through deferStatusRecovery.
+	due := now
+	connectionBackoffActive := effectiveStatusRetryKinds(retry)&statusRetryConnection != 0 && !retry.nextAt.IsZero()
+	if connectionBackoffActive && retry.nextAt.After(due) {
+		due = retry.nextAt
+	}
+	if retry.refreshNextAt.IsZero() || retry.refreshNextAt.After(due) {
+		retry.refreshNextAt = due
 	}
 	m.statusRetries[address] = retry
 	m.statusRetryMutex.Unlock()

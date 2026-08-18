@@ -284,8 +284,9 @@ type statusRetry struct {
 	// The original fields are the connection retry schedule. Keeping them
 	// separate from channel retry state prevents an optional channel failure
 	// from accelerating or delaying connection recovery. Refresh pending work
-	// has its own due time so it cannot reset an active connection backoff
-	// or be delayed by one.
+	// has its own due time so it cannot reset an active connection backoff;
+	// while a backoff is active the marker is clamped to it so recovery does
+	// not re-run the failed read ahead of schedule.
 	failures            int
 	lastAttempt         time.Time
 	nextAt              time.Time

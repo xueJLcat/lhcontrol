@@ -165,3 +165,65 @@ func TestApplyRecoverySettingsRebasesAdapterInitializationCooldown(t *testing.T)
 		t.Fatalf("adapter retry cooldown = %v, want 3s", got)
 	}
 }
+
+// TestRefreshMarkerRespectsRecordedConnectionBackoff guards the pending-refresh
+// invariant: a marker stamped while a connection backoff is already recorded
+// must not fall due before that backoff. Recovery picks the earliest due
+// schedule, so an immediate marker would re-run the read that just failed,
+// negate the backoff, and count failures against the absent-station budget
+// ahead of schedule.
+func TestRefreshMarkerRespectsRecordedConnectionBackoff(t *testing.T) {
+	cfg := config.NewConfig()
+	manager := NewManager(cfg)
+	manager.shuttingDown.Store(true) // Keep the scheduler dormant while inspecting its queue.
+	t.Cleanup(manager.Shutdown)
+
+	address := "AA:BB:CC:DD:EE:06"
+	nextAt := time.Now().Add(time.Minute)
+	manager.statusRetries[address] = statusRetry{
+		kinds:       statusRetryConnection,
+		failures:    1,
+		lastAttempt: time.Now(),
+		nextAt:      nextAt,
+	}
+
+	manager.trackStatusRefreshPending(address)
+
+	retry, tracked := manager.statusRetries[address]
+	if !tracked {
+		t.Fatal("refresh marker dropped the retry entry")
+	}
+	if retry.refreshNextAt.Before(nextAt) {
+		t.Fatalf("refresh marker due at %v falls before the connection backoff at %v", retry.refreshNextAt, nextAt)
+	}
+	kind, _, _, selectedNextAt := statusRetryOrderAndKind(retry)
+	if kind != statusRetryConnection || !selectedNextAt.Equal(nextAt) {
+		t.Fatalf("recovery order = kind %v nextAt %v, want the connection backoff to stay the earliest schedule", kind, selectedNextAt)
+	}
+}
+
+// TestRefreshMarkerWithoutBackoffFallsDueImmediately keeps the no-backoff
+// behavior: a pending-refresh marker for a station without a recorded
+// connection failure is due immediately so recovery re-reads it without delay.
+func TestRefreshMarkerWithoutBackoffFallsDueImmediately(t *testing.T) {
+	cfg := config.NewConfig()
+	manager := NewManager(cfg)
+	manager.shuttingDown.Store(true) // Keep the scheduler dormant while inspecting its queue.
+	t.Cleanup(manager.Shutdown)
+
+	address := "AA:BB:CC:DD:EE:07"
+	before := time.Now()
+	manager.trackStatusRefreshPending(address)
+
+	retry, tracked := manager.statusRetries[address]
+	if !tracked {
+		t.Fatal("refresh marker did not create a retry entry")
+	}
+	kind, _, _, selectedNextAt := statusRetryOrderAndKind(retry)
+	if kind != statusRetryRefresh {
+		t.Fatalf("recovery order = kind %v, want the refresh marker", kind)
+	}
+	if selectedNextAt.Before(before) || selectedNextAt.After(time.Now()) {
+		t.Fatalf("refresh marker due at %v, want immediately", selectedNextAt)
+	}
+}
