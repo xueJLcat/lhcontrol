@@ -443,8 +443,9 @@ type initialScanReadResult struct {
 	// cancellation. The station was never read, so it must not be booked as a
 	// success (no failure to clear), a failure, or a pending recovery: a
 	// user-cancelled scan stays clean instead of emitting warnings and
-	// background reads for work that never ran. Real transport failures and
-	// phase deadlines are classified separately and keep their handling.
+	// background reads for work that never ran. Real transport failures,
+	// phase deadlines, and per-station budget deadlines are classified
+	// separately and keep their handling.
 	cancelSkipped bool
 }
 
@@ -471,6 +472,13 @@ func (m *Manager) runInitialScanReads(ctx context.Context, stationsToFetch []*bl
 					// scanContextError keeps a caller deadline classified as a
 					// timeout instead of a user cancellation.
 					readResults[resultIndex].err = scanContextError(ctx)
+					if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+						// A caller-deadline interruption of a read that never ran
+						// is booked like a phase deadline: the discovered station
+						// stays tracked for a refresh instead of being silently
+						// dropped along with the interruption.
+						readResults[resultIndex].phaseDeadlineExceeded = true
+					}
 				} else {
 					readResults[resultIndex].err = fmt.Errorf("initial read phase deadline exceeded: %w", phaseContext.Err())
 					readResults[resultIndex].phaseDeadlineExceeded = true
@@ -478,8 +486,11 @@ func (m *Manager) runInitialScanReads(ctx context.Context, stationsToFetch []*bl
 				return
 			}
 			defer func() { <-semaphore }()
-			if err := scanContextError(ctx); err != nil {
-				readResults[resultIndex].err = err
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				readResults[resultIndex].err = scanContextError(ctx)
+				if errors.Is(ctxErr, context.DeadlineExceeded) {
+					readResults[resultIndex].phaseDeadlineExceeded = true
+				}
 				return
 			}
 			readContext, cancelRead := context.WithTimeout(phaseContext, m.initialReadTimeoutDuration())
@@ -510,16 +521,20 @@ func (m *Manager) runInitialScanReads(ctx context.Context, stationsToFetch []*bl
 		// scan was cancelled. A read that only observed the cancellation itself
 		// (the gate, the pre-read guard, or an in-flight read torn down by the
 		// stop) is a pure interruption and stays clean: no warning, no failure,
-		// no recovery, matching a user-cancelled scan's contract. A read that
-		// hit a genuine transport fault before the stop landed keeps its real
-		// error so the disconnect/backoff bookkeeping below still runs instead
-		// of being silently dropped along with the interruption.
+		// no recovery, matching a user-cancelled scan's contract. Work that
+		// ran but could not finish keeps its booking even under an
+		// interruption: a genuine transport fault still runs the
+		// disconnect/backoff bookkeeping, and a per-station budget that
+		// expired is a real read failure that must keep its backoff and
+		// recovery entry instead of being silently dropped along with the
+		// interruption.
 		for index := range readResults {
 			result := &readResults[index]
 			if result.err == nil || result.phaseDeadlineExceeded {
 				continue
 			}
-			if errors.Is(result.err, bluetooth.ErrScanCancelled) || isPureContextError(result.err) {
+			if errors.Is(result.err, bluetooth.ErrScanCancelled) ||
+				(isPureContextError(result.err) && errors.Is(result.err, context.Canceled)) {
 				result.err = nil
 				result.cancelSkipped = true
 			}

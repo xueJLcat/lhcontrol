@@ -655,3 +655,60 @@ func TestCancelledScanStillBooksRealInitialReadFailures(t *testing.T) {
 		t.Fatal("purely cancelled read scheduled recovery instead of staying clean")
 	}
 }
+
+// TestCancelledScanBooksExpiredReadBudget guards the cancellation bookkeeping
+// for a per-station read budget that expired on its own: even when the scan's
+// cancellation lands in the same window, the deadline is a real read failure
+// and must keep its backoff and recovery entry instead of being folded into
+// the clean cancellation bucket and left untracked.
+func TestCancelledScanBooksExpiredReadBudget(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	manager.statusRecoveryStart.Do(func() {})
+
+	deadlineAddress := "11:22:33:44:55:A3"
+	manager.bluetoothOps.scanForDurationContext = func(context.Context, time.Duration) ([]internalbluetooth.DiscoveredStation, error) {
+		return []internalbluetooth.DiscoveredStation{
+			{Name: "LHB-BUDGET", Address: mustAddress(t, deadlineAddress)},
+		}, nil
+	}
+	readStarted := make(chan struct{})
+	releaseRead := make(chan struct{})
+	manager.bluetoothOps.fetchInitialPowerState = func(ctx context.Context, station *internalbluetooth.BaseStation) error {
+		close(readStarted)
+		// Hold the read until the cancellation lands, then fail with the
+		// station's own budget deadline: a bare deadline error with no
+		// transport cause, shaped like the read's own context running out.
+		<-releaseRead
+		return fmt.Errorf("initial station read: %w", context.DeadlineExceeded)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := manager.ScanAndFetchStationsContext(ctx)
+		done <- err
+	}()
+	select {
+	case <-readStarted:
+	case <-time.After(time.Second):
+		t.Fatal("initial read did not start")
+	}
+	cancel()
+	close(releaseRead)
+	select {
+	case err := <-done:
+		if !errors.Is(err, internalbluetooth.ErrScanCancelled) {
+			t.Fatalf("cancelled scan error = %v, want ErrScanCancelled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cancelled scan did not return promptly")
+	}
+
+	manager.statusRetryMutex.Lock()
+	_, tracked := manager.statusRetries[deadlineAddress]
+	manager.statusRetryMutex.Unlock()
+	if !tracked {
+		t.Fatal("expired per-station read budget during a cancelled scan was not scheduled for recovery")
+	}
+}
