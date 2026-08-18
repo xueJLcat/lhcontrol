@@ -626,7 +626,16 @@ waitScan:
 	// recorded, and that error must not reclassify the requested stop as a
 	// hard scan failure. An abandoned stop is swallowed by the cancellation:
 	// the stop attempt was given up on as part of honoring the cancel.
-	if reason == scanStopCancelled || ctx.Err() != nil {
+	// An expired caller context only classifies the outcome as a
+	// cancellation or timeout when the scan did not already settle on its
+	// own: a platform Scan that returned gracefully before the duration
+	// elapsed is the "stopped early" failure even when the deadline lands
+	// in the same instant, and reporting it as a benign cancellation
+	// would swallow a failure callers should see and retry. A concurrent
+	// adapter error keeps the cancellation branch: the watcher may still
+	// record its stop, and adapter failures racing a requested stop are
+	// swallowed by the cancellation below either way.
+	if reason == scanStopCancelled || (ctx.Err() != nil && (reason != scanStopNone || scanErr != nil)) {
 		// A platform failure that happened before the watcher ever started is
 		// the real outcome of the scan (for example the radio was unavailable
 		// and the start failure raced a cancellation): report it instead of a

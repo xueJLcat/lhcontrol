@@ -727,6 +727,44 @@ func TestScanRejectsEarlyGracefulReturn(t *testing.T) {
 		t.Fatalf("StopScan calls = %d, want 0", got)
 	}
 }
+// TestScanEarlyReturnWinsOverConcurrentContextExpiry guards the
+// classification order: a platform scan that returned gracefully before the
+// duration elapsed is the authoritative outcome even when the caller context
+// expires in the same instant. Reporting the benign cancellation instead
+// would swallow a failure callers should see and retry.
+func TestScanEarlyReturnWinsOverConcurrentContextExpiry(t *testing.T) {
+	originalAdapter := adapter
+	fake := newFakeBLEAdapter()
+	fake.releaseOn = make(chan struct{})
+	adapter = fake
+	t.Cleanup(func() { adapter = originalAdapter })
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		_, err := ScanForDurationContext(ctx, time.Hour)
+		result <- err
+	}()
+	<-fake.started
+	close(fake.releaseOn)
+	// Let the platform outcome land (and set platformDone) before the
+	// cancellation arrives: a stop requested after the scan already ended on
+	// its own must not record a cancellation reason.
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-result:
+		if err == nil || !strings.Contains(err.Error(), "before the requested duration") {
+			t.Fatalf("ScanForDurationContext() error = %v, want early-stop error", err)
+		}
+		if errors.Is(err, ErrScanCancelled) {
+			t.Fatalf("ScanForDurationContext() error = %v, must not be classified as cancelled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("scan did not return after the platform released it")
+	}
+}
+
 func TestScanTimerAndCancellationStopOnlyOnce(t *testing.T) {
 	originalAdapter := adapter
 	fake := newFakeBLEAdapter()
