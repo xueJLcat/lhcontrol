@@ -77,7 +77,9 @@ if (import.meta.env.DEV && isRuntimeMissing()) {
     GetStatusPollIntervalSeconds: () => Promise.resolve(15),
     GetStatusPollingEnabled: () => Promise.resolve(true),
     GetCurrentStationInfo: () => Promise.resolve([]),
-    GetScanStatus: () => Promise.resolve({ state: 'completed', found: 0, error: '', warnings: [] }),
+    // Shape matches station.ScanStatus (id omitted, like the backend's
+    // omitempty) so development previews exercise the same field presence.
+    GetScanStatus: () => Promise.resolve({ state: 'completed', startedAt: '', completedAt: '', found: 0, error: '', warnings: [] }),
     IdentifyStation: unavailable('IdentifyStation'),
     IsScanning: () => Promise.resolve(false),
     ListBluetoothAdapters: () => Promise.resolve([]),
