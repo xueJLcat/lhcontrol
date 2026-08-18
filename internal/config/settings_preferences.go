@@ -9,7 +9,10 @@ import (
 func (c *Config) GetAutoSleep() autosleep.Settings {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
-	return c.AutoSleep
+	// Repair the value the same way load does so callers (in particular the
+	// watcher rebuild) never receive a setting that fails validation, even
+	// when the config was built without going through Load.
+	return sanitizeAutoSleep(&c.AutoSleep)
 }
 
 // SetAutoSleep validates and persists the automatic-sleep settings, rolling
