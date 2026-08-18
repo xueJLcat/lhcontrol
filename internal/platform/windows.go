@@ -84,13 +84,13 @@ type FLASHWINFO struct {
 // executable. FindWindowW returns only one arbitrary title match; iterating
 // with FindWindowExW prevents a same-titled foreign window from hiding the
 // actual existing instance.
-func findWindow(title string) (syscall.Handle, error) {
+func findWindow(title string) windowSearchResult {
 	titlePtr, err := syscall.UTF16PtrFromString(title)
 	if err != nil {
-		return 0, err
+		return windowSearchResult{err: err}
 	}
 	expected, expectedErr := ownProcessImageBaseName()
-	return firstOwnedWindow(
+	match, foreign, err := firstOwnedWindow(
 		expected,
 		func(after syscall.Handle) (syscall.Handle, error) {
 			hwnd, _, _ := procFindWindowExW.Call(
@@ -108,34 +108,57 @@ func findWindow(title string) (syscall.Handle, error) {
 			return windowOwnerProcessName(hwnd)
 		},
 	)
+	// A verified-foreign window is only a last-resort candidate; keep
+	// polling for the real instance's window until the budget runs out.
+	return windowSearchResult{match: match, foreignFallback: foreign, err: err}
+}
+
+// windowSearchResult reports one window-search attempt: a match owned by this
+// application, or a verified-foreign same-titled window that may only be
+// focused as the final best effort, or a hard enumeration error.
+type windowSearchResult struct {
+	match           syscall.Handle
+	foreignFallback syscall.Handle
+	err             error
 }
 
 func firstOwnedWindow(
 	expected string,
 	next func(after syscall.Handle) (syscall.Handle, error),
 	owner func(syscall.Handle) (string, error),
-) (syscall.Handle, error) {
+) (match syscall.Handle, foreignFallback syscall.Handle, enumErr error) {
 	var after syscall.Handle
-	var fallback syscall.Handle
+	var unverifiable syscall.Handle
 	for {
 		hwnd, err := next(after)
 		if err != nil {
-			if fallback != 0 {
-				return fallback, nil
+			if unverifiable != 0 {
+				return unverifiable, 0, nil
 			}
-			return 0, err
+			if foreignFallback != 0 {
+				return 0, foreignFallback, nil
+			}
+			return 0, 0, err
 		}
 		if hwnd == 0 {
 			break
 		}
 		actual, ownerErr := owner(hwnd)
 		if ownerErr == nil && (expected == "" || strings.EqualFold(actual, expected)) {
-			return hwnd, nil
+			return hwnd, 0, nil
 		}
-		// An unverifiable or foreign-owned window must not shadow a later
-		// verified match; keep only the first one as the mutex-backed fallback.
-		if fallback == 0 {
-			fallback = hwnd
+		// A same-titled window must not shadow a later verified match. Keep
+		// the first candidate of each kind: an unverifiable owner can be a
+		// renamed instance whose process cannot be queried and stays an
+		// immediate fallback, while a verified-foreign window is proof the
+		// candidate belongs to another program and is only acceptable as the
+		// final best-effort focus when the instance window never appears.
+		if ownerErr != nil {
+			if unverifiable == 0 {
+				unverifiable = hwnd
+			}
+		} else if foreignFallback == 0 {
+			foreignFallback = hwnd
 		}
 		after = hwnd
 	}
@@ -147,7 +170,10 @@ func firstOwnedWindow(
 	// owner match above; only fall back here instead of reporting the window
 	// as missing, which would make the second launch exit without focusing
 	// the instance it just detected.
-	return fallback, nil
+	if unverifiable != 0 {
+		return unverifiable, 0, nil
+	}
+	return 0, foreignFallback, nil
 }
 
 // FindWindowW documents "not found" with a zero HWND. Its last-error value is
@@ -185,18 +211,25 @@ func waitForWindow(
 	appTitle string,
 	timeout time.Duration,
 	interval time.Duration,
-	finder func(string) (syscall.Handle, error),
+	finder func(string) windowSearchResult,
 	sleeper func(time.Duration),
 ) (syscall.Handle, error) {
 	attempts := int(timeout/interval) + 1
 	for attempt := 0; attempt < attempts; attempt++ {
-		hwnd, err := finder(appTitle)
-		if err != nil || hwnd != 0 {
-			return hwnd, err
+		result := finder(appTitle)
+		if result.err != nil {
+			return 0, result.err
 		}
-		if attempt+1 < attempts {
-			sleeper(interval)
+		if result.match != 0 {
+			return result.match, nil
 		}
+		if attempt+1 == attempts {
+			// Budget exhausted. A verified-foreign same-titled window is the
+			// best remaining focus target; earlier attempts kept polling so a
+			// slow-starting instance window could still appear first.
+			return result.foreignFallback, nil
+		}
+		sleeper(interval)
 	}
 	return 0, nil
 }
