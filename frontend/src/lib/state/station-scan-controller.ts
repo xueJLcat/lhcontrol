@@ -245,6 +245,9 @@ export class StationScanController {
       return;
     }
     host.stoppingScan = false;
+    // The stop settled the scan; end the elapsed timer the local scan armed
+    // (a newer owner's scan keeps running, maybeEndScanTimer self-gates).
+    host.maybeEndScanTimer();
     if (host.gates.canCommitStatus(statusOperation)) {
       const summary = await this.completedScanSummary();
       if (!host.disposed && host.gates.canCommitStatus(statusOperation)) {
