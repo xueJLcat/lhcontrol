@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"strings"
 	"time"
@@ -161,6 +162,21 @@ func (a *App) SetAPIListenAddress(address string) error {
 				}
 			}
 		}
+	} else if !a.shuttingDown.Load() && !a.GetAPIStatus().Running {
+		// The listener already targets the requested address but is not
+		// serving it (a failed bind stuck in its retry loop, typically left
+		// behind by an earlier diverged switch). Changing the persisted
+		// address onto this target must converge it exactly like the
+		// unchanged-address re-save instead of reporting success while the
+		// HTTP API stays down.
+		a.restartAPIServer()
+		bound, bindErr := a.waitForAPIBind()
+		if !bound {
+			if bindErr == nil {
+				bindErr = fmt.Errorf("%s did not come up within %s", normalized, a.apiBindVerifyWindow())
+			}
+			return fmt.Errorf("cannot listen on %s: %v", normalized, bindErr)
+		}
 	}
 
 	return nil
@@ -183,7 +199,14 @@ func (a *App) verifyAndSwitchListenAddress(normalized string) error {
 		if probeErr != nil {
 			return probeErr
 		}
-		return probe.Close()
+		// The successful bind already proved the address usable; a Close
+		// failure must not be reported as a bind failure and roll back an
+		// address that was just verified. Log it instead: the listener
+		// restart below retries its own bind if the socket lingers.
+		if closeErr := probe.Close(); closeErr != nil {
+			log.Printf("HTTP API bind probe for %s closed with an error: %v", normalized, closeErr)
+		}
+		return nil
 	}
 	a.setAPIAddress(normalized)
 	a.restartAPIServer()

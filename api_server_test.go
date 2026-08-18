@@ -1266,3 +1266,126 @@ func TestWaitForAPIBindSurvivesTransientBindFailure(t *testing.T) {
 		t.Fatalf("API status after delayed bind = %+v, want running on 127.0.0.1:9004", status)
 	}
 }
+
+// TestSetAPIListenAddressChangedBranchRepairsDownListener covers the diverged
+// convergence from the changed-address branch: the persisted address differs
+// from the requested one while the listener already targets the requested
+// address but is down (a failed switch left it in its bind-retry loop). The
+// change must restart the listener and verify the bind exactly like the
+// unchanged-address re-save instead of reporting success with the API down.
+func TestSetAPIListenAddressChangedBranchRepairsDownListener(t *testing.T) {
+	t.Setenv("AppData", t.TempDir())
+	app := NewApp()
+	app.apiRetryDelay = 5 * time.Millisecond
+	app.apiBindVerifyWait = 2 * time.Second
+	app.listen = func(_, address string) (net.Listener, error) {
+		return newFakeAPIListener(address), nil
+	}
+	app.serveListener = func(listener net.Listener) error {
+		fake := listener.(*fakeAPIListener)
+		<-fake.closed
+		return nil
+	}
+	// Diverged and down: the persisted address is the default while the
+	// listener targets 127.0.0.1:9005 without serving it.
+	app.apiStatus.Address = "127.0.0.1:9005"
+	app.apiStatus.Running = false
+	t.Cleanup(func() {
+		app.apiLifecycleMutex.Lock()
+		cancel := app.apiCancel
+		app.apiCancel = nil
+		app.apiLifecycleMutex.Unlock()
+		if cancel != nil {
+			cancel()
+		}
+		_ = app.api.Shutdown()
+		app.apiWG.Wait()
+	})
+
+	if err := app.SetAPIListenAddress("127.0.0.1:9005"); err != nil {
+		t.Fatalf("SetAPIListenAddress() error = %v, want the down listener repaired", err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for !(app.GetAPIStatus().Running && app.GetAPIStatus().Address == "127.0.0.1:9005") && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if status := app.GetAPIStatus(); !status.Running || status.Address != "127.0.0.1:9005" {
+		t.Fatalf("API status after the repaired change = %+v, want running on 127.0.0.1:9005", status)
+	}
+	if got := app.GetAPIListenAddress(); got != "127.0.0.1:9005" {
+		t.Fatalf("persisted API listen address = %q, want 127.0.0.1:9005", got)
+	}
+}
+
+// probeCloseFailListener binds successfully but fails Close: the probe
+// verification must still treat the address as bindable.
+type probeCloseFailListener struct {
+	fakeAPIListener
+}
+
+func (l *probeCloseFailListener) Close() error {
+	l.fakeAPIListener.Close()
+	return errors.New("probe close failed")
+}
+
+// TestSetAPIListenAddressProbeCloseFailureDoesNotFailSwitch guards the probe
+// branch semantics: a successful bind proves the address usable, so a Close
+// error on the probe socket must not be reported as a bind failure (which
+// would roll back an address that was just verified).
+func TestSetAPIListenAddressProbeCloseFailureDoesNotFailSwitch(t *testing.T) {
+	t.Setenv("AppData", t.TempDir())
+	app := NewApp()
+	app.apiStatus.Address = "127.0.0.1:9020"
+	app.apiRetryDelay = 5 * time.Millisecond
+	app.apiBindVerifyWait = 2 * time.Second
+	app.listen = func(_, address string) (net.Listener, error) {
+		if strings.HasPrefix(address, "127.0.0.1:9021") {
+			return &probeCloseFailListener{fakeAPIListener: *newFakeAPIListener(address)}, nil
+		}
+		return newFakeAPIListener(address), nil
+	}
+	app.serveListener = func(listener net.Listener) error {
+		switch typed := listener.(type) {
+		case *fakeAPIListener:
+			<-typed.closed
+			return nil
+		case *probeCloseFailListener:
+			<-typed.closed
+			return nil
+		}
+		return errors.New("unexpected listener type")
+	}
+	app.startAPIServer()
+	t.Cleanup(func() {
+		app.apiLifecycleMutex.Lock()
+		cancel := app.apiCancel
+		app.apiCancel = nil
+		app.apiLifecycleMutex.Unlock()
+		if cancel != nil {
+			cancel()
+		}
+		_ = app.api.Shutdown()
+		app.apiWG.Wait()
+	})
+	deadline := time.Now().Add(2 * time.Second)
+	for !app.GetAPIStatus().Running && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if status := app.GetAPIStatus(); !status.Running || status.Address != "127.0.0.1:9020" {
+		t.Fatalf("initial API status = %+v, want running on 127.0.0.1:9020", status)
+	}
+
+	if err := app.SetAPIListenAddress("127.0.0.1:9021"); err != nil {
+		t.Fatalf("SetAPIListenAddress() error = %v, want the probe Close failure ignored", err)
+	}
+	deadline = time.Now().Add(2 * time.Second)
+	for !(app.GetAPIStatus().Running && app.GetAPIStatus().Address == "127.0.0.1:9021") && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if status := app.GetAPIStatus(); !status.Running || status.Address != "127.0.0.1:9021" {
+		t.Fatalf("API status after the switch = %+v, want running on 127.0.0.1:9021", status)
+	}
+	if got := app.GetAPIListenAddress(); got != "127.0.0.1:9021" {
+		t.Fatalf("persisted API listen address = %q, want 127.0.0.1:9021", got)
+	}
+}
