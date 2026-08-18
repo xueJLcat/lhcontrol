@@ -307,6 +307,64 @@ func TestScanKeepsResultsWhenFirstStopFailsAndPlatformDrainsSlowly(t *testing.T)
 	}
 }
 
+// TestScanKeepsResultsWhenStopFailsAfterDurationElapses covers the terminal
+// stop-failure shape: the duration fully elapsed, StopScan reported a hard
+// error (a radio disabled in the exact stop window), and the platform Scan
+// call stayed blocked past the stop-handshake budget. Discovery completed in
+// every shape of that race, so the collected stations must survive the
+// teardown failure instead of being discarded as a failed scan.
+func TestScanKeepsResultsWhenStopFailsAfterDurationElapses(t *testing.T) {
+	originalAdapter := adapter
+	originalWait := scanStopWaitLimit
+	originalGrace := scanAbandonGrace
+	fake := newFakeBLEAdapter()
+	fake.stopErr = errors.New("watcher stop reported an error code")
+	fake.releaseOn = make(chan struct{})
+	adapter = fake
+	scanStopWaitLimit = 300 * time.Millisecond
+	scanAbandonGrace = 50 * time.Millisecond
+	t.Cleanup(func() {
+		adapter = originalAdapter
+		scanStopWaitLimit = originalWait
+		scanAbandonGrace = originalGrace
+		close(fake.releaseOn)
+	})
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+	mac, err := tinybluetooth.ParseMAC("11:22:33:44:55:73")
+	if err != nil {
+		t.Fatalf("ParseMAC() error = %v", err)
+	}
+	fake.results = []tinybluetooth.ScanResult{{
+		Address: tinybluetooth.Address{MACAddress: tinybluetooth.MACAddress{MAC: mac}},
+		AdvertisementPayload: &fakeAdvertisementPayload{
+			name:     "LHB-HARD-STOP",
+			services: []tinybluetooth.UUID{powerControlServiceUUID},
+		},
+	}}
+	type scanOutcome struct {
+		stations []DiscoveredStation
+		err      error
+	}
+	outcome := make(chan scanOutcome, 1)
+	go func() {
+		stations, scanErr := ScanForDuration(20 * time.Millisecond)
+		outcome <- scanOutcome{stations, scanErr}
+	}()
+	select {
+	case got := <-outcome:
+		if got.err != nil {
+			t.Fatalf("ScanForDuration() error = %v, want results kept after a hard stop failure following a completed duration", got.err)
+		}
+		if len(got.stations) != 1 || got.stations[0].Name != "LHB-HARD-STOP" {
+			t.Fatalf("hard-stop scan results = %+v", got.stations)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("hard-stop scan did not finish")
+	}
+}
+
 // TestScanForDurationContextReportsDeadlineAsTimeout guards the timeout
 // classification: a caller budget expiring mid-scan is a timeout, not a user
 // cancellation, even though the context watcher records the resulting stop

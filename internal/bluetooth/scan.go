@@ -562,18 +562,18 @@ waitScan:
 	reason := session.stopReason()
 	stopErr := session.stopError()
 	abandonedStop := isScanStopAbandoned(stopErr)
-	// A scan whose duration elapsed and whose stop was accepted keeps its
-	// discovery results even when the watcher's stop tail reports a final
-	// error (for example the watcher lingered in Stopping past the stop
-	// budget, or the Stopped event arrived with an error code): the duration
-	// fully ran, so discarding valid stations would lose them for no reason.
-	// A stop that was abandoned after the bounded wait is treated the same
-	// way: the watcher teardown never finished, but the discovery data was
-	// collected during the completed duration. This also preserves results
-	// when a cancellation lands in the stop-handshake window after the
+	// A scan whose duration elapsed keeps its discovery results no matter how
+	// the stop tail finished: the duration fully ran, so discarding valid
+	// stations would lose them for no reason. This covers a watcher that
+	// lingered in Stopping past the stop budget, a Stopped event that arrived
+	// with an error code, and a StopScan call that failed outright (for
+	// example the radio was disabled in the same instant the duration ended,
+	// so WinRT reports the stop as an error instead of hanging). Discovery
+	// completed in every shape; only the teardown did not. This also preserves
+	// results when a cancellation lands in the stop-handshake window after the
 	// duration already elapsed. Checked before the scanErr early return so
 	// that tail-of-stop errors cannot shadow it.
-	if session.durationStopIssuedFlag() && (stopErr == nil || abandonedStop) {
+	if session.durationStopIssuedFlag() {
 		return results, nil
 	}
 	// A watcher that failed to stop or timed out after a cancellation
