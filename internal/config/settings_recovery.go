@@ -51,6 +51,29 @@ func (c *Config) SetAbsentStationRetryLimit(limit int) error {
 	return c.setRanged("absent station retry limit", limit, MinAbsentStationRetryLimit, MaxAbsentStationRetryLimit, &c.AbsentStationRetryLimit, nil)
 }
 
+// SetAbsentStationRetryLimitWithPrevious persists the limit like
+// SetAbsentStationRetryLimit and also reports the effective value in place
+// immediately before the write. A blocked-save recovery inside the setter can
+// restore the persisted limit after the caller last read the field; callers
+// must compare that restored baseline — not their stale pre-recovery read —
+// to decide whether the limit was raised.
+func (c *Config) SetAbsentStationRetryLimitWithPrevious(limit int) (int, error) {
+	if limit < MinAbsentStationRetryLimit || limit > MaxAbsentStationRetryLimit {
+		return 0, fmt.Errorf("absent station retry limit must be between %d and %d, got %d", MinAbsentStationRetryLimit, MaxAbsentStationRetryLimit, limit)
+	}
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	c.recoverBlockedPersistenceLocked()
+	rawPrevious := c.AbsentStationRetryLimit
+	previous := sanitizeRangedInt(&c.AbsentStationRetryLimit, MinAbsentStationRetryLimit, MaxAbsentStationRetryLimit, DefaultAbsentStationRetryLimit)
+	c.AbsentStationRetryLimit = limit
+	if err := c.saveLocked(); err != nil {
+		c.AbsentStationRetryLimit = rawPrevious
+		return 0, err
+	}
+	return previous, nil
+}
+
 func (c *Config) GetInitialReadTimeoutSeconds() int {
 	return c.rangedGet(&c.InitialReadTimeoutSeconds, MinInitialReadTimeoutSeconds, MaxInitialReadTimeoutSeconds, DefaultInitialReadTimeoutSeconds)
 }

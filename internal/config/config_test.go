@@ -333,6 +333,66 @@ func TestTransientLoadFailureRecoversOnNextSetter(t *testing.T) {
 	}
 }
 
+// TestSetAbsentStationRetryLimitWithPreviousReportsRecoveredBaseline guards
+// the reported baseline across a blocked-save recovery: the setter reloads the
+// persisted file internally, and the caller must compare the new limit
+// against the recovered value, not the stale startup default it read before
+// the setter ran.
+func TestSetAbsentStationRetryLimitWithPreviousReportsRecoveredBaseline(t *testing.T) {
+	configDirectory := useTemporaryConfigDirectory(t)
+
+	originalReader := configFileReader
+	originalWriter := configFileWriter
+	readErr := errors.New("file locked by backup software")
+	calls := 0
+	configFileReader = func(path string) ([]byte, error) {
+		calls++
+		if calls == 1 {
+			return nil, readErr
+		}
+		return originalReader(path)
+	}
+	configFileWriter = func(string, []byte, os.FileMode) error { return nil }
+	t.Cleanup(func() {
+		configFileReader = originalReader
+		configFileWriter = originalWriter
+	})
+
+	seed := fmt.Sprintf(`{"absentStationRetryLimit":%d}`, MaxAbsentStationRetryLimit)
+	if err := os.WriteFile(filepath.Join(configDirectory, "config.json"), []byte(seed), 0o644); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+
+	cfg := NewConfig()
+	if err := cfg.Load(); err == nil {
+		t.Fatal("Load() unexpectedly succeeded on the transient failure")
+	}
+	staleBaseline := cfg.GetAbsentStationRetryLimit()
+	if staleBaseline == MaxAbsentStationRetryLimit {
+		t.Fatalf("startup baseline %d already equals the recovered value; the test cannot observe the difference", staleBaseline)
+	}
+
+	previous, err := cfg.SetAbsentStationRetryLimitWithPrevious(MinAbsentStationRetryLimit)
+	if err != nil {
+		t.Fatalf("SetAbsentStationRetryLimitWithPrevious() error = %v", err)
+	}
+	if previous != MaxAbsentStationRetryLimit {
+		t.Fatalf("reported previous limit = %d, want the recovered %d", previous, MaxAbsentStationRetryLimit)
+	}
+	if got := cfg.GetAbsentStationRetryLimit(); got != MinAbsentStationRetryLimit {
+		t.Fatalf("limit after the write = %d, want %d", got, MinAbsentStationRetryLimit)
+	}
+
+	// Without a recovery the reported baseline is simply the value in place.
+	previous, err = cfg.SetAbsentStationRetryLimitWithPrevious(MinAbsentStationRetryLimit + 1)
+	if err != nil {
+		t.Fatalf("second SetAbsentStationRetryLimitWithPrevious() error = %v", err)
+	}
+	if previous != MinAbsentStationRetryLimit {
+		t.Fatalf("reported previous limit = %d, want %d", previous, MinAbsentStationRetryLimit)
+	}
+}
+
 // TestSameAPIAddressSaveClearsPersistenceError guards the same-value
 // short-circuit: re-saving an unchanged API listen address must still persist
 // when a prior save failure left a pending persistence error, because that
