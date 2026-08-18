@@ -206,14 +206,19 @@ export class StationActionController {
             : t('{name}: {target} command sent; this firmware cannot confirm the state.', { name: station.name, target: targetLabel });
       }
     } catch (error) {
+      const failureMessage = `${t('Power change failed for {name}', { name: station.name })}: ${backendCopy(String(error))}`;
       if (!this.host.gates.canCommitStationOperation(operationEpoch, station.address, operationRevision)) {
         this.host.powerFeedback.clear(station.address);
+        // A newer scan owns the list, but the failure is real and has no
+        // other visible surface; the bulk path already reports superseded
+        // failures the same way.
+        pushToast(failureMessage);
         return;
       }
-      const errorText = backendCopy(String(error));
       const actual = await this.fetchStationUpdate(station.address, operationEpoch, operationRevision);
       if (!this.host.gates.canCommitStationOperation(operationEpoch, station.address, operationRevision)) {
         this.host.powerFeedback.clear(station.address);
+        pushToast(failureMessage);
         return;
       }
       this.host.powerFeedback.set(station.address, {
@@ -222,7 +227,6 @@ export class StationActionController {
         target: state,
         readAt: actual?.lastPowerReadAt
       });
-      const failureMessage = `${t('Power change failed for {name}', { name: station.name })}: ${errorText}`;
       if (this.host.gates.canCommitStatus(statusOperation)) {
         this.host.statusMessage = failureMessage;
       }
@@ -462,8 +466,13 @@ export class StationActionController {
       // user can open another station's rename, and its draft must survive.
       if (this.host.editingAddress === station.address) this.cancelRename();
     } catch (error) {
-      if (!this.host.gates.canCommitStationOperation(operationEpoch, station.address, operationRevision)) return;
       const failureMessage = withDetail('Error renaming', backendCopy(String(error)));
+      if (!this.host.gates.canCommitStationOperation(operationEpoch, station.address, operationRevision)) {
+        // Superseded by a newer scan, but the rename still failed; keep the
+        // failure visible instead of dropping it with the stale epoch.
+        pushToast(failureMessage);
+        return;
+      }
       if (this.host.gates.canCommitStatus(statusOperation)) {
         this.host.statusMessage = failureMessage;
       }
@@ -491,10 +500,16 @@ export class StationActionController {
       if (!this.host.gates.canCommitStationOperation(operationEpoch, station.address, operationRevision)) return;
       if (this.host.gates.canCommitStatus(statusOperation)) this.host.statusMessage = t('Identify signal sent to {name}.', { name: station.name });
     } catch (error) {
-      if (!this.host.gates.canCommitStationOperation(operationEpoch, station.address, operationRevision)) return;
-      await this.fetchStationUpdate(station.address, operationEpoch, operationRevision);
-      if (!this.host.gates.canCommitStationOperation(operationEpoch, station.address, operationRevision)) return;
       const failureMessage = `${t('Identify failed for {name}', { name: station.name })}: ${backendCopy(String(error))}`;
+      if (!this.host.gates.canCommitStationOperation(operationEpoch, station.address, operationRevision)) {
+        pushToast(failureMessage);
+        return;
+      }
+      await this.fetchStationUpdate(station.address, operationEpoch, operationRevision);
+      if (!this.host.gates.canCommitStationOperation(operationEpoch, station.address, operationRevision)) {
+        pushToast(failureMessage);
+        return;
+      }
       if (this.host.gates.canCommitStatus(statusOperation)) {
         this.host.statusMessage = failureMessage;
       }
@@ -530,10 +545,16 @@ export class StationActionController {
       // by status-line ownership; it has no other visible surface.
       if (updated.lastError) pushToast(message, 'warning');
     } catch (error) {
-      if (!this.host.gates.canCommitStationOperation(operationEpoch, station.address, operationRevision)) return;
-      await this.fetchStationUpdate(station.address, operationEpoch, operationRevision);
-      if (!this.host.gates.canCommitStationOperation(operationEpoch, station.address, operationRevision)) return;
       const failureMessage = `${t('Capability refresh failed for {name}', { name: station.name })}: ${backendCopy(String(error))}`;
+      if (!this.host.gates.canCommitStationOperation(operationEpoch, station.address, operationRevision)) {
+        pushToast(failureMessage);
+        return;
+      }
+      await this.fetchStationUpdate(station.address, operationEpoch, operationRevision);
+      if (!this.host.gates.canCommitStationOperation(operationEpoch, station.address, operationRevision)) {
+        pushToast(failureMessage);
+        return;
+      }
       if (this.host.gates.canCommitStatus(statusOperation)) {
         this.host.statusMessage = failureMessage;
       }
@@ -601,10 +622,20 @@ export class StationActionController {
         ? t('Channel changed from {previous} to {channel}. {warnings}', { previous: result.previousChannel || t('unknown'), channel: result.channel, warnings: joinBackendCopy(result.warnings) })
         : t('Channel already set to {channel}; no command was sent. {warnings}', { channel: result.channel, warnings: joinBackendCopy(result.warnings) });
     } catch (error) {
-      if (!this.host.gates.canCommitStationOperation(operationEpoch, address, operationRevision)) return;
+      const errorMessage = backendCopy(String(error));
+      if (!this.host.gates.canCommitStationOperation(operationEpoch, address, operationRevision)) {
+        // A newer scan owns the list, but the channel write still failed and
+        // must not disappear with the stale epoch; the channel editor state
+        // belongs to the newer owner, so only the toast is surfaced.
+        pushToast(`${t('Channel change failed')}: ${errorMessage}`);
+        return;
+      }
       const actual = await this.fetchStationUpdate(address, operationEpoch, operationRevision);
-      if (!this.host.gates.canCommitStationOperation(operationEpoch, address, operationRevision)) return;
-      this.host.channelError = `${backendCopy(String(error))} ${t('Readback')}: ${this.channelReadbackLabel(actual)}.`;
+      if (!this.host.gates.canCommitStationOperation(operationEpoch, address, operationRevision)) {
+        pushToast(`${t('Channel change failed')}: ${errorMessage}`);
+        return;
+      }
+      this.host.channelError = `${errorMessage} ${t('Readback')}: ${this.channelReadbackLabel(actual)}.`;
       this.host.channelWarning = false;
       const failureMessage = `${t('Channel change failed')}: ${this.host.channelError}`;
       if (this.host.gates.canCommitStatus(statusOperation)) {

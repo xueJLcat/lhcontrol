@@ -150,7 +150,11 @@ describe('ExternalScanCoordinator', () => {
     // The commit was rejected before clearing the recovery epochs, so the
     // periodic check can still retry instead of dropping the failure forever.
     expect(coordinator.hasPendingRecovery()).toBe(true);
-    expect(host.notifyExternalScanFailure).not.toHaveBeenCalled();
+    // The failure toast is emitted as soon as the failure is claimed, ahead
+    // of the status-line gates, so the user sees it even when a newer owner
+    // takes the footer before the status read settles.
+    expect(host.notifyExternalScanFailure).toHaveBeenCalledTimes(1);
+    expect(host.notifyExternalScanFailure).toHaveBeenCalledWith('External scan failed: boom');
   });
 
   it('keeps adopting while the backend scan is still running', async () => {

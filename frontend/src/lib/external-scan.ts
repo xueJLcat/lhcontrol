@@ -85,6 +85,11 @@ export class ExternalScanCoordinator {
   // Consecutive polls where a pending recovery made no progress. Capped so an
   // unmatched terminal status cannot rerun the recovery reads forever.
   private recoveryAttempts = 0;
+  // Set once the current recovery claim has surfaced a failure toast. The
+  // failure notification is emitted as soon as the failure is identified,
+  // ahead of the status-line gates; later recovery retries for the same scan
+  // must not repeat it.
+  private failureNotified = false;
 
   constructor(private readonly host: ExternalScanHost) {}
 
@@ -95,6 +100,7 @@ export class ExternalScanCoordinator {
     this.recoveryStatusId = null;
     this.recoveryAttempts = 0;
     this.pendingTerminal = null;
+    this.failureNotified = false;
   }
 
   hasPendingTerminal(): boolean {
@@ -114,6 +120,7 @@ export class ExternalScanCoordinator {
     this.recoveryStatusEpoch = this.host.statusEpoch();
     this.recoveryStatusId = null;
     this.recoveryAttempts = 0;
+    this.failureNotified = false;
   }
 
   // Records a fresh recovery claim and resets the bounded-retry counter.
@@ -122,6 +129,7 @@ export class ExternalScanCoordinator {
     this.recoveryStatusEpoch = statusEpoch;
     this.recoveryStatusId = statusId;
     this.recoveryAttempts = 0;
+    this.failureNotified = false;
   }
 
   // Counts a poll on which a pending recovery made no progress and, once the
@@ -137,6 +145,19 @@ export class ExternalScanCoordinator {
     this.recoveryStatusEpoch = null;
     this.recoveryStatusId = null;
     this.recoveryAttempts = 0;
+    this.failureNotified = false;
+  }
+
+  // Surfaces a failed external scan to the user exactly once per recovery
+  // claim. The notification is independent of the status-line and list
+  // gates: those protect state writes, but the failure itself must reach the
+  // user even when a newer owner has already taken the footer.
+  private notifyFailure(detail: string | undefined | null) {
+    if (this.failureNotified || this.host.isDisposed()) return;
+    this.failureNotified = true;
+    this.host.notifyExternalScanFailure(t('External scan failed: {detail}', {
+      detail: detail || t('unknown error')
+    }));
   }
 
   handleStarted(event: ExternalScanEvent) {
@@ -222,6 +243,11 @@ export class ExternalScanCoordinator {
     const revision = this.host.nextListRevision();
     this.host.prepareForScan();
     this.claimRecovery(operationEpoch, statusOperation, event.statusId ?? null);
+    // Notify immediately: by the time the backend reads below, a newer owner
+    // (auto-sleep, another scan) can already own the status line, and the
+    // failure toast must not depend on winning that gate. The claim keeps the
+    // recovery retries from notifying a second time.
+    this.notifyFailure(message);
     if (!this.host.localScanRunning()) this.host.setStoppingScan(false);
     this.host.maybeEndScanTimer();
     const capturedStationRevisions = this.host.snapshotStationRevisions();
@@ -245,7 +271,6 @@ export class ExternalScanCoordinator {
       state: 'failed', error: message, known: this.host.knownStationCount(),
       warnings: scanStatus?.warnings, external: true
     }));
-    this.host.notifyExternalScanFailure(t('External scan failed: {detail}', { detail: message }));
   }
 
   async handleCancelled(event: ExternalScanEvent): Promise<void> {
@@ -328,9 +353,7 @@ export class ExternalScanCoordinator {
       external: true
     }));
     if (scanStatus?.state === 'failed') {
-      this.host.notifyExternalScanFailure(t('External scan failed: {detail}', {
-        detail: scanStatus?.error || t('unknown error')
-      }));
+      this.notifyFailure(backendCopy(scanStatus?.error));
     }
   }
 
@@ -402,7 +425,13 @@ export class ExternalScanCoordinator {
       // The status line moved to a strictly newer owner after this recovery
       // was claimed. Status epochs only advance, so the terminal message can
       // never commit again; drop the recovery instead of re-running it every
-      // poll. The authoritative list was already applied above.
+      // poll. The authoritative list was already applied above. A failed
+      // outcome still gets its one toast before the drop: without it a
+      // failure whose event was lost (or whose handler lost the status gate)
+      // would never be reported anywhere.
+      if (scanStatus?.state === 'failed') {
+        this.notifyFailure(backendCopy(scanStatus?.error));
+      }
       this.recoveryEpoch = null;
       this.recoveryStatusEpoch = null;
       return;
@@ -427,9 +456,7 @@ export class ExternalScanCoordinator {
       external: true
     }));
     if (scanStatus?.state === 'failed') {
-      this.host.notifyExternalScanFailure(t('External scan failed: {detail}', {
-        detail: scanStatus?.error || t('unknown error')
-      }));
+      this.notifyFailure(backendCopy(scanStatus?.error));
     }
   }
 
