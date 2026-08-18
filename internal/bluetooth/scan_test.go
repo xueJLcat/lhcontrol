@@ -1155,13 +1155,16 @@ func TestScanDurationLatchDoesNotMaskAdapterUnavailable(t *testing.T) {
 func TestScanAbandonsWedgedScanStartAndReleasesSlot(t *testing.T) {
 	originalAdapter := adapter
 	originalStartWait := scanStartWaitLimit
+	originalStartGrace := scanStartOutcomeGrace
 	fake := newFakeBLEAdapter()
 	fake.startDelay = make(chan struct{}) // never closed: the watcher Start hangs
 	adapter = fake
 	scanStartWaitLimit = 50 * time.Millisecond
+	scanStartOutcomeGrace = 5 * time.Millisecond
 	t.Cleanup(func() {
 		adapter = originalAdapter
 		scanStartWaitLimit = originalStartWait
+		scanStartOutcomeGrace = originalStartGrace
 	})
 	result := make(chan error, 1)
 	go func() {
@@ -1205,6 +1208,53 @@ func TestScanAbandonsWedgedScanStartAndReleasesSlot(t *testing.T) {
 	adapter = newFakeBLEAdapter()
 	if _, err := ScanForDuration(time.Millisecond); err != nil {
 		t.Fatalf("scan after an abandoned scan start error = %v", err)
+	}
+}
+
+// TestScanStartBudgetPreservesLateAdapterFailure guards the start-budget
+// outcome race: a platform failure that lands just after the start budget
+// commits (for example the radio became unavailable while the watcher was
+// coming up) must still win over the start timeout so the
+// adapter-unavailable classification runs for this cycle instead of waiting
+// for the next scan.
+func TestScanStartBudgetPreservesLateAdapterFailure(t *testing.T) {
+	originalAdapter := adapter
+	originalStartWait := scanStartWaitLimit
+	originalStartGrace := scanStartOutcomeGrace
+	fake := newFakeBLEAdapter()
+	fake.startErr = tinybluetooth.ErrRadioNotAvailable
+	releaseStart := make(chan struct{})
+	fake.startDelay = releaseStart
+	adapter = fake
+	scanStartWaitLimit = 20 * time.Millisecond
+	scanStartOutcomeGrace = 500 * time.Millisecond
+	t.Cleanup(func() {
+		adapter = originalAdapter
+		scanStartWaitLimit = originalStartWait
+		scanStartOutcomeGrace = originalStartGrace
+	})
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+	outcome := make(chan error, 1)
+	go func() {
+		_, err := ScanForDurationContext(context.Background(), time.Second)
+		outcome <- err
+	}()
+	// Let the start budget expire while the platform Start is held, then
+	// release the failure inside the outcome grace window.
+	time.Sleep(60 * time.Millisecond)
+	close(releaseStart)
+	select {
+	case err := <-outcome:
+		if !errors.Is(err, tinybluetooth.ErrRadioNotAvailable) {
+			t.Fatalf("ScanForDurationContext() error = %v, want the late adapter-unavailable outcome", err)
+		}
+		if isScanStartTimeout(err) {
+			t.Fatalf("ScanForDurationContext() error = %v, want the adapter failure to beat the start timeout", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("scan did not return after the late adapter failure")
 	}
 }
 

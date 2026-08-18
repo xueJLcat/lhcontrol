@@ -72,6 +72,17 @@ const defaultScanAbandonGrace = 2 * time.Second
 
 const defaultScanStartWait = 10 * time.Second
 
+const defaultScanStartOutcomeGrace = 250 * time.Millisecond
+
+// scanStartOutcomeGrace bounds the extra wait for a platform outcome that
+// lands just after the start budget commits. The platform Scan goroutine can
+// fail microseconds after the budget branch runs (for example the radio
+// became unavailable while the watcher was coming up); without this grace the
+// authoritative failure stays unread in the outcome channel and the scan is
+// classified as a plain start timeout, skipping the adapter-unavailable
+// handling for this cycle. It is a var so tests can shorten it.
+var scanStartOutcomeGrace = defaultScanStartOutcomeGrace
+
 // scanStartWaitLimit bounds how long the scan body waits for the platform
 // watcher to accept a Start. The WinRT start sequence (watcher creation,
 // scanning mode, event registration, Start) can hang when the radio is
@@ -555,7 +566,23 @@ waitScan:
 					scanErr = &scanStartTimeoutError{budget: session.startWaitLimit}
 				}
 			default:
-				scanErr = &scanStartTimeoutError{budget: session.startWaitLimit}
+				// A platform failure can land microseconds after this branch
+				// commits (the same radio-unavailable race the concurrent
+				// branch above handles). Give the outcome one bounded grace so
+				// the authoritative failure wins over the start timeout and
+				// the adapter-unavailable classification still runs; a wedged
+				// platform call that never delivers an outcome keeps the
+				// start timeout.
+				grace := time.NewTimer(scanStartOutcomeGrace)
+				select {
+				case scanErr = <-scanDone:
+					grace.Stop()
+					if scanErr == nil {
+						scanErr = &scanStartTimeoutError{budget: session.startWaitLimit}
+					}
+				case <-grace.C:
+					scanErr = &scanStartTimeoutError{budget: session.startWaitLimit}
+				}
 			}
 			log.Printf("[BT] ScanForDuration: platform scan did not start within %s; abandoning it", session.startWaitLimit)
 			break waitScan
