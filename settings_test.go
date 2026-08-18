@@ -243,6 +243,43 @@ func TestAutoSleepSettingsNoOpRepairsMissingWatcher(t *testing.T) {
 	}
 }
 
+// TestRecoveryReplayDoesNotCancelMatchingAutoSleepWatcher guards the replay
+// invariant that SetAutoSleepSettings documents for re-saves: when the
+// recovered configuration matches the watcher that is already running, the
+// replay must not rebuild it. Rebuilding cancels the watcher's context,
+// aborting a sleep action mid-flight and re-arming the same session debt on
+// the replacement for a duplicate scan/sleep cycle.
+func TestRecoveryReplayDoesNotCancelMatchingAutoSleepWatcher(t *testing.T) {
+	t.Setenv("AppData", t.TempDir())
+	app := NewApp()
+	settings := autosleep.Settings{Enabled: true, Target: "steamvr", DelaySeconds: 60}
+	if err := app.config.SetAutoSleep(settings); err != nil {
+		t.Fatalf("config.SetAutoSleep() error = %v", err)
+	}
+	cancelled := false
+	app.autoSleepMutex.Lock()
+	app.autoSleepWatcher = &autosleep.Watcher{Settings: settings, Monitor: autosleep.NewMonitor(settings.Delay())}
+	app.autoSleepCancel = func() { cancelled = true }
+	app.autoSleepMutex.Unlock()
+	// Force one replay pass: the observed generation lags the real one.
+	app.configReplayGeneration.Store(app.config.RecoveryGeneration() + 1)
+
+	app.replayRecoveredConfigRuntime()
+
+	if cancelled {
+		t.Fatal("recovery replay cancelled a watcher whose settings already match the recovered configuration")
+	}
+	app.autoSleepMutex.Lock()
+	watcherPresent := app.autoSleepWatcher != nil
+	// Clear the synthetic watcher without invoking its sentinel cancel.
+	app.autoSleepWatcher = nil
+	app.autoSleepCancel = nil
+	app.autoSleepMutex.Unlock()
+	if !watcherPresent {
+		t.Fatal("recovery replay dropped the healthy watcher")
+	}
+}
+
 func TestLanguageBindingsPersistAndValidate(t *testing.T) {
 
 	t.Setenv("AppData", t.TempDir())

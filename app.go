@@ -299,7 +299,14 @@ func (a *App) replayRecoveredConfigRuntime() {
 	a.stationManager.ApplyPresenceMissThreshold()
 	replayed := true
 	if a.autoSleepSettingsMutex.TryLock() {
-		a.applyAutoSleep(a.config.GetAutoSleep())
+		// Re-applying settings the watcher already serves would cancel and
+		// rebuild it, aborting a sleep action mid-flight and re-arming the
+		// same session debt on the replacement. Keep the SetAutoSleepSettings
+		// invariant: only diverged or missing runtime state is repaired.
+		recovered := a.config.GetAutoSleep()
+		if !a.autoSleepMatches(recovered) {
+			a.applyAutoSleep(recovered)
+		}
 		a.autoSleepSettingsMutex.Unlock()
 	} else {
 		replayed = false
