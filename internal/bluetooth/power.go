@@ -332,6 +332,18 @@ func confirmPowerStateInternalContext(ctx context.Context, station *BaseStation,
 				// failure until the budget runs out.
 				return errors.Join(lastErr, err)
 			}
+			if expectedState == PowerStateSleep &&
+				(IsStationNotConnected(err) || RequiresReconnect(err)) {
+				// Firmware drops the BLE link as the station powers down, so
+				// a disconnect-class read failure right after a sleep command
+				// is the expected outcome rather than a transport fault.
+				// Reconnecting against the sleeping device can never produce
+				// a readback; stop immediately and report the command as
+				// unconfirmed instead of burning the whole retry and
+				// reconnect budget while holding the station lock.
+				_ = disconnectInternal(station)
+				return errors.Join(lastErr, err)
+			}
 			lastErr = err
 			consecutiveReadErrors++
 			if consecutiveReadErrors >= timing.ConfirmReconnectThreshold && attempt < attempts-1 {

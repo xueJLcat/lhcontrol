@@ -850,9 +850,11 @@ func (a *reconnectCountingAdapter) StopScan() error                             
 
 // TestPowerConfirmationKeepsBudgetAfterReconnectFailure verifies that a failed
 // confirmation reconnect does not abandon the remaining confirmation attempts.
-// A station that is rebooting is unreachable precisely while this polling
+// A station that is transitioning is unreachable precisely while this polling
 // exists for it, so giving up after the first reconnect failure would misreport
-// a legitimate boot as an unconfirmed command.
+// a legitimate transition as an unconfirmed command. The target is standby: a
+// sleep target exits early on disconnect-class read errors instead (the link
+// drop is the expected sleep outcome), which has its own test.
 func TestPowerConfirmationKeepsBudgetAfterReconnectFailure(t *testing.T) {
 	ConfigureTiming(TimingPolicy{
 		ConfirmAttemptsOff:        3,
@@ -872,7 +874,7 @@ func TestPowerConfirmationKeepsBudgetAfterReconnectFailure(t *testing.T) {
 	station.PowerState = PowerStateSleep
 
 	station.mutex.Lock()
-	err := confirmPowerStateInternalContext(context.Background(), station, PowerStateSleep)
+	err := confirmPowerStateInternalContext(context.Background(), station, PowerStateStandby)
 	station.mutex.Unlock()
 
 	if err == nil {

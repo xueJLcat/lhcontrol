@@ -319,6 +319,43 @@ func TestSleepDoesNotContinueAfterAmbiguousPrepareWrite(t *testing.T) {
 		t.Fatalf("sleep write attempts = %d, want prepare only", power.writeWithoutResponseAttempts)
 	}
 }
+func TestSleepConfirmationStopsWhenStationDropsLink(t *testing.T) {
+	// Firmware drops the BLE link as it powers down, so a disconnect-class
+	// read failure right after a successful sleep command must end the
+	// confirmation immediately instead of reconnecting against the sleeping
+	// device until the budget runs out.
+	originalTiming := CurrentTiming()
+	ConfigureTiming(TimingPolicy{
+		ConfirmAttemptsOff:  15,
+		ConfirmPollInterval: 300 * time.Millisecond,
+	})
+	t.Cleanup(func() { ConfigureTiming(originalTiming) })
+
+	power := &fakeCharacteristic{
+		value:             []byte{0x02},
+		powerSemantics:    true,
+		readErrAfterWrite: tinybluetooth.ErrDeviceDisconnected,
+	}
+	station := connectedFakeStation(power, nil, nil, Capabilities{PowerRead: true, PowerWrite: true})
+	device := &trackingConnectedDevice{}
+	station.device = device
+
+	start := time.Now()
+	result, err := SetPowerState(station, PowerStateSleep)
+	elapsed := time.Since(start)
+
+	var confirmationErr *PowerConfirmationError
+	if !errors.As(err, &confirmationErr) || result.Confirmed {
+		t.Fatalf("SetPowerState() result=%+v error=%v, want unconfirmed sleep after link drop", result, err)
+	}
+	if elapsed >= 2*time.Second {
+		t.Fatalf("sleep confirmation took %s, want an immediate exit once the link dropped", elapsed)
+	}
+	if device.disconnects != 1 {
+		t.Fatalf("device disconnects = %d, want only the final cleanup disconnect", device.disconnects)
+	}
+}
+
 func TestSleepContextCompletesFinalCommandAfterPrepareCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
