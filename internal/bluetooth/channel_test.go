@@ -451,6 +451,34 @@ func TestSetChannelAcceptsConfirmedReadbackAfterWriteError(t *testing.T) {
 		t.Fatalf("result = %+v, want command sent", result)
 	}
 }
+func TestSetChannelPollsDelayedApplicationAfterAmbiguousWriteError(t *testing.T) {
+	// An ambiguous write can be applied by the firmware only after a settling
+	// delay. The confirmation must poll like the clean-write path instead
+	// of deciding from a single immediate readback, which would report a
+	// false failure and cache the stale channel as a fresh observation.
+	mode := &fakeCharacteristic{
+		value:                []byte{0x03},
+		writeErr:             errors.New("late transport error"),
+		writeErrorAfterApply: true,
+		readValues: [][]byte{
+			{0x03}, // initial pre-write read
+			{0x03}, // first confirmation read: change not applied yet
+			{0x05}, // second confirmation read: change applied
+		},
+	}
+	station := connectedFakeStation(&fakeCharacteristic{}, mode, nil, Capabilities{ChannelRead: true, ChannelWrite: true})
+	result, err := SetChannel(station, 5)
+	if err != nil {
+		t.Fatalf("SetChannel() error = %v", err)
+	}
+	if result.Channel != 5 || !result.CommandSent || result.WriteWarning == "" {
+		t.Fatalf("result = %+v, want delayed confirmation of the ambiguous write", result)
+	}
+	if station.Channel != 5 || station.LastChannelReadAt.IsZero() {
+		t.Fatalf("station state = %+v, want the confirmed channel cached fresh", station.Snapshot())
+	}
+}
+
 func TestSetChannelDoesNotClaimDefinitelyRejectedWriteWasSent(t *testing.T) {
 	for name, writeErr := range map[string]error{
 		"transport classification": &classifiedWriteError{possiblySent: false},

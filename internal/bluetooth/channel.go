@@ -143,44 +143,75 @@ func SetChannelContext(ctx context.Context, station *BaseStation, channel int) (
 		result.CommandSent = IsPossiblySent(writeErr)
 		possiblySent, sendClassified := possiblySentClassification(writeErr)
 		definitelyNotSent := isDefiniteWriteRejection(writeErr) || (sendClassified && !possiblySent)
-		if readErr := readChannelInternalContext(ctx, station); readErr == nil {
-			result.Channel = station.Channel
-			if station.Channel == channel {
-				if definitelyNotSent {
+		if definitelyNotSent {
+			// The transport proves the command never reached the device, so the
+			// channel cannot change because of this operation: a single immediate
+			// readback is enough to detect an independently reached target.
+			if readErr := readChannelInternalContext(ctx, station); readErr == nil {
+				result.Channel = station.Channel
+				if station.Channel == channel {
 					// The requested outcome was reached independently after the
 					// initial read. Report success, but do not claim this operation
 					// sent a command the transport explicitly rejected.
 					result.CommandSent = false
 					result.WriteWarning = fmt.Sprintf("the write was reported as not sent, but channel %d was observed by readback: %v", channel, writeErr)
-				} else {
-					result.CommandSent = true
-					result.WriteWarning = fmt.Sprintf("the write call reported an error, but channel %d was confirmed by readback: %v", channel, writeErr)
+					station.LastReadAt = time.Now()
+					station.setChannelErrorInternal(nil)
+					station.setOperationErrorInternal(nil)
+					return result, nil
 				}
-				station.LastReadAt = time.Now()
-				station.setChannelErrorInternal(nil)
-				station.setOperationErrorInternal(nil)
-				return result, nil
+				writeErr = fmt.Errorf(
+					"write reported %v, but readback reported channel %d instead of %d",
+					writeErr,
+					station.Channel,
+					channel,
+				)
+			} else {
+				// Match the initial-read and post-confirmation readback paths: only
+				// a genuine transport failure invalidates the cached GATT handles. A
+				// capability rejection or an expired read budget is not evidence the
+				// link is broken and must not discard an otherwise healthy session.
+				if RequiresReconnect(writeErr) || RequiresReconnect(readErr) {
+					_ = disconnectInternal(station)
+				}
+				writeErr = errors.Join(writeErr, fmt.Errorf("final channel read failed: %w", readErr))
 			}
-			writeErr = fmt.Errorf(
-				"write reported %v, but readback reported channel %d instead of %d",
-				writeErr,
-				station.Channel,
-				channel,
-			)
+			station.setOperationErrorInternal(writeErr)
+			return result, fmt.Errorf("failed to write channel %d for %s: %w", channel, station.Name, writeErr)
+		}
+		// The write may have been applied: Lighthouse firmware does not always
+		// expose a channel change immediately, so confirm it with the same
+		// settling-and-poll window the clean-write path uses. A single immediate
+		// readback could observe the old value and cache it as a fresh
+		// observation, misleading the channel-conflict detection.
+		if confirmErr := confirmChannelWrite(ctx, station, channel, &result); confirmErr == nil {
+			result.CommandSent = true
+			result.WriteWarning = fmt.Sprintf("the write call reported an error, but channel %d was confirmed by readback: %v", channel, writeErr)
+			station.setOperationErrorInternal(nil)
+			return result, nil
 		} else {
-			// Match the initial-read and post-confirmation readback paths: only
-			// a genuine transport failure invalidates the cached GATT handles. A
-			// capability rejection or an expired read budget is not evidence the
-			// link is broken and must not discard an otherwise healthy session.
-			if RequiresReconnect(writeErr) || RequiresReconnect(readErr) {
+			if RequiresReconnect(writeErr) {
 				_ = disconnectInternal(station)
 			}
-			writeErr = errors.Join(writeErr, fmt.Errorf("final channel read failed: %w", readErr))
+			writeErr = errors.Join(writeErr, confirmErr)
+			station.setOperationErrorInternal(writeErr)
+			return result, fmt.Errorf("failed to write channel %d for %s: %w", channel, station.Name, writeErr)
 		}
-		station.setOperationErrorInternal(writeErr)
-		return result, fmt.Errorf("failed to write channel %d for %s: %w", channel, station.Name, writeErr)
 	}
 	result.CommandSent = true
+	if confirmErr := confirmChannelWrite(ctx, station, channel, &result); confirmErr != nil {
+		return result, fmt.Errorf("channel %d was written but could not be confirmed for %s: %w", channel, station.Name, confirmErr)
+	}
+	station.setOperationErrorInternal(nil)
+	return result, nil
+}
+
+// confirmChannelWrite polls the channel readback until the station reports the
+// requested channel or the confirmation budget is exhausted. Assumes the
+// caller holds station.mutex and keeps it held on return. On success it
+// records the fresh observation, clears the recorded errors, and returns nil;
+// result.Channel is updated with every successful read either way.
+func confirmChannelWrite(ctx context.Context, station *BaseStation, channel int, result *ChannelWriteResult) error {
 	var confirmationErr error
 	consecutiveReadErrors := 0
 	confirmTiming := CurrentTiming()
@@ -234,7 +265,7 @@ func SetChannelContext(ctx context.Context, station *BaseStation, channel int) (
 			station.LastReadAt = time.Now()
 			station.setChannelErrorInternal(nil)
 			station.setOperationErrorInternal(nil)
-			return result, nil
+			return nil
 		}
 		confirmationErr = fmt.Errorf("reported channel %d, expected %d", station.Channel, channel)
 	}
@@ -245,7 +276,7 @@ func SetChannelContext(ctx context.Context, station *BaseStation, channel int) (
 			station.LastReadAt = time.Now()
 			station.setChannelErrorInternal(nil)
 			station.setOperationErrorInternal(nil)
-			return result, nil
+			return nil
 		}
 		confirmationErr = fmt.Errorf("reported channel %d, expected %d", station.Channel, channel)
 	} else {
@@ -259,5 +290,5 @@ func SetChannelContext(ctx context.Context, station *BaseStation, channel int) (
 	}
 	station.setChannelErrorInternal(confirmationErr)
 	station.setOperationErrorInternal(nil)
-	return result, fmt.Errorf("channel %d was written but could not be confirmed for %s: %w", channel, station.Name, confirmationErr)
+	return confirmationErr
 }
