@@ -146,6 +146,32 @@ func TestFirstOwnedWindowUnverifiableOwnerRemainsImmediateFallback(t *testing.T)
 	}
 }
 
+// TestFirstOwnedWindowWithoutBaselineDefersCandidates covers the degraded
+// window search when the own executable name cannot be resolved: with an
+// empty comparison baseline no candidate may verify as this application's
+// window, so same-titled candidates stay deferred best-effort fallbacks
+// instead of becoming an immediate match that could activate an unrelated
+// program with the same window title.
+func TestFirstOwnedWindowWithoutBaselineDefersCandidates(t *testing.T) {
+	candidate := syscall.Handle(0x5000)
+	sequence := []syscall.Handle{candidate, 0}
+	index := 0
+	got, fallback, err := firstOwnedWindow(
+		"",
+		func(syscall.Handle) (syscall.Handle, error) {
+			value := sequence[index]
+			index++
+			return value, nil
+		},
+		func(syscall.Handle) (string, error) {
+			return "lhcontrol.exe", nil
+		},
+	)
+	if err != nil || got != 0 || fallback != candidate {
+		t.Fatalf("firstOwnedWindow() = (%v, %v, %v), want (0, %v, nil)", got, fallback, err, candidate)
+	}
+}
+
 func TestWaitForWindowRetriesUntilWindowAppears(t *testing.T) {
 	var attempts int
 	var sleeps int

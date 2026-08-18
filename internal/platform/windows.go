@@ -90,6 +90,24 @@ func findWindow(title string) windowSearchResult {
 		return windowSearchResult{err: err}
 	}
 	expected, expectedErr := ownProcessImageBaseName()
+	ownerOf := windowOwnerProcessName
+	if expectedErr != nil {
+		// Without the own executable name there is no baseline to verify a
+		// candidate against. Reporting that baseline failure as every
+		// candidate's owner-query error would mark all candidates
+		// unverifiable and promote the first one to an immediate match: an
+		// unrelated program that happens to use the same window title could
+		// be activated. Degrade every candidate to the deferred
+		// verified-foreign fallback instead: the search keeps polling until
+		// the budget runs out and focuses the first candidate only as the
+		// final best effort. Swallowing the per-window lookup error keeps it
+		// from taking the same unverifiable-immediate-match path.
+		expected = ""
+		ownerOf = func(hwnd syscall.Handle) (string, error) {
+			name, _ := windowOwnerProcessName(hwnd)
+			return name, nil
+		}
+	}
 	match, foreign, err := firstOwnedWindow(
 		expected,
 		func(after syscall.Handle) (syscall.Handle, error) {
@@ -101,12 +119,7 @@ func findWindow(title string) windowSearchResult {
 			)
 			return foundWindowHandle(hwnd), nil
 		},
-		func(hwnd syscall.Handle) (string, error) {
-			if expectedErr != nil {
-				return "", expectedErr
-			}
-			return windowOwnerProcessName(hwnd)
-		},
+		ownerOf,
 	)
 	// A verified-foreign window is only a last-resort candidate; keep
 	// polling for the real instance's window until the budget runs out.
@@ -144,7 +157,9 @@ func firstOwnedWindow(
 			break
 		}
 		actual, ownerErr := owner(hwnd)
-		if ownerErr == nil && (expected == "" || strings.EqualFold(actual, expected)) {
+		// An empty expected name means there is no baseline to verify
+		// against; no candidate may become an immediate match in that case.
+		if ownerErr == nil && expected != "" && strings.EqualFold(actual, expected) {
 			return hwnd, 0, nil
 		}
 		// A same-titled window must not shadow a later verified match. Keep
