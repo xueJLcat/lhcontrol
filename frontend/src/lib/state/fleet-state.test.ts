@@ -44,6 +44,32 @@ describe('FleetState merge', () => {
   });
 });
 
+describe('FleetState commit', () => {
+  it('dedupes duplicate addresses instead of rendering repeated cards', () => {
+    const fleet = new FleetState();
+
+    fleet.commit([
+      createStation({ address: 'AA', name: 'dup-first' }),
+      createStation({ address: 'AA', name: 'dup-last' }),
+      createStation({ address: 'BB', name: 'other' })
+    ]);
+
+    expect(fleet.stations).toHaveLength(2);
+    expect(fleet.stations.map((station) => station.address)).toEqual(['AA', 'BB']);
+    // The last occurrence wins for a duplicated address, matching merge.
+    expect(fleet.stations.find((station) => station.address === 'AA')?.name).toBe('dup-last');
+    expect(fleet.fleetUnverified + fleet.fleetOn + fleet.fleetStandby + fleet.fleetSleep).toBe(2);
+  });
+
+  it('ignores entries without an address instead of adding a ghost card', () => {
+    const fleet = new FleetState();
+
+    fleet.commit([createStation({ address: '', name: 'ghost' }), createStation({ address: 'BB', name: 'real' })]);
+
+    expect(fleet.stations.map((station) => station.address)).toEqual(['BB']);
+  });
+});
+
 describe('FleetState channel memory', () => {
   it('retains a long-lived channel for a full TTL after the first wipe', () => {
     vi.useFakeTimers();

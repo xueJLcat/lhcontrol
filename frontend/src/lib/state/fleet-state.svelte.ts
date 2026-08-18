@@ -120,8 +120,15 @@ export class FleetState {
   }
 
   commit(updated: StationInfo[]) {
+    // A snapshot carrying the same address twice must not append duplicate
+    // cards (the grid is keyed by address) or double-count the fleet
+    // aggregates; an entry without an address is a ghost card, matching
+    // merge's filter.
+    const deduped = new Map(
+      updated.filter((station) => Boolean(station?.address)).map((station) => [station.address, station])
+    );
     const previousByAddress = new Map(this.stations.map((station) => [station.address, station]));
-    this.stations = updated.map((station) => {
+    this.stations = [...deduped.values()].map((station) => {
       const previous = previousByAddress.get(station.address);
       return previous && sameStationInfo(previous, station) ? previous : station;
     });
