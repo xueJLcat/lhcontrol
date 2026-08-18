@@ -426,9 +426,18 @@ func main() {
 		// mid-flight. The drain is idempotent and safe even when startup
 		// never ran.
 		app.shutdown(context.Background())
+		// os.Exit below skips the deferred cleanup, so run it explicitly:
+		// release the instance mutex and flush plus close the diagnostic log,
+		// which matters most on the crash path.
 		if logFile != nil {
-			logFile.Sync()
-		} // Sync before exit, only if file exists
+			if syncErr := logFile.Sync(); syncErr != nil {
+				log.Printf("Failed to flush the diagnostic log before exit: %v", syncErr)
+			}
+			if closeErr := logFile.Close(); closeErr != nil {
+				log.Printf("Failed to close the diagnostic log before exit: %v", closeErr)
+			}
+		}
+		releaseInstance()
 		os.Exit(1)
 	}
 	log.Println("Application exited cleanly.")
