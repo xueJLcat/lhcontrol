@@ -472,6 +472,77 @@ func TestResetAddressRenameOnlySuppressesLegacyFallbackForThatDevice(t *testing.
 	}
 }
 
+// TestResetUnknownFactoryNameKeepsTombstoneAgainstLegacyAlias guards the
+// pre-scan reset: when the station has not been scanned this session the
+// factory name is unknown, so deleting the per-address alias would
+// resurrect the legacy alias as soon as a scan rediscovers the device.
+func TestResetUnknownFactoryNameKeepsTombstoneAgainstLegacyAlias(t *testing.T) {
+	t.Setenv("AppData", t.TempDir())
+
+	cfg := NewConfig()
+	cfg.RenamedStations["LHB-OLD"] = "Legacy name"
+	cfg.RenamedStationsByAddress["11:22:33:44:55:66"] = "Legacy name"
+
+	if err := cfg.SetRenamedStationByAddress("11:22:33:44:55:66", "", ""); err != nil {
+		t.Fatalf("SetRenamedStationByAddress() error = %v", err)
+	}
+	if got, ok := cfg.GetStationDisplayName("11:22:33:44:55:66", "LHB-OLD"); ok || got != "LHB-OLD" {
+		t.Fatalf("reset with unknown factory name = %q, %v, want the tombstone to suppress the legacy alias", got, ok)
+	}
+	if got, ok := cfg.GetStationDisplayName("AA:BB:CC:DD:EE:FF", "LHB-OLD"); !ok || got != "Legacy name" {
+		t.Fatalf("reset removed another device's legacy alias: %q, %v", got, ok)
+	}
+
+	reloaded := NewConfig()
+	if err := reloaded.Load(); err != nil {
+		t.Fatalf("Config.Load() error = %v", err)
+	}
+	if got, ok := reloaded.GetStationDisplayName("11:22:33:44:55:66", "LHB-OLD"); ok || got != "LHB-OLD" {
+		t.Fatalf("reloaded reset with unknown factory name = %q, %v, want the persisted tombstone", got, ok)
+	}
+
+	// A reset for a device that carries no alias and whose factory name is
+	// unknown has nothing to suppress and must not create a tombstone.
+	if err := cfg.SetRenamedStationByAddress("AA:BB:CC:DD:EE:00", "", ""); err != nil {
+		t.Fatalf("no-op reset error = %v", err)
+	}
+	if _, exists := cfg.RenamedStationsByAddress["AA:BB:CC:DD:EE:00"]; exists {
+		t.Fatal("no-op reset created a tombstone entry")
+	}
+}
+
+// TestLoadToleratesUTF8ByteOrderMark guards hand-edited configs saved with a
+// BOM (for example by Notepad): the marker must be stripped instead of
+// quarantining an otherwise valid file and falling back to defaults.
+func TestLoadToleratesUTF8ByteOrderMark(t *testing.T) {
+	configRoot := t.TempDir()
+	t.Setenv("AppData", configRoot)
+	configDirectory := filepath.Join(configRoot, "lhcontrol")
+	if err := os.MkdirAll(configDirectory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(configDirectory, "config.json")
+	content := append([]byte{0xEF, 0xBB, 0xBF}, []byte(`{"scanOnStartup":false}`)...)
+	if err := os.WriteFile(configPath, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := NewConfig()
+	if err := cfg.Load(); err != nil {
+		t.Fatalf("Config.Load() error = %v, want the BOM tolerated", err)
+	}
+	if cfg.ScanOnStartup {
+		t.Fatal("BOM-prefixed config fell back to defaults instead of loading")
+	}
+	preserved, err := filepath.Glob(configPath + ".invalid-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(preserved) != 0 {
+		t.Fatalf("BOM-prefixed config was quarantined: %v", preserved)
+	}
+}
+
 func TestInvalidConfigIsPreservedBeforeLaterSave(t *testing.T) {
 	configRoot := t.TempDir()
 	t.Setenv("AppData", configRoot)

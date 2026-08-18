@@ -127,12 +127,24 @@ func (c *Config) SetRenamedStationByAddress(address, originalName, newName strin
 	previousAddressName, addressExisted := c.RenamedStationsByAddress[address]
 	_, legacyExisted := c.RenamedStations[originalName]
 	if newName == "" {
-		if legacyExisted {
+		switch {
+		case legacyExisted:
 			// An empty address entry is a tombstone for this device only. It
 			// prevents the shared legacy name from being applied again without
 			// removing that alias from other devices with the same factory name.
 			c.RenamedStationsByAddress[address] = ""
-		} else {
+		case originalName == "":
+			// The factory name is unknown (the station has not been scanned
+			// this session), so a legacy alias may still apply to this device
+			// even when this setter cannot see it. Keep the existing entry as
+			// a tombstone: deleting it would silently resurrect the legacy
+			// alias once a scan rediscovers the device. With no existing entry
+			// there is nothing to suppress or remove.
+			if !addressExisted {
+				return nil
+			}
+			c.RenamedStationsByAddress[address] = ""
+		default:
 			delete(c.RenamedStationsByAddress, address)
 		}
 	} else {

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"lhcontrol/internal/autosleep"
@@ -81,7 +82,9 @@ func (c *Config) loadLocked(configFilePath string) error {
 	}
 
 	var loaded persistedConfig
-	err = json.Unmarshal(configFile, &loaded)
+	// A hand-edited file saved by an editor such as Notepad can begin with a
+	// UTF-8 BOM; strip it instead of quarantining an otherwise valid file.
+	err = json.Unmarshal(bytes.TrimPrefix(configFile, []byte{0xEF, 0xBB, 0xBF}), &loaded)
 	if err != nil {
 		invalidPath := fmt.Sprintf("%s.invalid-%s", configFilePath, time.Now().Format("20060102T150405.000000000"))
 		renameErr := configFileRenamer(configFilePath, invalidPath)
