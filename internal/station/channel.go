@@ -30,12 +30,6 @@ func (m *Manager) SetStationChannel(
 			result.Station = info
 		}
 	}()
-	initialSnapshot := stationPtr.Snapshot()
-	if initialSnapshot.Channel == channel && isOperationallyFresh(initialSnapshot.LastChannelReadAt, time.Now()) {
-		return ChannelChangeResult{
-			Address: initialSnapshot.Address, PreviousChannel: channel, Channel: channel, Confirmed: true, Warnings: []string{},
-		}, nil
-	}
 	operationContext, cancelOperation := m.newStationOperationContext(m.lifecycleContext)
 	defer cancelOperation()
 	if err := m.beginForegroundStationOperationContext(operationContext, canonicalAddress); err != nil {

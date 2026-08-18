@@ -1175,3 +1175,40 @@ func TestBulkCancelOwnsSkipWhenStationBudgetAlsoExpires(t *testing.T) {
 		t.Fatal("bulk operation did not finish after cancellation")
 	}
 }
+
+// TestBulkPowerInvalidTargetRejectedWhileBusy guards the entry validation
+// order: an unparseable target is a permanent argument error and must not be
+// masked as a retryable busy rejection just because another batch happens to
+// be running.
+func TestBulkPowerInvalidTargetRejectedWhileBusy(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	manager.bulkLifecycleMutex.Lock()
+	manager.bulkLifecycle = &bulkPowerLifecycle{cancel: func() {}, done: make(chan struct{})}
+	manager.bulkLifecycleMutex.Unlock()
+	t.Cleanup(func() {
+		manager.bulkLifecycleMutex.Lock()
+		manager.bulkLifecycle = nil
+		manager.bulkLifecycleMutex.Unlock()
+	})
+
+	result, err := manager.SetAllStationsPowerDetailed("bogus-state")
+	if !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("SetAllStationsPowerDetailed() error = %v, want ErrInvalidArgument despite the busy batch", err)
+	}
+	if errors.Is(err, ErrOperationInProgress) {
+		t.Fatalf("invalid target masked as a busy rejection: %v", err)
+	}
+	if result.Results == nil || len(result.Results) != 0 {
+		t.Fatalf("invalid-target results = %+v, want an empty non-nil list", result.Results)
+	}
+
+	// A valid target must still surface the busy rejection with the target.
+	busyResult, busyErr := manager.SetAllStationsPowerDetailed("on")
+	if !errors.Is(busyErr, ErrOperationInProgress) {
+		t.Fatalf("valid target while busy error = %v, want ErrOperationInProgress", busyErr)
+	}
+	if busyResult.Target != internalbluetooth.PowerStateOn.String() {
+		t.Fatalf("busy result target = %q, want %q", busyResult.Target, internalbluetooth.PowerStateOn.String())
+	}
+}

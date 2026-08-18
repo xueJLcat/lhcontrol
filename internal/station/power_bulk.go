@@ -77,9 +77,14 @@ func (m *Manager) SetAllStationsPowerDetailedContext(ctx context.Context, state 
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	busyTarget := ""
-	if target, targetErr := bluetooth.ParsePowerTarget(state); targetErr == nil {
-		busyTarget = target.String()
+	// Validate before the busy check: an unparseable target is a permanent
+	// argument error and must not be reported as ErrOperationInProgress just
+	// because another batch happens to be running. Entry validation also
+	// guarantees the cancellation backfill below always has a valid target.
+	target, targetErr := bluetooth.ParsePowerTarget(state)
+	if targetErr != nil {
+		return BulkPowerResult{Results: []BulkPowerStationResult{}},
+			fmt.Errorf("%w: %v", ErrInvalidArgument, targetErr)
 	}
 	operationContext, cancelOperation := context.WithTimeout(ctx, m.config.BulkPowerTimeout())
 	stopLifecycleCancellation := context.AfterFunc(m.lifecycleContext, cancelOperation)
@@ -91,7 +96,7 @@ func (m *Manager) SetAllStationsPowerDetailedContext(ctx context.Context, state 
 		cancelOperation()
 		// Keep the Results contract consistent with every other path: an empty
 		// list, not a nil slice (JSON [] rather than null).
-		return BulkPowerResult{Target: busyTarget, Results: []BulkPowerStationResult{}}, ErrOperationInProgress
+		return BulkPowerResult{Target: target.String(), Results: []BulkPowerStationResult{}}, ErrOperationInProgress
 	}
 	m.bulkLifecycle = lifecycle
 	m.bulkLifecycleMutex.Unlock()
@@ -129,11 +134,9 @@ func (m *Manager) SetAllStationsPowerDetailedContext(ctx context.Context, state 
 		// and the same selection semantics (booting skips, display names,
 		// deterministic order) instead of a raw list of every known station.
 		if len(result.Results) == 0 {
-			if backfillTarget, backfillErr := bluetooth.ParsePowerTarget(state); backfillErr == nil {
-				backfilled, _ := m.seedBulkPowerResults(m.selectBulkPowerCandidates(), backfillTarget, time.Now())
-				result.Results = backfilled.Results
-				m.attachBulkPowerStationInfos(result.Results)
-			}
+			backfilled, _ := m.seedBulkPowerResults(m.selectBulkPowerCandidates(), target, time.Now())
+			result.Results = backfilled.Results
+			m.attachBulkPowerStationInfos(result.Results)
 		}
 		for index := range result.Results {
 			item := &result.Results[index]

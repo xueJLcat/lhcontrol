@@ -143,14 +143,15 @@ func TestSetStationChannelRejectsVisibleConflictBeforeWrite(t *testing.T) {
 
 func TestSetStationChannelAlreadyAtFreshTargetIsNoOp(t *testing.T) {
 	manager := NewManager(config.NewConfig())
+	// The no-op check now runs behind the station operation gate, so one
+	// concurrent operation on a different station must leave a free slot for
+	// the no-op to acquire. The gate must not be bypassed: a confirmed no-op
+	// returned while another caller is writing the same station's channel
+	// would report a stale channel as verified.
 	if err := manager.beginStationOperation("busy-1"); err != nil {
 		t.Fatalf("beginStationOperation(busy-1) error = %v", err)
 	}
 	defer manager.endStationOperation("busy-1")
-	if err := manager.beginStationOperation("busy-2"); err != nil {
-		t.Fatalf("beginStationOperation(busy-2) error = %v", err)
-	}
-	defer manager.endStationOperation("busy-2")
 	manager.initializeErr = errors.New("adapter unavailable")
 	manager.nextInitializeAt = time.Now().Add(time.Hour)
 	manager.initializeBluetooth = func() error {
