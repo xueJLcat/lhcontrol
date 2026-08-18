@@ -240,6 +240,15 @@ func (a *App) rollbackListener(restoreAddress, convergeAddress string) {
 	}
 	a.setAPIAddress(convergeAddress)
 	a.restartAPIServer()
+	// Every other address switch verifies its bind before reporting an
+	// outcome; the convergence restart must do the same instead of leaving
+	// a listener that shows the converged address without serving it.
+	if bound, bindErr := a.waitForAPIBind(); !bound {
+		if bindErr == nil {
+			bindErr = fmt.Errorf("%s did not come up within %s", convergeAddress, a.apiBindVerifyWindow())
+		}
+		log.Printf("HTTP API listener could not converge onto %s: %v", convergeAddress, bindErr)
+	}
 }
 
 // waitForAPIBind polls the freshly restarted listener until it reports a
