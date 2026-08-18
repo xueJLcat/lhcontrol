@@ -95,6 +95,19 @@ func (w *Watcher) ReplacementMonitor(delay time.Duration) (*Monitor, bool) {
 	return monitor.replacement(delay, triggerOwed), carried
 }
 
+// MonitorCountdown reports the monitor's in-flight session-close countdown,
+// if any, for a watcher that stopped on its own. It reads the monitor through
+// the same lifecycle lock ReplacementMonitor writes under, so a concurrent
+// settings replacement cannot race the snapshot.
+func (w *Watcher) MonitorCountdown() (active bool, closedAt time.Time) {
+	w.lifecycleMutex.Lock()
+	defer w.lifecycleMutex.Unlock()
+	if w.Monitor == nil {
+		return false, time.Time{}
+	}
+	return w.Monitor.Countdown()
+}
+
 // SeedOwedSession seeds an unsettled sleep debt inherited from a watcher for
 // a different watched process (a target change). The monitor countdown cannot
 // express the debt (it belongs to the action bookkeeping, and the new

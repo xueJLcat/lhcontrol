@@ -667,6 +667,23 @@ func TestWatcherTriggerDebtUsesCompletionGeneration(t *testing.T) {
 	}
 }
 
+// TestWatcherMonitorCountdownSafeWithoutMonitor guards the reap snapshot: a
+// watcher that never ran its loop has no monitor yet, and the countdown
+// accessor must report no countdown instead of dereferencing the field.
+func TestWatcherMonitorCountdownSafeWithoutMonitor(t *testing.T) {
+	watcher := &Watcher{Settings: DefaultSettings()}
+	if active, closedAt := watcher.MonitorCountdown(); active || !closedAt.IsZero() {
+		t.Fatalf("MonitorCountdown() without a monitor = (%v, %v), want (false, zero)", active, closedAt)
+	}
+
+	closedAt := time.Now().Add(-time.Minute)
+	watcher.Monitor = NewMonitorContinuing(time.Hour, closedAt)
+	active, got := watcher.MonitorCountdown()
+	if !active || !got.Equal(closedAt) {
+		t.Fatalf("MonitorCountdown() = (%v, %v), want (true, %v)", active, got, closedAt)
+	}
+}
+
 // TestWatcherRearmsOwedTriggerAfterUnsettledCancel covers an action cancelled
 // before settling while the same watcher keeps running (for example when an
 // external scan stop cancels the action's scan phase). The monitor already

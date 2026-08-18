@@ -259,11 +259,13 @@ func (a *App) reapStoppedAutoSleepWatcher(watcher *autosleep.Watcher) {
 	// countdown that had not fired yet (delay not elapsed, no debt) is
 	// snapshotted too: the rebuild continues it instead of restarting the
 	// monitor from idle, which would never fire for the already-closed
-	// session. Run has returned, so the monitor state no longer changes.
+	// session. Run has returned, so the monitor state no longer changes; the
+	// monitor field itself still can (a replacement snapshots it lazily), so
+	// both reads go through the watcher's lifecycle lock.
 	owed, closedAt := watcher.OwedSession()
 	var countdownClosedAt time.Time
-	if !owed && watcher.Monitor != nil {
-		if active, monitorClosedAt := watcher.Monitor.Countdown(); active {
+	if !owed {
+		if active, monitorClosedAt := watcher.MonitorCountdown(); active {
 			countdownClosedAt = monitorClosedAt
 		}
 	}
