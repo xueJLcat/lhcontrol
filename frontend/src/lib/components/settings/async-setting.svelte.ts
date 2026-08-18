@@ -32,6 +32,9 @@ export class AsyncSetting<T> {
   error = $state<string | null>(null);
   busy = $state(false);
   private pendingSaves = 0;
+  // Advances with every accepted edit so a failed queued save can tell
+  // whether a newer edit already owns the displayed value.
+  private saveRevision = 0;
 
   constructor(private readonly options: AsyncSettingOptions<T>) {}
 
@@ -58,6 +61,7 @@ export class AsyncSetting<T> {
     // serialized saves drain.
     if (this.value === null || (this.busy && this.pendingSaves === 0)) return;
     this.value = next;
+    const revision = ++this.saveRevision;
     this.pendingSaves += 1;
     this.busy = true;
     try {
@@ -65,10 +69,18 @@ export class AsyncSetting<T> {
         try {
           await this.options.setter(next);
         } catch (error) {
+          if (revision !== this.saveRevision) {
+            // A newer queued edit owns the displayed value, and its save
+            // settles the backend state next. Rolling back here would
+            // clobber that optimistic value with an older persisted one and
+            // leave the display behind once the newer save succeeds.
+            pushToast(withDetail(this.options.saveMessage, backendCopy(String(error))));
+            return;
+          }
           // Another drawer instance may have completed an earlier queued save
           // after this instance captured `previous`. Re-read inside the same
-          // serialization slot so a failed later save rolls back to the value
-          // that is actually persisted, not to an older local snapshot.
+          // serialization slot so a failed save rolls back to the value that
+          // is actually persisted, not to an older local snapshot.
           try {
             const persisted = await this.options.getter();
             this.value = this.options.map ? this.options.map(persisted) : persisted;

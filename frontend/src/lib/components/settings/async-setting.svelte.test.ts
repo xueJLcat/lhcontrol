@@ -161,6 +161,36 @@ describe('AsyncSetting', () => {
     expect(second.value).toBe(10);
   });
 
+  it('keeps a newer queued edit visible when an older queued save fails', async () => {
+    let persisted = 5;
+    const releaseFirstSave = deferred<void>();
+    const setter = vi.fn(async (value: number) => {
+      if (value === 10) {
+        await releaseFirstSave.promise;
+        throw new Error('save rejected');
+      }
+      persisted = value;
+    });
+    const { setting } = createSetting(async () => persisted, setter);
+    await setting.load();
+
+    const firstSave = setting.change(10);
+    await vi.waitFor(() => expect(setter).toHaveBeenCalledOnce());
+    const secondSave = setting.change(20);
+
+    releaseFirstSave.resolve(undefined);
+    await Promise.all([firstSave, secondSave]);
+
+    // The failed first save must not roll the display back past the newer
+    // edit: the second save settled the backend on 20, and nothing re-reads
+    // afterwards, so a stale rollback would leave the UI disagreeing with
+    // the persisted value for the rest of the drawer session.
+    expect(persisted).toBe(20);
+    expect(setting.value).toBe(20);
+    expect(setting.error).toBeNull();
+    expect(setting.busy).toBe(false);
+  });
+
   it('surfaces an error when a failed save cannot re-read the persisted value', async () => {
     const getter = vi.fn()
       .mockResolvedValueOnce(5)
