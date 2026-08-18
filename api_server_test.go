@@ -118,6 +118,33 @@ func TestConfigLoadWarningIsExposedAndDefensivelyCopied(t *testing.T) {
 
 }
 
+func TestConfigLoadWarningClearsOncePersistenceRecovers(t *testing.T) {
+
+	app := NewApp()
+
+	app.setConfigLoadStatus(errors.New("invalid JSON"))
+
+	if status := app.GetAPIStatus(); len(status.Warnings) != 1 {
+
+		t.Fatalf("load failure status = %+v", status)
+
+	}
+
+	// A successful save proves the configuration file is usable again; the
+	// startup load failure must not keep surfacing next to configWritable.
+
+	app.setConfigPersistenceStatus()
+
+	status := app.GetAPIStatus()
+
+	if !status.ConfigWritable || len(status.Warnings) != 0 {
+
+		t.Fatalf("recovered persistence status = %+v", status)
+
+	}
+
+}
+
 func TestGetAPIStatusIncludesRecoverableExternalOperations(t *testing.T) {
 
 	app := NewApp()

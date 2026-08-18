@@ -64,6 +64,9 @@ type App struct {
 	// effects (Bluetooth timing, auto-sleep watcher, API listener) exactly
 	// once.
 	configReplayGeneration atomic.Uint64
+	// configReplayMutex serializes the replay itself so two setters that
+	// observe the stale generation concurrently cannot both run it.
+	configReplayMutex sync.Mutex
 	// absentRetryLimitMutex guards absentRetryLimitApplied, the absent-station
 	// retry limit the runtime last converged on. A blocked-save recovery that
 	// restores a higher persisted limit must revive recovery entries that
@@ -297,6 +300,10 @@ func (a *App) setConfigPersistenceStatus() {
 		a.configSaveWarning = fmt.Sprintf("Configuration changes could not be saved: %v", persistenceErr)
 	} else {
 		a.configSaveWarning = ""
+		// A successful save proves the configuration file is usable again:
+		// the runtime state is now persisted to it, so a startup load failure
+		// is no longer current and must not keep surfacing for the session.
+		a.configLoadWarning = ""
 	}
 	a.refreshConfigStatusLocked(persistenceErr)
 	a.apiStatusMutex.Unlock()
@@ -318,6 +325,15 @@ func (a *App) setConfigPersistenceStatus() {
 // a replay that could not observe every subsystem.
 func (a *App) replayRecoveredConfigRuntime() {
 	generation := a.config.RecoveryGeneration()
+	if a.configReplayGeneration.Load() == generation {
+		return
+	}
+	// Serialize concurrent replays: two setters can observe the stale
+	// generation at once, and the check-then-act gate would otherwise run the
+	// shared convergence actions (timing, recovery settings, retry limits)
+	// twice. TryLock-guarded subsystems keep their skip semantics inside.
+	a.configReplayMutex.Lock()
+	defer a.configReplayMutex.Unlock()
 	if a.configReplayGeneration.Load() == generation {
 		return
 	}
@@ -352,14 +368,19 @@ func (a *App) replayRecoveredConfigRuntime() {
 }
 
 // convergeAPIListenerAfterRecovery restarts the API listener onto the
-// recovered listen address when it still serves the pre-recovery one. A
-// recovered address that cannot bind restores the previously serving address
-// so the API stays reachable; the persisted address remains the recovered one
-// and the listener converges onto it on the next address change.
+// recovered listen address when it still serves the pre-recovery one, or when
+// it already targets the recovered address but is down (a bind-retry loop the
+// explicit setter paths treat as repair-worthy the same way). A recovered
+// address that cannot bind restores the previously serving address so the API
+// stays reachable; the persisted address remains the recovered one and the
+// listener converges onto it on the next address change.
 func (a *App) convergeAPIListenerAfterRecovery() {
+	if a.shuttingDown.Load() {
+		return
+	}
 	configured := a.config.GetAPIListenAddress()
 	status := a.GetAPIStatus()
-	if status.Address == configured || a.shuttingDown.Load() {
+	if status.Address == configured && status.Running {
 		return
 	}
 	previous := status.Address
