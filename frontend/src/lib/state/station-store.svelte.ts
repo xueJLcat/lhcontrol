@@ -876,7 +876,15 @@ export class StationStore {
       startupDecisionApplied = true;
       // An external scan event may have arrived while this initial query was
       // pending. Do not let its older result overwrite the newer event state.
-      if (this.disposed || startupScanEpoch !== this.gates.currentScanEpoch) return;
+      if (this.disposed || startupScanEpoch !== this.gates.currentScanEpoch) {
+        // The startup scan decision belongs to the newer scan owner now, but a
+        // polling re-enable during the barrier still owes an immediate
+        // refresh. This early return is the only exit that skips the
+        // fulfillment below, so deliver it here; periodicStatusCheck
+        // self-gates against whichever work the newer owner is running.
+        this.runOwedImmediateStatusCheck();
+        return;
+      }
       if (startupScanning === null) {
         if (this.scanOnStartupEnabled) this.setStartupScanDeferred(true);
       } else if (startupScanning) {
