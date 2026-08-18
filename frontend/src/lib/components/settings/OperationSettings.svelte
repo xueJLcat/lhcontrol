@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onDestroy } from 'svelte';
   import { Cable, Gauge, LoaderCircle, RefreshCw, Timer } from 'lucide-svelte';
   import { t } from '../../i18n.svelte';
   import { useOperationSettings } from './context';
@@ -21,6 +22,27 @@
   const identifyAttemptsDraft = numericDraft(() => settings.identifyAttempts, R.MIN_IDENTIFY_ATTEMPTS, R.MAX_IDENTIFY_ATTEMPTS, settings.onIdentifyAttemptsChange);
   const confirmReconnectThresholdDraft = numericDraft(() => settings.confirmReconnectThreshold, R.MIN_CONFIRM_RECONNECT_THRESHOLD, R.MAX_CONFIRM_RECONNECT_THRESHOLD, settings.onConfirmReconnectThresholdChange);
   const confirmReconnectDelayDraft = numericDraft(() => settings.confirmReconnectDelayMs, R.MIN_CONFIRM_RECONNECT_DELAY_MS, R.MAX_CONFIRM_RECONNECT_DELAY_MS, settings.onConfirmReconnectDelayChange);
+
+  // Closing the drawer with Escape or the scrim unmounts the focused input
+  // without firing change; commit the edited drafts so typed values are not
+  // silently discarded. commit is idempotent for unchanged values.
+  onDestroy(() => {
+    bulkTimeoutDraft.commit();
+    stationTimeoutDraft.commit();
+    confirmAttemptsOnDraft.commit();
+    confirmAttemptsOffDraft.commit();
+    confirmPollIntervalDraft.commit();
+    bootFallbackDraft.commit();
+    sleepFinalWriteDraft.commit();
+    sleepPrepareGapDraft.commit();
+    powerWriteAttemptsDraft.commit();
+    operationRetryDelayDraft.commit();
+    discoveryAttemptsDraft.commit();
+    discoveryRetryDelayDraft.commit();
+    identifyAttemptsDraft.commit();
+    confirmReconnectThresholdDraft.commit();
+    confirmReconnectDelayDraft.commit();
+  });
 </script>
 
 <section>

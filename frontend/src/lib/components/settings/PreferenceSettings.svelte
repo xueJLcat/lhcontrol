@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onDestroy } from 'svelte';
   import { Languages, LoaderCircle, MoonStar, Radar, RefreshCw } from 'lucide-svelte';
   import { autosleep } from '../../../../wailsjs/go/models';
   import { t } from '../../i18n.svelte';
@@ -56,6 +57,15 @@
       settings.onAutoSleepChange(autosleep.Settings.createFrom({ ...autoSleep, delaySeconds }));
     }
   }
+
+  // Closing the drawer with Escape or the scrim unmounts the focused input
+  // without firing change; commit the edited drafts so typed values are not
+  // silently discarded. commit is idempotent for unchanged values.
+  onDestroy(() => {
+    scanDurationDraft.commit();
+    statusPollIntervalDraft.commit();
+    commitDelay();
+  });
 </script>
 
 <section>

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onDestroy } from 'svelte';
   import { History, Hourglass, LoaderCircle, Network, RefreshCw, Shuffle } from 'lucide-svelte';
   import { t } from '../../i18n.svelte';
   import { useAdvancedSettings } from './context';
@@ -39,6 +40,25 @@
     apiAddressDraft = address;
     if (address !== current) settings.onAPIListenAddressChange(address);
   }
+
+  // Closing the drawer with Escape or the scrim unmounts the focused input
+  // without firing change; commit the edited drafts so typed values are not
+  // silently discarded. commit is idempotent for unchanged values.
+  onDestroy(() => {
+    channelConfirmAttemptsDraft.commit();
+    channelConfirmIntervalDraft.commit();
+    presenceMissThresholdDraft.commit();
+    commitAPIListenAddress();
+    initialReadTimeoutDraft.commit();
+    scanReadPhaseTimeoutDraft.commit();
+    statusReadTimeoutDraft.commit();
+    statusRefreshTimeoutDraft.commit();
+    channelScanFreshnessDraft.commit();
+    recoveryRetryBaseDraft.commit();
+    recoveryRetryMaxDraft.commit();
+    absentStationRetryLimitDraft.commit();
+    bluetoothInitRetryDraft.commit();
+  });
 </script>
 
 <section>
