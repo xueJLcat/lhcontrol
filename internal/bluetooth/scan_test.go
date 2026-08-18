@@ -594,6 +594,32 @@ func TestScanForDurationContextDoesNotStartWithCancelledContext(t *testing.T) {
 	default:
 	}
 }
+// TestScanForDurationContextPreExpiredDeadlineReportsTimeout guards the
+// pre-flight classification: a caller deadline that expired before the scan
+// could start is a timeout, matching the in-scan classification. Reporting
+// ErrScanCancelled instead would route a late-started timed-out scan into
+// the benign-cancellation paths upstream.
+func TestScanForDurationContextPreExpiredDeadlineReportsTimeout(t *testing.T) {
+	originalAdapter := adapter
+	fake := newFakeBLEAdapter()
+	adapter = fake
+	t.Cleanup(func() { adapter = originalAdapter })
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Millisecond))
+	defer cancel()
+	_, err := ScanForDurationContext(ctx, time.Hour)
+	if err == nil || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("ScanForDurationContext() error = %v, want a timeout wrapping DeadlineExceeded", err)
+	}
+	if errors.Is(err, ErrScanCancelled) {
+		t.Fatalf("ScanForDurationContext() error = %v, must not be classified as cancelled", err)
+	}
+	select {
+	case <-fake.started:
+		t.Fatal("adapter scan started with an already-expired deadline")
+	default:
+	}
+}
+
 func TestRequestScanCancellationBeforeWatcherStartIsNonBlocking(t *testing.T) {
 	originalAdapter := adapter
 	fake := newFakeBLEAdapter()

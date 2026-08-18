@@ -286,10 +286,12 @@ func (s *scanSession) markFinished() {
 }
 
 // markPlatformDone records that the platform Scan call delivered its outcome
-// (with or without an error). Callers invoke it right after receiving from
-// scanDone, before markFinished, so a duration timer that fires in that
-// narrow window cannot latch durationStopIssued and mask the platform
-// outcome as a completed duration scan.
+// (with or without an error). The scan goroutine invokes it before publishing
+// the outcome on scanDone so the flag is set by the time any consumer can
+// observe the result: a duration timer that fires afterwards cannot latch
+// durationStopIssued and mask the platform outcome as a completed duration
+// scan. Marking after the receive instead left a window in which the timer
+// could still latch between the receive and the mark.
 func (s *scanSession) markPlatformDone() {
 	s.mutex.Lock()
 	s.platformDone = true
@@ -355,7 +357,15 @@ func ScanForDurationContext(ctx context.Context, duration time.Duration) ([]Disc
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if ctx.Err() != nil {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		// A caller deadline that expired before the scan could start is a
+		// timeout, matching the in-scan classification at the end of this
+		// function; callers retry cancellations but treat timeouts as a
+		// distinct failure mode. Only an explicit cancellation reports
+		// ErrScanCancelled.
+		if errors.Is(ctxErr, context.DeadlineExceeded) {
+			return nil, fmt.Errorf("Bluetooth scan timed out: %w", context.DeadlineExceeded)
+		}
 		return nil, ErrScanCancelled
 	}
 	// log.Printf("[BT] ScanForDuration: Starting scan for %v...", duration)
@@ -444,7 +454,12 @@ func ScanForDurationContext(ctx context.Context, duration time.Duration) ([]Disc
 	log.Println("[BT] ScanForDuration: Calling adapter.Scan()...")
 	scanDone := make(chan error, 1)
 	go func() {
-		scanDone <- scanSafely(scanCallback, scanStarted)
+		scanErr := scanSafely(scanCallback, scanStarted)
+		// Mark the platform outcome delivered before publishing it (see
+		// markPlatformDone): a duration timer firing after this moment cannot
+		// latch durationStopIssued and reclassify the outcome.
+		session.markPlatformDone()
+		scanDone <- scanErr
 	}()
 	var scanErr error
 	scanWedged := false
@@ -461,7 +476,6 @@ waitScan:
 	for {
 		select {
 		case scanErr = <-scanDone:
-			session.markPlatformDone()
 			break waitScan
 		case <-session.stopDone:
 			// The stop handshake completed or was abandoned. Give the platform
@@ -483,7 +497,6 @@ waitScan:
 			select {
 			case scanErr = <-scanDone:
 				grace.Stop()
-				session.markPlatformDone()
 			case <-grace.C:
 				scanWedged = true
 				log.Printf("[BT] ScanForDuration: platform scan did not finish within %s of the stop handshake; abandoning it", graceBudget)
@@ -508,7 +521,6 @@ waitScan:
 				// the authoritative result and must win over the start
 				// timeout so the adapter-unavailable classification still
 				// runs; only a nil outcome keeps the timeout.
-				session.markPlatformDone()
 				if scanErr == nil {
 					scanErr = &scanStartTimeoutError{budget: session.startWaitLimit}
 				}
