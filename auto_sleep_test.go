@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"errors"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"lhcontrol/internal/autosleep"
 	"lhcontrol/internal/station"
 )
 
@@ -294,6 +296,124 @@ func TestRunAutoSleepIsVisibleInOperationHealthUntilItFinishes(t *testing.T) {
 	status = app.GetAPIStatus()
 	if status.OperationRevision != 2 || len(status.ActiveOperations) != 0 {
 		t.Fatalf("finished operation status = %+v", status)
+	}
+}
+
+// selfStoppingWatcher returns a Watcher that stops itself after repeated
+// process-check failures, carrying an unsettled sleep debt seeded beforehand.
+func selfStoppingWatcher() *autosleep.Watcher {
+	watcher := &autosleep.Watcher{
+		Settings: autosleep.Settings{Enabled: true, Target: string(autosleep.TargetSteamVR), DelaySeconds: autosleep.MinDelaySeconds},
+		Interval: time.Millisecond,
+		IsRunning: func(string) (bool, error) {
+			return false, errors.New("process snapshot unavailable")
+		},
+		Trigger: func(context.Context, time.Time) bool { return true },
+	}
+	watcher.SeedOwedSession()
+	return watcher
+}
+
+// TestSelfStoppedWatcherDebtSurvivesRebuild guards the owed-sleep invariant
+// across a watcher self-stop: the unsettled debt must be stashed by the reap
+// and re-armed by the replacement watcher instead of being dropped until the
+// watched process runs a brand-new session.
+func TestSelfStoppedWatcherDebtSurvivesRebuild(t *testing.T) {
+	app := NewApp()
+	// The rebuilt watcher fires the inherited debt on its first poll; block
+	// the action there so the debt stays owed while the test asserts it.
+	releaseTrigger := make(chan struct{})
+	app.scanForAutoSleep = func(ctx context.Context) ([]station.StationInfo, error) {
+		select {
+		case <-releaseTrigger:
+		case <-ctx.Done():
+		}
+		return nil, nil
+	}
+	app.setPowerForAutoSleep = func(context.Context, string) (station.BulkPowerResult, error) {
+		return station.BulkPowerResult{}, nil
+	}
+	var failedEvents atomic.Int32
+	app.autoSleepEventSink = func(event autoSleepEvent) {
+		if event.Phase == "failed" {
+			failedEvents.Add(1)
+		}
+	}
+
+	watcher := selfStoppingWatcher()
+	ctx, cancel := context.WithCancel(context.Background())
+	go watcher.Run(ctx)
+	select {
+	case <-watcher.Done():
+	case <-time.After(2 * time.Second):
+		cancel()
+		t.Fatal("watcher did not self-stop after persistent check failures")
+	}
+	cancel()
+
+	app.autoSleepMutex.Lock()
+	app.autoSleepWatcher = watcher
+	app.autoSleepCancel = func() {}
+	app.autoSleepMutex.Unlock()
+
+	app.reapStoppedAutoSleepWatcher(watcher)
+
+	app.autoSleepMutex.Lock()
+	stillSet := app.autoSleepWatcher == watcher
+	owed := app.autoSleepSelfStopOwed
+	app.autoSleepMutex.Unlock()
+	if stillSet {
+		t.Fatal("self-stopped watcher was not cleared")
+	}
+	if !owed {
+		t.Fatal("self-stopped watcher debt was not stashed for the rebuild")
+	}
+	if failedEvents.Load() != 1 {
+		t.Fatalf("failed watcher events = %d, want one surfaced failure", failedEvents.Load())
+	}
+
+	app.applyAutoSleep(autosleep.Settings{Enabled: true, Target: string(autosleep.TargetSteamVR), DelaySeconds: autosleep.MinDelaySeconds})
+	defer app.stopAutoSleep()
+	defer close(releaseTrigger)
+
+	app.autoSleepMutex.Lock()
+	rebuilt := app.autoSleepWatcher
+	owedAfter := app.autoSleepSelfStopOwed
+	app.autoSleepMutex.Unlock()
+	if rebuilt == nil {
+		t.Fatal("rebuild did not create a replacement watcher")
+	}
+	if owedAfter {
+		t.Fatal("replacement watcher did not consume the stashed debt")
+	}
+	if !rebuilt.OwesTrigger() {
+		t.Fatal("replacement watcher lost the owed sleep debt")
+	}
+}
+
+// TestStopAutoSleepCancelsPendingRebuild guards shutdown against a pending
+// self-stop rebuild timer: without cancelling it, the shutdown wait would
+// block until the timer fires.
+func TestStopAutoSleepCancelsPendingRebuild(t *testing.T) {
+	app := NewApp()
+	app.scheduleAutoSleepRebuild()
+	app.autoSleepMutex.Lock()
+	pending := app.autoSleepRebuildTimer != nil
+	app.autoSleepMutex.Unlock()
+	if !pending {
+		t.Fatal("scheduleAutoSleepRebuild() did not register a pending rebuild")
+	}
+
+	start := time.Now()
+	app.stopAutoSleep()
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("stopAutoSleep() took %v, want the pending rebuild cancelled immediately", elapsed)
+	}
+	app.autoSleepMutex.Lock()
+	leftover := app.autoSleepRebuildTimer != nil
+	app.autoSleepMutex.Unlock()
+	if leftover {
+		t.Fatal("stopAutoSleep() left a pending rebuild timer registered")
 	}
 }
 

@@ -57,6 +57,11 @@ func (a *App) SetAPIListenAddress(address string) error {
 		err := a.config.SetAPIListenAddress(normalized)
 		a.setConfigPersistenceStatus()
 		if err != nil {
+			// A blocked-save recovery inside the setter may have restored a
+			// different persisted address while the save still failed; the
+			// replay triggered above cannot take this setter's mutex, so
+			// converge the listener here instead of leaving it diverged.
+			a.convergeAPIListenerAfterRecovery()
 			return err
 		}
 		published := a.GetAPIStatus().Address
@@ -99,6 +104,9 @@ func (a *App) SetAPIListenAddress(address string) error {
 	published := a.GetAPIStatus().Address
 	if err := a.config.SetAPIListenAddress(normalized); err != nil {
 		a.setConfigPersistenceStatus()
+		// Same recovery window as the unchanged-address branch: converge the
+		// listener onto whatever address the recovered configuration holds.
+		a.convergeAPIListenerAfterRecovery()
 		return err
 	}
 	a.setConfigPersistenceStatus()

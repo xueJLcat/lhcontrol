@@ -58,18 +58,30 @@ type App struct {
 	// defaults with the persisted file contents replays the runtime side
 	// effects (Bluetooth timing, auto-sleep watcher, API listener) exactly
 	// once.
-	configReplayGeneration  atomic.Uint64
-	autoSleepMutex          sync.Mutex
-	autoSleepCancel         context.CancelFunc
-	autoSleepWatcher        *autosleep.Watcher
-	autoSleepStopWait       time.Duration
-	autoSleepWG             sync.WaitGroup
-	autoSleepActionID       atomic.Uint64
-	autoSleepActionSlot     chan struct{}
-	autoSleepSettledSession time.Time
-	scanForAutoSleep        func(context.Context) ([]station.StationInfo, error)
-	setPowerForAutoSleep    func(context.Context, string) (station.BulkPowerResult, error)
-	autoSleepEventSink      func(autoSleepEvent)
+	configReplayGeneration atomic.Uint64
+	// autoSleepMutex protects autoSleepCancel, autoSleepWatcher,
+	// autoSleepRebuildTimer and the self-stop debt fields below.
+	autoSleepMutex    sync.Mutex
+	autoSleepCancel   context.CancelFunc
+	autoSleepWatcher  *autosleep.Watcher
+	autoSleepStopWait time.Duration
+	autoSleepWG       sync.WaitGroup
+	// autoSleepRebuildTimer holds the pending rebuild scheduled after a
+	// watcher self-stop. It carries one autoSleepWG count that is released
+	// either by the timer callback or by stopScheduledAutoSleepRebuildLocked
+	// when the timer is cancelled before firing.
+	autoSleepRebuildTimer *time.Timer
+	// autoSleepSelfStopOwed remembers an unsettled sleep debt left behind by
+	// a self-stopped watcher so the rebuilt watcher re-arms it instead of
+	// dropping it until the watched process runs a full new session.
+	autoSleepSelfStopOwed     bool
+	autoSleepSelfStopClosedAt time.Time
+	autoSleepActionID         atomic.Uint64
+	autoSleepActionSlot       chan struct{}
+	autoSleepSettledSession   time.Time
+	scanForAutoSleep          func(context.Context) ([]station.StationInfo, error)
+	setPowerForAutoSleep      func(context.Context, string) (station.BulkPowerResult, error)
+	autoSleepEventSink        func(autoSleepEvent)
 }
 
 func NewApp() *App {
@@ -273,24 +285,34 @@ func (a *App) setConfigPersistenceStatus() {
 // observation. The generation check makes concurrent setters replay exactly
 // once per recovery. Subsystems whose owning setter may itself be holding its
 // serialization mutex (auto-sleep, API address) are skipped under TryLock
-// contention: the owner re-applies the post-recovery state itself once its
-// mutation and save complete.
+// contention: the owner converges the runtime itself on both its success and
+// failure paths. The generation is committed only when neither subsystem was
+// skipped, so a later setter re-verifies the convergence instead of trusting
+// a replay that could not observe every subsystem.
 func (a *App) replayRecoveredConfigRuntime() {
 	generation := a.config.RecoveryGeneration()
-	if a.configReplayGeneration.Swap(generation) == generation {
+	if a.configReplayGeneration.Load() == generation {
 		return
 	}
-	log.Printf("Configuration recovered from a blocked load; re-applying runtime settings")
 	a.applyBluetoothTiming()
 	a.stationManager.ApplyRecoverySettings()
 	a.stationManager.ApplyPresenceMissThreshold()
+	replayed := true
 	if a.autoSleepSettingsMutex.TryLock() {
 		a.applyAutoSleep(a.config.GetAutoSleep())
 		a.autoSleepSettingsMutex.Unlock()
+	} else {
+		replayed = false
 	}
 	if a.apiSettingsMutex.TryLock() {
 		a.convergeAPIListenerAfterRecovery()
 		a.apiSettingsMutex.Unlock()
+	} else {
+		replayed = false
+	}
+	if replayed {
+		log.Printf("Configuration recovered from a blocked load; re-applied runtime settings")
+		a.configReplayGeneration.Store(generation)
 	}
 }
 

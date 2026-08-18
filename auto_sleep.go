@@ -73,7 +73,15 @@ func (a *App) SetAutoSleepSettings(settings autosleep.Settings) error {
 	a.setConfigPersistenceStatus()
 
 	if err != nil {
-
+		// A blocked-save recovery inside the config setter may have replaced
+		// the in-memory settings while the save itself still failed. The
+		// replay triggered above cannot take this setter's mutex, so converge
+		// the runtime onto the recovered configuration here instead of
+		// leaving the watcher silently out of sync with it.
+		current := a.config.GetAutoSleep()
+		if !a.autoSleepMatches(current) {
+			a.applyAutoSleep(current)
+		}
 		return err
 
 	}
@@ -110,6 +118,10 @@ func (a *App) applyAutoSleep(settings autosleep.Settings) {
 
 	defer a.autoSleepMutex.Unlock()
 
+	// An explicit settings application supersedes any pending self-stop
+	// rebuild: this call already rebuilds (or detaches) the watcher.
+	a.stopScheduledAutoSleepRebuildLocked()
+
 	var monitor *autosleep.Monitor
 	seedOwedSession := false
 	if previous := a.autoSleepWatcher; previous != nil {
@@ -145,17 +157,29 @@ func (a *App) applyAutoSleep(settings autosleep.Settings) {
 		// caller behind a possibly minute-long Bluetooth operation. Shutdown
 		// joins every watcher through the shared wait group instead.
 	}
-
 	if !settings.Enabled || a.shuttingDown.Load() {
-
+		// Detaching the feature drops a debt a self-stopped watcher left
+		// behind: with monitoring disabled there is no session to settle it.
+		a.autoSleepSelfStopOwed = false
+		a.autoSleepSelfStopClosedAt = time.Time{}
 		return
 
 	}
 
 	if monitor == nil {
-		monitor = autosleep.NewMonitor(settings.Delay())
+		if a.autoSleepSelfStopOwed {
+			// The previous watcher self-stopped while its sleep debt was
+			// unsettled. Continue the closed-session countdown and seed the
+			// debt so the rebuilt watcher fires it instead of waiting for a
+			// brand-new process session that may never come.
+			monitor = autosleep.NewMonitorContinuing(settings.Delay(), a.autoSleepSelfStopClosedAt)
+			seedOwedSession = true
+			a.autoSleepSelfStopOwed = false
+			a.autoSleepSelfStopClosedAt = time.Time{}
+		} else {
+			monitor = autosleep.NewMonitor(settings.Delay())
+		}
 	}
-
 	watcher := &autosleep.Watcher{
 		Settings: settings,
 		Monitor:  monitor,
@@ -212,6 +236,12 @@ func (a *App) reapStoppedAutoSleepWatcher(watcher *autosleep.Watcher) {
 		return
 	}
 
+	// A self-stop cancels any action the watcher was still running, and an
+	// action cancelled before settling leaves its sleep owed. Snapshot that
+	// debt before clearing the watcher so the rebuild can re-arm it instead
+	// of dropping it until the watched process runs a full new session.
+	owed, closedAt := watcher.OwedSession()
+
 	a.autoSleepMutex.Lock()
 	cleared := a.autoSleepWatcher == watcher
 	if cleared {
@@ -220,6 +250,10 @@ func (a *App) reapStoppedAutoSleepWatcher(watcher *autosleep.Watcher) {
 		if a.autoSleepCancel != nil {
 			a.autoSleepCancel()
 			a.autoSleepCancel = nil
+		}
+		if owed {
+			a.autoSleepSelfStopOwed = true
+			a.autoSleepSelfStopClosedAt = closedAt
 		}
 	}
 	a.autoSleepMutex.Unlock()
@@ -252,9 +286,23 @@ func (a *App) scheduleAutoSleepRebuild() {
 	if a.shuttingDown.Load() {
 		return
 	}
+	a.autoSleepMutex.Lock()
+	defer a.autoSleepMutex.Unlock()
+	if a.shuttingDown.Load() {
+		return
+	}
+	// A second self-stop before the first rebuild fires must not accumulate
+	// timers; the pending one already re-applies the current settings.
+	a.stopScheduledAutoSleepRebuildLocked()
 	a.autoSleepWG.Add(1)
-	time.AfterFunc(autoSleepRestartDelay, func() {
+	var rebuildTimer *time.Timer
+	rebuildTimer = time.AfterFunc(autoSleepRestartDelay, func() {
 		defer a.autoSleepWG.Done()
+		a.autoSleepMutex.Lock()
+		if a.autoSleepRebuildTimer == rebuildTimer {
+			a.autoSleepRebuildTimer = nil
+		}
+		a.autoSleepMutex.Unlock()
 		if a.shuttingDown.Load() {
 			return
 		}
@@ -272,6 +320,20 @@ func (a *App) scheduleAutoSleepRebuild() {
 			log.Printf("Auto-sleep watcher rebuild failed: %v", err)
 		}
 	})
+	a.autoSleepRebuildTimer = rebuildTimer
+}
+
+// stopScheduledAutoSleepRebuildLocked cancels a pending self-stop rebuild and
+// releases the wait-group count it reserved. A timer that already fired keeps
+// its own count until the callback finishes. Callers hold autoSleepMutex.
+func (a *App) stopScheduledAutoSleepRebuildLocked() {
+	if a.autoSleepRebuildTimer == nil {
+		return
+	}
+	if a.autoSleepRebuildTimer.Stop() {
+		a.autoSleepWG.Done()
+	}
+	a.autoSleepRebuildTimer = nil
 }
 
 // stopAutoSleep terminates the auto-sleep watcher and waits for it,
@@ -293,6 +355,12 @@ func (a *App) stopAutoSleep() {
 	// autoSleepMatches must not queue behind a draining sleep action.
 
 	a.autoSleepMutex.Lock()
+
+	// Cancel a pending self-stop rebuild first: its wait-group count would
+	// otherwise keep the shutdown wait blocked until the timer fired.
+	a.stopScheduledAutoSleepRebuildLocked()
+	a.autoSleepSelfStopOwed = false
+	a.autoSleepSelfStopClosedAt = time.Time{}
 
 	if a.autoSleepCancel != nil {
 
