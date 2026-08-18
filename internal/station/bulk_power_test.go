@@ -429,6 +429,45 @@ func TestBulkPowerKeepsCapabilityConnectionFailuresAsFailed(t *testing.T) {
 	}
 }
 
+// TestBulkPowerKeepsMixedInterruptionAndTransportFailuresAsFailed guards the
+// worker classification against a joined error: the bluetooth layer joins the
+// stopping context error with a genuine transport failure hit just before it
+// stopped. Only errors made exclusively of context interruptions own the
+// entry as a skipped result; the mixed error must run the failure path so its
+// disconnect/backoff bookkeeping is not silently dropped.
+func TestBulkPowerKeepsMixedInterruptionAndTransportFailuresAsFailed(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	manager.statusRecoveryStart.Do(func() {})
+	address := "11:22:33:44:55:69"
+	manager.stations[address] = &internalbluetooth.BaseStation{
+		Name: "LHB-MIXED-FAILURE", Address: mustAddress(t, address), Present: true,
+	}
+	stubPowerVerificationRead(manager)
+	mixedErr := errors.Join(context.DeadlineExceeded, tinybluetooth.ErrDeviceDisconnected)
+	manager.bluetoothOps.ensureCapabilities = func(context.Context, *internalbluetooth.BaseStation) (internalbluetooth.Capabilities, error) {
+		return internalbluetooth.Capabilities{}, mixedErr
+	}
+
+	result, err := manager.SetAllStationsPowerDetailed("on")
+	if err != nil {
+		t.Fatalf("SetAllStationsPowerDetailed() error = %v", err)
+	}
+	if result.Cancelled || result.TimedOut {
+		t.Fatalf("batch result = %+v, want a healthy batch with a failed entry", result)
+	}
+	if len(result.Results) != 1 || result.Results[0].Skipped || result.Results[0].Error == "" {
+		t.Fatalf("mixed error result = %+v, want a failed entry with error details", result.Results)
+	}
+	manager.statusRetryMutex.Lock()
+	retry, tracked := manager.statusRetries[address]
+	kinds := effectiveStatusRetryKinds(retry)
+	manager.statusRetryMutex.Unlock()
+	if !tracked || kinds&statusRetryConnection == 0 {
+		t.Fatalf("mixed error bookkeeping = tracked:%v kinds:%v, want a connection recovery entry", tracked, kinds)
+	}
+}
+
 func TestBulkPowerLateUnsupportedCapabilityIsSkipped(t *testing.T) {
 	manager := NewManager(config.NewConfig())
 	address := "11:22:33:44:55:67"

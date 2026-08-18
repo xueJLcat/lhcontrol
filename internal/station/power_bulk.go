@@ -541,7 +541,12 @@ func (m *Manager) finalizeBulkPowerWorkerOutcome(ctx context.Context, s *bluetoo
 		stationResult.Success = true
 		stationResult.Confirmed = false
 		stationResult.Error = workerErr.Error()
-	case errors.Is(workerErr, context.Canceled), errors.Is(workerErr, context.DeadlineExceeded):
+	case isPureContextError(workerErr):
+		// Only errors made exclusively of context interruptions own the
+		// entry as a skip. The bluetooth layer joins the stopping context
+		// error with a genuine transport failure hit just before it stopped;
+		// a plain context match would misclassify that mixed error here and
+		// drop the disconnect/backoff bookkeeping the failure path runs.
 		stationResult.Skipped = true
 		stationResult.Reason = m.bulkInterruptionReason(ctx, workerErr)
 		stationResult.CommandSent = false
