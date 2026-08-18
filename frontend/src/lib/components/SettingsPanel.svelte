@@ -243,14 +243,19 @@
   async function changeLanguage(next: LanguagePreference) {
     if (languageBusy || next === languagePreference()) return;
     languageBusy = true;
-    const save = saveLanguagePreference(next);
-    onLanguageChanged();
-    const result = await save;
-    if (!result.saved) {
-      if (result.reverted) onLanguageChanged();
-      pushToast(`${t('Language setting could not be saved')}: ${String(result.error)}`);
+    try {
+      const save = saveLanguagePreference(next);
+      onLanguageChanged();
+      const result = await save;
+      if (!result.saved) {
+        if (result.reverted) onLanguageChanged();
+        pushToast(`${t('Language setting could not be saved')}: ${String(result.error)}`);
+      }
+    } finally {
+      // An exception above must not leave the setting disabled forever: the
+      // language radios bind their disabled state to languageBusy.
+      languageBusy = false;
     }
-    languageBusy = false;
   }
 
 
