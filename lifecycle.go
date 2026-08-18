@@ -70,6 +70,15 @@ func (a *App) waitForAPIShutdown() {
 }
 
 func (a *App) shutdown(ctx context.Context) {
+	// Wails can run OnShutdown and still return a run error, which makes the
+	// fatal path call shutdown a second time. Everything here is idempotent
+	// except the bounded waits, so run the whole sequence once.
+	a.shutdownOnce.Do(func() {
+		a.runShutdown(ctx)
+	})
+}
+
+func (a *App) runShutdown(ctx context.Context) {
 
 	a.shuttingDown.Store(true)
 

@@ -53,6 +53,11 @@ type App struct {
 	activeExternalOperations  map[uint64]string
 	externalOperationRevision uint64
 	shuttingDown              atomic.Bool
+	// shutdownOnce keeps the shutdown sequence idempotent: Wails may have run
+	// OnShutdown before returning a run error, in which case the fatal path's
+	// explicit shutdown call must not repeat the bounded auto-sleep and API
+	// waits for the same draining goroutines.
+	shutdownOnce sync.Once
 	// configReplayGeneration tracks the last observed config recovery
 	// generation so a blocked-save recovery that replaced the startup
 	// defaults with the persisted file contents replays the runtime side
