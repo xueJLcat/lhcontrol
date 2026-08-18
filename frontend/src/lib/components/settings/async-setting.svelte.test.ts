@@ -12,7 +12,7 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-function createSetting(getter: () => Promise<number>, setter = vi.fn(async () => {})) {
+function createSetting(getter: () => Promise<number>, setter: (value: number) => Promise<void> = vi.fn(async () => {})) {
   return {
     setting: new AsyncSetting({
       getter,
@@ -179,6 +179,35 @@ describe('AsyncSetting', () => {
     // action instead of silently displaying a possibly stale value.
     expect(setting.value).toBeNull();
     expect(setting.error).toContain('save rejected');
+    expect(setting.busy).toBe(false);
+  });
+
+  it('queues a change made while an earlier change on the same instance is saving', async () => {
+    let persisted = 5;
+    const releaseFirstSave = deferred<void>();
+    const setter = vi.fn(async (value: number) => {
+      if (value === 10) await releaseFirstSave.promise;
+      persisted = value;
+    });
+    const { setting } = createSetting(async () => persisted, setter);
+    await setting.load();
+
+    const firstSave = setting.change(10);
+    await vi.waitFor(() => expect(setter).toHaveBeenCalledOnce());
+    // A quick second edit while the first save is still in flight must be
+    // queued instead of being silently dropped.
+    expect(setting.busy).toBe(true);
+    const secondSave = setting.change(20);
+    expect(setting.value).toBe(20);
+    await Promise.resolve();
+    expect(setter).toHaveBeenCalledOnce();
+
+    releaseFirstSave.resolve(undefined);
+    await Promise.all([firstSave, secondSave]);
+
+    expect(setter.mock.calls.map(([value]) => value)).toEqual([10, 20]);
+    expect(persisted).toBe(20);
+    expect(setting.value).toBe(20);
     expect(setting.busy).toBe(false);
   });
 });

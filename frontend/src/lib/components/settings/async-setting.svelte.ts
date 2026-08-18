@@ -31,6 +31,7 @@ export class AsyncSetting<T> {
   value = $state<T | null>(null);
   error = $state<string | null>(null);
   busy = $state(false);
+  private pendingSaves = 0;
 
   constructor(private readonly options: AsyncSettingOptions<T>) {}
 
@@ -51,8 +52,13 @@ export class AsyncSetting<T> {
   };
 
   change = async (next: T): Promise<void> => {
-    if (this.busy || this.value === null) return;
+    // A pending load can still replace the displayed value, so a save must
+    // not race it. A save already in flight (or queued) must not drop the
+    // newer value: queue it instead so the most recent edit wins once the
+    // serialized saves drain.
+    if (this.value === null || (this.busy && this.pendingSaves === 0)) return;
     this.value = next;
+    this.pendingSaves += 1;
     this.busy = true;
     try {
       await serializeSettingOperation(this.options.setter, async () => {
@@ -89,7 +95,8 @@ export class AsyncSetting<T> {
         }
       });
     } finally {
-      this.busy = false;
+      this.pendingSaves -= 1;
+      if (this.pendingSaves === 0) this.busy = false;
     }
   };
 }
