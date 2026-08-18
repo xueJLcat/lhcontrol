@@ -333,14 +333,19 @@ func confirmPowerStateInternalContext(ctx context.Context, station *BaseStation,
 				return errors.Join(lastErr, err)
 			}
 			if expectedState == PowerStateSleep &&
-				(IsStationNotConnected(err) || RequiresReconnect(err)) {
+				(IsStationNotConnected(err) || RequiresReconnect(err) ||
+					station.characteristic == nil || !station.isConnected) {
 				// Firmware drops the BLE link as the station powers down, so
 				// a disconnect-class read failure right after a sleep command
-				// is the expected outcome rather than a transport fault.
-				// Reconnecting against the sleeping device can never produce
-				// a readback; stop immediately and report the command as
-				// unconfirmed instead of burning the whole retry and
-				// reconnect budget while holding the station lock.
+				// is the expected outcome rather than a transport fault. An OS
+				// disconnect landing in an unlocked poll window invalidates the
+				// session behind the read too (characteristic cleared), which
+				// reports as a bare "characteristic unavailable" transport error
+				// the classifiers above do not match. Reconnecting against the
+				// sleeping device can never produce a readback; stop
+				// immediately and report the command as unconfirmed instead of
+				// burning the whole retry and reconnect budget while holding
+				// the station lock.
 				_ = disconnectInternal(station)
 				return errors.Join(lastErr, err)
 			}
@@ -684,6 +689,15 @@ func writeSleepCommandPair(ctx context.Context, station *BaseStation, command by
 	}
 	finalContext, cancelFinal := context.WithTimeout(context.WithoutCancel(ctx), finalBudget)
 	defer cancelFinal()
+	// An OS disconnect can invalidate the session during the unlocked gap.
+	// The pair must still complete, so rebuild the session under the same
+	// detached budget before the final write instead of leaving the station
+	// prepared (and awake) with the pair abandoned.
+	if station.characteristic == nil {
+		if reconnectErr := connectAndDiscoverInternalContext(finalContext, station); reconnectErr != nil {
+			return true, nil, fmt.Errorf("sleep pair lost the session during the prepare gap: %w", reconnectErr)
+		}
+	}
 	return true, nil, writePowerValueInternal(finalContext, station, command)
 }
 

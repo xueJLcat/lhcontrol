@@ -928,3 +928,91 @@ func TestDefinitelyUnsentWritePreservesCompatibilityBootInference(t *testing.T) 
 		)
 	}
 }
+
+// TestSleepConfirmationStopsWhenSessionInvalidatedBetweenPolls guards the
+// sleep early-exit: an OS disconnect landing in an unlocked poll window
+// clears the session handles, and the following read reports a bare
+// "characteristic unavailable" transport error that IsStationNotConnected and
+// RequiresReconnect both miss. The guard must still stop immediately instead
+// of burning the whole retry and reconnect budget against the powering-down
+// station.
+func TestSleepConfirmationStopsWhenSessionInvalidatedBetweenPolls(t *testing.T) {
+	ConfigureTiming(TimingPolicy{
+		ConfirmAttemptsOff:        4,
+		ConfirmPollInterval:       time.Millisecond,
+		ConfirmReconnectThreshold: 2,
+		ConfirmReconnectDelay:     time.Millisecond,
+	})
+	t.Cleanup(func() { ConfigureTiming(TimingPolicy{}) })
+
+	originalAdapter := adapter
+	counting := &reconnectCountingAdapter{connectErr: errors.New("station is powering down")}
+	adapter = counting
+	t.Cleanup(func() { adapter = originalAdapter })
+
+	power := &fakeCharacteristic{value: []byte{0x09}}
+	station := connectedFakeStation(power, nil, nil, Capabilities{PowerRead: true, PowerWrite: true})
+	station.PowerState = PowerStateOn
+	station.RawPowerState = 0x09
+	device := &trackingConnectedDevice{}
+	station.device = device
+
+	station.mutex.Lock()
+	// Simulate the invalidation that lands while the confirmation sleeps
+	// between polls: handles cleared, session unusable.
+	station.characteristic = nil
+	err := confirmPowerStateInternalContext(context.Background(), station, PowerStateSleep)
+	station.mutex.Unlock()
+
+	if err == nil {
+		t.Fatal("confirmation unexpectedly succeeded after the session was invalidated")
+	}
+	if calls := counting.connectCalls.Load(); calls != 0 {
+		t.Fatalf("invalidated sleep confirmation attempted %d reconnects, want none", calls)
+	}
+	if device.disconnects != 1 || station.Snapshot().Connected {
+		t.Fatalf("invalidated sleep confirmation cleanup: disconnects=%d connected=%v", device.disconnects, station.Snapshot().Connected)
+	}
+}
+
+// TestSleepPairRebuildsSessionInvalidatedDuringPrepareGap guards the sleep
+// pair invariant "the pair must complete once prepare has been sent": an OS
+// disconnect can invalidate the session during the unlocked settling gap. The
+// final write must rebuild the session under the detached budget instead of
+// leaving the station prepared and awake with the pair abandoned.
+func TestSleepPairRebuildsSessionInvalidatedDuringPrepareGap(t *testing.T) {
+	ConfigureTiming(TimingPolicy{PrepareGap: time.Millisecond, FinalSleepWrite: 2 * time.Second})
+	t.Cleanup(func() { ConfigureTiming(TimingPolicy{}) })
+
+	connectErr := errors.New("radio restarting")
+	originalAdapter := adapter
+	counting := &reconnectCountingAdapter{connectErr: connectErr}
+	adapter = counting
+	t.Cleanup(func() { adapter = originalAdapter })
+
+	power := &fakeCharacteristic{value: []byte{0x09}}
+	station := connectedFakeStation(power, nil, nil, Capabilities{PowerRead: true, PowerWrite: true})
+	power.onWrite = func(value []byte) {
+		if value[0] == 0x01 {
+			// The prepare write landed; invalidate the session the way an OS
+			// disconnect does while the pair waits out the settling gap.
+			station.device = nil
+			station.isConnected = false
+			station.characteristic = nil
+		}
+	}
+
+	station.mutex.Lock()
+	finalAttempted, gapErr, writeErr := writeSleepCommandPair(context.Background(), station, 0x00)
+	station.mutex.Unlock()
+
+	if !finalAttempted || gapErr != nil {
+		t.Fatalf("pair outcome = finalAttempted:%v gapErr:%v, want the final write attempted", finalAttempted, gapErr)
+	}
+	if counting.connectCalls.Load() == 0 {
+		t.Fatal("invalidated sleep pair did not attempt to rebuild the session")
+	}
+	if !errors.Is(writeErr, connectErr) {
+		t.Fatalf("sleep pair error = %v, want the rebuild failure surfaced", writeErr)
+	}
+}
