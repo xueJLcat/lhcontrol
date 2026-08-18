@@ -605,6 +605,24 @@ func FetchInitialPowerStateContext(ctx context.Context, station *BaseStation) er
 			}
 			return finishInitialReadResult(station, powerReadErr, channelReadErr, metadataReadErr)
 		}
+		if powerReadErr != nil && !isContextOnlyError(powerReadErr) {
+			// The power read ran and failed before the cancellation landed.
+			// Report the structured interruption, which preserves the genuine
+			// failure, instead of a bare context error: upstream treats pure
+			// context errors as clean interruptions, so the transport fault
+			// would lose its disconnect/backoff bookkeeping. A failure that is
+			// itself only the expired budget or the cancellation stays pure and
+			// keeps the clean-interruption path below.
+			return finishInterruptedInitialRead(
+				station,
+				contextErr,
+				powerReadCompleted,
+				false,
+				powerReadErr,
+				nil,
+				metadataReadErr,
+			)
+		}
 		return finishCancelledInitialRead(station, contextErr)
 	}
 	channelReadAttempted := false

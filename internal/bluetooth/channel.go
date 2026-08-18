@@ -56,7 +56,10 @@ func IdentifyContext(ctx context.Context, station *BaseStation) error {
 			err := sleepContext(ctx, CurrentTiming().OperationRetryDelay)
 			station.mutex.Lock()
 			if err != nil {
-				return err
+				// Join the failed attempt's error with the interruption: a
+				// bare context error would read upstream as a clean
+				// interruption and drop the observed connect/write failure.
+				return errors.Join(lastErr, err)
 			}
 		}
 	}

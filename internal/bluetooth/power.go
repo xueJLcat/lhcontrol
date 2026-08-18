@@ -519,9 +519,12 @@ func SetPowerStateContext(ctx context.Context, station *BaseStation, target Powe
 			_ = disconnectInternal(station)
 			// Retry backoff runs outside the station lock so short readers
 			// are not queued behind the wait; the lock is held again before
-			// the next attempt touches station state.
+			// the next attempt touches station state. A cancellation that
+			// lands during the wait joins the failed attempt's error: a bare
+			// context error would read upstream as a clean interruption and
+			// drop the connect failure's bookkeeping.
 			if waitErr := station.retryBackoff(ctx); waitErr != nil {
-				return PowerControlResult{}, waitErr
+				return PowerControlResult{}, errors.Join(err, waitErr)
 			}
 			continue
 		}
@@ -612,8 +615,11 @@ func SetPowerStateContext(ctx context.Context, station *BaseStation, target Powe
 			station.restoreBootInference(previousBootRawTrustedOn, previousBootingSince)
 			log.Printf("Bluetooth: Write %s was not applied for %s: %v. Retrying on the current connection...", target, station.Name, err)
 			if i < maxRetries-1 {
+				// Join the rejected write with the interruption: upstream
+				// classifies pure context errors as clean interruptions and
+				// would otherwise drop the observed write rejection.
 				if waitErr := station.retryBackoff(ctx); waitErr != nil {
-					return PowerControlResult{}, waitErr
+					return PowerControlResult{}, errors.Join(err, waitErr)
 				}
 			}
 			continue
@@ -622,7 +628,7 @@ func SetPowerStateContext(ctx context.Context, station *BaseStation, target Powe
 		_ = disconnectInternal(station)
 		if i < maxRetries-1 {
 			if waitErr := station.retryBackoff(ctx); waitErr != nil {
-				return PowerControlResult{}, waitErr
+				return PowerControlResult{}, errors.Join(err, waitErr)
 			}
 		}
 	}

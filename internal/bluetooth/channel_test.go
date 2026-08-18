@@ -537,3 +537,46 @@ func TestSetChannelAcceptsTargetOnFinalReadback(t *testing.T) {
 		t.Fatalf("confirmed final readback retained error %q", station.LastError)
 	}
 }
+
+// TestIdentifyContextKeepsAttemptErrorWhenBackoffCancelled guards the retry
+// contract: a cancellation that lands during the retry backoff must keep the
+// failed attempt's error joined with the interruption. A bare context error
+// would read upstream as a clean interruption and drop the observed connect
+// failure's bookkeeping.
+func TestIdentifyContextKeepsAttemptErrorWhenBackoffCancelled(t *testing.T) {
+	ConfigureTiming(TimingPolicy{IdentifyAttempts: 3, OperationRetryDelay: 10 * time.Second})
+	t.Cleanup(func() { ConfigureTiming(TimingPolicy{}) })
+
+	originalAdapter := adapter
+	connectErr := errors.New("radio unavailable during identify")
+	counting := &reconnectCountingAdapter{connectErr: connectErr}
+	adapter = counting
+	t.Cleanup(func() { adapter = originalAdapter })
+
+	station := &BaseStation{Name: "LHB-IDENTIFY"}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result := make(chan error, 1)
+	go func() { result <- IdentifyContext(ctx, station) }()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for counting.connectCalls.Load() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("identify never attempted a connect")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("IdentifyContext() error = %v, want the cancellation preserved", err)
+		}
+		if !errors.Is(err, connectErr) {
+			t.Fatalf("IdentifyContext() error = %v, want the failed attempt preserved", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("cancelled identify did not return")
+	}
+}

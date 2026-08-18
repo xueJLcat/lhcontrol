@@ -555,6 +555,34 @@ func IsGATTCommunicationFailure(err error) bool {
 	return RequiresReconnect(err)
 }
 
+// isContextOnlyError reports whether every leaf in the error tree is a context
+// cancellation or deadline. A read whose only failure is an expired budget or
+// the caller's own cancellation stays a clean interruption; any genuine
+// transport leaf disqualifies it so callers keep the failure's bookkeeping.
+func isContextOnlyError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		for _, nested := range joined.Unwrap() {
+			if nested == nil {
+				continue
+			}
+			if !isContextOnlyError(nested) {
+				return false
+			}
+		}
+		return true
+	}
+	if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	if wrapped := errors.Unwrap(err); wrapped != nil {
+		return isContextOnlyError(wrapped)
+	}
+	return true
+}
+
 // ScanForDuration performs a blocking BLE scan for the specified duration
 // and returns a list of discovered base stations.
 // Uses time.AfterFunc to stop the scan.
