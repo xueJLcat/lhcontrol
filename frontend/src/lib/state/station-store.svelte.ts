@@ -254,12 +254,16 @@ export class StationStore {
       // lost terminal event (or a missed snapshot) left armed: while the
       // backend is unreachable no external operation can be in flight, and
       // keeping the flags would lock the scan/bulk controls and skip the
-      // periodic status check for the rest of the session.
+      // periodic status check for the rest of the session. Auto-sleep is NOT
+      // fed an idle observation here: a failed probe carries no evidence that
+      // the in-process auto-sleep action settled, and counting failures as
+      // idle snapshots could clear the busy flag while a real action still
+      // runs, exposing its internal scan for adoption. Healthy snapshots keep
+      // reconciling auto-sleep through reconcileExternalOperations.
       if (this.externalOperationRunning || this.externalOperationIds.size > 0) {
         this.externalOperationIds.clear();
         this.externalOperationRunning = false;
       }
-      this.autoSleepEvents.reconcileIdle();
       this.maybeRunDeferredStartupScan();
     },
     reportConfigWarning: (warning) => pushToast(backendCopy(warning), 'warning')

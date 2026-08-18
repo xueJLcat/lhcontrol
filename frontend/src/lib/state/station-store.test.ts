@@ -1531,12 +1531,13 @@ describe('StationStore external HTTP operation events', () => {
     }
     expect(store.externalOperationRunning).toBe(false);
 
-    // Auto-sleep clears after two consecutive idle observations; only then
-    // are the derived scan/bulk locks fully released.
+    // Auto-sleep is an in-process action: failed probes carry no evidence it
+    // settled, so the busy flag must stay armed (a healthy snapshot still
+    // reconciles it) instead of exposing the running action's internal scan
+    // for adoption. The external-operation release alone frees the controls.
     await store.apiStatus.refresh();
-    expect(store.autoSleepRunning).toBe(false);
-    expect(store.scanLocked).toBe(false);
-    expect(store.bulkLocked).toBe(false);
+    expect(store.autoSleepRunning).toBe(true);
+    expect(store.scanLocked).toBe(true);
   });
 
   it('re-arms the deferred startup scan when the retry rejects', async () => {
