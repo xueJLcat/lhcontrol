@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	tinybluetooth "tinygo.org/x/bluetooth"
@@ -594,6 +595,7 @@ func TestScanForDurationContextDoesNotStartWithCancelledContext(t *testing.T) {
 	default:
 	}
 }
+
 // TestScanForDurationContextPreExpiredDeadlineReportsTimeout guards the
 // pre-flight classification: a caller deadline that expired before the scan
 // could start is a timeout, matching the in-scan classification. Reporting
@@ -727,6 +729,7 @@ func TestScanRejectsEarlyGracefulReturn(t *testing.T) {
 		t.Fatalf("StopScan calls = %d, want 0", got)
 	}
 }
+
 // TestScanEarlyReturnWinsOverConcurrentContextExpiry guards the
 // classification order: a platform scan that returned gracefully before the
 // duration elapsed is the authoritative outcome even when the caller context
@@ -1082,6 +1085,65 @@ func TestScanMidScanFailureNotMaskedByDurationResults(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("scan did not return after the mid-scan failure")
+	}
+}
+
+// TestScanDurationLatchDoesNotMaskAdapterUnavailable covers the boundary race
+// where the platform Scan call delivers an adapter-unavailable outcome in the
+// same instant the duration timer latches the stop: the latch must not
+// reclassify the failure as a completed duration scan, or the adapter-lost
+// handling downstream would never see it.
+func TestScanDurationLatchDoesNotMaskAdapterUnavailable(t *testing.T) {
+	originalAdapter := adapter
+	fake := newFakeBLEAdapter()
+	fake.releaseOn = make(chan struct{})
+	fake.releaseErr = tinybluetooth.ErrRadioNotAvailable
+	adapter = fake
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(fake.releaseOn) }) }
+	t.Cleanup(func() {
+		adapter = originalAdapter
+		release()
+	})
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+	mac, err := tinybluetooth.ParseMAC("11:22:33:44:55:74")
+	if err != nil {
+		t.Fatalf("ParseMAC() error = %v", err)
+	}
+	fake.results = []tinybluetooth.ScanResult{{
+		Address: tinybluetooth.Address{MACAddress: tinybluetooth.MACAddress{MAC: mac}},
+		AdvertisementPayload: &fakeAdvertisementPayload{
+			name:     "LHB-LATCH-RACE",
+			services: []tinybluetooth.UUID{powerControlServiceUUID},
+		},
+	}}
+	type scanOutcome struct {
+		stations []DiscoveredStation
+		err      error
+	}
+	outcome := make(chan scanOutcome, 1)
+	go func() {
+		stations, scanErr := ScanForDuration(20 * time.Millisecond)
+		outcome <- scanOutcome{stations, scanErr}
+	}()
+	// Wait until the duration stop landed (and with it the duration latch),
+	// then deliver the platform outcome through the same adapter failure the
+	// latch would otherwise mask.
+	select {
+	case <-fake.stopped:
+	case <-time.After(time.Second):
+		t.Fatal("duration stop was never issued")
+	}
+	release()
+	select {
+	case got := <-outcome:
+		if !errors.Is(got.err, tinybluetooth.ErrRadioNotAvailable) {
+			t.Fatalf("ScanForDuration() error = %v, want the adapter-unavailable outcome to survive the duration latch", got.err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("scan did not return after the late adapter failure")
 	}
 }
 

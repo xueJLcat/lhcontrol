@@ -614,8 +614,11 @@ waitScan:
 	// completed in every shape; only the teardown did not. This also preserves
 	// results when a cancellation lands in the stop-handshake window after the
 	// duration already elapsed. Checked before the scanErr early return so
-	// that tail-of-stop errors cannot shadow it.
-	if session.durationStopIssuedFlag() {
+	// that tail-of-stop errors cannot shadow it. An adapter-unavailable
+	// platform outcome racing the duration boundary is the exception: keeping
+	// the results would hide a lost radio from the classification below and
+	// skip the adapter recovery path.
+	if session.durationStopIssuedFlag() && (scanErr == nil || !IsAdapterUnavailable(scanErr)) {
 		return results, nil
 	}
 	// A watcher that failed to stop or timed out after a cancellation
