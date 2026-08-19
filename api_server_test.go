@@ -1363,6 +1363,30 @@ func TestWaitForAPIBindSurvivesTransientBindFailure(t *testing.T) {
 	}
 }
 
+// TestWaitForAPIBindReturnsEarlyDuringShutdown guards the address-save versus
+// window-close race: once shutdown starts, restartAPIServer refuses to start
+// a new loop, so Running can never become true. The wait must stop early with
+// a shutdown error instead of burning the whole verification window and then
+// reporting a misleading bind failure.
+func TestWaitForAPIBindReturnsEarlyDuringShutdown(t *testing.T) {
+	app := NewApp()
+	app.apiBindVerifyWait = 3 * time.Second
+	app.shuttingDown.Store(true)
+
+	start := time.Now()
+	bound, err := app.waitForAPIBind()
+	elapsed := time.Since(start)
+	if bound {
+		t.Fatal("waitForAPIBind() reported a bound listener during shutdown")
+	}
+	if !errors.Is(err, errAPIShutdownInProgress) {
+		t.Fatalf("waitForAPIBind() error = %v, want errAPIShutdownInProgress", err)
+	}
+	if elapsed > time.Second {
+		t.Fatalf("waitForAPIBind() kept polling %v during shutdown, want an early return", elapsed)
+	}
+}
+
 // TestSetAPIListenAddressChangedBranchRepairsDownListener covers the diverged
 // convergence from the changed-address branch: the persisted address differs
 // from the requested one while the listener already targets the requested

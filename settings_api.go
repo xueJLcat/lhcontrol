@@ -21,6 +21,12 @@ func (a *App) GetAPIListenAddress() string {
 // the listener loop so a transient bind failure can still recover.
 const defaultAPIBindVerifyWait = 3 * time.Second
 
+// errAPIShutdownInProgress terminates a bind verification early when the
+// application starts shutting down: restartAPIServer refuses to start a new
+// listener loop, so the listener can never report Running and waiting out
+// the whole window would only produce a misleading bind-failure error.
+var errAPIShutdownInProgress = errors.New("application is shutting down")
+
 func (a *App) apiBindVerifyWindow() time.Duration {
 	if a.apiBindVerifyWait > 0 {
 		return a.apiBindVerifyWait
@@ -263,6 +269,9 @@ func (a *App) waitForAPIBind() (bool, error) {
 	deadline := time.Now().Add(a.apiBindVerifyWindow())
 	var firstErr error
 	for {
+		if a.shuttingDown.Load() {
+			return false, errAPIShutdownInProgress
+		}
 		status := a.GetAPIStatus()
 		if status.Running {
 			return true, nil
