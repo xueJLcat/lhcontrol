@@ -161,6 +161,7 @@ describe('backendCopy', () => {
       'the write call reported an error, but channel 5 was confirmed by readback: detail',
       'Configuration could not be loaded: boom',
       'Configuration changes could not be saved: boom',
+      'Configuration was reset to defaults during recovery: boom',
       'identify is not supported',
       'identify is not supported: ATT error',
       'scan duration must be between 2 and 30 seconds, got 1',

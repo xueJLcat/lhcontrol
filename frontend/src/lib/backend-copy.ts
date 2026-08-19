@@ -213,6 +213,12 @@ const PATTERNS: readonly CopyPattern[] = [
     render: (m) => t('Configuration changes could not be saved: {detail}', { detail: backendCopy(m[1]) })
   },
   {
+    // config persistence: blocked-save recovery quarantined the file and
+    // fell back to defaults mid-session.
+    pattern: /^Configuration was reset to defaults during recovery: (.+)$/s,
+    render: (m) => t('Configuration was reset to defaults during recovery: {detail}', { detail: backendCopy(m[1]) })
+  },
+  {
     // UnsupportedCapabilityError shape: "<capability> is not supported[: cause]".
     pattern: /^([A-Za-z ]+?) is not supported(?:$|:)/,
     render: (m) => {

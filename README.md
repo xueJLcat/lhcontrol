@@ -163,7 +163,7 @@ lhcontrol-amd64-installer.exe
 %APPDATA%\lhcontrol\config.json
 ```
 
-如果配置文件内容无效，应用会保留带时间戳的 `config.json.invalid-*` 副本并恢复默认配置；界面底部会显示配置只读或保存失败提示。
+如果配置文件内容无效，应用会保留带时间戳的 `config.json.invalid-*` 副本并恢复默认配置；界面底部会显示配置只读或保存失败提示。如果会话中的一次阻塞保存恢复隔离了已损坏的配置并回退到默认值，界面也会持续显示该恢复警告。
 
 ## 故障排查
 
@@ -879,7 +879,7 @@ Station aliases, scan and refresh preferences, bulk and per-station operation ti
 %APPDATA%\lhcontrol\config.json
 ```
 
-If the configuration is invalid, the application preserves a timestamped `config.json.invalid-*` copy and falls back to defaults. The footer reports read-only configuration or persistence failures.
+If the configuration is invalid, the application preserves a timestamped `config.json.invalid-*` copy and falls back to defaults. The footer reports read-only configuration or persistence failures. When a blocked-save recovery quarantines a corrupted configuration mid-session and falls back to defaults, the recovery warning stays visible as well.
 
 ## Troubleshooting
 

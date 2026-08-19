@@ -440,6 +440,7 @@ const zhCN = {
   'channel.warning.errorButConfirmed': '写入调用报告错误，但回读确认了频道 {channel}：{detail}',
   'Configuration could not be loaded: {detail}': '配置无法加载：{detail}',
   'Configuration changes could not be saved: {detail}': '配置更改无法保存：{detail}',
+  'Configuration was reset to defaults during recovery: {detail}': '恢复期间配置已重置为默认值：{detail}',
   '{capability} is not supported': '不支持{capability}',
   'The selected channel {channel} is now occupied by {names}. Pick a free channel.': '所选频道 {channel} 现已被 {names} 占用，请选择空闲频道。',
   'power.confirmationError': '{target}命令已发送，但状态确认失败（实际 {actual}，原始值 {raw}）：{detail}',
