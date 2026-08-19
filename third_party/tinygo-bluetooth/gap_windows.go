@@ -288,21 +288,35 @@ func (control *scanControl) ensureStopped() {
 	_ = stopWatcherBounded(watcher)
 }
 
+// rescueLateStartFailureLimit caps consecutive failing status reads. Each
+// failed read abandons a COM call that kept running on a locked OS thread, so
+// a watcher whose status calls hang (the same wedge that hung Start) would
+// accumulate one leaked thread per poll forever; give up once the watcher is
+// unresponsive for the whole budget. A watcher whose status reads succeed
+// keeps being polled, because a wedged Start can still self-heal into a
+// Started watcher that must be stopped.
+const rescueLateStartFailureLimit = 30
+
+// rescueLateStartMaxPollBackoff bounds the pause between failing status reads
+// so a wedged watcher does not churn abandoned COM calls every poll interval.
+const rescueLateStartMaxPollBackoff = 2 * time.Second
+
 // rescueLateStart tears down a watcher whose Start only completed after the
 // start budget abandoned the scan. The watcher came up orphaned (the owning
 // ScanWithStart already returned and skipped the watcher release), so leaving
 // it alone would keep the radio scanning with no owner. The rescue polls
 // until the watcher reaches a state it can act on: a wedged Start that
 // self-heals late must still be stopped, because a late Success leaves the
-// watcher Started with no owner scanning indefinitely. Each poll is bounded;
-// a permanently wedged Start never produces a running watcher, so the rescue
-// stays parked on its ticker without ever issuing a stop.
+// watcher Started with no owner scanning indefinitely. Polls whose status read
+// fails back off exponentially and give up after the failure limit; a
+// permanently wedged Start never produces a running watcher, so a healthy
+// rescue stays parked until process exit without ever issuing a stop.
 func (control *scanControl) rescueLateStart(watcher *advertisement.BluetoothLEAdvertisementWatcher) {
 	defer func() {
 		_ = recover()
 	}()
-	ticker := time.NewTicker(scanStopPollInterval)
-	defer ticker.Stop()
+	backoff := scanStopPollInterval
+	consecutiveFailures := 0
 	for {
 		status := advertisement.BluetoothLEAdvertisementWatcherStatusCreated
 		statusErr := boundedWatcherCall(watcherStatusCallLimit, func() error {
@@ -311,6 +325,8 @@ func (control *scanControl) rescueLateStart(watcher *advertisement.BluetoothLEAd
 			return readErr
 		})
 		if statusErr == nil {
+			consecutiveFailures = 0
+			backoff = scanStopPollInterval
 			switch status {
 			case advertisement.BluetoothLEAdvertisementWatcherStatusStarted:
 				_ = stopWatcherBounded(watcher)
@@ -319,8 +335,19 @@ func (control *scanControl) rescueLateStart(watcher *advertisement.BluetoothLEAd
 				advertisement.BluetoothLEAdvertisementWatcherStatusAborted:
 				return
 			}
+		} else {
+			consecutiveFailures++
+			if consecutiveFailures >= rescueLateStartFailureLimit {
+				return
+			}
+			if backoff < rescueLateStartMaxPollBackoff {
+				backoff *= 2
+				if backoff > rescueLateStartMaxPollBackoff {
+					backoff = rescueLateStartMaxPollBackoff
+				}
+			}
 		}
-		<-ticker.C
+		time.Sleep(backoff)
 	}
 }
 
