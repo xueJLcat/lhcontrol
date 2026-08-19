@@ -942,7 +942,17 @@ export class StationStore {
   private async recoverPreMountScanOutcome() {
     const status = await GetScanStatus().catch(() => null);
     if (this.disposed || !status || !isTerminalScanState(status.state)) return;
-    if (this.globalOperation !== 'idle' || this.externalScanning || this.isLoading) return;
+    // Match the adoption guard above: while an auto-sleep or external
+    // operation is active, the terminal record belongs to an internal scan.
+    // Recovering it as external would mislabel its outcome and reset the
+    // scan epochs under a concurrent local operation.
+    if (
+      this.globalOperation !== 'idle' ||
+      this.externalScanning ||
+      this.isLoading ||
+      this.autoSleepRunning ||
+      this.externalOperationRunning
+    ) return;
     await this.externalScan.recoverUntracked();
   }
 

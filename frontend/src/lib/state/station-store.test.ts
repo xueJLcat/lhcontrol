@@ -454,6 +454,34 @@ describe('StationStore startup', () => {
     expect(store.externalScanning).toBe(false);
   });
 
+  it('does not recover a pre-mount scan outcome while auto-sleep is running', async () => {
+    // The internal auto-sleep scan's terminal record must not be recovered as
+    // an external scan: the adoption guard's auto-sleep/external-operation
+    // conditions apply to the pre-mount probe as well, or its outcome would be
+    // mislabeled and the recovery's epoch reset could clobber a concurrent
+    // local operation.
+    backend.GetScanOnStartup.mockResolvedValue(false);
+    backend.GetScanStatus.mockResolvedValue({ state: 'failed', found: 0, error: 'radio removed', warnings: [] });
+    backend.GetAPIStatus.mockResolvedValue({
+      running: true,
+      address: '127.0.0.1:7575',
+      error: '',
+      warnings: [],
+      configWritable: true,
+      activeOperations: [{ id: 62, kind: 'auto-sleep' }],
+      operationRevision: 2
+    });
+
+    const { store } = mountStore();
+    await vi.waitFor(() => expect(store.autoSleepRunning).toBe(true));
+    await vi.waitFor(() => expect(backend.GetScanStatus).toHaveBeenCalled());
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    expect(store.statusMessage).not.toContain('External scan failed');
+    expect(backend.GetCurrentStationInfo).not.toHaveBeenCalled();
+    expect(store.externalScanning).toBe(false);
+  });
+
   it('defers and retries the startup scan when the scanning probe rejects', async () => {
     vi.useFakeTimers();
     // A rejected probe must land in the "no authoritative observation"
