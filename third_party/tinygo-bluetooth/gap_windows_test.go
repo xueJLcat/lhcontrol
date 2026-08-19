@@ -1311,3 +1311,52 @@ func TestNotificationCallbackCanDisconnectWithoutDeadlock(t *testing.T) {
 		t.Fatal("Disconnect() from a notification callback deadlocked")
 	}
 }
+
+// TestBoundedCleanupCallBoundsWedgedCleanupCalls guards the disconnect cleanup
+// against a wedged radio or driver: a COM call that never returns must not
+// hang the cleanup forever. The helper must give up after the budget, report
+// the call as hung (so the caller keeps the COM reference instead of
+// releasing it underneath the in-flight call), and let the rest of the
+// cleanup proceed.
+func TestBoundedCleanupCallBoundsWedgedCleanupCalls(t *testing.T) {
+	originalLimit := deviceCleanupCallLimit
+	deviceCleanupCallLimit = 30 * time.Millisecond
+	t.Cleanup(func() { deviceCleanupCallLimit = originalLimit })
+	originalEnter := enterWinRTThread
+	enterWinRTThread = func() (func(), error) { return func() {}, nil }
+	t.Cleanup(func() { enterWinRTThread = originalEnter })
+
+	release := make(chan struct{})
+	defer close(release)
+	started := time.Now()
+	err, hung := boundedCleanupCall("close wedged session", func() error {
+		<-release // simulates a COM call stuck on a wedged driver
+		return nil
+	})
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("boundedCleanupCall() waited %v, want the budget", elapsed)
+	}
+	if !hung {
+		t.Fatal("boundedCleanupCall() hung = false, want the timed-out call reported as hung")
+	}
+	if err == nil || !strings.Contains(err.Error(), "close wedged session") {
+		t.Fatalf("boundedCleanupCall() error = %v, want the timeout naming the operation", err)
+	}
+}
+
+func TestBoundedCleanupCallReportsFastOutcomes(t *testing.T) {
+	originalEnter := enterWinRTThread
+	enterWinRTThread = func() (func(), error) { return func() {}, nil }
+	t.Cleanup(func() { enterWinRTThread = originalEnter })
+
+	err, hung := boundedCleanupCall("fast cleanup", func() error { return nil })
+	if err != nil || hung {
+		t.Fatalf("boundedCleanupCall() error = %v hung = %v, want a clean bounded completion", err, hung)
+	}
+
+	cleanupErr := errors.New("close failed")
+	err, hung = boundedCleanupCall("failing cleanup", func() error { return cleanupErr })
+	if hung || !errors.Is(err, cleanupErr) {
+		t.Fatalf("boundedCleanupCall() error = %v hung = %v, want the cleanup failure surfaced", err, hung)
+	}
+}

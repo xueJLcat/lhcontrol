@@ -1832,6 +1832,11 @@ func (d Device) cleanup(attempt *deviceCleanupAttempt) {
 	state.blockCallbacks()
 
 	var warnings []error
+	// A COM object whose call is still in flight after a budget expiry must
+	// keep its reference: releasing it could destroy the object underneath
+	// the abandoned call. Track the wedged objects and skip their releases.
+	deviceBusy := false
+	notificationBusy := make([]bool, len(state.notifications))
 	state.drainCallbacksForCleanup(func() {
 		if state.cancel != nil {
 			if err := cleanupCall("cancel device context", func() error {
@@ -1842,15 +1847,23 @@ func (d Device) cleanup(attempt *deviceCleanupAttempt) {
 			}
 		}
 		if state.device != nil && state.connectionStatusListenerAdded {
-			if err := cleanupCall("remove connection status listener", func() error {
+			removeErr, hung := boundedCleanupCall("remove connection status listener", func() error {
 				return state.device.RemoveConnectionStatusChanged(state.connectionStatusListenerToken)
-			}); err != nil {
-				warnings = append(warnings, err)
+			})
+			if removeErr != nil {
+				warnings = append(warnings, removeErr)
+			}
+			if hung {
+				deviceBusy = true
 			}
 		}
-		for _, notification := range state.notifications {
-			if err := cleanupCall("remove characteristic notification", notification.unregister); err != nil {
-				warnings = append(warnings, err)
+		for index, notification := range state.notifications {
+			unregisterErr, hung := boundedCleanupCall("remove characteristic notification", notification.unregister)
+			if unregisterErr != nil {
+				warnings = append(warnings, unregisterErr)
+			}
+			if hung {
+				notificationBusy[index] = true
 			}
 		}
 	})
@@ -1875,7 +1888,10 @@ func (d Device) cleanup(attempt *deviceCleanupAttempt) {
 	state.operationMutex.Unlock()
 	ownershipDetached = true
 
-	if listener != nil {
+	if listener != nil && !deviceBusy {
+		// A listener that could not be unregistered must keep its reference:
+		// the device may still dispatch into the handler until the abandoned
+		// unregistration completes.
 		if err := cleanupCall("release connection status listener", func() error {
 			listener.Release()
 			return nil
@@ -1883,7 +1899,11 @@ func (d Device) cleanup(attempt *deviceCleanupAttempt) {
 			warnings = append(warnings, err)
 		}
 	}
-	for _, notification := range notifications {
+	for index, notification := range notifications {
+		if notificationBusy[index] {
+			continue
+		}
+		notification := notification
 		if err := cleanupCall("release notification handler", func() error {
 			notification.release()
 			return nil
@@ -1893,6 +1913,7 @@ func (d Device) cleanup(attempt *deviceCleanupAttempt) {
 	}
 	for _, characteristic := range characteristics {
 		if characteristic != nil {
+			characteristic := characteristic
 			if err := cleanupCall("release characteristic", func() error {
 				characteristic.Release()
 				return nil
@@ -1903,8 +1924,15 @@ func (d Device) cleanup(attempt *deviceCleanupAttempt) {
 	}
 	for _, service := range services {
 		if service != nil {
-			if err := cleanupCall("close service", service.Close); err != nil {
-				warnings = append(warnings, err)
+			service := service
+			closeErr, hung := boundedCleanupCall("close service", service.Close)
+			if closeErr != nil {
+				warnings = append(warnings, closeErr)
+			}
+			if hung {
+				// An in-flight Close keeps using the object; keep the
+				// reference instead of releasing it underneath the call.
+				continue
 			}
 			if err := cleanupCall("release service", func() error {
 				service.Release()
@@ -1915,30 +1943,46 @@ func (d Device) cleanup(attempt *deviceCleanupAttempt) {
 		}
 	}
 	if session != nil {
-		if err := cleanupCall("disable maintained connection", func() error {
+		sessionBusy := false
+		maintainErr, hung := boundedCleanupCall("disable maintained connection", func() error {
 			return session.SetMaintainConnection(false)
-		}); err != nil {
-			warnings = append(warnings, err)
+		})
+		if maintainErr != nil {
+			warnings = append(warnings, maintainErr)
 		}
-		if err := cleanupCall("close GATT session", session.Close); err != nil {
-			warnings = append(warnings, err)
+		if hung {
+			sessionBusy = true
 		}
-		if err := cleanupCall("release GATT session", func() error {
-			session.Release()
-			return nil
-		}); err != nil {
-			warnings = append(warnings, err)
+		if !sessionBusy {
+			closeErr, hung := boundedCleanupCall("close GATT session", session.Close)
+			if closeErr != nil {
+				warnings = append(warnings, closeErr)
+			}
+			if hung {
+				sessionBusy = true
+			}
+		}
+		if !sessionBusy {
+			if err := cleanupCall("release GATT session", func() error {
+				session.Release()
+				return nil
+			}); err != nil {
+				warnings = append(warnings, err)
+			}
 		}
 	}
-	if device != nil {
-		if err := cleanupCall("close Bluetooth device", device.Close); err != nil {
-			warnings = append(warnings, err)
+	if device != nil && !deviceBusy {
+		closeErr, hung := boundedCleanupCall("close Bluetooth device", device.Close)
+		if closeErr != nil {
+			warnings = append(warnings, closeErr)
 		}
-		if err := cleanupCall("release Bluetooth device", func() error {
-			device.Release()
-			return nil
-		}); err != nil {
-			warnings = append(warnings, err)
+		if !hung {
+			if err := cleanupCall("release Bluetooth device", func() error {
+				device.Release()
+				return nil
+			}); err != nil {
+				warnings = append(warnings, err)
+			}
 		}
 	}
 	if len(warnings) > 0 {
@@ -1956,6 +2000,44 @@ func cleanupCall(operation string, cleanup func() error) (returnErr error) {
 		return fmt.Errorf("%s: %w", operation, err)
 	}
 	return nil
+}
+
+// deviceCleanupCallLimit bounds each watcher/device COM call made during a
+// disconnect cleanup so a wedged radio or driver cannot hang the cleanup
+// goroutine forever. Without a bound, one stuck Close would keep attempt.done
+// closed off, block every later Disconnect on the device, and suppress the
+// cleanup-retry path for the life of the process. The limit is a variable so
+// tests can shrink it.
+var deviceCleanupCallLimit = 5 * time.Second
+
+// boundedCleanupCall runs a cleanup COM call on its own initialized WinRT
+// thread and waits at most deviceCleanupCallLimit for it. The hung return
+// reports a budget expiry: the call keeps running in the background, so the
+// caller must keep (not release) any COM reference the abandoned call may
+// still be using and move on with the remaining cleanup. The thread
+// initializer and the limit are captured before launching the call so an
+// abandoned attempt never reads them later.
+func boundedCleanupCall(operation string, cleanup func() error) (err error, hung bool) {
+	initThread := enterWinRTThread
+	limit := deviceCleanupCallLimit
+	done := make(chan error, 1)
+	go func() {
+		leaveThread, threadErr := initThread()
+		if threadErr != nil {
+			done <- fmt.Errorf("%s: %w", operation, threadErr)
+			return
+		}
+		defer leaveThread()
+		done <- cleanupCall(operation, cleanup)
+	}()
+	timer := time.NewTimer(limit)
+	defer timer.Stop()
+	select {
+	case callErr := <-done:
+		return callErr, false
+	case <-timer.C:
+		return fmt.Errorf("%s did not return within %s", operation, limit), true
+	}
 }
 
 func invokeConnectionCallbackSafely(callback func()) {
