@@ -445,8 +445,11 @@ func (m *Manager) runBulkPowerWorker(ctx context.Context, semaphore chan struct{
 	}
 	m.attachBulkPowerStationInfo(&stationResult)
 	communicationSucceeded := !cachedSkip && (workerErr == nil || stationResult.CommandSent)
-	if communicationSucceeded && !bluetooth.RequiresReconnect(workerErr) &&
-		!bluetooth.IsAdapterUnavailable(workerErr) {
+	if communicationSucceeded && (errors.Is(workerErr, bluetooth.ErrSleepTransitionDisconnect) ||
+		(!bluetooth.RequiresReconnect(workerErr) && !bluetooth.IsAdapterUnavailable(workerErr))) {
+		// A sleep confirmation's link drop is expected firmware behavior: it
+		// must not leave the connection-failure recovery scheduled above for
+		// a legitimately sleeping station.
 		m.clearStatusFailureKind(stationResult.Address, statusRetryConnection)
 	}
 	*entry = stationResult

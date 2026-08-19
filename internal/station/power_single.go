@@ -129,7 +129,12 @@ func (m *Manager) SetStationPower(address, state string) (PowerActionResult, err
 		m.observeStationBluetoothError(stationPtr, canonicalAddress, err)
 		var confirmationErr *bluetooth.PowerConfirmationError
 		if errors.As(err, &confirmationErr) {
-			if !bluetooth.RequiresReconnect(err) && !bluetooth.IsAdapterUnavailable(err) {
+			if errors.Is(err, bluetooth.ErrSleepTransitionDisconnect) ||
+				(!bluetooth.RequiresReconnect(err) && !bluetooth.IsAdapterUnavailable(err)) {
+				// A sleep confirmation ends with the firmware dropping the
+				// link by design; undo the connection-failure observation
+				// above so a legitimately sleeping station is not scheduled
+				// for background reconnect recovery.
 				m.clearStatusFailureKind(canonicalAddress, statusRetryConnection)
 			}
 			// The write reached the station, so the structured sent/unconfirmed

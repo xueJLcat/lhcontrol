@@ -953,3 +953,106 @@ func TestShutdownDuringPowerCacheVerificationReturnsShuttingDown(t *testing.T) {
 	}
 	manager.Shutdown()
 }
+
+// sleepTransitionConfirmationError models the bluetooth layer's report of a
+// successful sleep command: the firmware drops the BLE link as the station
+// powers down, so the confirmation read fails with a disconnect-class
+// transport error joined with the sleep-transition marker. The transport half
+// alone classifies as RequiresReconnect.
+func sleepTransitionConfirmationError() error {
+	transportErr := &internalbluetooth.DeviceTransportError{
+		Operation: "read power characteristic",
+		Err:       tinybluetooth.ErrDeviceDisconnected,
+	}
+	return &internalbluetooth.PowerConfirmationError{
+		Target: internalbluetooth.PowerStateSleep,
+		Actual: internalbluetooth.PowerStateOn,
+		Raw:    0x0B,
+		Err:    errors.Join(transportErr, internalbluetooth.ErrSleepTransitionDisconnect),
+	}
+}
+
+// TestSingleSleepTransitionDoesNotScheduleConnectionRecovery guards the
+// expected-outcome semantics of a successful sleep command: the firmware drops
+// the link while powering down, and that disconnect must not be accounted as
+// a connection failure. Scheduling background recovery would reconnect
+// against a legitimately sleeping station, which can never produce a readback
+// and would churn until the process restarts.
+func TestSingleSleepTransitionDoesNotScheduleConnectionRecovery(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	manager.statusRecoveryStart.Do(func() {})
+	manager.statusRetryBase = time.Hour
+	address := "11:22:33:44:88:03"
+	station := &internalbluetooth.BaseStation{
+		Name:              "LHB-SLEEP-TRANSITION",
+		Address:           mustAddress(t, address),
+		Present:           true,
+		PowerState:        internalbluetooth.PowerStateOn,
+		RawPowerState:     0x0B,
+		LastPowerReadAt:   time.Now(),
+		Capabilities:      internalbluetooth.Capabilities{PowerRead: true, PowerWrite: true},
+		CapabilitiesKnown: true,
+	}
+	manager.stations[address] = station
+	manager.bluetoothOps.disconnectStation = func(*internalbluetooth.BaseStation) error { return nil }
+	manager.bluetoothOps.setPowerState = func(context.Context, *internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
+		return internalbluetooth.PowerControlResult{State: internalbluetooth.PowerStateSleep}, sleepTransitionConfirmationError()
+	}
+
+	result, err := manager.SetStationPower(address, "sleep")
+	if err == nil || !result.CommandSent || result.Confirmed {
+		t.Fatalf("SetStationPower() result = %+v, error = %v; want sent-but-unconfirmed sleep", result, err)
+	}
+	manager.statusRetryMutex.Lock()
+	retry, tracked := manager.statusRetries[address]
+	manager.statusRetryMutex.Unlock()
+	if tracked && effectiveStatusRetryKinds(retry)&statusRetryConnection != 0 {
+		t.Fatalf("sleep transition left connection recovery scheduled: %+v", retry)
+	}
+}
+
+// TestBulkSleepTransitionDoesNotScheduleConnectionRecovery pins the same
+// invariant for the bulk path (auto-sleep and All controls): every station's
+// expected sleep disconnect must be settled without a connection-failure
+// entry, so a fleet-wide sleep does not enqueue one recovery per station.
+func TestBulkSleepTransitionDoesNotScheduleConnectionRecovery(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	manager.statusRecoveryStart.Do(func() {})
+	manager.statusRetryBase = time.Hour
+	address := "11:22:33:44:88:04"
+	station := &internalbluetooth.BaseStation{
+		Name:              "LHB-BULK-SLEEP",
+		Address:           mustAddress(t, address),
+		Present:           true,
+		PowerState:        internalbluetooth.PowerStateOn,
+		RawPowerState:     0x0B,
+		LastPowerReadAt:   time.Now(),
+		Capabilities:      internalbluetooth.Capabilities{PowerRead: true, PowerWrite: true},
+		CapabilitiesKnown: true,
+	}
+	manager.stations[address] = station
+	manager.bluetoothOps.disconnectStation = func(*internalbluetooth.BaseStation) error { return nil }
+	manager.bluetoothOps.setPowerState = func(context.Context, *internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
+		return internalbluetooth.PowerControlResult{State: internalbluetooth.PowerStateSleep}, sleepTransitionConfirmationError()
+	}
+
+	result, err := manager.SetAllStationsPowerDetailed("sleep")
+	if err != nil {
+		t.Fatalf("SetAllStationsPowerDetailed() error = %v", err)
+	}
+	if len(result.Results) != 1 {
+		t.Fatalf("bulk results = %d entries, want 1", len(result.Results))
+	}
+	entry := result.Results[0]
+	if !entry.CommandSent || !entry.Success || entry.Confirmed {
+		t.Fatalf("bulk entry = %+v, want sent-but-unconfirmed sleep", entry)
+	}
+	manager.statusRetryMutex.Lock()
+	retry, tracked := manager.statusRetries[address]
+	manager.statusRetryMutex.Unlock()
+	if tracked && effectiveStatusRetryKinds(retry)&statusRetryConnection != 0 {
+		t.Fatalf("bulk sleep transition left connection recovery scheduled: %+v", retry)
+	}
+}

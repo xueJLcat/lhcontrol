@@ -342,12 +342,14 @@ func confirmPowerStateInternalContext(ctx context.Context, station *BaseStation,
 				// session behind the read too (characteristic cleared), which
 				// reports as a bare "characteristic unavailable" transport error
 				// the classifiers above do not match. Reconnecting against the
-				// sleeping device can never produce a readback; stop
-				// immediately and report the command as unconfirmed instead of
-				// burning the whole retry and reconnect budget while holding
-				// the station lock.
-				_ = disconnectInternal(station)
-				return errors.Join(lastErr, err)
+			// sleeping device can never produce a readback; stop
+			// immediately and report the command as unconfirmed instead of
+			// burning the whole retry and reconnect budget while holding
+			// the station lock. Join the sleep-transition marker so higher
+			// layers skip the connection-failure accounting this expected
+			// disconnect would otherwise trigger.
+			_ = disconnectInternal(station)
+			return errors.Join(lastErr, err, ErrSleepTransitionDisconnect)
 			}
 			lastErr = err
 			consecutiveReadErrors++
@@ -434,6 +436,14 @@ type PowerControlResult struct {
 	State     PowerState
 	Confirmed bool
 }
+
+// ErrSleepTransitionDisconnect marks a sleep confirmation that ended because
+// the firmware dropped the BLE link as the station powered down. That drop is
+// the expected outcome of a successful sleep command, not a transport fault:
+// callers must neither count it as a connection failure nor schedule
+// connection recovery against the now-sleeping station (reconnecting there
+// can never produce a readback).
+var ErrSleepTransitionDisconnect = errors.New("station disconnected while transitioning to sleep")
 
 // PowerConfirmationError means the write completed, but the target stable
 // state could not be confirmed by readback.
