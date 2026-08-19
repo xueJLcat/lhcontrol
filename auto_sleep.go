@@ -343,36 +343,49 @@ func (a *App) scheduleAutoSleepRebuild() {
 			a.autoSleepRebuildTimer = nil
 		}
 		a.autoSleepMutex.Unlock()
-		if a.shuttingDown.Load() {
-			return
-		}
-		settings := a.config.GetAutoSleep()
-		if !settings.Enabled {
-			return
-		}
-		if _, err := autosleep.Target(settings.Target).ProcessName(); err != nil {
-			// A configuration error cannot be repaired by a rebuild; it would
-			// only loop. Re-saving valid settings remains the recovery path.
-			return
-		}
-		log.Println("Auto-sleep watcher rebuilding after an unexpected stop")
-		if err := a.SetAutoSleepSettings(settings); err != nil {
-			log.Printf("Auto-sleep watcher rebuild failed: %v", err)
-			// A failed rebuild (typically a transiently blocked configuration
-			// save) must not disable the feature permanently: retry after the
-			// same cooldown until the cap is reached.
-			a.autoSleepMutex.Lock()
-			a.autoSleepRebuildFailures++
-			giveUp := a.autoSleepRebuildFailures >= maxAutoSleepRebuildRetries
-			a.autoSleepMutex.Unlock()
-			if giveUp {
-				log.Printf("Auto-sleep watcher rebuild failed %d times in a row; re-saving the settings restarts it", maxAutoSleepRebuildRetries)
-				return
-			}
-			a.scheduleAutoSleepRebuild()
-		}
+		a.runScheduledAutoSleepRebuild()
 	})
 	a.autoSleepRebuildTimer = rebuildTimer
+}
+
+// runScheduledAutoSleepRebuild re-applies the persisted auto-sleep settings
+// so a self-stopped watcher is replaced. A settings save that fails after a
+// blocked-save recovery already converged the runtime watcher is not a
+// rebuild failure: counting it would burn the retry budget and log a give-up
+// message while the feature works.
+func (a *App) runScheduledAutoSleepRebuild() {
+	if a.shuttingDown.Load() {
+		return
+	}
+	settings := a.config.GetAutoSleep()
+	if !settings.Enabled {
+		return
+	}
+	if _, err := autosleep.Target(settings.Target).ProcessName(); err != nil {
+		// A configuration error cannot be repaired by a rebuild; it would
+		// only loop. Re-saving valid settings remains the recovery path.
+		return
+	}
+	log.Println("Auto-sleep watcher rebuilding after an unexpected stop")
+	if err := a.SetAutoSleepSettings(settings); err != nil {
+		if a.autoSleepMatches(a.config.GetAutoSleep()) {
+			log.Printf("Auto-sleep watcher rebuild converged despite a failed save: %v", err)
+			return
+		}
+		log.Printf("Auto-sleep watcher rebuild failed: %v", err)
+		// A failed rebuild (typically a transiently blocked configuration
+		// save) must not disable the feature permanently: retry after the
+		// same cooldown until the cap is reached.
+		a.autoSleepMutex.Lock()
+		a.autoSleepRebuildFailures++
+		giveUp := a.autoSleepRebuildFailures >= maxAutoSleepRebuildRetries
+		a.autoSleepMutex.Unlock()
+		if giveUp {
+			log.Printf("Auto-sleep watcher rebuild failed %d times in a row; re-saving the settings restarts it", maxAutoSleepRebuildRetries)
+			return
+		}
+		a.scheduleAutoSleepRebuild()
+	}
 }
 
 // stopScheduledAutoSleepRebuildLocked cancels a pending self-stop rebuild and

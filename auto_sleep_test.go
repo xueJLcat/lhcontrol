@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -508,6 +510,49 @@ func TestStopAutoSleepCancelsPendingRebuild(t *testing.T) {
 	app.autoSleepMutex.Unlock()
 	if leftover {
 		t.Fatal("stopAutoSleep() left a pending rebuild timer registered")
+	}
+}
+
+// TestScheduledAutoSleepRebuildConvergedRuntimeIsNotAFailure guards the
+// self-stop rebuild against a blocked configuration save: SetAutoSleepSettings
+// converges the runtime watcher onto the configuration before returning the
+// save failure, so the rebuild is actually done. Counting that error as a
+// rebuild failure would burn the retry budget and log a give-up message while
+// the feature works.
+func TestScheduledAutoSleepRebuildConvergedRuntimeIsNotAFailure(t *testing.T) {
+	blockedRoot := filepath.Join(t.TempDir(), "occupied")
+	if err := os.WriteFile(blockedRoot, []byte("occupied"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AppData", blockedRoot)
+
+	app := NewApp()
+	if err := app.config.Load(); err == nil {
+		t.Fatal("Load() unexpectedly succeeded with a blocked config path")
+	}
+	settings := autosleep.Settings{
+		Enabled:      true,
+		Target:       string(autosleep.TargetSteamVR),
+		DelaySeconds: autosleep.MinDelaySeconds,
+	}
+	app.config.AutoSleep = settings
+
+	app.runScheduledAutoSleepRebuild()
+	defer app.stopAutoSleep()
+
+	app.autoSleepMutex.Lock()
+	failures := app.autoSleepRebuildFailures
+	pending := app.autoSleepRebuildTimer != nil
+	watcher := app.autoSleepWatcher
+	app.autoSleepMutex.Unlock()
+	if watcher == nil {
+		t.Fatal("rebuild did not converge the runtime watcher despite the failed save")
+	}
+	if failures != 0 {
+		t.Fatalf("rebuild failures = %d, want the converged runtime to count as no failure", failures)
+	}
+	if pending {
+		t.Fatal("converged rebuild scheduled another retry")
 	}
 }
 
