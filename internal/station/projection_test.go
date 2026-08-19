@@ -2,6 +2,7 @@ package station
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -71,5 +72,20 @@ func TestOperationalFreshnessAcceptsRecentReads(t *testing.T) {
 	if len(infos) != 1 || !infos[0].PowerFresh || !infos[0].PowerOperationallyFresh ||
 		!infos[0].ChannelFresh || !infos[0].ChannelOperationallyFresh {
 		t.Fatalf("station info = %+v, want recent reads fresh for display and operations", infos)
+	}
+}
+
+// TestRunSafelyConvertsPanicsToErrors guards the panic boundary: a panicking
+// operation must surface as a descriptive error instead of killing the caller
+// goroutine (and, for the shutdown drain, the whole cleanup sequence).
+func TestRunSafelyConvertsPanicsToErrors(t *testing.T) {
+	err := runSafely("test scope", func() error {
+		panic("driver exploded")
+	})
+	if err == nil {
+		t.Fatal("runSafely() swallowed the panic")
+	}
+	if !strings.Contains(err.Error(), "test scope") || !strings.Contains(err.Error(), "driver exploded") {
+		t.Fatalf("runSafely() error = %q, want it to carry the scope and the panic value", err.Error())
 	}
 }

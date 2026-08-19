@@ -542,3 +542,122 @@ func TestRunAutoSleepPreservesPartialResultsWhenBulkPowerTimesOut(t *testing.T) 
 		t.Fatalf("timed-out event = %+v", event)
 	}
 }
+
+// TestRunAutoSleepSessionSkipsWhenScanIsBusy pins the README contract that a
+// busy cycle is skipped without an automatic retry: the debt must settle so
+// the watcher does not re-fire for the same closed session.
+func TestRunAutoSleepSessionSkipsWhenScanIsBusy(t *testing.T) {
+	app := NewApp()
+	var events []autoSleepEvent
+	app.autoSleepEventSink = func(event autoSleepEvent) { events = append(events, event) }
+	app.scanForAutoSleep = func(context.Context) ([]station.StationInfo, error) {
+		return nil, station.ErrOperationInProgress
+	}
+	app.setPowerForAutoSleep = func(context.Context, string) (station.BulkPowerResult, error) {
+		t.Fatal("bulk power started after the scan reported busy")
+		return station.BulkPowerResult{}, nil
+	}
+
+	settled := app.runAutoSleepSession(context.Background(), time.Now())
+
+	if !settled {
+		t.Fatal("busy auto-sleep cycle kept the session debt owed instead of settling it")
+	}
+	if len(events) != 2 || events[0].Phase != "started" || events[1].Phase != "skipped" {
+		t.Fatalf("auto-sleep events = %+v, want started then skipped", events)
+	}
+	if events[1].Error != "another Bluetooth operation is in progress" {
+		t.Fatalf("skipped reason = %q", events[1].Error)
+	}
+}
+
+// TestRunAutoSleepSessionSkipsWhenPowerPhaseIsBusy covers the second busy
+// window: the scan succeeded but the bulk command cannot start.
+func TestRunAutoSleepSessionSkipsWhenPowerPhaseIsBusy(t *testing.T) {
+	app := NewApp()
+	var events []autoSleepEvent
+	app.autoSleepEventSink = func(event autoSleepEvent) { events = append(events, event) }
+	app.scanForAutoSleep = func(context.Context) ([]station.StationInfo, error) {
+		return []station.StationInfo{{Address: "AA"}}, nil
+	}
+	app.setPowerForAutoSleep = func(context.Context, string) (station.BulkPowerResult, error) {
+		return station.BulkPowerResult{}, station.ErrOperationInProgress
+	}
+
+	settled := app.runAutoSleepSession(context.Background(), time.Now())
+
+	if !settled {
+		t.Fatal("busy power phase kept the session debt owed instead of settling it")
+	}
+	if len(events) != 2 || events[0].Phase != "started" || events[1].Phase != "skipped" {
+		t.Fatalf("auto-sleep events = %+v, want started then skipped", events)
+	}
+}
+
+// TestRunAutoSleepSessionFailsAfterScanDegradesToCachedRegistry pins the
+// degrade path: a failed scan continues with the cached registry, and a power
+// phase that then fails surfaces a terminal failed event and settles the debt.
+func TestRunAutoSleepSessionFailsAfterScanDegradesToCachedRegistry(t *testing.T) {
+	app := NewApp()
+	var events []autoSleepEvent
+	app.autoSleepEventSink = func(event autoSleepEvent) { events = append(events, event) }
+	app.scanForAutoSleep = func(context.Context) ([]station.StationInfo, error) {
+		return nil, errors.New("bluetooth scan exploded")
+	}
+	powerErr := errors.New("Bluetooth is unavailable")
+	app.setPowerForAutoSleep = func(context.Context, string) (station.BulkPowerResult, error) {
+		return station.BulkPowerResult{}, powerErr
+	}
+
+	settled := app.runAutoSleepSession(context.Background(), time.Now())
+
+	if !settled {
+		t.Fatal("failed auto-sleep cycle kept the session debt owed instead of settling it")
+	}
+	if len(events) != 2 || events[0].Phase != "started" || events[1].Phase != "failed" {
+		t.Fatalf("auto-sleep events = %+v, want started then failed", events)
+	}
+	if events[1].Error != powerErr.Error() {
+		t.Fatalf("failed event error = %q, want %q", events[1].Error, powerErr.Error())
+	}
+}
+
+// TestRunAutoSleepSessionKeepsDebtWhenPowerPhaseIsCancelled verifies the
+// cancellation-during-power contract: partial results are preserved in the
+// terminal event and the session debt stays owed so a relaunched session does
+// not silently lose the sleep.
+func TestRunAutoSleepSessionKeepsDebtWhenPowerPhaseIsCancelled(t *testing.T) {
+	app := NewApp()
+	ctx, cancel := context.WithCancel(context.Background())
+	var events []autoSleepEvent
+	app.autoSleepEventSink = func(event autoSleepEvent) { events = append(events, event) }
+	app.scanForAutoSleep = func(context.Context) ([]station.StationInfo, error) {
+		return []station.StationInfo{{Address: "AA"}}, nil
+	}
+	app.setPowerForAutoSleep = func(context.Context, string) (station.BulkPowerResult, error) {
+		cancel()
+		return station.BulkPowerResult{
+			Cancelled: true,
+			Results: []station.BulkPowerStationResult{
+				{Address: "AA", Success: true, Confirmed: true},
+				{Address: "BB", Skipped: true, Reason: station.ReasonOperationCancelled},
+			},
+		}, context.Canceled
+	}
+
+	settled := app.runAutoSleepSession(ctx, time.Now())
+
+	if settled {
+		t.Fatal("cancelled auto-sleep cycle settled the debt instead of keeping it owed")
+	}
+	if len(events) != 2 || events[0].Phase != "started" || events[1].Phase != "cancelled" {
+		t.Fatalf("auto-sleep events = %+v, want started then cancelled", events)
+	}
+	event := events[1]
+	if event.Success != 1 || event.Skipped != 1 || event.Failed != 0 {
+		t.Fatalf("cancelled event = %+v, want partial results preserved", event)
+	}
+	if event.Error != "cancelled while power commands were in progress" {
+		t.Fatalf("cancellation reason = %q", event.Error)
+	}
+}
