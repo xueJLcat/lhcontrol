@@ -301,6 +301,12 @@ const rescueLateStartFailureLimit = 30
 // so a wedged watcher does not churn abandoned COM calls every poll interval.
 const rescueLateStartMaxPollBackoff = 2 * time.Second
 
+// rescueStopAttempts bounds the stop retries for a late-started orphaned
+// watcher. An unhealthy radio can reject the first Stop; a few spaced retries
+// mirror the waitForScanStop retry behavior without parking the rescue on a
+// permanently failing stop.
+const rescueStopAttempts = 3
+
 // rescueLateStart tears down a watcher whose Start only completed after the
 // start budget abandoned the scan. The watcher came up orphaned (the owning
 // ScanWithStart already returned and skipped the watcher release), so leaving
@@ -315,24 +321,47 @@ func (control *scanControl) rescueLateStart(watcher *advertisement.BluetoothLEAd
 	defer func() {
 		_ = recover()
 	}()
-	backoff := scanStopPollInterval
-	consecutiveFailures := 0
-	for {
+	getStatus := func() (advertisement.BluetoothLEAdvertisementWatcherStatus, error) {
 		status := advertisement.BluetoothLEAdvertisementWatcherStatusCreated
 		statusErr := boundedWatcherCall(watcherStatusCallLimit, func() error {
 			readStatus, readErr := watcher.GetStatus()
 			status = readStatus
 			return readErr
 		})
+		return status, statusErr
+	}
+	runRescueLateStart(getStatus, func() error {
+		return stopWatcherBounded(watcher)
+	}, func() {
+		watcher.Release()
+	})
+}
+
+// runRescueLateStart drives the rescue poll loop with injectable watcher
+// calls. Every exit path that observes a terminal state releases the watcher:
+// releaseWatcher deliberately abandons a wedged-start watcher, so the rescue
+// is the only owner left that can free its COM reference.
+func runRescueLateStart(
+	getStatus func() (advertisement.BluetoothLEAdvertisementWatcherStatus, error),
+	stop func() error,
+	release func(),
+) {
+	backoff := scanStopPollInterval
+	consecutiveFailures := 0
+	for {
+		status, statusErr := getStatus()
 		if statusErr == nil {
 			consecutiveFailures = 0
 			backoff = scanStopPollInterval
 			switch status {
 			case advertisement.BluetoothLEAdvertisementWatcherStatusStarted:
-				_ = stopWatcherBounded(watcher)
+				rescueStopStartedWatcher(getStatus, stop, release)
 				return
 			case advertisement.BluetoothLEAdvertisementWatcherStatusStopped,
 				advertisement.BluetoothLEAdvertisementWatcherStatusAborted:
+				// The watcher ended on its own; release the reference now
+				// that the terminal state is confirmed.
+				release()
 				return
 			}
 		} else {
@@ -348,6 +377,50 @@ func (control *scanControl) rescueLateStart(watcher *advertisement.BluetoothLEAd
 			}
 		}
 		time.Sleep(backoff)
+	}
+}
+
+// rescueStopStartedWatcher stops an orphaned Started watcher and releases it
+// once a terminal state is confirmed. A failed stop (a rejecting or wedged
+// radio) is retried with a short backoff; after an accepted stop the drain is
+// awaited under the drain budget, and a watcher still draining past it is
+// abandoned (reference kept) instead of released mid-drain, matching
+// releaseWatcher.
+func rescueStopStartedWatcher(
+	getStatus func() (advertisement.BluetoothLEAdvertisementWatcherStatus, error),
+	stop func() error,
+	release func(),
+) {
+	isTerminal := func() bool {
+		status, err := getStatus()
+		if err != nil {
+			return false
+		}
+		return status == advertisement.BluetoothLEAdvertisementWatcherStatusStopped ||
+			status == advertisement.BluetoothLEAdvertisementWatcherStatusAborted
+	}
+	for attempt := 0; attempt < rescueStopAttempts; attempt++ {
+		if isTerminal() {
+			release()
+			return
+		}
+		if stop() == nil {
+			drainedAt := time.Now().Add(scanStopDrainTimeout)
+			for time.Now().Before(drainedAt) {
+				if isTerminal() {
+					release()
+					return
+				}
+				time.Sleep(scanStopPollInterval)
+			}
+			// Still draining past the budget: keep the reference so WinRT
+			// can finish the drain on its own.
+			return
+		}
+		time.Sleep(time.Duration(attempt+1) * scanStopPollInterval)
+	}
+	if isTerminal() {
+		release()
 	}
 }
 
@@ -985,6 +1058,17 @@ func waitForScanStop(stopped <-chan error, stopRequests <-chan error, stop func(
 					// clean stop as a failure (which would make callers
 					// discard an otherwise completed scan's results).
 					originalErr = nil
+					// The stop is accepted now, so the watcher earns the
+					// same drain budget as an initially accepted stop. The
+					// short retry budget was armed when the stop was still
+					// failing; keeping it would time out a clean slow drain
+					// and release a watcher that is still stopping.
+					if !deadline.Reset(scanStopDrainTimeout) {
+						select {
+						case <-deadline.C:
+						default:
+						}
+					}
 				}
 			}
 		case <-deadline.C:

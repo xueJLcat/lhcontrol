@@ -505,6 +505,149 @@ func TestWaitForScanStopAcceptsSlowDrainAfterAcceptedStop(t *testing.T) {
 	}
 }
 
+// TestWaitForScanStopExtendsDeadlineWhenRetrySucceeds guards the budget
+// switch: when the first Stop fails and a retry is accepted, the watcher
+// becomes an ordinarily draining stop and must earn the full drain budget.
+// Keeping the short retry budget armed at the start would time out a clean
+// slow drain, report a stop timeout for a completed scan, and release a
+// watcher that is still stopping.
+func TestWaitForScanStopExtendsDeadlineWhenRetrySucceeds(t *testing.T) {
+	originalTimeout := scanStopTimeout
+	originalDrain := scanStopDrainTimeout
+	originalPoll := scanStopPollInterval
+	scanStopTimeout = 30 * time.Millisecond
+	scanStopDrainTimeout = 2 * time.Second
+	scanStopPollInterval = time.Millisecond
+	t.Cleanup(func() {
+		scanStopTimeout = originalTimeout
+		scanStopDrainTimeout = originalDrain
+		scanStopPollInterval = originalPoll
+	})
+
+	stopRequests := make(chan error, 1)
+	stopRequests <- errors.New("transient stop failure")
+	drainedAt := time.Now().Add(100 * time.Millisecond)
+	var retried atomic.Bool
+	started := time.Now()
+	err := waitForScanStop(make(chan error), stopRequests, func() error {
+		retried.Store(true)
+		return nil
+	}, func() (advertisement.BluetoothLEAdvertisementWatcherStatus, error) {
+		if time.Now().Before(drainedAt) {
+			return advertisement.BluetoothLEAdvertisementWatcherStatusStopping, nil
+		}
+		return advertisement.BluetoothLEAdvertisementWatcherStatusStopped, nil
+	})
+	if !retried.Load() {
+		t.Fatal("failed stop was never retried")
+	}
+	if err != nil {
+		t.Fatalf("waitForScanStop() error = %v, want a clean stop once the retry drained under the extended budget", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("drain wait took %v, want bounded by the extended drain budget", elapsed)
+	}
+}
+
+// TestRescueLateStartRetriesFailedStopAndReleasesDrainedWatcher covers the
+// orphaned-watcher teardown when the late Start self-heals into a running
+// watcher: a rejecting first Stop must be retried, and once the accepted stop
+// drains to a terminal state the rescue must release the COM reference
+// (releaseWatcher abandons a wedged-start watcher, so no other owner frees
+// it).
+func TestRescueLateStartRetriesFailedStopAndReleasesDrainedWatcher(t *testing.T) {
+	originalDrain := scanStopDrainTimeout
+	originalPoll := scanStopPollInterval
+	scanStopDrainTimeout = time.Second
+	scanStopPollInterval = time.Millisecond
+	t.Cleanup(func() {
+		scanStopDrainTimeout = originalDrain
+		scanStopPollInterval = originalPoll
+	})
+
+	var stops atomic.Int32
+	var released atomic.Bool
+	draining := atomic.Bool{}
+	status := func() (advertisement.BluetoothLEAdvertisementWatcherStatus, error) {
+		if draining.Load() {
+			return advertisement.BluetoothLEAdvertisementWatcherStatusStopped, nil
+		}
+		return advertisement.BluetoothLEAdvertisementWatcherStatusStarted, nil
+	}
+	runRescueLateStart(status, func() error {
+		if stops.Add(1) == 1 {
+			return errors.New("radio busy")
+		}
+		draining.Store(true)
+		return nil
+	}, func() {
+		released.Store(true)
+	})
+
+	if stops.Load() != 2 {
+		t.Fatalf("stop attempts = %d, want the failed first stop retried once", stops.Load())
+	}
+	if !released.Load() {
+		t.Fatal("drained orphan watcher was not released")
+	}
+}
+
+// TestRescueLateStartReleasesWatcherThatEndedOnItsOwn covers the rescue
+// observing a watcher that reached a terminal state without a stop: the
+// reference must be released instead of leaked.
+func TestRescueLateStartReleasesWatcherThatEndedOnItsOwn(t *testing.T) {
+	var stops atomic.Int32
+	var released atomic.Bool
+	runRescueLateStart(
+		func() (advertisement.BluetoothLEAdvertisementWatcherStatus, error) {
+			return advertisement.BluetoothLEAdvertisementWatcherStatusStopped, nil
+		},
+		func() error {
+			stops.Add(1)
+			return nil
+		},
+		func() {
+			released.Store(true)
+		},
+	)
+	if stops.Load() != 0 {
+		t.Fatalf("stop attempts = %d, want no stop for an already terminal watcher", stops.Load())
+	}
+	if !released.Load() {
+		t.Fatal("terminal orphan watcher was not released")
+	}
+}
+
+// TestRescueLateStartBoundedWhenStopKeepsFailing guards against an endless
+// stop retry loop: a permanently rejecting stop gives up after the attempt
+// limit, and nothing is released while the watcher stays Started.
+func TestRescueLateStartBoundedWhenStopKeepsFailing(t *testing.T) {
+	originalPoll := scanStopPollInterval
+	scanStopPollInterval = time.Millisecond
+	t.Cleanup(func() { scanStopPollInterval = originalPoll })
+
+	var stops atomic.Int32
+	var released atomic.Bool
+	runRescueLateStart(
+		func() (advertisement.BluetoothLEAdvertisementWatcherStatus, error) {
+			return advertisement.BluetoothLEAdvertisementWatcherStatusStarted, nil
+		},
+		func() error {
+			stops.Add(1)
+			return errors.New("stop rejected")
+		},
+		func() {
+			released.Store(true)
+		},
+	)
+	if stops.Load() != rescueStopAttempts {
+		t.Fatalf("stop attempts = %d, want exactly %d bounded attempts", stops.Load(), rescueStopAttempts)
+	}
+	if released.Load() {
+		t.Fatal("a still-running watcher must not be released")
+	}
+}
+
 // TestCallbackGateWaitIsBounded guards against a permanently blocked callback
 // body pinning scan teardown or device cleanup forever: after the drain limit
 // the wait must return even though the callback never ends.
