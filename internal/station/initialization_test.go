@@ -32,6 +32,137 @@ func TestBluetoothInitializationRecoversAfterRetry(t *testing.T) {
 		t.Fatalf("initialization attempts = %d, want 2", attempts)
 	}
 }
+// TestEnsureReadyBoundsHungAdapterInitialization guards the background
+// recovery loop against a wedged adapter.Enable: initialization must give up
+// waiting after the bounded window instead of blocking the loop (started once
+// via sync.Once) forever, a second Enable must never run alongside the hung
+// one, and a late-completing attempt is adopted by the next caller.
+func TestEnsureReadyBoundsHungAdapterInitialization(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	manager.initializeWait = 20 * time.Millisecond
+	release := make(chan struct{})
+	var attempts atomic.Int32
+	manager.initializeBluetooth = func() error {
+		attempts.Add(1)
+		<-release
+		return nil
+	}
+	manager.initializeErr = errors.New("radio unavailable")
+	manager.nextInitializeAt = time.Now().Add(-time.Second)
+
+	startedAt := time.Now()
+	err := manager.ensureReady()
+	elapsed := time.Since(startedAt)
+	if err == nil {
+		t.Fatal("ensureReady() unexpectedly succeeded while the adapter call was hung")
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("ensureReady() blocked %v on a hung adapter enable, want a bounded wait", elapsed)
+	}
+
+	// A retry while the hung attempt is tracked must wait on that attempt
+	// instead of starting a concurrent adapter.Enable.
+	manager.initializeMutex.Lock()
+	manager.nextInitializeAt = time.Now().Add(-time.Second)
+	manager.initializeMutex.Unlock()
+	if err := manager.ensureReady(); err == nil {
+		t.Fatal("ensureReady() unexpectedly succeeded while the adapter call was still hung")
+	}
+	if attempts.Load() != 1 {
+		t.Fatalf("initialization attempts = %d, want exactly 1 concurrent adapter.Enable", attempts.Load())
+	}
+
+	// Once the attempt finally completes, a later caller adopts the success.
+	close(release)
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if err := manager.ensureReady(); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("ensureReady() never adopted the late initialization success")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if attempts.Load() != 1 {
+		t.Fatalf("initialization attempts after adoption = %d, want 1", attempts.Load())
+	}
+	if manager.initializeErr != nil {
+		t.Fatalf("initializeErr after adoption = %v, want nil", manager.initializeErr)
+	}
+}
+
+// TestEnsureReadyAdoptsFailedAttemptKeepsCooldown verifies that a completed
+// failed attempt records the normal cooldown bookkeeping instead of leaving
+// the retry window open for a hot re-attempt loop.
+func TestEnsureReadyAdoptsFailedAttemptKeepsCooldown(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	manager.initializeWait = time.Second
+	var attempts atomic.Int32
+	manager.initializeBluetooth = func() error {
+		attempts.Add(1)
+		return errors.New("radio unavailable")
+	}
+	manager.initializeErr = errors.New("radio unavailable")
+	manager.nextInitializeAt = time.Now().Add(-time.Second)
+
+	if err := manager.ensureReady(); err == nil {
+		t.Fatal("ensureReady() unexpectedly succeeded with a failing adapter enable")
+	}
+	// The recorded failure pushes nextInitializeAt out by the cooldown, so an
+	// immediate follow-up call refuses a fresh attempt.
+	if err := manager.ensureReady(); err == nil {
+		t.Fatal("ensureReady() unexpectedly succeeded inside the retry cooldown")
+	}
+	if attempts.Load() != 1 {
+		t.Fatalf("initialization attempts = %d, want 1 (cooldown must suppress an immediate retry)", attempts.Load())
+	}
+}
+
+// TestStatusRecoveryRoundSurvivesHungAdapterInitialization pins the loop-level
+// contract: a recovery round must return promptly even when the adapter-enable
+// call hangs, and the station's retry must stay scheduled so later rounds keep
+// trying. The loop is started once via sync.Once, so a single wedged
+// initialization must not silence all background recovery.
+func TestStatusRecoveryRoundSurvivesHungAdapterInitialization(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	manager.initializeWait = 20 * time.Millisecond
+	release := make(chan struct{})
+	defer close(release)
+	manager.initializeBluetooth = func() error {
+		<-release
+		return nil
+	}
+	manager.observeBluetoothError(tinybluetooth.ErrRadioNotAvailable)
+
+	address := "AA:BB:CC:DD:EE:F5"
+	manager.stations[address] = &internalbluetooth.BaseStation{
+		Name: "LHB-HUNG-INIT", Address: mustAddress(t, address), Present: true,
+	}
+	manager.statusRetryMutex.Lock()
+	manager.statusRetries[address] = statusRetry{
+		kinds:    statusRetryConnection,
+		failures: 1,
+		nextAt:   time.Now().Add(-time.Second),
+	}
+	manager.statusRetryMutex.Unlock()
+
+	startedAt := time.Now()
+	manager.runStatusRecoveryRound()
+	if elapsed := time.Since(startedAt); elapsed > 2*time.Second {
+		t.Fatalf("recovery round blocked %v on a hung adapter enable, want a bounded round", elapsed)
+	}
+	manager.statusRetryMutex.Lock()
+	_, tracked := manager.statusRetries[address]
+	manager.statusRetryMutex.Unlock()
+	if !tracked {
+		t.Fatal("hung-initialization round dropped the station's recovery schedule")
+	}
+}
+
 func TestUnsupportedPowerReadDoesNotHideChannelRecovery(t *testing.T) {
 	manager := NewManager(config.NewConfig())
 	manager.statusRetryBase = time.Hour

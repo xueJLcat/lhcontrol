@@ -699,33 +699,106 @@ func (m *Manager) Initialize() error {
 	}
 	return m.initializeErr
 }
+// initializeWaitLimit bounds how long ensureReady waits for an adapter-enable
+// attempt. adapter.Enable takes no context, and WinRT against an unhealthy
+// radio can hang indefinitely; the background recovery loop is started once
+// through sync.Once, so a hung synchronous initialization inside it would
+// silence every background retry and hold its operation slot until the
+// process restarts. An attempt that exceeds the limit keeps running in the
+// background: its pending channel stays tracked so later calls adopt its
+// outcome, and no second adapter.Enable ever runs alongside it.
+const initializeWaitLimit = 15 * time.Second
+
+func (m *Manager) initializeWaitDuration() time.Duration {
+	if m.initializeWait > 0 {
+		return m.initializeWait
+	}
+	return initializeWaitLimit
+}
+
+func bluetoothUnavailableError(cause error) error {
+	return fmt.Errorf("Bluetooth is unavailable; turn on Bluetooth or check the adapter, then retry: %w", cause)
+}
+
 func (m *Manager) ensureReady() error {
 	if m.shuttingDown.Load() {
 		return ErrShuttingDown
 	}
 	m.initializeMutex.Lock()
-	defer m.initializeMutex.Unlock()
 	if m.initializeErr == nil {
+		m.initializeMutex.Unlock()
 		if m.shuttingDown.Load() {
 			return ErrShuttingDown
 		}
 		return nil
 	}
+	if pending := m.initializePending; pending != nil {
+		// A previous attempt is still inside the adapter call: adopt its
+		// outcome instead of starting a concurrent Enable.
+		m.initializeMutex.Unlock()
+		return m.waitInitializeAttempt(pending)
+	}
 	if time.Now().Before(m.nextInitializeAt) {
-		return fmt.Errorf("Bluetooth is unavailable; turn on Bluetooth or check the adapter, then retry: %w", m.initializeErr)
+		err := m.initializeErr
+		m.initializeMutex.Unlock()
+		return bluetoothUnavailableError(err)
 	}
-	m.initializeErr = m.initializeBluetooth()
-	if m.initializeErr != nil {
-		m.initializeFailedAt = time.Now()
-		m.nextInitializeAt = m.initializeFailedAt.Add(m.initializeRetryCooldown())
-		return fmt.Errorf("Bluetooth is unavailable; turn on Bluetooth or check the adapter, then retry: %w", m.initializeErr)
-	}
-	m.initializeFailedAt = time.Time{}
-	m.nextInitializeAt = time.Time{}
-	if m.shuttingDown.Load() {
+	pending := make(chan struct{})
+	m.initializePending = pending
+	initialize := m.initializeBluetooth
+	m.initializeWg.Add(1)
+	m.initializeMutex.Unlock()
+	go func() {
+		defer m.initializeWg.Done()
+		m.completeInitializeAttempt(pending, runSafely("bluetooth adapter initialization", initialize))
+	}()
+	return m.waitInitializeAttempt(pending)
+}
+
+// waitInitializeAttempt waits for an in-flight initialization attempt with a
+// bounded budget. A completed attempt is re-evaluated through ensureReady so
+// every caller observes the recorded outcome; an expired budget reports the
+// adapter unavailable while the attempt keeps running in the background.
+func (m *Manager) waitInitializeAttempt(pending chan struct{}) error {
+	waitLimit := m.initializeWaitDuration()
+	waitTimer := time.NewTimer(waitLimit)
+	defer waitTimer.Stop()
+	select {
+	case <-pending:
+		return m.ensureReady()
+	case <-waitTimer.C:
+		log.Printf("Bluetooth adapter initialization exceeded %s; the attempt continues in the background", waitLimit)
+		m.initializeMutex.Lock()
+		// Keep the hung attempt tracked so a later call adopts its outcome
+		// instead of stacking a concurrent adapter.Enable. Push the retry
+		// window out so callers back off while the hung call runs.
+		m.nextInitializeAt = time.Now().Add(m.initializeRetryCooldown())
+		err := m.initializeErr
+		m.initializeMutex.Unlock()
+		return bluetoothUnavailableError(err)
+	case <-m.shutdownCh:
 		return ErrShuttingDown
 	}
-	return nil
+}
+
+// completeInitializeAttempt records an attempt's outcome and releases all
+// waiters. Callers hold nothing; the mutex is taken here so the outcome and
+// the pending-channel clearing land as one atomic update.
+func (m *Manager) completeInitializeAttempt(pending chan struct{}, err error) {
+	m.initializeMutex.Lock()
+	if m.initializePending == pending {
+		m.initializePending = nil
+	}
+	m.initializeErr = err
+	if err != nil {
+		m.initializeFailedAt = time.Now()
+		m.nextInitializeAt = m.initializeFailedAt.Add(m.initializeRetryCooldown())
+	} else {
+		m.initializeFailedAt = time.Time{}
+		m.nextInitializeAt = time.Time{}
+	}
+	m.initializeMutex.Unlock()
+	close(pending)
 }
 func (m *Manager) markBluetoothUnavailable(err error) {
 	if !bluetooth.IsAdapterUnavailable(err) {

@@ -121,6 +121,11 @@ func (m *Manager) runShutdownDrain(done chan struct{}) {
 	}
 	m.lifecycleMutex.Unlock()
 	m.asyncScanWg.Wait()
+	// Join in-flight adapter-initialization attempts before the fleet
+	// disconnect: an attempt that outlived its bounded ensureReady wait still
+	// runs inside the adapter and must not race the shutdown cleanup. The
+	// surrounding drain limit bounds a hung attempt.
+	m.initializeWg.Wait()
 	// scanCallbackWg is intentionally not awaited: shutdown may itself be
 	// invoked from a scan callback, so waiting for callbacks would
 	// self-deadlock. Event emissions are guarded by the caller's shutdown

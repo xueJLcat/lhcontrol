@@ -241,11 +241,19 @@ type Manager struct {
 	scanStatusID            uint64
 	scanLifecycleMutex      sync.Mutex
 	scanLifecycle           *scanLifecycle
-	initializeMutex         sync.Mutex
-	initializeErr           error
-	initializeFailedAt      time.Time
-	nextInitializeAt        time.Time
-	initializeBluetooth     func() error
+	initializeMutex    sync.Mutex
+	initializeErr      error
+	initializeFailedAt time.Time
+	nextInitializeAt   time.Time
+	// initializePending is non-nil while a bounded initialization attempt runs.
+	// Closed once the attempt's outcome is recorded; later ensureReady calls
+	// adopt the outcome instead of starting a concurrent adapter.Enable.
+	initializePending chan struct{}
+	// initializeWg tracks in-flight initialization attempts so shutdown joins
+	// them before the fleet disconnect; an attempt an ensureReady waiter
+	// abandoned on a timeout keeps running and must not race the drain.
+	initializeWg        sync.WaitGroup
+	initializeBluetooth func() error
 	asyncScanWg             sync.WaitGroup
 	scanCallbackWg          sync.WaitGroup
 	statusRetryMutex        sync.Mutex
@@ -267,6 +275,7 @@ type Manager struct {
 	// them at zero and follow the package defaults.
 	stopScanTimeout        time.Duration
 	adapterCleanupWait     time.Duration
+	initializeWait         time.Duration
 	foregroundDrainWait    time.Duration
 	statusRefreshJoinWait  time.Duration
 	shuttingDown            atomic.Bool
@@ -306,5 +315,9 @@ const (
 	statusRetryChannel
 	statusRetryMetadata
 	statusRetryRefresh
-	metadataRetryLimit = 5
 )
+
+// metadataRetryLimit caps metadata recovery attempts per backoff window. It is
+// a plain count, declared outside the retry-kind bitmask block above so it is
+// never mistaken for a bit flag.
+const metadataRetryLimit = 5
