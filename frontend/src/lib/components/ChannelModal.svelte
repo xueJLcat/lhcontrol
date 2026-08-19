@@ -59,6 +59,17 @@
     }
   });
 
+  // The modal stays open across background refreshes, so the unknown-channel
+  // condition can clear and come back (a channel reappearing after a stale
+  // read, freshness expiring again). An acknowledgement granted for the old
+  // condition must not carry over into a new one: reset it whenever the
+  // condition clears.
+  $effect(() => {
+    if (!hasUnknownVisibleChannel && confirmUnknownChannelRisk) {
+      confirmUnknownChannelRisk = false;
+    }
+  });
+
   const unchanged = $derived(hasOperationallyCurrentChannel(station) && station.channel === targetChannel);
   const blockedReason = $derived(channelChangeBlockedReason(station));
   const allChannelsOccupied = $derived(occupiedChannels.size >= 16);

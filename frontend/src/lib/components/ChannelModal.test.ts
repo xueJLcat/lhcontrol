@@ -173,6 +173,42 @@ describe('ChannelModal channel grid', () => {
     expect(onSave).toHaveBeenCalledWith(7, false);
   });
 
+  it('resets the unknown-channel risk acknowledgement when the condition clears and returns', async () => {
+    const onSave = vi.fn();
+    const baseProps = {
+      station: station(),
+      occupiedChannels: new Map<number, string[]>(),
+      error: '',
+      warning: false,
+      busy: false,
+      locked: false,
+      onClose: vi.fn(),
+      onSave,
+      onIdentify: vi.fn()
+    };
+    const view = render(ChannelModal, {
+      props: { ...baseProps, hasUnknownVisibleChannel: true }
+    });
+    await fireEvent.click(screen.getByRole('button', { name: '5' }));
+    const confirm = screen.getByRole('button', { name: 'Confirm change' });
+    expect(confirm).toBeDisabled();
+    await fireEvent.click(screen.getByRole('checkbox'));
+    expect(confirm).toBeEnabled();
+
+    // A background refresh resolves the unknown channel; the acknowledgement
+    // checkbox disappears.
+    await view.rerender({ ...baseProps, hasUnknownVisibleChannel: false });
+    expect(screen.queryByRole('checkbox')).not.toBeInTheDocument();
+    expect(confirm).toBeEnabled();
+
+    // The condition comes back (the channel goes unknown again). The earlier
+    // acknowledgement must not carry over into the new risk.
+    await view.rerender({ ...baseProps, hasUnknownVisibleChannel: true });
+    const checkbox = screen.getByRole('checkbox') as HTMLInputElement;
+    expect(checkbox.checked).toBe(false);
+    expect(confirm).toBeDisabled();
+  });
+
   it('describes the busy state by its actual operation', () => {
     cleanup();
     renderModal({ busy: true, saving: true });
