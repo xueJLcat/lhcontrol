@@ -529,9 +529,7 @@ func finishInterruptedInitialRead(
 	// closed, and callers can use them to avoid duplicate commands.
 	powerReadAt := station.LastPowerReadAt
 	channelReadAt := station.LastChannelReadAt
-	if cleanupErr := disconnectInternal(station); cleanupErr != nil {
-		contextErr = errors.Join(contextErr, transportError("cleanup cancelled initial read", cleanupErr))
-	}
+	cleanupErr := disconnectInternal(station)
 	if powerReadCompleted {
 		station.LastPowerReadAt = powerReadAt
 	}
@@ -543,7 +541,16 @@ func finishInterruptedInitialRead(
 	} else if channelReadErr != nil {
 		channelReadErr = errors.Join(channelReadErr, contextErr)
 	}
-	return finishInitialReadResult(station, powerReadErr, channelReadErr, metadataReadErr)
+	readErr := finishInitialReadResult(station, powerReadErr, channelReadErr, metadataReadErr)
+	if cleanupErr != nil {
+		// Keep the cleanup failure out of the Channel domain: the channel was
+		// never read, and a transport-classified error there would note a
+		// channel failure for an observation that never happened. The
+		// top-level join still surfaces the fault (including adapter loss)
+		// to error observers.
+		return errors.Join(readErr, transportError("cleanup cancelled initial read", cleanupErr))
+	}
+	return readErr
 }
 
 // FetchInitialPowerStateContext performs the full initial GATT read using one

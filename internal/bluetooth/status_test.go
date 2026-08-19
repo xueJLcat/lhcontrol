@@ -214,6 +214,52 @@ func TestFetchInitialPowerStateContextKeepsFailedPowerReadUnderCancellation(t *t
 	}
 }
 
+// TestFetchInitialPowerStateContextKeepsCleanupFailureOutOfChannelField
+// guards the interrupted-read cleanup attribution: when the cleanup disconnect
+// fails after an interrupted read, the fault must not land in the Channel
+// domain (the channel was never read — upstream would note a channel failure
+// for an observation that never happened). The top-level error still carries
+// the cleanup fault so observers can see it.
+func TestFetchInitialPowerStateContextKeepsCleanupFailureOutOfChannelField(t *testing.T) {
+	terminalErr := errors.New("WinRT operation ended with canceled status")
+	cleanupErr := errors.New("cleanup disconnect failed")
+	power := &blockingContextCharacteristic{
+		fakeCharacteristic: &fakeCharacteristic{},
+		started:            make(chan struct{}),
+		terminalErr:        terminalErr,
+	}
+	station := connectedFakeStation(power, nil, nil, Capabilities{PowerRead: true, ChannelRead: true})
+	device := &trackingConnectedDevice{disconnectErr: cleanupErr}
+	station.device = device
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() { result <- FetchInitialPowerStateContext(ctx, station) }()
+	select {
+	case <-power.started:
+	case <-time.After(time.Second):
+		t.Fatal("context-aware power read did not start")
+	}
+	cancel()
+	select {
+	case err := <-result:
+		var initialErr *InitialReadError
+		if !errors.As(err, &initialErr) {
+			t.Fatalf("FetchInitialPowerStateContext() error = %v, want an InitialReadError", err)
+		}
+		if !errors.Is(initialErr.Channel, context.Canceled) || errors.Is(initialErr.Channel, cleanupErr) {
+			t.Fatalf("InitialReadError.Channel = %v, want the bare interruption without the cleanup fault", initialErr.Channel)
+		}
+		if !errors.Is(err, cleanupErr) {
+			t.Fatalf("FetchInitialPowerStateContext() error = %v, want the cleanup failure surfaced at the top level", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("cancelled initial read did not return within 3 seconds")
+	}
+	if device.disconnects != 1 || station.Snapshot().Connected {
+		t.Fatalf("interrupted initial read cleanup: disconnects=%d connected=%v", device.disconnects, station.Snapshot().Connected)
+	}
+}
+
 func TestFetchInitialPowerStateContextPreservesPowerReadWhenCancelledBetweenFields(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	power := &cancelAfterSuccessfulRead{
