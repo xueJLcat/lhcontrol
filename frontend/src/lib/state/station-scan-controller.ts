@@ -525,18 +525,12 @@ export class StationScanController {
         );
         if (outcome === 'still-scanning') this.scheduleStopRecheck(operationEpoch, statusOperation, requestGeneration, 1);
       } else {
-        if (this.host.globalOperation !== 'scanning') {
-          if (this.host.stoppingScan) {
-            // The scan workflow already settled locally, but the backend can
-            // keep reporting it briefly while it drains. Hand the stopping
-            // marker to the recheck chain instead of clearing it here: the
-            // periodic poll must not adopt our own draining scan as an
-            // external one. The chain writes the terminal summary once the
-            // backend reports no scan.
-            this.scheduleStopRecheck(operationEpoch, statusOperation, requestGeneration, 1);
-            return;
-          }
-        }
+        // A settled StopScan returns only after the backend scan lifecycle has
+        // fully drained (isScanning already false), so no drain window exists
+        // here; clearing the marker is safe. The promise-settles-first case is
+        // covered by startScan's finally, which hands the marker to the
+        // stop-recheck chain when a stop is still pending.
+        if (this.host.globalOperation !== 'scanning') this.host.stoppingScan = false;
         if (this.host.gates.canCommitStatus(statusOperation)) {
           // The scan can complete on its own while the stop is in flight;
           // report its real outcome instead of a plain "stopped" message.
