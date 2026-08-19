@@ -26,7 +26,13 @@ function Get-SortKey {
 function Assert-StableOrder {
     param([object[]]$Stations)
     $actual = @($Stations | ForEach-Object { Get-SortKey $_ })
-    $expected = @($actual | Sort-Object)
+    # Sort-Object uses the current culture's collation, which ignores
+    # punctuation at its primary level (LHB-a-b, LHB-a.b, LHB-ab sort
+    # differently than byte order). The backend sorts bytewise on the
+    # lowercased values, so the comparison must use the ordinal comparer to
+    # avoid flagging a correctly ordered list as unsorted.
+    $expected = @($actual.Clone())
+    [Array]::Sort($expected, [System.StringComparer]::Ordinal)
     if (($actual -join "`n") -ne ($expected -join "`n")) {
         throw "Station list is not sorted by channel, name, and address"
     }
@@ -267,7 +273,10 @@ function Wait-Scan {
     $deadline = (Get-Date).AddSeconds($ScanWaitSeconds)
     $lastStatus = $null
     while ((Get-Date) -lt $deadline) {
-        $status = Invoke-RestMethod -Method Get -Uri "$ApiBase/scan/status"
+        # Bound each poll request itself: without an explicit timeout a hung
+        # API keeps the final request inside this loop blocked for the 100s
+        # default, overshooting the scan wait budget by minutes.
+        $status = Invoke-RestMethod -Method Get -Uri "$ApiBase/scan/status" -TimeoutSec 15
         $lastStatus = $status
         if (Test-ScanTerminalState ([string]$status.state)) {
             return $status
