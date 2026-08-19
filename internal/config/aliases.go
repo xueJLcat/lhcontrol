@@ -139,8 +139,13 @@ func (c *Config) SetRenamedStationByAddress(address, originalName, newName strin
 			// even when this setter cannot see it. Keep the existing entry as
 			// a tombstone: deleting it would silently resurrect the legacy
 			// alias once a scan rediscovers the device. With no existing entry
-			// there is nothing to suppress or remove.
+			// there is nothing to suppress or remove; a blocked persistence
+			// still reports the block like every other setter instead of
+			// claiming success.
 			if !addressExisted {
+				if c.persistenceBlockedErr != nil {
+					return blockedSaveError(c.persistenceBlockedErr)
+				}
 				return nil
 			}
 			c.RenamedStationsByAddress[address] = ""

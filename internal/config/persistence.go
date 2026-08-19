@@ -96,12 +96,20 @@ func (c *Config) RecoveryLoadWarning() string {
 	return c.recoveryLoadWarning
 }
 
+// blockedSaveError reports that persistence is intentionally withheld because
+// the configuration file could not be read and saving the sparse in-memory
+// state would destroy it. Every setter that skips a write must surface this
+// instead of claiming success.
+func blockedSaveError(cause error) error {
+	return fmt.Errorf("config save blocked to preserve the unreadable file: %w", cause)
+}
+
 // saveLocked persists exactly the state protected by mutex. Keeping mutation
 // and persistence under one exclusive lock prevents an older Save from
 // overwriting a newer rename.
 func (c *Config) saveLocked() error {
 	if c.persistenceBlockedErr != nil {
-		return fmt.Errorf("config save blocked to preserve the unreadable file: %w", c.persistenceBlockedErr)
+		return blockedSaveError(c.persistenceBlockedErr)
 	}
 	configFilePath, err := getConfigPath()
 	if err != nil {

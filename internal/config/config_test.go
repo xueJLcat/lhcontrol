@@ -268,6 +268,31 @@ func TestLoadReadFailureBlocksSavesToProtectExistingConfig(t *testing.T) {
 	}
 }
 
+// TestBlockedAliasResetForUnscannedStationReportsBlockedSave covers the one
+// rename path that writes nothing: resetting the alias of a station that was
+// never scanned this session (unknown factory name, no existing entry). Even
+// though there is nothing to persist, the call must report the block like
+// every other setter instead of claiming success while the config stays
+// read-only.
+func TestBlockedAliasResetForUnscannedStationReportsBlockedSave(t *testing.T) {
+	t.Setenv("AppData", t.TempDir())
+
+	originalReader := configFileReader
+	configFileReader = func(string) ([]byte, error) {
+		return nil, errors.New("file locked by backup software")
+	}
+	t.Cleanup(func() { configFileReader = originalReader })
+
+	cfg := NewConfig()
+	if err := cfg.Load(); err == nil {
+		t.Fatal("Load() unexpectedly succeeded")
+	}
+	err := cfg.SetRenamedStationByAddress("11:22:33:44:55:77", "", "")
+	if err == nil || !strings.Contains(err.Error(), "save blocked") {
+		t.Fatalf("SetRenamedStationByAddress() error = %v, want blocked save", err)
+	}
+}
+
 // TestTransientLoadFailureRecoversOnNextSetter guards the lazy recovery: when
 // the startup Load hit a transient read failure (a backup tool holding the
 // file), saves are blocked to protect the unreadable config, but the very next
