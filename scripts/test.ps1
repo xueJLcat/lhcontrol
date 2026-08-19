@@ -38,6 +38,10 @@ finally {
 Push-Location $repositoryRoot
 try {
     Invoke-Native "go test ./..."
+    # The bundled Bluetooth fork lives in a separate module behind a replace
+    # directive, so `go test ./...` never reaches it. Run its own test suite
+    # explicitly: it carries the WinRT stability patches this build depends on.
+    Invoke-Native "go test tinygo.org/x/bluetooth/..."
 }
 finally {
     Pop-Location
