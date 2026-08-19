@@ -33,12 +33,19 @@ func TestShutdownBoundsStuckAPIServerLoop(t *testing.T) {
 // TestShutdownRunsOnce guards the idempotence fix: Wails may invoke OnShutdown
 // and still return a run error, in which case the fatal path calls shutdown a
 // second time. Only the first call may run the bounded waits; the second must
-// return immediately instead of re-draining already-joined goroutines.
+// return immediately instead of re-draining already-joined goroutines. The
+// blocked apiWG makes a re-run visibly stall on the bounded drain again, so
+// the assertion discriminates the Once gate instead of passing trivially on an
+// already-drained app.
 func TestShutdownRunsOnce(t *testing.T) {
 	app := NewApp()
 	app.api = nil
-	app.apiShutdownWait = 25 * time.Millisecond
+	app.apiShutdownWait = 300 * time.Millisecond
 	app.autoSleepStopWait = time.Millisecond
+	// Keep the API listener wait-group blocked: a second invocation that
+	// re-runs the sequence stalls here a second time, while the Once gate
+	// short-circuits before reaching the drain.
+	app.apiWG.Add(1)
 
 	first := make(chan struct{})
 	go func() {
@@ -47,12 +54,12 @@ func TestShutdownRunsOnce(t *testing.T) {
 	}()
 	<-first
 
-	// A second invocation must be a no-op that returns promptly. If the
-	// sequence ran again it would re-arm and re-wait on the auto-sleep and
-	// API drains.
 	start := time.Now()
 	app.shutdown(context.Background())
-	if elapsed := time.Since(start); elapsed > 200*time.Millisecond {
+	elapsed := time.Since(start)
+	app.apiWG.Done() // release the waiter(s) spawned by the drain(s)
+
+	if elapsed > 150*time.Millisecond {
 		t.Fatalf("second shutdown re-ran the bounded sequence, took %v", elapsed)
 	}
 	if !app.shuttingDown.Load() {
