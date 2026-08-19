@@ -257,6 +257,29 @@ func TestBoundedWatcherCallBoundsWedgedWatcherCalls(t *testing.T) {
 	}
 }
 
+// TestBoundedWatcherCallReportsThreadInitFailure guards the apartment guard:
+// when the WinRT thread initialization fails, the COM call must not run on
+// the unprepared thread (it produces opaque failures there); the helper
+// reports the initialization failure instead.
+func TestBoundedWatcherCallReportsThreadInitFailure(t *testing.T) {
+	originalEnter := enterWinRTThread
+	threadErr := errors.New("RoInitialize failed")
+	enterWinRTThread = func() (func(), error) { return nil, threadErr }
+	t.Cleanup(func() { enterWinRTThread = originalEnter })
+
+	called := false
+	err := boundedWatcherCall(time.Second, func() error {
+		called = true
+		return nil
+	})
+	if !errors.Is(err, threadErr) {
+		t.Fatalf("boundedWatcherCall() error = %v, want %v", err, threadErr)
+	}
+	if called {
+		t.Fatal("watcher COM call ran despite the thread initialization failure")
+	}
+}
+
 // TestStopScanSessionTargetsItsOwnScan guards session-targeted stops: a stop
 // must act on the session's own control instead of the adapter's global scan
 // slot, so a delayed stop from an older session can never stop a newer scan

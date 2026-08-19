@@ -1016,3 +1016,52 @@ func TestSleepPairRebuildsSessionInvalidatedDuringPrepareGap(t *testing.T) {
 		t.Fatalf("sleep pair error = %v, want the rebuild failure surfaced", writeErr)
 	}
 }
+
+// TestPowerWriteBackoffInterruptionKeepsConnectFailure guards the retry join:
+// a cancellation landing inside the retry backoff must keep the failed
+// attempt's connect error joined with the interruption. A bare context error
+// would read upstream as a clean interruption and drop the connect failure's
+// bookkeeping.
+func TestPowerWriteBackoffInterruptionKeepsConnectFailure(t *testing.T) {
+	ConfigureTiming(TimingPolicy{WriteAttempts: 3, OperationRetryDelay: 5 * time.Second})
+	t.Cleanup(func() { ConfigureTiming(TimingPolicy{}) })
+
+	connectErr := errors.New("radio unavailable")
+	originalAdapter := adapter
+	counting := &reconnectCountingAdapter{connectErr: connectErr}
+	adapter = counting
+	t.Cleanup(func() { adapter = originalAdapter })
+
+	station := &BaseStation{Name: "LHB-BACKOFF"}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		_, err := SetPowerStateContext(ctx, station, PowerStateOn)
+		result <- err
+	}()
+
+	// Wait for the first connect to fail and the retry backoff to begin, then
+	// cancel inside the backoff window.
+	waitDeadline := time.Now().Add(2 * time.Second)
+	for counting.connectCalls.Load() == 0 {
+		if time.Now().After(waitDeadline) {
+			t.Fatal("power write never attempted a connect")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("SetPowerStateContext() error = %v, want the cancellation preserved", err)
+		}
+		if !errors.Is(err, connectErr) {
+			t.Fatalf("SetPowerStateContext() error = %v, want the failed connect attempt preserved", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("cancelled power write did not return")
+	}
+}
