@@ -508,7 +508,11 @@ func (m *Manager) runInitialScanReads(ctx context.Context, stationsToFetch []*bl
 				return m.bluetoothOps.fetchInitialPowerState(readContext, ptr)
 			})
 			if ctx.Err() == nil && !ownBudget && errors.Is(phaseContext.Err(), context.DeadlineExceeded) &&
+				isPureContextError(readResults[resultIndex].err) &&
 				errors.Is(readResults[resultIndex].err, context.DeadlineExceeded) {
+				// A genuine transport failure joined with the phase deadline
+				// must keep the structured failure handling below instead of
+				// being folded into the phase timeout.
 				readResults[resultIndex].phaseDeadlineExceeded = true
 			}
 		}(index, stationToFetch)

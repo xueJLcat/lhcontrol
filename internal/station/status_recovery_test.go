@@ -401,6 +401,55 @@ func TestStatusRefreshTimeoutBoundsWholeFleet(t *testing.T) {
 	manager.statusRetryMutex.Unlock()
 }
 
+// TestStatusRefreshMixedDeadlineKeepsFailureBookkeeping guards the fleet
+// deadline classification in readStationStatus: a genuine transport failure
+// joined with the fleet-window deadline is not a clean fleet interruption.
+// It must keep the disconnect/backoff bookkeeping instead of degrading to a
+// refresh-only marker, matching the isPureContextError rule the cancellation
+// branch already applies.
+func TestStatusRefreshMixedDeadlineKeepsFailureBookkeeping(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	manager.statusRecoveryStart.Do(func() {})
+	manager.statusReadTimeout = time.Hour
+	manager.statusRefreshTimeout = 40 * time.Millisecond
+	address := "11:22:33:44:77:21"
+	station := &internalbluetooth.BaseStation{
+		Name: "LHB-MIXED-DEADLINE", Address: mustAddress(t, address), Present: true,
+	}
+	manager.stations[address] = station
+	manager.bluetoothOps.stationConnected = func(*internalbluetooth.BaseStation) bool { return true }
+	transportErr := &internalbluetooth.DeviceTransportError{
+		Operation: "read power characteristic",
+		Err:       tinybluetooth.ErrGATTUnreachable,
+	}
+	var disconnects atomic.Int32
+	manager.bluetoothOps.disconnectStation = func(*internalbluetooth.BaseStation) error {
+		disconnects.Add(1)
+		return nil
+	}
+	manager.bluetoothOps.readPowerStateContext = func(ctx context.Context, _ *internalbluetooth.BaseStation) error {
+		<-ctx.Done()
+		return &internalbluetooth.StatusReadError{
+			Power:   errors.Join(transportErr, ctx.Err()),
+			Channel: ctx.Err(),
+		}
+	}
+
+	if _, err := manager.CheckAllStationStatuses(); err == nil {
+		t.Fatal("CheckAllStationStatuses() error = nil, want the read failure surfaced")
+	}
+	if disconnects.Load() != 1 {
+		t.Fatalf("disconnects = %d, want the transport failure to disconnect once", disconnects.Load())
+	}
+	manager.statusRetryMutex.Lock()
+	retry, tracked := manager.statusRetries[address]
+	manager.statusRetryMutex.Unlock()
+	if !tracked || effectiveStatusRetryKinds(retry)&statusRetryConnection == 0 || retry.failures == 0 {
+		t.Fatalf("mixed-deadline retry = %+v, tracked=%v; want a connection failure backoff", retry, tracked)
+	}
+}
+
 // TestStatusRefreshAbandonsWedgedWorker guards the bounded worker join: a
 // read blocked inside an adapter call that ignores cancellation (a wedged
 // WinRT cleanup holding the transport lock) must not hold the refresh lock

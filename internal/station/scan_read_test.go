@@ -99,6 +99,57 @@ func TestScanInitialReadPhaseTimeoutBoundsWholeFleet(t *testing.T) {
 	manager.Shutdown()
 }
 
+// TestScanInitialReadMixedDeadlineKeepsFailureBookkeeping guards the phase
+// deadline classification: a genuine transport failure joined with the phase
+// deadline is not a clean phase interruption. It must keep the structured
+// failure handling (disconnect/backoff) instead of being folded into the
+// phase timeout's refresh-only marker, matching the isPureContextError rule
+// the cancellation path already applies.
+func TestScanInitialReadMixedDeadlineKeepsFailureBookkeeping(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	manager.statusRecoveryStart.Do(func() {})
+	manager.initialReadTimeout = time.Hour
+	manager.initialReadPhaseTimeout = 40 * time.Millisecond
+	address := "11:22:33:44:66:20"
+	manager.bluetoothOps.scanForDurationContext = func(context.Context, time.Duration) ([]internalbluetooth.DiscoveredStation, error) {
+		return []internalbluetooth.DiscoveredStation{{
+			Name: "LHB-MIXED-DEADLINE", Address: mustAddress(t, address),
+		}}, nil
+	}
+	transportErr := &internalbluetooth.DeviceTransportError{
+		Operation: "read power characteristic",
+		Err:       tinybluetooth.ErrGATTUnreachable,
+	}
+	var disconnects atomic.Int32
+	manager.bluetoothOps.disconnectStation = func(*internalbluetooth.BaseStation) error {
+		disconnects.Add(1)
+		return nil
+	}
+	manager.bluetoothOps.fetchInitialPowerState = func(ctx context.Context, _ *internalbluetooth.BaseStation) error {
+		// The transport fault lands just as the phase budget expires; the
+		// bluetooth layer joins the two into one error.
+		<-ctx.Done()
+		return &internalbluetooth.InitialReadError{
+			Power:   transportErr,
+			Channel: ctx.Err(),
+		}
+	}
+
+	if _, err := manager.ScanAndFetchStations(); err != nil {
+		t.Fatalf("ScanAndFetchStations() error = %v", err)
+	}
+	if disconnects.Load() != 1 {
+		t.Fatalf("disconnects = %d, want the transport failure to disconnect once", disconnects.Load())
+	}
+	manager.statusRetryMutex.Lock()
+	retry, tracked := manager.statusRetries[address]
+	manager.statusRetryMutex.Unlock()
+	if !tracked || effectiveStatusRetryKinds(retry)&statusRetryConnection == 0 || retry.failures == 0 {
+		t.Fatalf("mixed-deadline retry = %+v, tracked=%v; want a connection failure backoff", retry, tracked)
+	}
+	manager.Shutdown()
+}
+
 func TestScanInitialReadClassifiesPartialFailures(t *testing.T) {
 	for _, test := range []struct {
 		name            string

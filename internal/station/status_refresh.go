@@ -287,7 +287,11 @@ func (m *Manager) readStationStatus(refreshContext context.Context, stationPtr *
 		return nil
 	}
 	if !ownBudget && errors.Is(refreshContext.Err(), context.DeadlineExceeded) &&
-		errors.Is(workerErr, context.DeadlineExceeded) {
+		isPureContextError(workerErr) && errors.Is(workerErr, context.DeadlineExceeded) {
+		// Only an error made exclusively of context errors is a fleet-window
+		// interruption: the bluetooth layer joins a real read failure with
+		// the deadline it hit, and that mixed outcome must take the failure
+		// path below, matching the cancellation branch above.
 		m.trackStatusRefreshPending(address)
 		return fmt.Errorf("%s: status refresh deadline exceeded: %w", address, workerErr)
 	}
