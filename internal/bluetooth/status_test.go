@@ -351,6 +351,53 @@ func TestReadPowerStateContextCancelsBlockingRead(t *testing.T) {
 		t.Fatal("cancelled status read did not return")
 	}
 }
+// TestReadPowerStateContextKeepsFreshnessWhenReadCancelled guards the
+// interrupted-read observation contract: a pure cancellation delivered no new
+// observation and is not evidence the link broke, so the previous read's
+// values and freshness must survive. Wiping the freshness disabled the
+// duplicate-command suppression and could disarm the boot-transition write
+// guards for a station whose verification read was interrupted.
+func TestReadPowerStateContextKeepsFreshnessWhenReadCancelled(t *testing.T) {
+	power := &blockingContextCharacteristic{
+		fakeCharacteristic: &fakeCharacteristic{},
+		started:            make(chan struct{}),
+	}
+	station := connectedFakeStation(power, &fakeCharacteristic{value: []byte{0x04}}, nil, Capabilities{PowerRead: true, ChannelRead: true})
+	powerReadAt := time.Now().Add(-time.Second)
+	channelReadAt := time.Now().Add(-time.Second)
+	station.mutex.Lock()
+	station.PowerState = PowerStateOn
+	station.RawPowerState = 0x0B
+	station.Channel = 4
+	station.LastPowerReadAt = powerReadAt
+	station.LastChannelReadAt = channelReadAt
+	station.mutex.Unlock()
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() { result <- ReadPowerStateContext(ctx, station) }()
+	select {
+	case <-power.started:
+	case <-time.After(time.Second):
+		t.Fatal("context-aware power read did not start")
+	}
+	cancel()
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("ReadPowerStateContext() error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cancelled status read did not return")
+	}
+	snapshot := station.Snapshot()
+	if snapshot.PowerState != PowerStateOn || snapshot.RawPowerState != 0x0B || snapshot.Channel != 4 {
+		t.Fatalf("cancelled read clobbered cached observations: %+v", snapshot)
+	}
+	if !snapshot.LastPowerReadAt.Equal(powerReadAt) || !snapshot.LastChannelReadAt.Equal(channelReadAt) {
+		t.Fatalf("cancelled read wiped the previous observations' freshness: power=%v channel=%v", snapshot.LastPowerReadAt, snapshot.LastChannelReadAt)
+	}
+}
+
 func TestReadPowerStateContextPreservesCancellationWhenTransportReturnsTerminalError(t *testing.T) {
 	power := &blockingContextCharacteristic{
 		fakeCharacteristic: &fakeCharacteristic{},

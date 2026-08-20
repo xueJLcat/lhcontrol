@@ -246,6 +246,41 @@ func TestSetChannelUnsupportedConfirmationReportsCommandSent(t *testing.T) {
 		t.Fatal("unsupported confirmation read discarded a healthy connection")
 	}
 }
+// TestSetChannelConfirmationKeepsSessionOnProtocolRejection guards the
+// readback loop: an ATT security-policy or resource rejection is a protocol
+// decision about a healthy link that reconnecting can never change, so the
+// loop must stop polling without running the disconnect/reconnect threshold.
+func TestSetChannelConfirmationKeepsSessionOnProtocolRejection(t *testing.T) {
+	ConfigureTiming(TimingPolicy{
+		ChannelConfirmAttempts:    6,
+		ChannelConfirmInterval:    time.Millisecond,
+		ConfirmReconnectThreshold: 2,
+		ConfirmReconnectDelay:     time.Millisecond,
+	})
+	t.Cleanup(func() { ConfigureTiming(TimingPolicy{}) })
+	rejection := tinybluetooth.ErrAttInsufficientEncryption
+	device := &trackingConnectedDevice{}
+	mode := &fakeCharacteristic{
+		value:             []byte{0x03},
+		readErrAfterWrite: rejection,
+	}
+	station := connectedFakeStation(&fakeCharacteristic{}, mode, nil, Capabilities{ChannelRead: true, ChannelWrite: true})
+	station.device = device
+	result, err := SetChannel(station, 5)
+	if err == nil {
+		t.Fatalf("SetChannel() = %+v, want an unconfirmed write", result)
+	}
+	if !errors.Is(err, rejection) {
+		t.Fatalf("SetChannel() error = %v, want the protocol rejection surfaced", err)
+	}
+	if !result.CommandSent || result.PreviousChannel != 3 {
+		t.Fatalf("result = %+v, want the submitted command reported after channel 3", result)
+	}
+	if device.disconnects != 0 || !station.Snapshot().Connected {
+		t.Fatalf("protocol-rejected readback discarded a healthy connection: disconnects=%d snapshot=%+v", device.disconnects, station.Snapshot())
+	}
+}
+
 func TestATTCapabilityErrorsDoNotRequireReconnect(t *testing.T) {
 	for _, protocolErr := range []tinybluetooth.AttributeProtocolError{
 		tinybluetooth.ErrAttReadNotPermitted,

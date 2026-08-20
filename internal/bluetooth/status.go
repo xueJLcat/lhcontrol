@@ -30,7 +30,14 @@ func readPowerStateInternalContext(ctx context.Context, station *BaseStation) er
 	buf := make([]byte, statusValueReadSize)
 	n, err := readCharacteristicContext(ctx, station.characteristic, buf)
 	if err != nil {
-		station.LastPowerReadAt = time.Time{}
+		// An interrupted read delivered no observation and is not evidence
+		// the link is broken; the previous authoritative observation keeps its
+		// freshness, which the duplicate-command suppression and the
+		// boot-transition write guards depend on. Genuine transport failures
+		// still invalidate the stale value.
+		if !isContextOnlyError(err) {
+			station.LastPowerReadAt = time.Time{}
+		}
 		if IsCapabilityUnsupported(err) {
 			station.Capabilities.PowerRead = false
 			station.clearPowerStateInternal()
@@ -105,7 +112,11 @@ func readChannelInternalContext(ctx context.Context, station *BaseStation) error
 	buf := make([]byte, statusValueReadSize)
 	n, err := readCharacteristicContext(ctx, station.modeCharacteristic, buf)
 	if err != nil {
-		station.LastChannelReadAt = time.Time{}
+		// Same interrupted-read rule as the power path: the previous
+		// observation stays authoritative with its freshness intact.
+		if !isContextOnlyError(err) {
+			station.LastChannelReadAt = time.Time{}
+		}
 		if IsCapabilityUnsupported(err) {
 			station.Capabilities.ChannelRead = false
 			station.Channel = ChannelUnknown

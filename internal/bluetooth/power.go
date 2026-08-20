@@ -288,8 +288,9 @@ func confirmPowerStateInternalContext(ctx context.Context, station *BaseStation,
 			// must cover that window regardless of the configured attempt count,
 			// otherwise every power-on is reported unconfirmed even when the
 			// station actually turned on. The surrounding context still bounds
-			// the real wait.
-			fallbackAttempts := int(timing.BootFallbackAfter/timing.ConfirmPollInterval) + 1
+			// the real wait. Ceiling division: with a fractional window/poll
+			// ratio the final poll still has to reach past the window.
+			fallbackAttempts := int((timing.BootFallbackAfter+timing.ConfirmPollInterval-1)/timing.ConfirmPollInterval) + 1
 			if fallbackAttempts > attempts {
 				attempts = fallbackAttempts
 			}
@@ -330,6 +331,15 @@ func confirmPowerStateInternalContext(ctx context.Context, station *BaseStation,
 				// Malformed device data cannot change with a reconnect; the
 				// disconnect/reconnect fallback would only repeat the same
 				// failure until the budget runs out.
+				return errors.Join(lastErr, err)
+			}
+			if IsProtocolRejection(err) {
+				// Security-policy and resource rejections are protocol
+				// decisions about a healthy link; the classifier never routes
+				// them through RequiresReconnect. Counting them toward the
+				// reconnect threshold would tear down and rebuild the session
+				// on every threshold, only to fail the same way on each poll,
+				// so stop polling like the other unrecoverable read failures.
 				return errors.Join(lastErr, err)
 			}
 			if expectedState == PowerStateSleep &&
@@ -383,7 +393,7 @@ func confirmPowerStateInternalContext(ctx context.Context, station *BaseStation,
 				if expectedState == PowerStateOn && reconnectExtensions < maxConfirmReconnectExtensions {
 					refreshed := CurrentTiming()
 					if refreshed.ConfirmPollInterval > 0 {
-						fallbackAttempts := int(refreshed.BootFallbackAfter/refreshed.ConfirmPollInterval) + 1
+						fallbackAttempts := int((refreshed.BootFallbackAfter+refreshed.ConfirmPollInterval-1)/refreshed.ConfirmPollInterval) + 1
 						if remaining := attempt + 1 + fallbackAttempts; remaining > attempts {
 							attempts = remaining
 							reconnectExtensions++

@@ -251,6 +251,15 @@ func confirmChannelWrite(ctx context.Context, station *BaseStation, channel int,
 				// reconnecting cannot change what the device reports.
 				break
 			}
+			if IsProtocolRejection(err) {
+				// A security-policy or resource rejection is a protocol
+				// decision about a healthy link that reconnecting cannot
+				// change; counting it toward the threshold would tear down
+				// and rebuild the session only to fail the same way on every
+				// poll. Stop polling like the other unrecoverable read
+				// failures; the final readback below still gets one chance.
+				break
+			}
 			consecutiveReadErrors++
 			if consecutiveReadErrors >= confirmTiming.ConfirmReconnectThreshold && attempt < confirmAttempts-1 {
 				_ = disconnectInternal(station)

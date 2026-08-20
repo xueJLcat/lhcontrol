@@ -169,6 +169,39 @@ func TestSetPowerStateConfirmsCompatibilityFirmwareAfterFreshFallbackWindow(t *t
 	}
 }
 
+// TestSetPowerStateConfirmationKeepsSessionOnProtocolRejection guards the
+// confirmation poll: an ATT security-policy or resource rejection is a
+// protocol decision about a healthy link that reconnecting can never change,
+// so it must stop the poll without paying the disconnect/reconnect cycle the
+// threshold would otherwise run on every confirmation of such a station.
+func TestSetPowerStateConfirmationKeepsSessionOnProtocolRejection(t *testing.T) {
+	ConfigureTiming(TimingPolicy{
+		ConfirmAttemptsOn:         6,
+		ConfirmPollInterval:       time.Millisecond,
+		ConfirmReconnectThreshold: 2,
+		ConfirmReconnectDelay:     time.Millisecond,
+	})
+	t.Cleanup(func() { ConfigureTiming(TimingPolicy{}) })
+	rejection := tinybluetooth.ErrAttInsufficientEncryption
+	power := &fakeCharacteristic{value: []byte{0x00}, readErr: rejection, ignoreWrite: true}
+	station := connectedFakeStation(power, nil, nil, Capabilities{PowerRead: true, PowerWrite: true})
+	device := &trackingConnectedDevice{}
+	station.device = device
+	result, err := SetPowerState(station, PowerStateOn)
+	if result.Confirmed {
+		t.Fatal("protocol-rejected readback must not confirm the write")
+	}
+	if err == nil || !errors.Is(err, rejection) {
+		t.Fatalf("SetPowerState() error = %v, want the protocol rejection surfaced", err)
+	}
+	if device.disconnects != 0 {
+		t.Fatalf("disconnects = %d, want a protocol rejection to keep the healthy session intact", device.disconnects)
+	}
+	if !station.IsConnected() {
+		t.Fatal("protocol-rejected confirmation dropped the cached connection")
+	}
+}
+
 func TestIsGATTCommunicationFailure(t *testing.T) {
 	for _, target := range []error{
 		tinybluetooth.ErrGATTUnreachable,
