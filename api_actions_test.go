@@ -215,6 +215,70 @@ func TestRegisteredPowerRoutePreservesConfirmationResult(t *testing.T) {
 
 }
 
+// TestStationRoutesDecodePercentEncodedAddress guards the RFC 3986 equivalent
+// spelling of station addresses: many HTTP clients percent-encode ':' when
+// quoting a path segment, and Fiber extracts route params from the raw path.
+// The handlers must decode the segment before the station lookup instead of
+// rejecting a known station with 404.
+func TestStationRoutesDecodePercentEncodedAddress(t *testing.T) {
+
+	for _, test := range []struct {
+		name string
+
+		method string
+
+		path string
+
+		body string
+
+		send func(manager *fakeAPIStationManager)
+	}{
+
+		{
+			name: "power", method: http.MethodPost, path: "/stations/AA%3ABB%3ACC%3ADD%3AEE%3AFF/power", body: `{"state":"on"}`,
+			send: func(manager *fakeAPIStationManager) { manager.powerResult = station.PowerActionResult{CommandSent: true, Confirmed: true} },
+		},
+		{name: "identify", method: http.MethodPost, path: "/stations/AA%3ABB%3ACC%3ADD%3AEE%3AFF/identify", body: ""},
+		{name: "refresh", method: http.MethodPost, path: "/stations/AA%3ABB%3ACC%3ADD%3AEE%3AFF/refresh", body: ""},
+		{
+			name: "channel", method: http.MethodPut, path: "/stations/AA%3ABB%3ACC%3ADD%3AEE%3AFF/channel", body: `{"channel":5}`,
+			send: func(manager *fakeAPIStationManager) { manager.channelResult = station.ChannelChangeResult{Address: "AA:BB:CC:DD:EE:FF", Channel: 5, Confirmed: true} },
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+
+			manager := &fakeAPIStationManager{}
+			if test.send != nil {
+				test.send(manager)
+			}
+			request := httptest.NewRequest(test.method, test.path, strings.NewReader(test.body))
+			request.Header.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSON)
+			response, err := testAPI(manager).Test(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer response.Body.Close()
+			if manager.lastAddress != "AA:BB:CC:DD:EE:FF" {
+				t.Fatalf("station lookup address = %q, want the decoded percent-encoded segment", manager.lastAddress)
+			}
+		})
+	}
+
+	// A raw colon address keeps working unchanged.
+	manager := &fakeAPIStationManager{powerResult: station.PowerActionResult{CommandSent: true, Confirmed: true}}
+	request := httptest.NewRequest(http.MethodPost, "/stations/AA:BB:CC:DD:EE:FF/power", strings.NewReader(`{"state":"on"}`))
+	request.Header.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSON)
+	response, err := testAPI(manager).Test(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if manager.lastAddress != "AA:BB:CC:DD:EE:FF" {
+		t.Fatalf("station lookup address = %q, want the raw segment", manager.lastAddress)
+	}
+
+}
+
 func TestPowerResultForWailsPreservesSentUnconfirmedResult(t *testing.T) {
 
 	confirmationErr := &bluetooth.PowerConfirmationError{

@@ -49,6 +49,8 @@ type fakeAPIStationManager struct {
 	lastChannelRequest int
 
 	lastAllowUnknownConflictRisk bool
+
+	lastAddress string
 }
 
 func (f *fakeAPIStationManager) PowerOnAllStations() error { return f.legacyErr }
@@ -759,7 +761,9 @@ func (f *fakeAPIStationManager) SetAllStationsPowerDetailed(state string) (stati
 
 }
 
-func (f *fakeAPIStationManager) SetStationPower(_ string, state string) (station.PowerActionResult, error) {
+func (f *fakeAPIStationManager) SetStationPower(address string, state string) (station.PowerActionResult, error) {
+
+	f.lastAddress = address
 
 	f.lastPowerState = state
 
@@ -773,15 +777,24 @@ func (f *fakeAPIStationManager) SetStationPower(_ string, state string) (station
 
 }
 
-func (f *fakeAPIStationManager) IdentifyStation(string) error { return f.legacyErr }
+func (f *fakeAPIStationManager) IdentifyStation(address string) error {
 
-func (f *fakeAPIStationManager) RefreshStationCapabilities(string) (station.StationInfo, error) {
+	f.lastAddress = address
+
+	return f.legacyErr
+}
+
+func (f *fakeAPIStationManager) RefreshStationCapabilities(address string) (station.StationInfo, error) {
+
+	f.lastAddress = address
 
 	return station.StationInfo{}, f.legacyErr
 
 }
 
-func (f *fakeAPIStationManager) SetStationChannel(_ string, channel int, allowUnknownConflictRisk bool) (station.ChannelChangeResult, error) {
+func (f *fakeAPIStationManager) SetStationChannel(address string, channel int, allowUnknownConflictRisk bool) (station.ChannelChangeResult, error) {
+
+	f.lastAddress = address
 
 	f.lastChannelRequest = channel
 

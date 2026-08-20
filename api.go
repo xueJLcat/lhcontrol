@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"sync/atomic"
 
 	"lhcontrol/internal/bluetooth"
@@ -62,6 +63,21 @@ func parseAPIJSONBody(body []byte, target any) error {
 		return fmt.Errorf("%w: invalid JSON body", station.ErrInvalidArgument)
 	}
 	return nil
+}
+
+// apiAddressParam returns the station address path parameter with any
+// percent-encoding removed. Fiber routes and extracts params from the raw
+// path (UnescapePath is false so %2F cannot reshape routing), so a client
+// that percent-encodes the segment — standard for ':' under many HTTP
+// libraries — would otherwise be matched literally and rejected as an unknown
+// station. An invalid escape keeps the raw value, which naturally 404s.
+func apiAddressParam(c *fiber.Ctx) string {
+	raw := c.Params("address")
+	decoded, err := url.PathUnescape(raw)
+	if err != nil {
+		return raw
+	}
+	return decoded
 }
 
 func apiErrorHandler(c *fiber.Ctx, err error) error {
@@ -340,7 +356,7 @@ func registerAPIRoutes(api *fiber.App, manager apiStationManager, events scanEve
 		var operationErr error
 		finish := beginExternalStationOperation(events, "power", "http-power", manager.GetStationInfo, &operationErr)
 		defer finish()
-		result, err := manager.SetStationPower(c.Params("address"), request.State)
+		result, err := manager.SetStationPower(apiAddressParam(c), request.State)
 		operationErr = err
 		return sendPowerActionResponse(c, result, err)
 	})
@@ -348,7 +364,7 @@ func registerAPIRoutes(api *fiber.App, manager apiStationManager, events scanEve
 		var operationErr error
 		finish := beginExternalStationOperation(events, "identify", "http-identify", manager.GetStationInfo, &operationErr)
 		defer finish()
-		operationErr = manager.IdentifyStation(c.Params("address"))
+		operationErr = manager.IdentifyStation(apiAddressParam(c))
 		if operationErr != nil {
 			return sendAPIError(c, operationErr)
 		}
@@ -358,7 +374,7 @@ func registerAPIRoutes(api *fiber.App, manager apiStationManager, events scanEve
 		var operationErr error
 		finish := beginExternalStationOperation(events, "refresh", "http-refresh", manager.GetStationInfo, &operationErr)
 		defer finish()
-		result, err := manager.RefreshStationCapabilities(c.Params("address"))
+		result, err := manager.RefreshStationCapabilities(apiAddressParam(c))
 		operationErr = err
 		if err != nil {
 			return sendAPIError(c, err)
@@ -376,7 +392,7 @@ func registerAPIRoutes(api *fiber.App, manager apiStationManager, events scanEve
 		var operationErr error
 		finish := beginExternalStationOperation(events, "channel", "http-channel", manager.GetStationInfo, &operationErr)
 		defer finish()
-		result, err := manager.SetStationChannel(c.Params("address"), request.Channel, request.AllowUnknownConflictRisk)
+		result, err := manager.SetStationChannel(apiAddressParam(c), request.Channel, request.AllowUnknownConflictRisk)
 		operationErr = err
 		return sendChannelActionResponse(c, result, request.Channel, err)
 	})
