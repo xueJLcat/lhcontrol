@@ -1,6 +1,7 @@
 package bluetooth
 
 import (
+	"context"
 	"errors"
 	"sync"
 	"testing"
@@ -177,5 +178,54 @@ func TestPendingCleanupReleasesLockAndRetainsHandleOnFailure(t *testing.T) {
 	}
 	if station.pendingCleanup != device {
 		t.Fatal("failed pending cleanup was not retained for retry")
+	}
+}
+
+// TestWaitForInFlightDisconnectBlocksUntilCleanupEnds pins the reconnect
+// guard: while a disconnect is releasing the station lock around its WinRT
+// cleanup, a waiter must block until the cleanup ends instead of opening an
+// overlapping GATT session, and a cancelled context must abort the wait with
+// the station lock reacquired.
+func TestWaitForInFlightDisconnectBlocksUntilCleanupEnds(t *testing.T) {
+	station := connectedFakeStation(nil, nil, nil, Capabilities{})
+	station.device = nil
+	station.isConnected = false
+	station.mutex.Lock()
+	wait := beginInFlightDisconnect(station)
+	station.mutex.Unlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		station.mutex.Lock()
+		errCh <- waitForInFlightDisconnect(ctx, station)
+		station.mutex.Unlock()
+	}()
+	cancel()
+	if err := <-errCh; !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled wait error = %v, want context.Canceled", err)
+	}
+
+	released := make(chan error, 1)
+	go func() {
+		station.mutex.Lock()
+		released <- waitForInFlightDisconnect(context.Background(), station)
+		station.mutex.Unlock()
+	}()
+	select {
+	case err := <-released:
+		t.Fatalf("wait returned %v before the in-flight disconnect ended", err)
+	case <-time.After(30 * time.Millisecond):
+	}
+	station.mutex.Lock()
+	endInFlightDisconnect(station, wait)
+	station.mutex.Unlock()
+	select {
+	case err := <-released:
+		if err != nil {
+			t.Fatalf("wait after cleanup completed error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("waiter stayed blocked after the in-flight disconnect ended")
 	}
 }
