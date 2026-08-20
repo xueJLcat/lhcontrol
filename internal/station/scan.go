@@ -563,30 +563,38 @@ func (m *Manager) runInitialScanReads(ctx context.Context, stationsToFetch []*bl
 	// the only unbounded part is a station lock held by a transport call that
 	// ignores cancellation. Wait the phase + per-read budgets plus a grace,
 	// then abandon any worker still wedged on a lock so the scan cannot hang.
+	// An already-interrupted caller context abandons immediately: the workers
+	// that respect it have bailed out, and waiting out the full budget would
+	// keep the scan slot pinned behind a wedged reader for nothing.
 	joinTimer := time.NewTimer(m.scanReadPhaseTimeoutDuration() + m.initialReadTimeoutDuration() + initialReadJoinGrace)
 	select {
 	case <-joined:
 		joinTimer.Stop()
 	case <-joinTimer.C:
 		log.Printf("Bluetooth initial reads did not finish within the join budget; abandoning wedged readers")
+	case <-ctx.Done():
+		log.Printf("Bluetooth initial reads interrupted; abandoning wedged readers")
 	}
 	// Collect the results of finished workers only. An abandoned worker keeps
-	// writing its result slot, so those slots must not be read; book them as
-	// phase-deadline interruptions from the captured pointers so the stations
-	// stay tracked for a background refresh instead of being dropped.
+	// writing its result slot, so those slots must not be read; book them
+	// exactly the way the workers' own bail-out paths would, so a user
+	// cancellation stays clean while a deadline keeps its refresh booking.
 	records := make([]initialScanReadResult, 0, len(stationsToFetch))
+	ctxErr := ctx.Err()
 	for index, ptr := range stationsToFetch {
 		if readDone[index].Load() {
 			records = append(records, readResults[index])
 			continue
 		}
 		snapshot, _ := ptr.SnapshotNonBlocking()
-		records = append(records, initialScanReadResult{
-			address:               snapshot.Address,
-			station:               ptr,
-			err:                   fmt.Errorf("initial read did not finish: %w", context.DeadlineExceeded),
-			phaseDeadlineExceeded: true,
-		})
+		record := initialScanReadResult{address: snapshot.Address, station: ptr}
+		if errors.Is(ctxErr, context.Canceled) {
+			record.cancelSkipped = true
+		} else {
+			record.err = fmt.Errorf("initial read did not finish: %w", context.DeadlineExceeded)
+			record.phaseDeadlineExceeded = true
+		}
+		records = append(records, record)
 	}
 	interrupted := scanContextError(ctx)
 	if interrupted != nil {

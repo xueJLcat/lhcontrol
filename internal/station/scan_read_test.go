@@ -810,3 +810,69 @@ func TestInitialScanReadsAbandonWedgedStationLock(t *testing.T) {
 		t.Fatalf("abandoned initial read retry = %+v, tracked=%v; want a refresh retry", retry, tracked)
 	}
 }
+
+// TestCancelledScanAbandonsWedgedReaderPromptly guards the cancellation path of
+// the bounded join: when the caller cancels while a reader is wedged on a
+// station lock (ignoring cancellation), the scan must abandon the reader and
+// return promptly instead of waiting out the full join budget with the scan
+// slot pinned. The abandoned wedged read stays clean (no recovery scheduled),
+// matching a user-cancelled scan's contract.
+func TestCancelledScanAbandonsWedgedReaderPromptly(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	manager.statusRecoveryStart.Do(func() {})
+	manager.initialReadPhaseTimeout = time.Hour
+	manager.initialReadTimeout = time.Hour
+	originalGrace := initialReadJoinGrace
+	initialReadJoinGrace = time.Hour
+	t.Cleanup(func() { initialReadJoinGrace = originalGrace })
+
+	address := "11:22:33:44:55:A5"
+	manager.bluetoothOps.scanForDurationContext = func(context.Context, time.Duration) ([]internalbluetooth.DiscoveredStation, error) {
+		return []internalbluetooth.DiscoveredStation{
+			{Name: "LHB-WEDGED", Address: mustAddress(t, address)},
+		}, nil
+	}
+	readStarted := make(chan struct{})
+	release := make(chan struct{})
+	defer close(release)
+	manager.bluetoothOps.fetchInitialPowerState = func(ctx context.Context, station *internalbluetooth.BaseStation) error {
+		// Wedge on the station lock, ignoring the read context.
+		station.HoldLockWhile(func() {
+			close(readStarted)
+			<-release
+		})
+		return nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := manager.ScanAndFetchStationsContext(ctx)
+		done <- err
+	}()
+	select {
+	case <-readStarted:
+	case <-time.After(time.Second):
+		t.Fatal("initial read did not start")
+	}
+	cancel()
+	started := time.Now()
+	select {
+	case err := <-done:
+		if elapsed := time.Since(started); elapsed > 3*time.Second {
+			t.Fatalf("cancelled scan took %v, want prompt abandon of the wedged reader", elapsed)
+		}
+		if !errors.Is(err, internalbluetooth.ErrScanCancelled) {
+			t.Fatalf("cancelled scan error = %v, want ErrScanCancelled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("cancelled scan did not return promptly behind a wedged reader")
+	}
+	manager.statusRetryMutex.Lock()
+	_, tracked := manager.statusRetries[address]
+	manager.statusRetryMutex.Unlock()
+	if tracked {
+		t.Fatal("wedged read on a cancelled scan scheduled recovery instead of staying clean")
+	}
+}
