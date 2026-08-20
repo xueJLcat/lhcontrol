@@ -146,51 +146,59 @@ dispatch:
 	case <-joined:
 		joinTimer.Stop()
 	case <-joinTimer.C:
-		// A worker is blocked past its budget (typically on an adapter call
-		// that ignores cancellation). Abandon the refresh instead of holding
-		// statusOperationMutex until it unblocks: the worker keeps running and
-		// releases its slot when the OS call returns, and registering every
-		// unsettled candidate for recovery lets the scheduler re-read it. Do
-		// not touch statusErrors from here on: the abandoned worker may still
-		// be writing its entry. Everything below must stay lock-free with
-		// respect to station mutexes: the wedged worker holds its station's
-		// write lock inside the transport call, so re-snapshotting it here
-		// would block the abandon while statusOperationMutex is still held —
-		// the exact wedge the bounded join exists to escape. The addresses
-		// were captured at candidate selection for exactly this reason.
-		log.Printf("Bluetooth status refresh worker did not finish within %s; abandoning the refresh", joinLimit)
-		for index, address := range addressesToRead {
-			if stationCompleted[index].Load() {
-				// A finished read already settled its own outcome: successes
-				// need no follow-up, and failures recorded their own backoff.
-				// Re-marking them due now would override that schedule and
-				// immediately reconnect stations the refresh already handled.
-				continue
+		// When the budget expires at the same instant the last read completes,
+		// the select above picks this branch at random. Re-check the join
+		// channel before abandoning: a refresh that actually finished must not
+		// be reported as a timeout failure.
+		select {
+		case <-joined:
+		default:
+			// A worker is blocked past its budget (typically on an adapter call
+			// that ignores cancellation). Abandon the refresh instead of holding
+			// statusOperationMutex until it unblocks: the worker keeps running and
+			// releases its slot when the OS call returns, and registering every
+			// unsettled candidate for recovery lets the scheduler re-read it. Do
+			// not touch statusErrors from here on: the abandoned worker may still
+			// be writing its entry. Everything below must stay lock-free with
+			// respect to station mutexes: the wedged worker holds its station's
+			// write lock inside the transport call, so re-snapshotting it here
+			// would block the abandon while statusOperationMutex is still held —
+			// the exact wedge the bounded join exists to escape. The addresses
+			// were captured at candidate selection for exactly this reason.
+			log.Printf("Bluetooth status refresh worker did not finish within %s; abandoning the refresh", joinLimit)
+			for index, address := range addressesToRead {
+				if stationCompleted[index].Load() {
+					// A finished read already settled its own outcome: successes
+					// need no follow-up, and failures recorded their own backoff.
+					// Re-marking them due now would override that schedule and
+					// immediately reconnect stations the refresh already handled.
+					continue
+				}
+				m.trackStatusRefreshPending(address)
 			}
-			m.trackStatusRefreshPending(address)
+			// Stations first observed disconnected in this abandoned refresh still
+			// need recovery tracking; the normal path registers them after the
+			// worker join.
+			for _, address := range disconnectedAddresses {
+				m.ensureStatusRecoveryTracked(address)
+			}
+			m.scheduleStatusRecovery()
+			// The abandoned worker still holds the shared read lock and a GATT
+			// slot. Keep this refresh's lifecycle done channel open until the
+			// worker releases them so an exclusive foreground operation (scan or
+			// bulk) that starts meanwhile can drain on the channel instead of
+			// observing a nil channel and returning an immediate, non-waiting
+			// Busy for as long as the OS call stays wedged. The synchronous
+			// lifecycle end is skipped by the flag checked in the deferred end.
+			endStatusLifecycleNow = false
+			go func() {
+				<-joined
+				m.abandonStatusLifecycle(statusDone)
+			}()
+			// A full GetStationInfo would snapshot the wedged station and block
+			// this return on the same lock; omit locked stations instead.
+			return m.getStationInfoWithoutStationLocks(), fmt.Errorf("status refresh did not finish within %s: %w", joinLimit, ErrOperationInProgress)
 		}
-		// Stations first observed disconnected in this abandoned refresh still
-		// need recovery tracking; the normal path registers them after the
-		// worker join.
-		for _, address := range disconnectedAddresses {
-			m.ensureStatusRecoveryTracked(address)
-		}
-		m.scheduleStatusRecovery()
-		// The abandoned worker still holds the shared read lock and a GATT
-		// slot. Keep this refresh's lifecycle done channel open until the
-		// worker releases them so an exclusive foreground operation (scan or
-		// bulk) that starts meanwhile can drain on the channel instead of
-		// observing a nil channel and returning an immediate, non-waiting
-		// Busy for as long as the OS call stays wedged. The synchronous
-		// lifecycle end is skipped by the flag checked in the deferred end.
-		endStatusLifecycleNow = false
-		go func() {
-			<-joined
-			m.abandonStatusLifecycle(statusDone)
-		}()
-		// A full GetStationInfo would snapshot the wedged station and block
-		// this return on the same lock; omit locked stations instead.
-		return m.getStationInfoWithoutStationLocks(), fmt.Errorf("status refresh did not finish within %s: %w", joinLimit, ErrOperationInProgress)
 	}
 	// Start newly discovered disconnect recovery only after foreground status
 	// reads have released their slots. Otherwise this refresh can make one of
