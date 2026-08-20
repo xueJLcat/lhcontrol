@@ -130,7 +130,7 @@ func NewApp() *App {
 		activeExternalOperations: make(map[uint64]string),
 		autoSleepActionSlot:      autoSleepActionSlot,
 		apiStatus: APIStatus{
-			Address:        "127.0.0.1:7575",
+			Address:        config.DefaultAPIListenAddress,
 			Warnings:       []string{},
 			ConfigWritable: true,
 		},
