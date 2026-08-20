@@ -246,6 +246,54 @@ func TestSetChannelUnsupportedConfirmationReportsCommandSent(t *testing.T) {
 		t.Fatal("unsupported confirmation read discarded a healthy connection")
 	}
 }
+// cancelOnSecondConnectAdapter fails every connect and cancels the caller's
+// context on the second attempt, deterministically landing the interruption
+// between identify attempts.
+type cancelOnSecondConnectAdapter struct {
+	inner  *reconnectCountingAdapter
+	cancel context.CancelFunc
+}
+
+func (a *cancelOnSecondConnectAdapter) Enable() error { return a.inner.Enable() }
+func (a *cancelOnSecondConnectAdapter) Connect(addr tinybluetooth.Address, params tinybluetooth.ConnectionParams) (tinybluetooth.Device, error) {
+	if a.inner.connectCalls.Load() >= 1 {
+		a.cancel()
+	}
+	return a.inner.Connect(addr, params)
+}
+func (a *cancelOnSecondConnectAdapter) Scan(func(*tinybluetooth.Adapter, tinybluetooth.ScanResult)) error {
+	return nil
+}
+func (a *cancelOnSecondConnectAdapter) SetConnectHandler(func(tinybluetooth.Device, bool)) {
+}
+func (a *cancelOnSecondConnectAdapter) StopScan() error { return nil }
+
+// TestIdentifyContextKeepsAttemptErrorWhenCancelledMidRetry guards the
+// interruption-between-attempts path: when the context expires while a retry
+// reconnects, the previous attempt's observed failure must be joined with the
+// cancellation instead of being swallowed by a bare context error.
+func TestIdentifyContextKeepsAttemptErrorWhenCancelledMidRetry(t *testing.T) {
+	ConfigureTiming(TimingPolicy{IdentifyAttempts: 3, OperationRetryDelay: time.Millisecond})
+	t.Cleanup(func() { ConfigureTiming(TimingPolicy{}) })
+	connectErr := errors.New("connect transport failure")
+	fake := &cancelOnSecondConnectAdapter{inner: &reconnectCountingAdapter{connectErr: connectErr}}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	fake.cancel = cancel
+	originalAdapter := adapter
+	adapter = fake
+	t.Cleanup(func() { adapter = originalAdapter })
+
+	station := &BaseStation{Name: "LHB-IDENTIFY"}
+	err := IdentifyContext(ctx, station)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("IdentifyContext() error = %v, want the cancellation preserved", err)
+	}
+	if !errors.Is(err, connectErr) {
+		t.Fatalf("IdentifyContext() error = %v, want the previous attempt's failure joined", err)
+	}
+}
+
 // TestSetChannelConfirmationKeepsSessionOnProtocolRejection guards the
 // readback loop: an ATT security-policy or resource rejection is a protocol
 // decision about a healthy link that reconnecting can never change, so the

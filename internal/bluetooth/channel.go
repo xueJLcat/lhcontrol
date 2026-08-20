@@ -21,6 +21,11 @@ func IdentifyContext(ctx context.Context, station *BaseStation) error {
 	maxAttempts := CurrentTiming().IdentifyAttempts
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		if contextErr := ctx.Err(); contextErr != nil {
+			if lastErr != nil {
+				// A cancellation that lands between attempts must not swallow
+				// the previous attempt's observed failure.
+				return errors.Join(lastErr, contextErr)
+			}
 			return contextErr
 		}
 		if err := connectAndDiscoverInternalContext(ctx, station); err != nil {
@@ -33,8 +38,12 @@ func IdentifyContext(ctx context.Context, station *BaseStation) error {
 				// The interruption stopped the attempt; report the cancellation
 				// itself instead of booking it as a failed identify that
 				// exhausted its retries. The half-opened session still needs
-				// the same cleanup the retry path runs.
+				// the same cleanup the retry path runs. A previous attempt's
+				// observed failure is joined so it is not swallowed.
 				_ = disconnectInternal(station)
+				if lastErr != nil {
+					return errors.Join(lastErr, contextErr)
+				}
 				return contextErr
 			}
 			lastErr = err

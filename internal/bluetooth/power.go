@@ -525,6 +525,12 @@ func SetPowerStateContext(ctx context.Context, station *BaseStation, target Powe
 	for i := 0; i < maxRetries; i++ {
 		sleepFinalAttempted := false
 		if contextErr := ctx.Err(); contextErr != nil {
+			if err != nil {
+				// A cancellation that lands between attempts must not swallow
+				// the previous attempt's observed failure (a bare context
+				// error would read upstream as a clean interruption).
+				return PowerControlResult{}, errors.Join(err, contextErr)
+			}
 			return PowerControlResult{}, contextErr
 		}
 		if err = connectAndDiscoverInternalContext(ctx, station); err != nil {
