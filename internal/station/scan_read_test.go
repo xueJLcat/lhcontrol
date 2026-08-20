@@ -763,3 +763,50 @@ func TestCancelledScanBooksExpiredReadBudget(t *testing.T) {
 		t.Fatal("expired per-station read budget during a cancelled scan was not scheduled for recovery")
 	}
 }
+
+// TestInitialScanReadsAbandonWedgedStationLock guards the initial-read worker
+// join: a reader wedged on a station lock inside a transport call that ignores
+// cancellation must not hang the scan. After the phase and per-read budgets
+// plus a grace the wedged reader is abandoned, and its station is booked like
+// a phase deadline (tracked for a background refresh) instead of blocking the
+// whole scan behind the lock.
+func TestInitialScanReadsAbandonWedgedStationLock(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	manager.statusRecoveryStart.Do(func() {})
+	manager.initialReadPhaseTimeout = 20 * time.Millisecond
+	manager.initialReadTimeout = 20 * time.Millisecond
+	originalGrace := initialReadJoinGrace
+	initialReadJoinGrace = 20 * time.Millisecond
+	t.Cleanup(func() { initialReadJoinGrace = originalGrace })
+
+	address := "11:22:33:44:55:A4"
+	manager.bluetoothOps.scanForDurationContext = func(context.Context, time.Duration) ([]internalbluetooth.DiscoveredStation, error) {
+		return []internalbluetooth.DiscoveredStation{
+			{Name: "LHB-WEDGED", Address: mustAddress(t, address)},
+		}, nil
+	}
+	release := make(chan struct{})
+	defer close(release)
+	manager.bluetoothOps.fetchInitialPowerState = func(ctx context.Context, station *internalbluetooth.BaseStation) error {
+		// Mirrors FetchInitialPowerStateContext: the transport call wedges
+		// while holding the station's write lock, ignoring the read context.
+		station.HoldLockWhile(func() { <-release })
+		return nil
+	}
+
+	started := time.Now()
+	_, err := manager.ScanAndFetchStationsContext(context.Background())
+	if elapsed := time.Since(started); elapsed > 3*time.Second {
+		t.Fatalf("scan took %v, want the initial-read join bounded", elapsed)
+	}
+	if err != nil {
+		t.Fatalf("ScanAndFetchStationsContext() error = %v, want the abandoned read booked without a scan error", err)
+	}
+	manager.statusRetryMutex.Lock()
+	retry, tracked := manager.statusRetries[address]
+	manager.statusRetryMutex.Unlock()
+	if !tracked || retry.kinds&statusRetryRefresh == 0 {
+		t.Fatalf("abandoned initial read retry = %+v, tracked=%v; want a refresh retry", retry, tracked)
+	}
+}

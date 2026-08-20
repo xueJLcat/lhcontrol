@@ -10,8 +10,16 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
+
+// initialReadJoinGrace is added to the phase and per-read budgets when bounding
+// the initial-read worker join. The phase already bounds every worker except a
+// station lock held by a transport call that ignores cancellation; the grace
+// keeps healthy readers from being abandoned while still guaranteeing the scan
+// cannot hang behind a wedged lock. It is a variable so tests can shrink it.
+var initialReadJoinGrace = 10 * time.Second
 
 func (m *Manager) ScanAndFetchStations() ([]StationInfo, error) {
 	return m.ScanAndFetchStationsContext(context.Background())
@@ -468,11 +476,17 @@ func (m *Manager) runInitialScanReads(ctx context.Context, stationsToFetch []*bl
 	defer cancelPhase()
 	var wg sync.WaitGroup
 	readResults := make([]initialScanReadResult, len(stationsToFetch))
+	// readDone marks each worker's result slot fully written. A worker wedged
+	// on a station lock inside the transport call never reaches it, so the
+	// bounded join below can tell finished slots (safe to read) apart from
+	// abandoned ones (still being written, must not be touched).
+	readDone := make([]atomic.Bool, len(stationsToFetch))
 	semaphore := make(chan struct{}, 2)
 	for index, stationToFetch := range stationsToFetch {
 		wg.Add(1)
 		go func(resultIndex int, ptr *bluetooth.BaseStation) {
 			defer wg.Done()
+			defer readDone[resultIndex].Store(true)
 			// Non-blocking snapshot: a station wedged inside a transport call
 			// must not block the address capture that precedes the read.
 			if snapshot, ok := ptr.SnapshotNonBlocking(); ok {
@@ -540,7 +554,40 @@ func (m *Manager) runInitialScanReads(ctx context.Context, stationsToFetch []*bl
 			}
 		}(index, stationToFetch)
 	}
-	wg.Wait()
+	joined := make(chan struct{})
+	go func() {
+		defer close(joined)
+		wg.Wait()
+	}()
+	// The phase deadline bounds every worker's semaphore wait and read budget;
+	// the only unbounded part is a station lock held by a transport call that
+	// ignores cancellation. Wait the phase + per-read budgets plus a grace,
+	// then abandon any worker still wedged on a lock so the scan cannot hang.
+	joinTimer := time.NewTimer(m.scanReadPhaseTimeoutDuration() + m.initialReadTimeoutDuration() + initialReadJoinGrace)
+	select {
+	case <-joined:
+		joinTimer.Stop()
+	case <-joinTimer.C:
+		log.Printf("Bluetooth initial reads did not finish within the join budget; abandoning wedged readers")
+	}
+	// Collect the results of finished workers only. An abandoned worker keeps
+	// writing its result slot, so those slots must not be read; book them as
+	// phase-deadline interruptions from the captured pointers so the stations
+	// stay tracked for a background refresh instead of being dropped.
+	records := make([]initialScanReadResult, 0, len(stationsToFetch))
+	for index, ptr := range stationsToFetch {
+		if readDone[index].Load() {
+			records = append(records, readResults[index])
+			continue
+		}
+		snapshot, _ := ptr.SnapshotNonBlocking()
+		records = append(records, initialScanReadResult{
+			address:               snapshot.Address,
+			station:               ptr,
+			err:                   fmt.Errorf("initial read did not finish: %w", context.DeadlineExceeded),
+			phaseDeadlineExceeded: true,
+		})
+	}
 	interrupted := scanContextError(ctx)
 	if interrupted != nil {
 		// The discovery results were already merged into the fleet before the
@@ -555,8 +602,8 @@ func (m *Manager) runInitialScanReads(ctx context.Context, stationsToFetch []*bl
 		// expired is a real read failure that must keep its backoff and
 		// recovery entry instead of being silently dropped along with the
 		// interruption.
-		for index := range readResults {
-			result := &readResults[index]
+		for index := range records {
+			result := &records[index]
 			if result.err == nil || result.phaseDeadlineExceeded {
 				continue
 			}
@@ -567,7 +614,7 @@ func (m *Manager) runInitialScanReads(ctx context.Context, stationsToFetch []*bl
 			}
 		}
 	}
-	m.recordInitialScanReadResults(readResults)
+	m.recordInitialScanReadResults(records)
 	return interrupted
 }
 
