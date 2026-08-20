@@ -12,10 +12,30 @@ import (
 )
 
 func (m *Manager) GetStationInfo() []StationInfo {
+	return m.getStationInfo(func(stationPtr *bluetooth.BaseStation) (bluetooth.BaseStationSnapshot, bool) {
+		return stationPtr.Snapshot(), true
+	})
+}
+
+// getStationInfoWithoutStationLocks builds the projection without waiting on
+// any station mutex: a station whose lock is currently held (for example by a
+// status worker wedged inside an adapter call that ignores cancellation) is
+// omitted instead. It backs the abandoned-refresh return, where snapshotting
+// the wedged station would block while statusOperationMutex is still held and
+// defeat the bounded worker join that exists precisely for that wedge.
+func (m *Manager) getStationInfoWithoutStationLocks() []StationInfo {
+	return m.getStationInfo(func(stationPtr *bluetooth.BaseStation) (bluetooth.BaseStationSnapshot, bool) {
+		return stationPtr.TrySnapshot()
+	})
+}
+
+func (m *Manager) getStationInfo(snapshot func(*bluetooth.BaseStation) (bluetooth.BaseStationSnapshot, bool)) []StationInfo {
 	stationPtrs := m.stationPointers()
 	snapshots := make([]bluetooth.BaseStationSnapshot, 0, len(stationPtrs))
 	for _, stationPtr := range stationPtrs {
-		snapshots = append(snapshots, stationPtr.Snapshot())
+		if stationSnapshot, ok := snapshot(stationPtr); ok {
+			snapshots = append(snapshots, stationSnapshot)
+		}
 	}
 	channelCounts := make(map[int]int)
 	now := time.Now()

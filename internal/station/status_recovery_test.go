@@ -490,6 +490,57 @@ func TestStatusRefreshAbandonsWedgedWorker(t *testing.T) {
 	}
 }
 
+// TestStatusRefreshAbandonDoesNotWaitOnWedgedStationLock guards the abandon
+// path itself: the wedged worker holds the station's write lock inside the
+// transport call, so unwinding must not snapshot that station (or wait on any
+// station lock). Re-deriving state from snapshots there blocked the abandon
+// behind the very wedge the bounded join escapes, holding
+// statusOperationMutex and keeping the lifecycle channel open indefinitely.
+func TestStatusRefreshAbandonDoesNotWaitOnWedgedStationLock(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	manager.statusRecoveryStart.Do(func() {})
+	manager.statusReadTimeout = time.Hour
+	manager.statusRefreshTimeout = time.Hour
+	manager.statusRefreshJoinWait = 20 * time.Millisecond
+	address := "11:22:33:44:55:7A"
+	station := &internalbluetooth.BaseStation{
+		Name: "LHB-WEDGED-LOCK", Address: mustAddress(t, address), Present: true,
+	}
+	manager.stations[address] = station
+	manager.bluetoothOps.stationConnected = func(*internalbluetooth.BaseStation) bool { return true }
+	release := make(chan struct{})
+	defer close(release)
+	manager.bluetoothOps.readPowerStateContext = func(context.Context, *internalbluetooth.BaseStation) error {
+		// Mirrors ReadPowerStateContext: the transport call wedges while
+		// holding the station's write lock.
+		station.HoldLockWhile(func() { <-release })
+		return nil
+	}
+
+	started := time.Now()
+	stations, err := manager.CheckAllStationStatuses()
+	if !errors.Is(err, ErrOperationInProgress) {
+		t.Fatalf("CheckAllStationStatuses() error = %v, want a retryable busy error", err)
+	}
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("abandon took %v, want it to skip the wedged station lock", elapsed)
+	}
+	// The best-effort projection omits the wedged station instead of blocking
+	// behind it.
+	for _, info := range stations {
+		if info.Address == address {
+			t.Fatalf("abandoned refresh snapshotted the wedged station: %+v", info)
+		}
+	}
+	manager.statusRetryMutex.Lock()
+	retry, tracked := manager.statusRetries[address]
+	manager.statusRetryMutex.Unlock()
+	if !tracked || retry.kinds&statusRetryRefresh == 0 {
+		t.Fatalf("abandoned status retry = %+v, tracked=%v; want a refresh retry", retry, tracked)
+	}
+}
+
 // TestStatusRefreshAbandonKeepsDrainChannel guards the abandoned-worker
 // lifecycle: while the wedged worker still holds the shared read lock, the
 // refresh's done channel must stay published so an exclusive foreground

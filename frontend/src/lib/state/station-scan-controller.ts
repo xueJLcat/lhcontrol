@@ -44,6 +44,13 @@ const SCAN_WATCHDOG_MAX_ATTEMPTS = 24;
 // periodic poll only run once this call returns, and the poll cannot clear
 // stoppingScan while the backend keeps reporting the scan).
 const STOP_SCAN_WATCHDOG_DELAY_MS = 45000;
+// GetCurrentStationInfo snapshots every station under its own lock, and a
+// worker wedged inside an adapter call that ignores cancellation can hold one
+// of those locks indefinitely. Bound the fallback reads the way every other
+// backend call here is bounded: otherwise this controller's promise never
+// settles, leaving globalOperation pinned (and with it every scan and bulk
+// control locked) until the OS call returns.
+const FALLBACK_STATION_READ_TIMEOUT_MS = 10000;
 
 export interface StationScanHost {
   stations: StationInfo[];
@@ -96,6 +103,27 @@ export class StationScanController {
   private cancelScanWatchdog() {
     if (this.scanWatchdogTimer !== null) clearTimeout(this.scanWatchdogTimer);
     this.scanWatchdogTimer = null;
+  }
+
+  // Reads the station list against the same bounded-watchdog rule as every
+  // other backend call in this controller, resolving to fallback when the
+  // read fails or times out (a worker wedged inside an adapter call can hold
+  // a station lock indefinitely). The underlying promise's late settlement is
+  // ignored and cannot become an unhandled rejection.
+  private readStationListWithWatchdog(fallback: StationInfo[] | null): Promise<StationInfo[] | null> {
+    return new Promise<StationInfo[] | null>((resolve) => {
+      const timer = setTimeout(() => resolve(fallback), FALLBACK_STATION_READ_TIMEOUT_MS);
+      void GetCurrentStationInfo().then(
+        (stations) => {
+          clearTimeout(timer);
+          resolve(stations ?? fallback);
+        },
+        () => {
+          clearTimeout(timer);
+          resolve(fallback);
+        }
+      );
+    });
   }
 
   // Races StopScan against a bounded watchdog. A wedged Wails binding
@@ -375,7 +403,7 @@ export class StationScanController {
     } catch (error) {
       if (this.host.disposed || !this.host.listRevisions.isCurrent(revision)) return;
       console.error('Periodic status check failed:', error);
-      const fallback = await GetCurrentStationInfo().catch(() => this.host.stations);
+      const fallback = await this.readStationListWithWatchdog(this.host.stations);
       if (!this.host.applyStationList(fallback, revision, capturedStationRevisions)) return;
       // While the scan recovery card is up the Bluetooth outage is already
       // explained; repeating this failure in the status line every poll
@@ -436,7 +464,7 @@ export class StationScanController {
         await this.settleSupersededScanStatus(statusOperation);
         return true;
       }
-      const updated = await GetCurrentStationInfo().catch(() => null);
+      const updated = await this.readStationListWithWatchdog(null);
       if (!this.host.gates.canCommitOperation(operationEpoch) || !this.host.listRevisions.isCurrent(revision)) {
         await this.settleSupersededScanStatus(statusOperation);
         return true;

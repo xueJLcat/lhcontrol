@@ -274,6 +274,23 @@ type BaseStationSnapshot struct {
 func (bs *BaseStation) Snapshot() BaseStationSnapshot {
 	bs.mutex.RLock()
 	defer bs.mutex.RUnlock()
+	return bs.snapshotLocked()
+}
+
+// TrySnapshot is Snapshot without the wait: it reports false when the station
+// lock is currently held by another operation (a worker wedged inside an
+// adapter call that ignores cancellation can hold it indefinitely). Callers
+// building a best-effort projection on a degraded path skip such stations
+// instead of blocking behind them.
+func (bs *BaseStation) TrySnapshot() (BaseStationSnapshot, bool) {
+	if !bs.mutex.TryRLock() {
+		return BaseStationSnapshot{}, false
+	}
+	defer bs.mutex.RUnlock()
+	return bs.snapshotLocked(), true
+}
+
+func (bs *BaseStation) snapshotLocked() BaseStationSnapshot {
 	return BaseStationSnapshot{
 		Name:                 bs.Name,
 		Address:              bs.Address.String(),
@@ -303,6 +320,15 @@ func (bs *BaseStation) SetPresent(present bool) {
 	bs.mutex.Lock()
 	bs.Present = present
 	bs.mutex.Unlock()
+}
+
+// HoldLockWhile runs fn while holding the station's write lock. It lets tests
+// emulate a transport call that wedges with the lock held (the shape every
+// blocking GATT operation takes); production code must not call it.
+func (bs *BaseStation) HoldLockWhile(fn func()) {
+	bs.mutex.Lock()
+	defer bs.mutex.Unlock()
+	fn()
 }
 
 // MarkSeen records a scan observation and reports whether the station

@@ -93,8 +93,10 @@ func (m *Manager) CheckAllStationStatuses() ([]StationInfo, error) {
 		return candidates[i].sortKey < candidates[j].sortKey
 	})
 	stationsToRead := make([]*bluetooth.BaseStation, 0, len(candidates))
+	addressesToRead := make([]string, 0, len(candidates))
 	for _, candidate := range candidates {
 		stationsToRead = append(stationsToRead, candidate.station)
+		addressesToRead = append(addressesToRead, candidate.address)
 	}
 	type statusReadWork struct {
 		index   int
@@ -125,7 +127,7 @@ dispatch:
 		select {
 		case work <- statusReadWork{index: index, station: station}:
 		case <-refreshContext.Done():
-			m.recordSkippedStatusReads(refreshContext, stationsToRead[index:], statusErrors[index:])
+			m.recordSkippedStatusReads(refreshContext, addressesToRead[index:], statusErrors[index:])
 			break dispatch
 		}
 	}
@@ -150,9 +152,14 @@ dispatch:
 		// releases its slot when the OS call returns, and registering every
 		// unsettled candidate for recovery lets the scheduler re-read it. Do
 		// not touch statusErrors from here on: the abandoned worker may still
-		// be writing its entry.
+		// be writing its entry. Everything below must stay lock-free with
+		// respect to station mutexes: the wedged worker holds its station's
+		// write lock inside the transport call, so re-snapshotting it here
+		// would block the abandon while statusOperationMutex is still held —
+		// the exact wedge the bounded join exists to escape. The addresses
+		// were captured at candidate selection for exactly this reason.
 		log.Printf("Bluetooth status refresh worker did not finish within %s; abandoning the refresh", joinLimit)
-		for index, stationPtr := range stationsToRead {
+		for index, address := range addressesToRead {
 			if stationCompleted[index].Load() {
 				// A finished read already settled its own outcome: successes
 				// need no follow-up, and failures recorded their own backoff.
@@ -160,7 +167,7 @@ dispatch:
 				// immediately reconnect stations the refresh already handled.
 				continue
 			}
-			m.trackStatusRefreshPending(stationPtr.Snapshot().Address)
+			m.trackStatusRefreshPending(address)
 		}
 		// Stations first observed disconnected in this abandoned refresh still
 		// need recovery tracking; the normal path registers them after the
@@ -181,7 +188,9 @@ dispatch:
 			<-joined
 			m.abandonStatusLifecycle(statusDone)
 		}()
-		return m.GetStationInfo(), fmt.Errorf("status refresh did not finish within %s: %w", joinLimit, ErrOperationInProgress)
+		// A full GetStationInfo would snapshot the wedged station and block
+		// this return on the same lock; omit locked stations instead.
+		return m.getStationInfoWithoutStationLocks(), fmt.Errorf("status refresh did not finish within %s: %w", joinLimit, ErrOperationInProgress)
 	}
 	// Start newly discovered disconnect recovery only after foreground status
 	// reads have released their slots. Otherwise this refresh can make one of
@@ -204,9 +213,12 @@ dispatch:
 }
 
 // statusRefreshCandidate carries the station together with the address
-// captured at selection time so ordering never re-snapshots a station.
+// captured at selection time so ordering never re-snapshots a station, and
+// the abandon path can register recovery without taking a station lock a
+// wedged worker may be holding.
 type statusRefreshCandidate struct {
 	station *bluetooth.BaseStation
+	address string
 	sortKey string
 }
 
@@ -229,6 +241,7 @@ func (m *Manager) selectStatusRefreshCandidates() ([]statusRefreshCandidate, []s
 		if m.bluetoothOps.stationConnected(stationPtr) {
 			candidates = append(candidates, statusRefreshCandidate{
 				station: stationPtr,
+				address: snapshot.Address,
 				sortKey: strings.ToLower(snapshot.Address),
 			})
 		} else {
@@ -342,10 +355,12 @@ func (m *Manager) readStationStatus(refreshContext context.Context, stationPtr *
 
 // recordSkippedStatusReads registers every station never dispatched because
 // the refresh context stopped, marking each for recovery and reporting the
-// stop unless a plain caller-side cancellation silenced the batch.
-func (m *Manager) recordSkippedStatusReads(refreshContext context.Context, skipped []*bluetooth.BaseStation, statusErrors []error) {
-	for offset, stationPtr := range skipped {
-		address := stationPtr.Snapshot().Address
+// stop unless a plain caller-side cancellation silenced the batch. It works
+// on the addresses captured at candidate selection: a skipped station's own
+// lock can already be held by a concurrent foreground operation, and this
+// bookkeeping must not wait on it.
+func (m *Manager) recordSkippedStatusReads(refreshContext context.Context, skippedAddresses []string, statusErrors []error) {
+	for offset, address := range skippedAddresses {
 		m.trackStatusRefreshPending(address)
 		if !errors.Is(refreshContext.Err(), context.Canceled) || m.lifecycleContext.Err() != nil {
 			stopDescription := "status refresh stopped"

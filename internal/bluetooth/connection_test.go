@@ -339,6 +339,47 @@ func TestConnectGateCancellationMarkedNotStarted(t *testing.T) {
 	}
 }
 
+// TestTrySnapshotSkipsLockedStation pins the best-effort projection primitive:
+// a worker wedged inside a transport call holds the station's write lock
+// indefinitely, and degraded paths must be able to skip that station instead
+// of queueing behind it. Snapshot keeps its blocking contract.
+func TestTrySnapshotSkipsLockedStation(t *testing.T) {
+	station := connectedFakeStation(&fakeCharacteristic{value: []byte{0x0B}}, nil, nil, Capabilities{PowerRead: true})
+	station.mutex.Lock()
+	locked := make(chan struct{})
+	release := make(chan struct{})
+	go func() {
+		defer station.mutex.Unlock()
+		close(locked)
+		<-release
+	}()
+	<-locked
+
+	if _, ok := station.TrySnapshot(); ok {
+		t.Fatal("TrySnapshot() succeeded while the station lock is held")
+	}
+	snapshotDone := make(chan struct{})
+	go func() {
+		defer close(snapshotDone)
+		station.Snapshot()
+	}()
+	select {
+	case <-snapshotDone:
+		t.Fatal("Snapshot() did not block behind the held station lock")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
+	<-snapshotDone
+
+	snapshot, ok := station.TrySnapshot()
+	if !ok {
+		t.Fatal("TrySnapshot() failed after the station lock was released")
+	}
+	if snapshot.Address == "" || !snapshot.Connected {
+		t.Fatalf("TrySnapshot() = %+v, want the same projection Snapshot returns", snapshot)
+	}
+}
+
 // TestConnectFailurePreservesReadTimestamps guards the observation
 // preservation contract: a failed connect does not invalidate values read
 // from an earlier session, so the read timestamps must survive. Wiping them

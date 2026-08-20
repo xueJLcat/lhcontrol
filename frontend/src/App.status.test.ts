@@ -340,4 +340,25 @@ describe('App asynchronous operations', () => {
     expect(screen.queryByText('LHB-OLD')).not.toBeInTheDocument();
     expect(screen.queryByText(/Status refresh incomplete/)).not.toBeInTheDocument();
   });
+
+  it('bounds the periodic fallback list read instead of hanging on a wedged station lock', async () => {
+    vi.useFakeTimers();
+    render(App);
+    await vi.waitFor(() => expect(api.ScanAndFetchStations).toHaveBeenCalledOnce());
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Scan' })).not.toBeDisabled());
+
+    // A failed refresh falls back to a list read; a worker wedged inside an
+    // adapter call holds a station lock, so that read never settles on its own.
+    // Without the watchdog bound the poll would keep the operation state — and
+    // with it every scan/bulk control — locked until the OS call returns.
+    api.CheckAllStationStatuses.mockRejectedValue(new Error('temporary read failure'));
+    api.GetCurrentStationInfo.mockReturnValue(new Promise(() => {}));
+
+    await vi.advanceTimersByTimeAsync(15_000);
+    await vi.waitFor(() => expect(api.CheckAllStationStatuses).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(api.GetCurrentStationInfo).toHaveBeenCalledOnce());
+
+    await vi.advanceTimersByTimeAsync(10_500);
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Scan' })).not.toBeDisabled());
+  });
 });
