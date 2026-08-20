@@ -8,10 +8,16 @@ package station
 func (m *Manager) ApplyPresenceMissThreshold() {
 	threshold := m.config.GetPresenceMissThreshold()
 	for _, current := range m.stationPointers() {
-		if !current.ApplyPresenceMissThreshold(threshold) {
+		// The Try variant skips a station whose lock a wedged transport call
+		// holds, deferring that station's reclassification instead of blocking
+		// the whole pass; the next scan re-evaluates it.
+		if !current.TryApplyPresenceMissThreshold(threshold) {
 			continue
 		}
-		snapshot := current.Snapshot()
+		snapshot, ok := current.SnapshotNonBlocking()
+		if !ok {
+			continue
+		}
 		if snapshot.Present && !snapshot.Connected {
 			m.rebaseRecoveryForRevivedStation(snapshot.Address)
 		} else if !snapshot.Present {

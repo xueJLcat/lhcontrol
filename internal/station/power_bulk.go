@@ -331,9 +331,15 @@ func (m *Manager) selectBulkPowerCandidates() []bulkPowerCandidate {
 	stationPtrs := m.stationPointers()
 	candidates := make([]bulkPowerCandidate, 0, len(stationPtrs))
 	for _, stationPtr := range stationPtrs {
-		snapshot := stationPtr.Snapshot()
+		// Non-blocking snapshot: a station wedged inside a transport call must
+		// not hang candidate selection (and with it the whole bulk); it is
+		// projected from its most recent state instead.
+		snapshot, ok := stationPtr.SnapshotNonBlocking()
+		if !ok {
+			continue
+		}
 		name := snapshot.Name
-		if renamedName, ok := m.config.GetStationDisplayName(snapshot.Address, snapshot.Name); ok {
+		if renamedName, renamed := m.config.GetStationDisplayName(snapshot.Address, snapshot.Name); renamed {
 			name = renamedName
 		}
 		candidates = append(candidates, bulkPowerCandidate{station: stationPtr, snapshot: snapshot, name: name})

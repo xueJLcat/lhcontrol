@@ -492,10 +492,11 @@ func TestStatusRefreshAbandonsWedgedWorker(t *testing.T) {
 
 // TestStatusRefreshAbandonDoesNotWaitOnWedgedStationLock guards the abandon
 // path itself: the wedged worker holds the station's write lock inside the
-// transport call, so unwinding must not snapshot that station (or wait on any
-// station lock). Re-deriving state from snapshots there blocked the abandon
-// behind the very wedge the bounded join escapes, holding
-// statusOperationMutex and keeping the lifecycle channel open indefinitely.
+// transport call, so unwinding must not wait on any station lock. Re-deriving
+// state from blocking snapshots there held the abandon behind the very wedge
+// the bounded join escapes, keeping statusOperationMutex and the lifecycle
+// channel pinned indefinitely. The projection now renders the wedged station
+// from its most recent cached snapshot instead of blocking or dropping it.
 func TestStatusRefreshAbandonDoesNotWaitOnWedgedStationLock(t *testing.T) {
 	manager := NewManager(config.NewConfig())
 	defer manager.Shutdown()
@@ -526,12 +527,16 @@ func TestStatusRefreshAbandonDoesNotWaitOnWedgedStationLock(t *testing.T) {
 	if elapsed := time.Since(started); elapsed > 2*time.Second {
 		t.Fatalf("abandon took %v, want it to skip the wedged station lock", elapsed)
 	}
-	// The best-effort projection omits the wedged station instead of blocking
-	// behind it.
+	// The abandon must not block on the wedged lock, and the wedged station is
+	// rendered from its cached snapshot rather than dropped from the list.
+	found := false
 	for _, info := range stations {
 		if info.Address == address {
-			t.Fatalf("abandoned refresh snapshotted the wedged station: %+v", info)
+			found = true
 		}
+	}
+	if !found {
+		t.Fatalf("abandoned refresh dropped the wedged station from the projection")
 	}
 	manager.statusRetryMutex.Lock()
 	retry, tracked := manager.statusRetries[address]

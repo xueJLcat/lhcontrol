@@ -15,7 +15,10 @@ func (m *Manager) RenameStation(originalName string, newName string) error {
 	stationPtrs := m.stationPointers()
 	addresses := make([]string, 0)
 	for _, stationPtr := range stationPtrs {
-		snapshot := stationPtr.Snapshot()
+		snapshot, ok := stationPtr.SnapshotNonBlocking()
+		if !ok {
+			continue
+		}
 		if snapshot.Name == originalName {
 			addresses = append(addresses, snapshot.Address)
 		}

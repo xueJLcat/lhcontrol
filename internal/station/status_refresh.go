@@ -195,9 +195,9 @@ dispatch:
 				<-joined
 				m.abandonStatusLifecycle(statusDone)
 			}()
-			// A full GetStationInfo would snapshot the wedged station and block
-			// this return on the same lock; omit locked stations instead.
-			return m.getStationInfoWithoutStationLocks(), fmt.Errorf("status refresh did not finish within %s: %w", joinLimit, ErrOperationInProgress)
+			// GetStationInfo projects locked stations from their most recent
+			// snapshot, so this return cannot block on the wedged station.
+			return m.GetStationInfo(), fmt.Errorf("status refresh did not finish within %s: %w", joinLimit, ErrOperationInProgress)
 		}
 	}
 	// Start newly discovered disconnect recovery only after foreground status
@@ -237,12 +237,16 @@ func (m *Manager) selectStatusRefreshCandidates() ([]statusRefreshCandidate, []s
 	// Snapshot and stationConnected take each station's own mutex, which an
 	// abandoned WinRT cleanup can hold for a long time; run them outside the
 	// fleet lock so one wedged station cannot stall every fleet reader and
-	// writer.
+	// writer. Snapshots are non-blocking: a wedged station contributes its
+	// most recent state instead of hanging the whole refresh here.
 	stationPtrs := m.stationPointers()
 	candidates := make([]statusRefreshCandidate, 0)
 	disconnectedAddresses := make([]string, 0)
 	for _, stationPtr := range stationPtrs {
-		snapshot := stationPtr.Snapshot()
+		snapshot, ok := stationPtr.SnapshotNonBlocking()
+		if !ok {
+			continue
+		}
 		if !snapshot.Present {
 			continue
 		}

@@ -187,7 +187,11 @@ func (m *Manager) nextStatusRecoveryDelay() (time.Duration, bool) {
 	}
 	eligible := make(map[string]struct{}, len(retries))
 	for _, station := range m.stationPointers() {
-		address := station.Snapshot().Address
+		snapshot, ok := station.SnapshotNonBlocking()
+		if !ok {
+			continue
+		}
+		address := snapshot.Address
 		if _, tracked := retries[address]; tracked {
 			eligible[address] = struct{}{}
 		}
@@ -264,7 +268,13 @@ func (m *Manager) runStatusRecoveryRound() time.Duration {
 	m.statusRetryMutex.Unlock()
 	candidates := make([]recoveryCandidate, 0)
 	for _, station := range m.stationPointers() {
-		snapshot := station.Snapshot()
+		// Non-blocking snapshot: a station wedged inside a transport call must
+		// not hold up every other station's recovery round; its entry stays
+		// scheduled for the next tick.
+		snapshot, ok := station.SnapshotNonBlocking()
+		if !ok {
+			continue
+		}
 		retry, tracked := retries[snapshot.Address]
 		if !tracked {
 			continue

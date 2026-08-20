@@ -38,7 +38,8 @@ func NewManager(cfg *config.Config) *Manager {
 			disconnectStation:      bluetooth.DisconnectStation,
 			releaseStationForScan:  bluetooth.ReleaseStationForScan,
 			stationConnected: func(station *bluetooth.BaseStation) bool {
-				return station.Snapshot().Connected
+				snapshot, ok := station.SnapshotNonBlocking()
+				return ok && snapshot.Connected
 			},
 		},
 	}
@@ -283,7 +284,10 @@ func (m *Manager) ApplyRecoverySettings() {
 	stationPtrs := m.stationPointers()
 	absent := make(map[string]bool, len(stationPtrs))
 	for _, station := range stationPtrs {
-		snapshot := station.Snapshot()
+		snapshot, ok := station.SnapshotNonBlocking()
+		if !ok {
+			continue
+		}
 		absent[snapshot.Address] = !snapshot.Present
 	}
 
@@ -343,7 +347,10 @@ func (m *Manager) ReviveAbsentStationRecovery() {
 	stationPtrs := m.stationPointers()
 	absentStations := make([]string, 0, len(stationPtrs))
 	for _, station := range stationPtrs {
-		snapshot := station.Snapshot()
+		snapshot, ok := station.SnapshotNonBlocking()
+		if !ok {
+			continue
+		}
 		if !snapshot.Present {
 			absentStations = append(absentStations, snapshot.Address)
 		}
@@ -506,7 +513,11 @@ func statusRetryOrder(retry statusRetry) (int, time.Time, time.Time) {
 	return failures, lastAttempt, nextAt
 }
 func (m *Manager) stopExhaustedAbsentRecovery(address string, station *bluetooth.BaseStation) {
-	if station == nil || station.Snapshot().Present {
+	if station == nil {
+		return
+	}
+	snapshot, ok := station.SnapshotNonBlocking()
+	if !ok || snapshot.Present {
 		return
 	}
 	m.statusRetryMutex.Lock()

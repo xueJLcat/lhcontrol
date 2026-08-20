@@ -138,7 +138,14 @@ func (m *Manager) SetStationChannel(
 		otherStations = append(otherStations, other)
 	}
 	for _, other := range otherStations {
-		snapshot := other.Snapshot()
+		// Non-blocking snapshot: a station wedged inside a transport call must
+		// not hang the conflict check (and with it the channel write). Its
+		// channel cannot be verified while locked, so count it as unknown.
+		snapshot, ok := other.SnapshotNonBlocking()
+		if !ok {
+			hasUnknown = true
+			continue
+		}
 		if !snapshot.Present {
 			continue
 		}

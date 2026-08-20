@@ -298,7 +298,10 @@ func (m *Manager) releaseStationsForScan(ctx context.Context) (map[string]struct
 		if err := scanContextError(ctx); err != nil {
 			return nil, err
 		}
-		address := stationPtr.Snapshot().Address
+		// Non-blocking snapshot: a station wedged inside a transport call must
+		// not hang the pre-scan release loop (and with it the whole scan).
+		snapshot, _ := stationPtr.SnapshotNonBlocking()
+		address := snapshot.Address
 		releaseErr := m.releaseStationForScanBounded(stationPtr)
 		if releaseErr == nil {
 			continue
@@ -313,7 +316,8 @@ func (m *Manager) releaseStationsForScan(ctx context.Context) (map[string]struct
 			// issuing releases; recovery re-reads them once the adapter
 			// returns.
 			for _, remaining := range connectedStations[index+1:] {
-				unreliablePresence[strings.ToLower(remaining.Snapshot().Address)] = struct{}{}
+				remainingSnapshot, _ := remaining.SnapshotNonBlocking()
+				unreliablePresence[strings.ToLower(remainingSnapshot.Address)] = struct{}{}
 			}
 			break
 		}
@@ -353,7 +357,13 @@ func (m *Manager) mergeDiscoveredStations(
 	// for; the others already participate in this scan's own initial reads.
 	previouslyAbsent := make(map[*bluetooth.BaseStation]bool, len(stationPtrs))
 	for _, stationPtr := range stationPtrs {
-		snapshot := stationPtr.Snapshot()
+		// Non-blocking snapshot: a station wedged inside a transport call must
+		// not hang the merge (and with it the whole scan); it simply keeps its
+		// previous presence bookkeeping this round.
+		snapshot, ok := stationPtr.SnapshotNonBlocking()
+		if !ok {
+			continue
+		}
 		if _, unreliable := unreliablePresence[strings.ToLower(snapshot.Address)]; unreliable {
 			// An unreliable station still needs its absence snapshotted: when
 			// its cached connection could not be released, a genuinely absent
@@ -416,7 +426,7 @@ func (m *Manager) mergeDiscoveredStations(
 		if stationPtr.MarkSeen(scanTime) && previouslyAbsent[stationPtr] {
 			revivedStations = append(revivedStations, stationPtr)
 		}
-		if !stationPtr.Snapshot().Connected {
+		if snapshot, ok := stationPtr.SnapshotNonBlocking(); !ok || !snapshot.Connected {
 			stationsToFetch = append(stationsToFetch, stationPtr)
 		}
 	}
@@ -426,8 +436,8 @@ func (m *Manager) mergeDiscoveredStations(
 	// station). Re-arm recovery for a revived but disconnected station so it
 	// does not sit untracked until the next status poll or user action.
 	for _, stationPtr := range revivedStations {
-		snapshot := stationPtr.Snapshot()
-		if !snapshot.Connected {
+		snapshot, ok := stationPtr.SnapshotNonBlocking()
+		if ok && !snapshot.Connected {
 			m.rebaseRecoveryForRevivedStation(snapshot.Address)
 		}
 	}
@@ -463,7 +473,11 @@ func (m *Manager) runInitialScanReads(ctx context.Context, stationsToFetch []*bl
 		wg.Add(1)
 		go func(resultIndex int, ptr *bluetooth.BaseStation) {
 			defer wg.Done()
-			readResults[resultIndex].address = ptr.Snapshot().Address
+			// Non-blocking snapshot: a station wedged inside a transport call
+			// must not block the address capture that precedes the read.
+			if snapshot, ok := ptr.SnapshotNonBlocking(); ok {
+				readResults[resultIndex].address = snapshot.Address
+			}
 			readResults[resultIndex].station = ptr
 			select {
 			case semaphore <- struct{}{}:

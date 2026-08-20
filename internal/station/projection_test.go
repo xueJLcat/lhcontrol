@@ -75,6 +75,56 @@ func TestOperationalFreshnessAcceptsRecentReads(t *testing.T) {
 	}
 }
 
+// TestGetStationInfoDoesNotBlockOnWedgedStationLock guards the fleet
+// projection against a station wedged inside a transport call that ignores
+// cancellation: its lock stays held indefinitely, and every list consumer
+// (UI polls, the HTTP status endpoint, scan results) would otherwise queue
+// behind it. The projection must return immediately, rendering the wedged
+// station from its most recent snapshot.
+func TestGetStationInfoDoesNotBlockOnWedgedStationLock(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	address := "11:22:33:44:55:7B"
+	station := &internalbluetooth.BaseStation{
+		Name:          "LHB-WEDGED",
+		Address:       mustAddress(t, address),
+		Present:       true,
+		PowerState:    internalbluetooth.PowerStateOn,
+		RawPowerState: 0x0B,
+		Channel:       3,
+	}
+	manager.stations[address] = station
+	// Prime the snapshot cache with a successful read before the wedge.
+	station.Snapshot()
+
+	acquired := make(chan struct{})
+	release := make(chan struct{})
+	defer close(release)
+	go station.HoldLockWhile(func() {
+		close(acquired)
+		<-release
+	})
+	select {
+	case <-acquired:
+	case <-time.After(time.Second):
+		t.Fatal("wedged lock was not acquired")
+	}
+
+	done := make(chan []StationInfo, 1)
+	go func() { done <- manager.GetStationInfo() }()
+	select {
+	case infos := <-done:
+		if len(infos) != 1 {
+			t.Fatalf("station info count = %d, want the wedged station projected from its cached snapshot", len(infos))
+		}
+		if infos[0].Address != address || infos[0].PowerState != 1 {
+			t.Fatalf("station info = %+v, want the cached last-known state", infos[0])
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("GetStationInfo blocked behind the wedged station lock")
+	}
+}
+
 // TestRunSafelyConvertsPanicsToErrors guards the panic boundary: a panicking
 // operation must surface as a descriptive error instead of killing the caller
 // goroutine (and, for the shutdown drain, the whole cleanup sequence).

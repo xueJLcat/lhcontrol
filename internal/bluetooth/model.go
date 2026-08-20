@@ -6,6 +6,7 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"tinygo.org/x/bluetooth"
@@ -49,6 +50,10 @@ type BaseStation struct {
 	// Add Mutex for thread-safe access
 	mutex             sync.RWMutex
 	invalidationMutex sync.Mutex
+	// cachedSnapshot mirrors the most recent successful snapshot so fleet
+	// aggregation paths can fall back to last-known state instead of blocking
+	// behind a station lock a wedged transport call holds indefinitely.
+	cachedSnapshot atomic.Pointer[BaseStationSnapshot]
 	// pendingInvalidations coalesces OS disconnect notifications into one
 	// worker per station without discarding distinct device identities. An old
 	// connection callback can be delivered after the current connection's
@@ -273,8 +278,10 @@ type BaseStationSnapshot struct {
 
 func (bs *BaseStation) Snapshot() BaseStationSnapshot {
 	bs.mutex.RLock()
-	defer bs.mutex.RUnlock()
-	return bs.snapshotLocked()
+	snapshot := bs.snapshotLocked()
+	bs.mutex.RUnlock()
+	bs.cachedSnapshot.Store(&snapshot)
+	return snapshot
 }
 
 // TrySnapshot is Snapshot without the wait: it reports false when the station
@@ -288,6 +295,23 @@ func (bs *BaseStation) TrySnapshot() (BaseStationSnapshot, bool) {
 	}
 	defer bs.mutex.RUnlock()
 	return bs.snapshotLocked(), true
+}
+
+// SnapshotNonBlocking aggregates a station without ever waiting on its lock:
+// it returns the fresh snapshot when the lock is immediately available and
+// otherwise the most recent one. ok is false only when no snapshot has ever
+// succeeded. Fleet-wide loops use it so one station wedged inside a transport
+// call cannot hang every list consumer behind it.
+func (bs *BaseStation) SnapshotNonBlocking() (BaseStationSnapshot, bool) {
+	if snapshot, ok := bs.TrySnapshot(); ok {
+		snapshotCopy := snapshot
+		bs.cachedSnapshot.Store(&snapshotCopy)
+		return snapshot, true
+	}
+	if cached := bs.cachedSnapshot.Load(); cached != nil {
+		return *cached, true
+	}
+	return BaseStationSnapshot{}, false
 }
 
 func (bs *BaseStation) snapshotLocked() BaseStationSnapshot {
@@ -371,6 +395,25 @@ func (bs *BaseStation) ApplyPresenceMissThreshold(threshold int) bool {
 	}
 	bs.mutex.Lock()
 	defer bs.mutex.Unlock()
+	return bs.applyPresenceMissThresholdLocked(threshold)
+}
+
+// TryApplyPresenceMissThreshold is ApplyPresenceMissThreshold without the
+// wait: it reports false when the lock is held by another operation (a wedged
+// transport call), deferring that station's reclassification instead of
+// blocking the fleet-wide threshold pass behind it.
+func (bs *BaseStation) TryApplyPresenceMissThreshold(threshold int) bool {
+	if threshold <= 0 {
+		threshold = CurrentTiming().PresenceMissThreshold
+	}
+	if !bs.mutex.TryLock() {
+		return false
+	}
+	defer bs.mutex.Unlock()
+	return bs.applyPresenceMissThresholdLocked(threshold)
+}
+
+func (bs *BaseStation) applyPresenceMissThresholdLocked(threshold int) bool {
 	if bs.MissedScans == 0 {
 		return false
 	}
