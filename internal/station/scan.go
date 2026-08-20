@@ -567,9 +567,9 @@ func (m *Manager) runInitialScanReads(ctx context.Context, stationsToFetch []*bl
 	// that respect it have bailed out, and waiting out the full budget would
 	// keep the scan slot pinned behind a wedged reader for nothing.
 	joinTimer := time.NewTimer(m.scanReadPhaseTimeoutDuration() + m.initialReadTimeoutDuration() + initialReadJoinGrace)
+	defer joinTimer.Stop()
 	select {
 	case <-joined:
-		joinTimer.Stop()
 	case <-joinTimer.C:
 		log.Printf("Bluetooth initial reads did not finish within the join budget; abandoning wedged readers")
 	case <-ctx.Done():
