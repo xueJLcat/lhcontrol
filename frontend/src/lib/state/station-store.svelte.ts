@@ -629,17 +629,25 @@ export class StationStore {
   }
 
   private reconcileExternalOperations(operations: Array<{ id: number; kind?: string }>, revision: number) {
-    if (revision <= 0 && this.externalOperationRevision > 0) return;
     if (revision > 0 && revision < this.externalOperationRevision) return;
     if (revision > 0) this.externalOperationRevision = revision;
-    const nextIds = new Set(
-      operations.map((operation) => Number(operation.id)).filter((id) => Number.isFinite(id))
-    );
-    if ([...nextIds].some((id) => !this.externalOperationIds.has(id))) {
-      this.invalidateForExternalOperation();
+    // A revision-0 snapshot that lands after a revisioned event may be a poll
+    // issued before that event (its read was in flight while the revision was
+    // assigned), so it must not rewrite the operation-id set. It is not
+    // dropped outright, though: the auto-sleep reconciliation below is the
+    // only safety net that clears a lost auto-sleep action, and it protects
+    // itself against a single stale snapshot with a consecutive-idle count.
+    const unordered = revision <= 0 && this.externalOperationRevision > 0;
+    if (!unordered) {
+      const nextIds = new Set(
+        operations.map((operation) => Number(operation.id)).filter((id) => Number.isFinite(id))
+      );
+      if ([...nextIds].some((id) => !this.externalOperationIds.has(id))) {
+        this.invalidateForExternalOperation();
+      }
+      this.externalOperationIds = nextIds;
+      this.externalOperationRunning = this.externalOperationIds.size > 0;
     }
-    this.externalOperationIds = nextIds;
-    this.externalOperationRunning = this.externalOperationIds.size > 0;
     // The auto-sleep busy flag is normally driven by the auto-sleep event
     // stream, but a lost terminal event would otherwise lock the UI forever.
     // Reconcile it against the authoritative operation snapshot: the backend

@@ -110,13 +110,18 @@ export class StationActionController {
     this.bulkCancelGeneration += 1;
     this.bulkRunGeneration += 1;
     const host = this.host;
+    // Clearing the flag must not depend on the bulk still being in flight: a
+    // wedged CancelBulkPower request keeps owning it after the bulk promise
+    // settled first, and the bumped cancel generation stops that request's
+    // own finally from ever clearing it. Without this, the flag — and with it
+    // every bulk control — stays locked for the rest of the session.
+    host.cancellingBulk = false;
     if (host.disposed || host.globalOperation !== 'bulk-power') return;
     host.gates.beginScanEpoch();
     host.gates.beginStatusOperation();
     host.listRevisions.next();
     host.globalOperation = 'idle';
     host.bulkTarget = null;
-    host.cancellingBulk = false;
     const message = t('Stopping bulk power timed out; the operation state was reset.');
     host.statusMessage = message;
     pushToast(message, 'warning');
@@ -373,7 +378,11 @@ export class StationActionController {
       // watchdog that a newer bulk's cancel request armed, or a second wedged
       // bulk would lose its only recovery path and lock the UI permanently.
       if (!this.host.disposed && this.bulkRunGeneration === runGeneration) {
-        this.cancelBulkCancelWatchdog();
+        // A settled bulk settles the bulk only. While a cancel request is
+        // still in flight, its watchdog is the only recovery left for a
+        // CancelBulkPower promise that never returns; cancelling it here
+        // would leave cancellingBulk latched until a process restart.
+        if (!this.host.cancellingBulk) this.cancelBulkCancelWatchdog();
         if (this.host.globalOperation === 'bulk-power') this.host.globalOperation = 'idle';
         this.host.bulkTarget = null;
         // Intentionally leave cancellingBulk alone: cancelBulkPower owns it
@@ -417,6 +426,13 @@ export class StationActionController {
       // it in the meantime).
       if (!this.host.disposed && cancelGeneration === this.bulkCancelGeneration) {
         this.host.cancellingBulk = false;
+        // The watchdog must outlive this request only while the bulk itself
+        // is still in flight (a wedged bulk whose workers ignore
+        // cancellation, exactly the case the opening comment describes).
+        // Once the bulk has settled there is nothing left to recover, and a
+        // lingering timer could fire mid-way through an unrelated later bulk
+        // and force-reset it.
+        if (this.host.globalOperation !== 'bulk-power') this.cancelBulkCancelWatchdog();
       }
     }
   }

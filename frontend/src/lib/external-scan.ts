@@ -164,6 +164,17 @@ export class ExternalScanCoordinator {
     if (this.host.isDisposed()) return;
     if (event.id <= this.latestID) return;
     this.latestID = event.id;
+    if (this.scanID === null && this.host.externalScanning()) {
+      // An adopted scan just identified itself: its started event was
+      // delivered after the adoption, and the scan is already being tracked.
+      // Re-running begin() would bump the scan epoch and list revision (voiding
+      // in-flight reads), restart the elapsed display, and clear a stop the
+      // user may already have requested for this same scan. While a scan is
+      // running no second external scan can start, so this event can only
+      // belong to the adopted scan — record its identity and nothing else.
+      this.scanID = event.id;
+      return;
+    }
     this.begin(event.id);
   }
 

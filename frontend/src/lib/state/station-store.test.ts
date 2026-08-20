@@ -1391,6 +1391,32 @@ describe('StationStore external HTTP operation events', () => {
     expect(store.externalOperationRunning).toBe(true);
   });
 
+  it('keeps reconciling auto-sleep from unordered snapshots without clobbering newer operation events', async () => {
+    const { store } = mountStore();
+    await vi.waitFor(() => expect(runtime.handlers.has('external-operation')).toBe(true));
+
+    runtime.handlers.get('external-operation')?.({ id: 91, phase: 'started', kind: 'power', revision: 2 });
+    runtime.handlers.get('auto-sleep')?.({ id: 1, phase: 'started' });
+    expect(store.externalOperationRunning).toBe(true);
+    expect(store.autoSleepRunning).toBe(true);
+
+    // A revision-0 snapshot that arrives after a revisioned event must not
+    // rewrite the operation-id set (it may be a poll issued before the event),
+    // but it must still feed the auto-sleep idle reconciliation: dropping it
+    // entirely would permanently disable the safety net that clears a lost
+    // auto-sleep terminal event and unlock the UI again.
+    backend.GetAPIStatus.mockResolvedValue({
+      running: true, address: '127.0.0.1:7575', error: '', warnings: [], configWritable: true,
+      activeOperations: [], operationRevision: 0
+    });
+    await store.apiStatus.refresh();
+    expect(store.externalOperationRunning).toBe(true);
+    expect(store.autoSleepRunning).toBe(true);
+    await store.apiStatus.refresh();
+    expect(store.externalOperationRunning).toBe(true);
+    expect(store.autoSleepRunning).toBe(false);
+  });
+
 
   it('locks controls until every overlapping external operation finishes', async () => {
     const { store } = mountStore();

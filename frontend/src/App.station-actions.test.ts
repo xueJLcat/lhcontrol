@@ -609,6 +609,45 @@ describe('App asynchronous operations', () => {
     expect(await screen.findByText('Skipped · power control is not supported')).toBeInTheDocument();
   });
 
+  it('recovers bulk controls when a wedged cancel outlives the settled bulk', async () => {
+    vi.useFakeTimers();
+    // The bulk promise settles while the CancelBulkPower Wails promise never
+    // does. The bulk's finally must not cancel the cancel watchdog in that
+    // case: it is the only recovery that clears cancellingBulk, and without
+    // it every bulk control stays locked for the rest of the session.
+    let resolveBulk!: (result: unknown) => void;
+    const station = createStation();
+    api.SetAllStationsPowerDetailed.mockReturnValue(new Promise((resolve) => { resolveBulk = resolve; }));
+    api.CancelBulkPower.mockReturnValue(new Promise(() => {}));
+    render(App);
+    await screen.findByText('LHB-TEST');
+    // Wait for startup work to settle so the bulk controls are unlocked.
+    await vi.waitFor(() => expect(screen.getByRole('button', { name: 'Scan' })).toBeEnabled());
+    const bulkOn = screen.getByTitle('Turn all known stations on');
+    await vi.waitFor(() => expect(bulkOn).toBeEnabled());
+    await fireEvent.click(bulkOn);
+
+    const cancelButton = await screen.findByRole('button', { name: 'Cancel bulk power' });
+    await fireEvent.click(cancelButton);
+    await vi.waitFor(() => expect(api.CancelBulkPower).toHaveBeenCalledOnce());
+
+    resolveBulk({
+      target: 'on',
+      results: [{
+        address: station.address, name: station.name, skipped: false, reason: '',
+        commandSent: true, success: true, confirmed: true, error: '', station
+      }]
+    });
+    // The bulk settled, so the cancel control disappears, but the pending
+    // cancel request keeps the bulk targets locked until the watchdog fires.
+    await vi.waitFor(() => expect(screen.queryByRole('button', { name: 'Cancel bulk power' })).not.toBeInTheDocument());
+    const standby = document.querySelector('.seg-standby') as HTMLButtonElement;
+    expect(standby.disabled).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(90_000);
+    await vi.waitFor(() => expect((document.querySelector('.seg-standby') as HTMLButtonElement).disabled).toBe(false));
+  });
+
   it('disables a bulk target when every station is already there or booting', async () => {
     const stationOn = createStation({
       name: 'LHB-ON', address: 'AA', powerState: 1, powerStateName: 'on', rawPowerState: 0x0b

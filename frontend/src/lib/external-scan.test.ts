@@ -198,6 +198,34 @@ describe('ExternalScanCoordinator', () => {
     expect(coordinator.hasPendingRecovery()).toBe(false);
   });
 
+  it('records an adopted scan id from a delayed started event without restarting it', async () => {
+    const { host, state } = createHost();
+    mockIsScanning(host, true);
+    const coordinator = new ExternalScanCoordinator(host);
+    // The periodic poll adopts the running scan before its started event is
+    // delivered; the adoption begins with a null id.
+    await coordinator.adoptUnknown();
+    expect(state.externalScanning).toBe(true);
+    const epochAfterAdoption = state.scanEpoch;
+    // The user already requested a stop for the adopted scan.
+    state.stoppingScan = true;
+
+    coordinator.handleStarted({ id: 4 });
+
+    // The delayed event belongs to the scan already being tracked: it must only
+    // record the identity, not re-run begin(). A restart would bump the scan
+    // epoch (voiding in-flight reads), clear the pending stop, and reset the
+    // status line back to "Preparing external scan...".
+    expect(state.scanEpoch).toBe(epochAfterAdoption);
+    expect(state.stoppingScan).toBe(true);
+    expect(state.statusMessages.filter((message) => message === 'Preparing external scan...')).toHaveLength(1);
+
+    // The scan is now tracked by its real id, so its terminal event is claimed.
+    mockIsScanning(host, false);
+    await coordinator.handleCompleted({ id: 4, stations: [] });
+    expect(state.externalScanning).toBe(false);
+  });
+
   it('marks recovery epochs for the current scan and status operations', () => {
     const { host, state } = createHost();
     const coordinator = new ExternalScanCoordinator(host);

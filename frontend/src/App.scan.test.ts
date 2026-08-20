@@ -912,6 +912,43 @@ describe('App asynchronous operations', () => {
     expect(await screen.findByRole('button', { name: 'Scan' })).toBeEnabled();
   });
 
+  it('keeps the successor scan watchdog alive when a wedged predecessor settles late', async () => {
+    vi.useFakeTimers();
+    // Both scans wedge; the first is force-settled by its watchdog. When the
+    // successor starts and the predecessor's promise finally settles late,
+    // the predecessor's finally must not cancel the successor's watchdog:
+    // that watchdog is the only recovery left for the wedged successor.
+    let resolveFirstScan!: (stations: StationInfo[]) => void;
+    api.ScanAndFetchStations
+      .mockReturnValueOnce(new Promise((resolve) => { resolveFirstScan = resolve; }))
+      .mockReturnValueOnce(new Promise(() => {}));
+    api.StopScan.mockResolvedValue(undefined);
+    api.IsScanning.mockResolvedValueOnce(false) // startup probe
+      .mockResolvedValueOnce(true)              // first watchdog observes the scan
+      .mockResolvedValueOnce(false)             // first watchdog recheck settles it
+      .mockResolvedValueOnce(true)              // successor watchdog observes the scan
+      .mockResolvedValueOnce(false);            // successor watchdog recheck settles it
+    api.GetScanStatus.mockResolvedValue({ state: 'completed', found: 1, warnings: [] });
+    render(App);
+    await vi.waitFor(() => expect(api.ScanAndFetchStations).toHaveBeenCalledOnce());
+
+    await vi.advanceTimersByTimeAsync(90_000);
+    await vi.waitFor(() => expect(api.StopScan).toHaveBeenCalledOnce());
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(await screen.findByRole('button', { name: 'Scan' })).toBeEnabled();
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Scan' }));
+    await vi.waitFor(() => expect(api.ScanAndFetchStations).toHaveBeenCalledTimes(2));
+    // The wedged predecessor settles after the successor armed its watchdog.
+    resolveFirstScan([]);
+    await vi.advanceTimersByTimeAsync(0);
+
+    await vi.advanceTimersByTimeAsync(90_000);
+    await vi.waitFor(() => expect(api.StopScan).toHaveBeenCalledTimes(2));
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(await screen.findByRole('button', { name: 'Scan' })).toBeEnabled();
+  });
+
   it('keeps a scan started while a previous StopScan is settling stoppable', async () => {
     let rejectFirstScan!: (error: Error) => void;
     let resolveSecondScan!: (stations: StationInfo[]) => void;

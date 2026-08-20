@@ -470,12 +470,13 @@ export class StationScanController {
         if (classified.kind === 'busy') return false;
       }
     } finally {
-      this.cancelScanWatchdog();
       // The watchdog can force-settle this scan when the backend hangs, and
       // a newer scan may start before this late promise resolves. The epoch
       // check keeps the settled scan's cleanup from clearing a newer owner's
-      // scanning state.
+      // scanning state — including its watchdog, which is the only recovery
+      // left when the newer scan wedges the same way.
       if (!this.host.disposed && this.host.gates.canCommitOperation(operationEpoch)) {
+        this.cancelScanWatchdog();
         if (this.host.globalOperation === 'scanning') this.host.globalOperation = 'idle';
         if (!this.host.stopRequestPending && !this.host.externalScanning && this.host.stoppingScan) {
           // A stop was requested for this scan, but the backend can keep
