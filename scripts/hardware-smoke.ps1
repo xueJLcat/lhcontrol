@@ -17,24 +17,46 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-function Get-SortKey {
+# A trailing slash would produce double-slash endpoint URLs that the router
+# rejects with a misleading 404.
+$ApiBase = $ApiBase.TrimEnd('/')
+
+function Get-ChannelSortValue {
     param($Station)
-    $channel = if ([int]$Station.channel -gt 0) { [int]$Station.channel } else { [int]::MaxValue }
-    return "{0:D10}|{1}|{2}" -f $channel, ([string]$Station.name).ToLowerInvariant(), ([string]$Station.address).ToLowerInvariant()
+    $channel = [int]$Station.channel
+    if ($channel -gt 0) { return $channel }
+    return [int]::MaxValue
+}
+
+function Compare-StationOrder {
+    param($Left, $Right)
+    $leftChannel = Get-ChannelSortValue $Left
+    $rightChannel = Get-ChannelSortValue $Right
+    if ($leftChannel -ne $rightChannel) {
+        return $leftChannel - $rightChannel
+    }
+    $nameComparison = [string]::CompareOrdinal(
+        ([string]$Left.name).ToLowerInvariant(),
+        ([string]$Right.name).ToLowerInvariant()
+    )
+    if ($nameComparison -ne 0) { return $nameComparison }
+    return [string]::CompareOrdinal(
+        ([string]$Left.address).ToLowerInvariant(),
+        ([string]$Right.address).ToLowerInvariant()
+    )
 }
 
 function Assert-StableOrder {
     param([object[]]$Stations)
-    $actual = @($Stations | ForEach-Object { Get-SortKey $_ })
-    # Sort-Object uses the current culture's collation, which ignores
-    # punctuation at its primary level (LHB-a-b, LHB-a.b, LHB-ab sort
-    # differently than byte order). The backend sorts bytewise on the
-    # lowercased values, so the comparison must use the ordinal comparer to
-    # avoid flagging a correctly ordered list as unsorted.
-    $expected = @($actual.Clone())
-    [Array]::Sort($expected, [System.StringComparer]::Ordinal)
-    if (($actual -join "`n") -ne ($expected -join "`n")) {
-        throw "Station list is not sorted by channel, name, and address"
+    # The backend compares the three sort fields fieldwise (channel, then name,
+    # then address) with ordinal comparisons on the lowercased values. A single
+    # joined sort key misorders prefix-related names (LHB-1 vs LHB-10): the
+    # separator would be compared against the next name character, so the check
+    # must compare adjacent stations fieldwise to match the backend exactly.
+    for ($index = 1; $index -lt $Stations.Count; $index++) {
+        if ((Compare-StationOrder $Stations[$index - 1] $Stations[$index]) -gt 0) {
+            throw "Station list is not sorted by channel, name, and address"
+        }
     }
 }
 
@@ -174,6 +196,26 @@ function Invoke-SelfTest {
     )
     Assert-ScanSnapshot ([pscustomobject]@{ found = 1 }) $visible 1 @("AA")
 
+    # Prefix-related names must be ordered fieldwise, not by a joined key:
+    # LHB-1 precedes LHB-10 (the shorter prefix first), the exact ordering a
+    # single joined sort key would reverse.
+    $prefixOrdered = @(
+        [pscustomobject]@{ channel = 1; name = "LHB-1"; address = "AA"; seenInLatestScan = $true }
+        [pscustomobject]@{ channel = 1; name = "LHB-10"; address = "AB"; seenInLatestScan = $true }
+    )
+    Assert-StableOrder $prefixOrdered
+    $prefixReversed = @($prefixOrdered[1], $prefixOrdered[0])
+    $rejectedPrefixOrder = $false
+    try {
+        Assert-StableOrder $prefixReversed
+    }
+    catch {
+        $rejectedPrefixOrder = $true
+    }
+    if (-not $rejectedPrefixOrder) {
+        throw "Self-test failed: a prefix-misordered station list was accepted"
+    }
+
     $failedScanRecord = [ordered]@{
         state = "running"; found = 0; warnings = @(); addresses = @(); stations = @(); status = $null
     }
@@ -265,6 +307,7 @@ $results = [ordered]@{
     restore = @()
 }
 $initialStates = [ordered]@{}
+$operatedAddresses = @{}
 $powerStarted = $false
 $restoreFailed = $false
 $lastScanTimeoutEvidence = $null
@@ -272,14 +315,24 @@ $lastScanTimeoutEvidence = $null
 function Wait-Scan {
     $deadline = (Get-Date).AddSeconds($ScanWaitSeconds)
     $lastStatus = $null
+    $lastPollError = $null
     while ((Get-Date) -lt $deadline) {
         # Bound each poll request itself: without an explicit timeout a hung
         # API keeps the final request inside this loop blocked for the 100s
-        # default, overshooting the scan wait budget by minutes.
-        $status = Invoke-RestMethod -Method Get -Uri "$ApiBase/scan/status" -TimeoutSec 15
-        $lastStatus = $status
-        if (Test-ScanTerminalState ([string]$status.state)) {
-            return $status
+        # default, overshooting the scan wait budget by minutes. A single
+        # failed poll (a connection reset, the app restarting its listener, or
+        # one slow response) must not abort the whole wait budget either:
+        # remember it and keep polling until the deadline.
+        try {
+            $status = Invoke-RestMethod -Method Get -Uri "$ApiBase/scan/status" -TimeoutSec 15
+            $lastStatus = $status
+            $lastPollError = $null
+            if (Test-ScanTerminalState ([string]$status.state)) {
+                return $status
+            }
+        }
+        catch {
+            $lastPollError = $_.Exception.Message
         }
         Start-Sleep -Milliseconds 500
     }
@@ -293,6 +346,9 @@ function Wait-Scan {
     $script:lastScanTimeoutEvidence = [ordered]@{
         status = $lastStatus
         stations = @($lastStations)
+    }
+    if ($null -eq $lastStatus -and $null -ne $lastPollError) {
+        throw "Scan did not complete within $ScanWaitSeconds seconds (status polling failed: $lastPollError)"
     }
     throw "Scan did not complete within $ScanWaitSeconds seconds"
 }
@@ -391,6 +447,11 @@ try {
                 # client headroom past that instead of aborting a slow batch.
                 $result = Invoke-RestMethod -Method Post -Uri "$ApiBase/stations/power" -ContentType "application/json" -Body $body -TimeoutSec 660
                 $powerRecord.result = $result
+                foreach ($item in @($result.results)) {
+                    if ([bool]$item.commandSent) {
+                        $operatedAddresses[[string]$item.address] = $true
+                    }
+                }
                 $phase = "validation"
                 Assert-BulkResult $result $target $snapshotAddresses
                 $readback = Get-Stations
@@ -421,6 +482,13 @@ catch {
 finally {
     if ($powerStarted) {
         foreach ($entry in $initialStates.GetEnumerator()) {
+            if (-not $operatedAddresses.Contains($entry.Key)) {
+                # A station that never received a command (for example one
+                # skipped for missing power-control capability) was never
+                # altered, so there is nothing to restore; attempting the write
+                # would be rejected as unsupported and fail the run.
+                continue
+            }
             try {
                 $restoreResult = Invoke-StationPower -Address $entry.Key -Target $entry.Value
                 $readback = Get-Stations
