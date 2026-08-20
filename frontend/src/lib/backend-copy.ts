@@ -24,11 +24,19 @@ const EXACT: ReadonlyMap<string, TranslationKey> = new Map([
   ['station not found', 'station not found'],
   ['channel conflicts with another visible station', 'channel conflicts with another visible station'],
   ['a recent successful scan is required', 'a recent successful scan is required'],
+  ['a recent successful scan is required before changing a channel', 'a recent successful scan is required before changing a channel'],
+  ['a recent successful scan is required: one or more visible stations have an unknown channel',
+    'a recent successful scan is required: one or more visible stations have an unknown channel'],
   ['station is transitioning between power states', 'station is transitioning between power states'],
+  // ErrUnsupported detail halves (internal/station power/channel/capability
+  // paths) surfaced inside "operation is not supported: <detail>".
+  ['power write is unavailable', 'power write is unavailable'],
+  ['standby is unavailable', 'standby is unavailable'],
+  ['identify is unavailable', 'identify is unavailable'],
+  ['safe channel changes require read and write support', 'safe channel changes require read and write support'],
   // Auto-sleep lifecycle event errors.
   ['cancelled before power commands were sent', 'cancelled before power commands were sent'],
   ['cancelled after scanning and before power commands were sent', 'cancelled after scanning and before power commands were sent'],
-  ['watched process restarted or automatic sleep was reconfigured', 'watched process restarted or automatic sleep was reconfigured'],
   ['bulk power timeout reached', 'bulk power timeout reached'],
   // Fixed channel-operation warnings.
   ['One or more visible stations have an unknown channel; conflicts cannot be fully verified.',
@@ -129,7 +137,10 @@ const SETTINGS_SUBJECT_ZH: Record<string, string> = {
   'confirmation reconnect threshold': '确认重连阈值',
   'confirmation reconnect delay': '确认重连延迟',
   'identify attempts': '识别尝试次数',
-  'presence miss threshold': '在场漏扫阈值'
+  'presence miss threshold': '在场漏扫阈值',
+  'absent station retry limit': '失联站放弃前重试数',
+  'channel scan freshness': '通道扫描新鲜窗口',
+  'Bluetooth init retry': '适配器初始化冷却'
 };
 
 interface CopyPattern {
@@ -143,13 +154,17 @@ const PATTERNS: readonly CopyPattern[] = [
     // station/scan.go: connections not released before scanning. The detail
     // is an errors.Join of "<MAC>: <error>" lines.
     pattern: /^(\d+) station connection\(s\) could not be fully released before scanning: (.+)$/s,
-    render: (m) => t('scan.warning.connectionsNotReleased', { count: m[1], detail: mapJoinedLines(m[2]) })
+    render: (m) => locale() === 'zh-CN'
+      ? t('scan.warning.connectionsNotReleased', { count: m[1], detail: mapJoinedLines(m[2]) })
+      : `${m[1]} station connection(s) could not be fully released before scanning: ${mapJoinedLines(m[2])}`
   },
   {
     // station/scan.go: initial read failures after discovery. The detail is
     // an errors.Join of "<MAC>: <error>" lines.
     pattern: /^(\d+) station\(s\) were discovered, but some initial values could not be read: (.+)$/s,
-    render: (m) => t('scan.warning.initialReadFailures', { count: m[1], detail: mapJoinedLines(m[2]) })
+    render: (m) => locale() === 'zh-CN'
+      ? t('scan.warning.initialReadFailures', { count: m[1], detail: mapJoinedLines(m[2]) })
+      : `${m[1]} station(s) were discovered, but some initial values could not be read: ${mapJoinedLines(m[2])}`
   },
   {
     // bluetooth/power.go PowerConfirmationError shape.
@@ -191,17 +206,23 @@ const PATTERNS: readonly CopyPattern[] = [
   {
     // bluetooth/channel.go: final-readback confirmation warning.
     pattern: /^channel (\d+) was confirmed by the final readback$/,
-    render: (m) => t('channel.warning.confirmedByFinalReadback', { channel: m[1] })
+    render: (m) => locale() === 'zh-CN'
+      ? t('channel.warning.confirmedByFinalReadback', { channel: m[1] })
+      : `channel ${m[1]} was confirmed by the final readback`
   },
   {
     // bluetooth/channel.go: write reported not sent but readback observed it.
     pattern: /^the write was reported as not sent, but channel (\d+) was observed by readback: (.+)$/s,
-    render: (m) => t('channel.warning.notSentButObserved', { channel: m[1], detail: backendCopy(m[2]) })
+    render: (m) => locale() === 'zh-CN'
+      ? t('channel.warning.notSentButObserved', { channel: m[1], detail: backendCopy(m[2]) })
+      : `the write was reported as not sent, but channel ${m[1]} was observed by readback: ${backendCopy(m[2])}`
   },
   {
     // bluetooth/channel.go: write errored but readback confirmed it.
     pattern: /^the write call reported an error, but channel (\d+) was confirmed by readback: (.+)$/s,
-    render: (m) => t('channel.warning.errorButConfirmed', { channel: m[1], detail: backendCopy(m[2]) })
+    render: (m) => locale() === 'zh-CN'
+      ? t('channel.warning.errorButConfirmed', { channel: m[1], detail: backendCopy(m[2]) })
+      : `the write call reported an error, but channel ${m[1]} was confirmed by readback: ${backendCopy(m[2])}`
   },
   {
     // app.go config-persistence warnings.
@@ -217,6 +238,54 @@ const PATTERNS: readonly CopyPattern[] = [
     // fell back to defaults mid-session.
     pattern: /^Configuration was reset to defaults during recovery: (.+)$/s,
     render: (m) => t('Configuration was reset to defaults during recovery: {detail}', { detail: backendCopy(m[1]) })
+  },
+  {
+    // station power paths: booting rejection wrapping the transition sentinel.
+    pattern: /^station is booting; retry after transition: (.+)$/s,
+    render: (m) => locale() === 'zh-CN'
+      ? t('power.error.bootingRetry', { detail: backendCopy(m[1]) })
+      : `station is booting; retry after transition: ${m[1]}`
+  },
+  {
+    // station/channel.go: booting rejection for channel changes.
+    pattern: /^station is booting; retry channel change after transition: (.+)$/s,
+    render: (m) => locale() === 'zh-CN'
+      ? t('channel.error.bootingRetry', { detail: backendCopy(m[1]) })
+      : `station is booting; retry channel change after transition: ${m[1]}`
+  },
+  {
+    // station_lookup.go: not-found sentinel with the address as detail.
+    pattern: /^station not found: (.+)$/s,
+    render: (m) => locale() === 'zh-CN'
+      ? t('station.error.notFoundDetail', { detail: backendCopy(m[1]) })
+      : `station not found: ${m[1]}`
+  },
+  {
+    // station/channel.go: detail inside the not-found wrapper above.
+    pattern: /^station (.+) was not seen in the latest scan$/,
+    render: (m) => locale() === 'zh-CN'
+      ? t('station.error.notSeenInLatestScan', { address: m[1] })
+      : `station ${m[1]} was not seen in the latest scan`
+  },
+  {
+    // station/channel.go: conflict sentinel with the occupant detail.
+    pattern: /^channel conflicts with another visible station: channel (\d+) is used by (.+) \((.+)\)$/,
+    render: (m) => locale() === 'zh-CN'
+      ? t('channel.error.conflictDetail', { channel: m[1], name: m[2], address: m[3] })
+      : `channel conflicts with another visible station: channel ${m[1]} is used by ${m[2]} (${m[3]})`
+  },
+  {
+    // ErrUnsupported wrappers. Must precede the generic capability pattern,
+    // which would misparse "operation" as a capability name.
+    pattern: /^operation is not supported(?:: (.+))?$/s,
+    render: (m) => {
+      if (locale() !== 'zh-CN') {
+        return m[1] ? `operation is not supported: ${m[1]}` : 'operation is not supported';
+      }
+      return m[1]
+        ? t('error.operationUnsupportedDetail', { detail: backendCopy(m[1]) })
+        : t('error.operationUnsupported');
+    }
   },
   {
     // UnsupportedCapabilityError shape: "<capability> is not supported[: cause]".
@@ -246,9 +315,9 @@ const PATTERNS: readonly CopyPattern[] = [
     }
   },
   {
-    // Config setters: "<subject> must cover/must not exceed/cannot exceed
-    // <other> of <limit> seconds, got <value>".
-    pattern: /^(.+?) (must cover the|must not exceed the|cannot exceed the) (.+?) of (\d+) seconds, got (\d+)$/,
+    // Config setters: "<subject> must cover/must not exceed/cannot exceed/
+    // must not fall below <other> of <limit> seconds, got <value>".
+    pattern: /^(.+?) (must cover the|must not exceed the|cannot exceed the|must not fall below the) (.+?) of (\d+) seconds, got (\d+)$/,
     render: (m) => {
       if (locale() !== 'zh-CN') {
         return `${m[1]} ${m[2]} ${m[3]} of ${m[4]} seconds, got ${m[5]}`;
@@ -257,7 +326,9 @@ const PATTERNS: readonly CopyPattern[] = [
       const other = SETTINGS_SUBJECT_ZH[m[3]] ?? m[3];
       const key = m[2] === 'must cover the'
         ? 'settings.error.mustCover'
-        : 'settings.error.mustNotExceed';
+        : m[2] === 'must not fall below the'
+          ? 'settings.error.mustNotFallBelow'
+          : 'settings.error.mustNotExceed';
       return t(key, { subject, other, limit: m[4], value: m[5] });
     }
   }

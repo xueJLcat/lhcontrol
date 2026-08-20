@@ -135,6 +135,72 @@ describe('backendCopy', () => {
       .toBe('已发现 2 个基站，但部分初始值读取失败：AA:BB:CC:DD:EE:01: 基站正在启动；AA:BB:CC:DD:EE:02: 基站正在启动');
   });
 
+  it('keeps scan and channel warning templates byte-identical in English', () => {
+    const connections = '2 station connection(s) could not be fully released before scanning: AA:BB:CC:DD:EE:01: boom';
+    expect(backendCopy(connections)).toBe(connections);
+    const reads = '2 station(s) were discovered, but some initial values could not be read: AA:BB:CC:DD:EE:01: boom';
+    expect(backendCopy(reads)).toBe(reads);
+    expect(backendCopy('channel 4 was confirmed by the final readback'))
+      .toBe('channel 4 was confirmed by the final readback');
+    const notSent = 'the write was reported as not sent, but channel 5 was observed by readback: detail';
+    expect(backendCopy(notSent)).toBe(notSent);
+    const errored = 'the write call reported an error, but channel 5 was confirmed by readback: detail';
+    expect(backendCopy(errored)).toBe(errored);
+  });
+
+  it('keeps wrapped sentinel errors byte-identical in English', () => {
+    const booting = 'station is booting; retry after transition: station is transitioning between power states';
+    expect(backendCopy(booting)).toBe(booting);
+    expect(backendCopy('station not found: AA:BB:CC:DD:EE:01')).toBe('station not found: AA:BB:CC:DD:EE:01');
+    const conflict = 'channel conflicts with another visible station: channel 4 is used by LHB-A (AA:BB:CC:DD:EE:01)';
+    expect(backendCopy(conflict)).toBe(conflict);
+    expect(backendCopy('a recent successful scan is required before changing a channel'))
+      .toBe('a recent successful scan is required before changing a channel');
+    expect(backendCopy('operation is not supported: standby is unavailable'))
+      .toBe('operation is not supported: standby is unavailable');
+  });
+
+  it('translates wrapped sentinel errors under zh-CN', () => {
+    setLanguagePreference('zh-CN');
+    expect(backendCopy('station is booting; retry after transition: station is transitioning between power states'))
+      .toBe('基站正在启动中，请待状态切换完成后重试：基站正在电源状态切换中');
+    expect(backendCopy('station is booting; retry channel change after transition: station is transitioning between power states'))
+      .toBe('基站正在启动中，请待状态切换完成后重试频道修改：基站正在电源状态切换中');
+    expect(backendCopy('station not found: AA:BB:CC:DD:EE:01')).toBe('未找到基站：AA:BB:CC:DD:EE:01');
+    expect(backendCopy('station not found: station AA:BB:CC:DD:EE:01 was not seen in the latest scan'))
+      .toBe('未找到基站：基站 AA:BB:CC:DD:EE:01 未在最近一次扫描中发现');
+    expect(backendCopy('channel conflicts with another visible station: channel 4 is used by LHB-A (AA:BB:CC:DD:EE:01)'))
+      .toBe('频道与另一个可见基站冲突：频道 4 已被 LHB-A（AA:BB:CC:DD:EE:01）使用');
+    expect(backendCopy('a recent successful scan is required before changing a channel'))
+      .toBe('更改频道前需要先完成一次有效扫描');
+    expect(backendCopy('a recent successful scan is required: one or more visible stations have an unknown channel'))
+      .toBe('需要先完成一次有效扫描：一个或多个可见基站的频道未知');
+  });
+
+  it('translates unsupported-operation errors without misparsing the capability pattern', () => {
+    setLanguagePreference('zh-CN');
+    expect(backendCopy('operation is not supported')).toBe('不支持该操作');
+    expect(backendCopy('operation is not supported: standby is unavailable')).toBe('不支持该操作：待机不可用');
+    expect(backendCopy('operation is not supported: safe channel changes require read and write support'))
+      .toBe('不支持该操作：安全频道修改需要读写支持');
+  });
+
+  it('translates the fall-below cross-field rejection under zh-CN', () => {
+    setLanguagePreference('zh-CN');
+    expect(backendCopy('recovery retry maximum must not fall below the recovery retry base of 30 seconds, got 10'))
+      .toBe('恢复退避上限不得低于恢复退避基底（30 秒），当前为 10');
+  });
+
+  it('translates the recovery and freshness range subjects under zh-CN', () => {
+    setLanguagePreference('zh-CN');
+    expect(backendCopy('absent station retry limit must be between 1 and 20, got 0'))
+      .toBe('失联站放弃前重试数必须在 1–20 范围内，当前为 0');
+    expect(backendCopy('channel scan freshness must be between 30 and 600 seconds, got 1'))
+      .toBe('通道扫描新鲜窗口必须在 30–600 秒范围内，当前为 1');
+    expect(backendCopy('Bluetooth init retry must be between 1 and 30 seconds, got 99'))
+      .toBe('适配器初始化冷却必须在 1–30 秒范围内，当前为 99');
+  });
+
   it('joins translated warnings with a locale-appropriate separator', () => {
     const warnings = ['station is booting', 'unknown detail stays raw'];
     expect(joinBackendCopy(warnings)).toBe('station is booting unknown detail stays raw');
@@ -169,6 +235,14 @@ describe('backendCopy', () => {
       'bulk power timeout must cover the per-station operation timeout of 30 seconds, got 20',
       'station operation timeout cannot exceed the bulk power timeout of 120 seconds, got 130',
       'initial read timeout must not exceed the station operation timeout of 30 seconds, got 60',
+      'recovery retry maximum must not fall below the recovery retry base of 30 seconds, got 10',
+      'station is booting; retry after transition: station is transitioning between power states',
+      'station is booting; retry channel change after transition: station is transitioning between power states',
+      'station not found: AA:BB:CC:DD:EE:01',
+      'station not found: station AA:BB:CC:DD:EE:01 was not seen in the latest scan',
+      'channel conflicts with another visible station: channel 4 is used by LHB-A (AA:BB:CC:DD:EE:01)',
+      'operation is not supported',
+      'operation is not supported: standby is unavailable',
       'read power characteristic: boom'
     ];
     for (const input of patternInputs) {
