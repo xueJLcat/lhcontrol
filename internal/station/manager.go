@@ -795,6 +795,12 @@ func (m *Manager) waitInitializeAttempt(pending chan struct{}) error {
 		m.nextInitializeAt = time.Now().Add(m.initializeRetryCooldown())
 		err := m.initializeErr
 		m.initializeMutex.Unlock()
+		if err == nil {
+			// The first attempt can exceed the budget before it records any
+			// outcome; substitute a real cause so the unavailable message does
+			// not format a nil wrapped error.
+			err = fmt.Errorf("adapter initialization did not finish within %s", waitLimit)
+		}
 		return bluetoothUnavailableError(err)
 	case <-m.shutdownCh:
 		return ErrShuttingDown

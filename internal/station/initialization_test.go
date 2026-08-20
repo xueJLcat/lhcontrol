@@ -5,6 +5,7 @@ import (
 	"errors"
 	internalbluetooth "lhcontrol/internal/bluetooth"
 	"lhcontrol/internal/config"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -55,6 +56,9 @@ func TestInitializeBoundsHungAdapterEnable(t *testing.T) {
 	}
 	if err == nil {
 		t.Fatal("Initialize() unexpectedly succeeded while the adapter call was hung")
+	}
+	if strings.Contains(err.Error(), "%!") {
+		t.Fatalf("Initialize() error = %q, want a real cause instead of a malformed wrap", err)
 	}
 	// ensureReady must reach its own bounded wait instead of queueing on
 	// initializeMutex behind the hung startup call.
