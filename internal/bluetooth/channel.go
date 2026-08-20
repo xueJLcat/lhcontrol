@@ -29,6 +29,14 @@ func IdentifyContext(ctx context.Context, station *BaseStation) error {
 				// the cancellation instead of tearing down before noticing it.
 				return err
 			}
+			if contextErr := ctx.Err(); contextErr != nil {
+				// The interruption stopped the attempt; report the cancellation
+				// itself instead of booking it as a failed identify that
+				// exhausted its retries. The half-opened session still needs
+				// the same cleanup the retry path runs.
+				_ = disconnectInternal(station)
+				return contextErr
+			}
 			lastErr = err
 		} else if !station.Capabilities.Identify || station.identifyCharacteristic == nil {
 			return unsupportedCapability("identify", nil)

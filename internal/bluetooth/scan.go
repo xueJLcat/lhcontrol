@@ -184,9 +184,17 @@ func (s *scanSession) requestStop(reason scanStopReason) error {
 	s.mutex.Lock()
 	// A platform watcher has not started yet, so there is no StopScan call to
 	// await. markStarted will issue the recorded cancellation when it arrives.
-	pendingStart := !s.started && !s.finished
+	finished := s.finished
+	pendingStart := !s.started && !finished
 	s.mutex.Unlock()
 	if pendingStart {
+		return nil
+	}
+	if finished {
+		// The scan already resolved; its body owns the stop handshake from
+		// here. A stop error recorded earlier (an abandoned or wedged stop
+		// the body already accounted for) must not surface to a late cancel
+		// as if stopping had just failed.
 		return nil
 	}
 	return s.awaitStop(s.stopWaitLimit)

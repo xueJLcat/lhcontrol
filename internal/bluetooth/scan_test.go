@@ -1010,6 +1010,27 @@ func TestScanSessionStopAfterFinishedDoesNotRecordReason(t *testing.T) {
 	}
 }
 
+// TestScanSessionStopAfterFinishedDropsStaleStopError guards the late-cancel
+// window: once the scan body has resolved the session, a stop error recorded
+// earlier (an abandoned or wedged stop the body already accounted for) must
+// not surface to a cancellation request as if stopping had just failed.
+func TestScanSessionStopAfterFinishedDropsStaleStopError(t *testing.T) {
+	session := newScanSession()
+	session.markStarted()
+	// Emulate an issued stop whose handshake was abandoned: the bounded wait
+	// recorded the failure and closed stopDone, then the scan body finished
+	// draining on its own.
+	session.mutex.Lock()
+	session.stopStarted = true
+	session.stopErr = &scanStopAbandonedError{budget: time.Second}
+	session.mutex.Unlock()
+	session.doneOnce.Do(func() { close(session.stopDone) })
+	session.markFinished()
+	if err := session.requestStop(scanStopCancelled); err != nil {
+		t.Fatalf("requestStop() after finish = %v, want nil", err)
+	}
+}
+
 // TestScanSessionPlatformOutcomeBlocksStopReason guards the duration-timer
 // race: once the platform Scan call has delivered its outcome (typically a
 // radio removed mid-scan), a duration or cancellation stop that lands before

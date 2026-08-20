@@ -310,6 +310,35 @@ func TestConnectAndDiscoverMarksPreCancelledRequestNotStarted(t *testing.T) {
 	}
 }
 
+// TestConnectGateCancellationMarkedNotStarted guards the gate wait: the
+// connect gate releases the station lock while waiting for an in-flight
+// disconnect, so a deadline landing there means the request never touched
+// connection state (and a concurrent operation may even have rebuilt the
+// session). The error must stay marked never-started so callers keep the
+// session instead of tearing it down as cancelled discovery.
+func TestConnectGateCancellationMarkedNotStarted(t *testing.T) {
+	station := connectedFakeStation(&fakeCharacteristic{value: []byte{0x09}}, nil, nil, Capabilities{PowerRead: true})
+	station.mutex.Lock()
+	station.disconnectInFlight = make(chan struct{})
+	station.mutex.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	station.mutex.Lock()
+	err := connectAndDiscoverInternalContext(ctx, station)
+	station.mutex.Unlock()
+
+	if !isConnectNotStarted(err) {
+		t.Fatalf("connectAndDiscoverInternalContext() error = %v, want never-started deadline", err)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("never-started error = %v, want it to still match context.DeadlineExceeded", err)
+	}
+	if station.device == nil || !station.isConnected {
+		t.Fatal("gate cancellation modified the cached connection")
+	}
+}
+
 // TestConnectFailurePreservesReadTimestamps guards the observation
 // preservation contract: a failed connect does not invalidate values read
 // from an earlier session, so the read timestamps must survive. Wiping them

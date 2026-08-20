@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 	tinybluetooth "tinygo.org/x/bluetooth"
@@ -578,5 +579,31 @@ func TestIdentifyContextKeepsAttemptErrorWhenBackoffCancelled(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("cancelled identify did not return")
+	}
+}
+
+// TestIdentifyContextReportsInterruptionInsteadOfRetryFailure guards the
+// interrupted-attempt classification: a deadline that lands after the attempt
+// connected but before discovery finished is an interruption, not an identify
+// failure that exhausted its retries. Upstream treats the two differently, so
+// the context error itself must surface instead of the retry-failure message.
+func TestIdentifyContextReportsInterruptionInsteadOfRetryFailure(t *testing.T) {
+	ConfigureTiming(TimingPolicy{IdentifyAttempts: 2})
+	t.Cleanup(func() { ConfigureTiming(TimingPolicy{}) })
+
+	station := connectedFakeStation(nil, nil, nil, Capabilities{})
+	station.characteristic = nil
+	station.CapabilitiesKnown = false
+	station.device = &blockingDiscoveryDevice{started: make(chan struct{})}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	err := IdentifyContext(ctx, station)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("IdentifyContext() error = %v, want the deadline surfaced", err)
+	}
+	if strings.Contains(err.Error(), "after retry") {
+		t.Fatalf("IdentifyContext() reported the interruption as a retry failure: %v", err)
 	}
 }

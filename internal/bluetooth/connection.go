@@ -27,13 +27,31 @@ func isConnectNotStarted(err error) bool {
 	return errors.As(err, &notStarted)
 }
 
+// contextNotStartedError marks a context error produced at a point where the
+// connect/discover request has not created any connection state this call
+// owns. Callers cleaning up a cancelled operation must not disconnect a
+// session the call never used — including one a concurrent operation rebuilt
+// while this call waited with the station lock released. Non-context errors
+// pass through unchanged.
+func contextNotStartedError(err error) error {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return &connectNotStartedError{Err: err}
+	}
+	return err
+}
+
 func connectAndDiscoverInternalContext(ctx context.Context, station *BaseStation) error {
 	ctx = normalizeContext(ctx)
 	if err := ctx.Err(); err != nil {
 		return &connectNotStartedError{Err: err}
 	}
+	// The gate releases the station lock while waiting for an in-flight
+	// disconnect or pending cleanup, so a cancellation landing there means
+	// this call never touched connection state (and a concurrent operation
+	// may even have rebuilt the session meanwhile). Mark the context error
+	// so callers do not tear a session down this call never used.
 	if err := connectGate(ctx, station); err != nil {
-		return err
+		return contextNotStartedError(err)
 	}
 	if station.isConnected && station.device != nil && station.characteristic != nil {
 		connected, err := station.device.Connected()
@@ -66,8 +84,11 @@ func connectAndDiscoverInternalContext(ctx context.Context, station *BaseStation
 		// WinRT calls; an OS disconnect landing in that window can start an
 		// eager cleanup (disconnectInFlight/pendingCleanup) for this station.
 		// Re-run the gate immediately before opening the replacement session.
+		// A cancellation inside the gate still owns no session (and the gate's
+		// unlocked window may have let a concurrent reconnect finish), so keep
+		// the context error marked as a never-started connect.
 		if err := connectGate(ctx, station); err != nil {
-			return err
+			return contextNotStartedError(err)
 		}
 		// The gate releases the lock around its own WinRT cleanup; a
 		// concurrent operation can complete a full reconnect inside that
@@ -134,14 +155,19 @@ func connectAndDiscoverInternalContext(ctx context.Context, station *BaseStation
 				waitErr := sleepContext(ctx, discoveryTiming.DiscoveryRetryDelay)
 				station.mutex.Lock()
 				if waitErr != nil {
-					return waitErr
+					// The retry already disconnected this call's session, and
+					// the unlocked sleep window may have let a concurrent
+					// operation reconnect. A cancellation here owns no session.
+					return contextNotStartedError(waitErr)
 				}
 				// The unlocked sleep window lets an OS disconnect start an eager
 				// cleanup for this station. Re-run the same gate the entry uses:
 				// opening a new GATT session while the previous one is still
 				// released drops or corrupts single-connection peripherals.
+				// A cancellation inside the gate keeps the same never-started
+				// marking for the same reason.
 				if gateErr := connectGate(ctx, station); gateErr != nil {
-					return gateErr
+					return contextNotStartedError(gateErr)
 				}
 				// The unlocked windows also let a concurrent operation complete
 				// a full reconnect for this station. Reuse that session instead
@@ -155,7 +181,10 @@ func connectAndDiscoverInternalContext(ctx context.Context, station *BaseStation
 					device, connectErr := connectContext(ctx, station.Address)
 					if connectErr != nil {
 						if errors.Is(connectErr, context.Canceled) || errors.Is(connectErr, context.DeadlineExceeded) {
-							return connectErr
+							// The aborted connect created no session; mark it so
+							// caller cleanup does not disconnect a session the
+							// retry never used.
+							return contextNotStartedError(connectErr)
 						}
 						err = transportError("retry station connection", connectErr)
 						continue
