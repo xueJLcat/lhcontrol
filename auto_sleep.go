@@ -124,6 +124,7 @@ func (a *App) applyAutoSleep(settings autosleep.Settings) {
 
 	var monitor *autosleep.Monitor
 	seedOwedSession := false
+	var seedOwedSessionClosedAt time.Time
 	if previous := a.autoSleepWatcher; previous != nil {
 		// Cancel before taking the replacement snapshot. Watcher polls perform
 		// their final cancellation check under the same lifecycle lock used by
@@ -133,12 +134,22 @@ func (a *App) applyAutoSleep(settings autosleep.Settings) {
 		if previous.Settings.Target == settings.Target {
 			// Preserve idle/running/countdown state, and re-arm a consumed
 			// trigger whose action is still running or queued. A debt already
-			// carried from another target keeps its carry semantics.
+			// carried from another target keeps its carry semantics, and the
+			// replacement must keep the debt's own session key: the carried
+			// monitor state may already describe a newer session of this
+			// target, and the re-arm fire must not be re-keyed by it.
 			var carried bool
 			monitor, carried = previous.ReplacementMonitor(settings.Delay())
-			seedOwedSession = carried
+			// Seed only while the debt is still owed: an action that settles
+			// between the replacement snapshot and this read leaves nothing to
+			// re-arm, and the settled-session de-duplication then covers the
+			// carried countdown. Seeding a zero key instead would bypass that
+			// de-duplication and re-run an already completed sleep.
+			if carried {
+				seedOwedSession, seedOwedSessionClosedAt = previous.OwedSession()
+			}
 		} else if owed, closedAt := previous.OwedSession(); owed {
-			// A target change discards the old process observation (it belongs
+			// A target change discards the old process observations (they belong
 			// to a different session source), but an owed unsettled sleep must
 			// survive: seed the session-close time so the replacement watcher
 			// re-arms the debt (and keeps the closedAt de-duplication key)
@@ -149,6 +160,7 @@ func (a *App) applyAutoSleep(settings autosleep.Settings) {
 			// it once that process stops.
 			monitor = autosleep.NewMonitorContinuing(settings.Delay(), closedAt)
 			seedOwedSession = true
+			seedOwedSessionClosedAt = closedAt
 		}
 		a.autoSleepCancel = nil
 		a.autoSleepWatcher = nil
@@ -176,6 +188,7 @@ func (a *App) applyAutoSleep(settings autosleep.Settings) {
 			// brand-new process session that may never come.
 			monitor = autosleep.NewMonitorContinuing(settings.Delay(), a.autoSleepSelfStopClosedAt)
 			seedOwedSession = true
+			seedOwedSessionClosedAt = a.autoSleepSelfStopClosedAt
 			a.autoSleepSelfStopOwed = false
 			a.autoSleepSelfStopClosedAt = time.Time{}
 		} else if !a.autoSleepSelfStopCountdownAt.IsZero() {
@@ -205,7 +218,7 @@ func (a *App) applyAutoSleep(settings autosleep.Settings) {
 		Trigger: a.runAutoSleepSession,
 	}
 	if seedOwedSession {
-		watcher.SeedOwedSession()
+		watcher.SeedOwedSession(seedOwedSessionClosedAt)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -292,10 +305,19 @@ func (a *App) reapStoppedAutoSleepWatcher(watcher *autosleep.Watcher) {
 	a.autoSleepMutex.Unlock()
 
 	// Surface the failure outside the lock; the event must not queue behind
-	// settings calls and the sink must not be able to deadlock on it.
+	// settings calls and the sink must not be able to deadlock on it. A
+	// concurrent settings replacement may have installed a healthy watcher
+	// between the clear and this point, so re-check under the lock first:
+	// a feature that already recovered must get neither a stale failure
+	// event nor a redundant rebuild timer.
 	if cleared {
-		a.emitAutoSleep(autoSleepEvent{Phase: "failed", Error: fmt.Sprintf("automatic sleep stopped watching: %v", err)})
-		a.scheduleAutoSleepRebuild()
+		a.autoSleepMutex.Lock()
+		report := a.autoSleepWatcher == nil && !a.shuttingDown.Load()
+		a.autoSleepMutex.Unlock()
+		if report {
+			a.emitAutoSleep(autoSleepEvent{Phase: "failed", Error: fmt.Sprintf("automatic sleep stopped watching: %v", err)})
+			a.scheduleAutoSleepRebuild()
+		}
 	}
 
 }
@@ -329,6 +351,11 @@ func (a *App) scheduleAutoSleepRebuild() {
 	a.autoSleepMutex.Lock()
 	defer a.autoSleepMutex.Unlock()
 	if a.shuttingDown.Load() {
+		return
+	}
+	// A settings replacement that raced the reaper may already cover the
+	// feature; its own self-stop (if any) schedules a fresh rebuild cycle.
+	if a.autoSleepWatcher != nil {
 		return
 	}
 	// A second self-stop before the first rebuild fires must not accumulate

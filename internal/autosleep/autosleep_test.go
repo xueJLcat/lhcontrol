@@ -348,7 +348,7 @@ func TestWatcherReplacementRearmsOwedTrigger(t *testing.T) {
 		t.Fatalf("source monitor = %v, want ActionTrigger", got)
 	}
 	watcher := &Watcher{Settings: Settings{Target: string(TargetSteamVR), DelaySeconds: 60}, Monitor: monitor}
-	watcher.markTriggerOwed(true)
+	watcher.markTriggerOwed(true, base.Add(time.Second))
 	replacement, carried := watcher.ReplacementMonitor(3 * time.Minute)
 	if carried {
 		t.Fatal("ReplacementMonitor reported a carried debt for a same-session debt")
@@ -372,7 +372,7 @@ func TestWatcherOwedSessionSurvivesTargetSwitch(t *testing.T) {
 		t.Fatalf("source monitor = %v, want ActionTrigger", got)
 	}
 	source := &Watcher{Settings: Settings{Target: string(TargetSteamVR), DelaySeconds: 60}, Monitor: monitor}
-	source.markTriggerOwed(true)
+	source.markTriggerOwed(true, base.Add(time.Second))
 
 	owed, closedAt := source.OwedSession()
 	if !owed || !closedAt.Equal(base.Add(time.Second)) {
@@ -398,7 +398,7 @@ func TestWatcherOwedSessionSurvivesTargetSwitch(t *testing.T) {
 			return true
 		},
 	}
-	watcher.SeedOwedSession()
+	watcher.SeedOwedSession(closedAt)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
@@ -649,14 +649,14 @@ func TestWatcherOwesTriggerWhileActionInFlight(t *testing.T) {
 func TestWatcherTriggerDebtUsesCompletionGeneration(t *testing.T) {
 	watcher := &Watcher{}
 
-	first := watcher.markTriggerOwed(true)
+	first := watcher.markTriggerOwed(true, time.Time{})
 	watcher.finishTrigger(first, true)
 	if watcher.OwesTrigger() {
 		t.Fatal("completed action remained owed before the watcher loop observed its done channel")
 	}
 
-	older := watcher.markTriggerOwed(true)
-	newer := watcher.markTriggerOwed(true)
+	older := watcher.markTriggerOwed(true, time.Time{})
+	newer := watcher.markTriggerOwed(true, time.Time{})
 	watcher.finishTrigger(older, true)
 	if !watcher.OwesTrigger() {
 		t.Fatal("older action completion cleared a newer pending trigger")
@@ -761,7 +761,7 @@ func TestCancelledActionKeepsOwedTriggerForReplacement(t *testing.T) {
 		t.Fatalf("source monitor = %v, want ActionTrigger", got)
 	}
 	watcher := &Watcher{Settings: Settings{Target: string(TargetSteamVR), DelaySeconds: 60}, Monitor: monitor}
-	generation := watcher.markTriggerOwed(true)
+	generation := watcher.markTriggerOwed(true, base.Add(time.Second))
 
 	// The in-flight action is cancelled before settling.
 	watcher.finishTrigger(generation, false)
@@ -796,7 +796,7 @@ func TestWatchedDebtSurvivesTargetSwitchWhileNewProcessRuns(t *testing.T) {
 		t.Fatalf("source monitor = %v, want ActionTrigger", got)
 	}
 	source := &Watcher{Settings: Settings{Target: string(TargetSteamVR), DelaySeconds: 60}, Monitor: monitor}
-	source.markTriggerOwed(true)
+	source.markTriggerOwed(true, originalClose)
 	owed, owedClosedAt := source.OwedSession()
 	if !owed || !owedClosedAt.Equal(originalClose) {
 		t.Fatalf("OwedSession() = %v, %v, want owed at %v", owed, owedClosedAt, originalClose)
@@ -806,6 +806,7 @@ func TestWatchedDebtSurvivesTargetSwitchWhileNewProcessRuns(t *testing.T) {
 	running.Store(true)
 	var ticks atomic.Int64
 	var calls atomic.Int32
+	var firedClosedAt atomic.Value
 	rearmRan := make(chan struct{})
 	var rearmOnce sync.Once
 	watcher := &Watcher{
@@ -814,14 +815,15 @@ func TestWatchedDebtSurvivesTargetSwitchWhileNewProcessRuns(t *testing.T) {
 		IsRunning: func(string) (bool, error) { return running.Load(), nil },
 		Now:       func() time.Time { return base.Add(3*time.Minute + time.Duration(ticks.Add(1))*time.Minute) },
 		Monitor:   NewMonitorContinuing(3*time.Minute, owedClosedAt),
-		Trigger: func(_ context.Context, _ time.Time) bool {
+		Trigger: func(_ context.Context, gotClosedAt time.Time) bool {
 			if calls.Add(1) == 1 {
+				firedClosedAt.Store(gotClosedAt)
 				rearmOnce.Do(func() { close(rearmRan) })
 			}
 			return true
 		},
 	}
-	watcher.SeedOwedSession()
+	watcher.SeedOwedSession(owedClosedAt)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -860,6 +862,14 @@ func TestWatchedDebtSurvivesTargetSwitchWhileNewProcessRuns(t *testing.T) {
 	}
 	if got := calls.Load(); got != 1 {
 		t.Fatalf("trigger calls = %d, want exactly 1", got)
+	}
+	// The re-arm fire must keep the debt's own session key: the monitor
+	// countdown at fire time belongs to the new target's just-closed session,
+	// and re-keying the debt by it would double-book the new session and drop
+	// the settled-session de-duplication key of the owed one.
+	got, _ := firedClosedAt.Load().(time.Time)
+	if !got.Equal(owedClosedAt) {
+		t.Fatalf("re-arm trigger closedAt = %v, want the carried debt's session close %v", got, owedClosedAt)
 	}
 }
 
@@ -931,5 +941,68 @@ func TestWatcherDoneClosesOnCancellation(t *testing.T) {
 	}
 	if err := watcher.ExitErr(); err != nil {
 		t.Fatalf("ExitErr() = %v after a planned cancellation, want nil", err)
+	}
+}
+
+// TestRearmedDebtConsumesMatchingCountdown guards the duplicate-fire case a
+// raised delay creates: the carried debt still has its own session armed as
+// a countdown that has not elapsed yet. The re-arm fires the debt
+// immediately and must consume that matching countdown; otherwise the same
+// closed session fires a second time once the longer delay elapses.
+func TestRearmedDebtConsumesMatchingCountdown(t *testing.T) {
+	base := time.Now()
+	sessionClose := base.Add(time.Second)
+	var ticks atomic.Int64
+	var calls atomic.Int32
+	var firedClosedAt atomic.Value
+	watcher := &Watcher{
+		Settings:  Settings{Enabled: true, Target: string(TargetSteamVR), DelaySeconds: 7200},
+		Interval:  time.Millisecond,
+		IsRunning: func(string) (bool, error) { return false, nil },
+		Now:       func() time.Time { return sessionClose.Add(30*time.Minute + time.Duration(ticks.Add(1))*30*time.Minute) },
+		Monitor:   NewMonitorContinuing(2*time.Hour, sessionClose),
+		Trigger: func(_ context.Context, gotClosedAt time.Time) bool {
+			firedClosedAt.Store(gotClosedAt)
+			calls.Add(1)
+			return true
+		},
+	}
+	watcher.SeedOwedSession(sessionClose)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		watcher.Run(ctx)
+	}()
+	defer func() {
+		cancel()
+		<-done
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for calls.Load() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("owed debt did not fire on the replacement watcher")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	deadline = time.Now().Add(2 * time.Second)
+	for watcher.OwesTrigger() {
+		if time.Now().After(deadline) {
+			t.Fatal("owed debt stayed owed after the action settled")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// Keep polling well past the raised delay: a still-armed countdown for
+	// the settled session would produce a second trigger here.
+	time.Sleep(50 * time.Millisecond)
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("trigger calls = %d, want exactly 1 (the matching countdown must be consumed)", got)
+	}
+	got, _ := firedClosedAt.Load().(time.Time)
+	if !got.Equal(sessionClose) {
+		t.Fatalf("trigger closedAt = %v, want the carried session close %v", got, sessionClose)
 	}
 }

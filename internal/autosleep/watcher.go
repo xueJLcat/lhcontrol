@@ -55,12 +55,17 @@ type Watcher struct {
 	// debt inherited from a watcher that watched a different process: the new
 	// target running is not a relaunch of that owed session, so the running
 	// branch must keep the debt owed until the action settles instead of
-	// dropping it.
+	// dropping it. owedClosedAt is the session-close time that identifies the
+	// owed debt. It must travel with the debt itself instead of being derived
+	// from the monitor at fire time: once a carried watcher's new target runs
+	// and stops, the monitor countdown describes the new session, and re-arm
+	// fires would otherwise book the old debt under the new session's key.
 	lifecycleMutex    sync.Mutex
 	mutex             sync.Mutex
 	triggerOwed       bool
 	triggerGeneration uint64
 	carriedDebt       bool
+	owedClosedAt      time.Time
 
 	// done closes when Run returns, for any reason. Owners observe it to tell
 	// a watcher that stopped on its own (invalid target, persistent
@@ -114,12 +119,16 @@ func (w *Watcher) MonitorCountdown() (active bool, closedAt time.Time) {
 // target's observations must not re-derive it), so the replacement watcher is
 // seeded directly: while the new target runs, the debt stays owed instead of
 // being cleared as a relaunched session, and the re-arm path fires it once
-// the new target stops running. Call before Run.
-func (w *Watcher) SeedOwedSession() {
+// the new target stops running. closedAt identifies the owed session so the
+// re-arm fire and downstream de-duplication keep using the debt's own
+// session key even after the new target's observations replace the monitor
+// state. Call before Run.
+func (w *Watcher) SeedOwedSession(closedAt time.Time) {
 	w.mutex.Lock()
 	w.triggerGeneration++
 	w.triggerOwed = true
 	w.carriedDebt = true
+	w.owedClosedAt = closedAt
 	w.mutex.Unlock()
 }
 
@@ -174,7 +183,10 @@ func (w *Watcher) OwesTrigger() bool {
 // monitor's observation state (running/countdown belongs to the old
 // process), but the debt itself does not depend on which process is watched
 // next and must survive the switch instead of being silently dropped until
-// the new target's next full session.
+// the new target's next full session. The reported close time is the debt's
+// own key, never the monitor's current countdown: after the new target runs
+// and stops, the monitor countdown belongs to that new session and must not
+// re-key the carried debt.
 func (w *Watcher) OwedSession() (bool, time.Time) {
 	// The entire snapshot runs under lifecycleMutex, matching
 	// ReplacementMonitor: the poll loop checks cancellation and commits its
@@ -186,25 +198,29 @@ func (w *Watcher) OwedSession() (bool, time.Time) {
 	w.lifecycleMutex.Lock()
 	defer w.lifecycleMutex.Unlock()
 	w.mutex.Lock()
-	owed := w.triggerOwed
-	w.mutex.Unlock()
-	if !owed {
+	defer w.mutex.Unlock()
+	if !w.triggerOwed {
 		return false, time.Time{}
 	}
-	if w.Monitor == nil {
-		return true, time.Time{}
-	}
-	_, closedAt := w.Monitor.Countdown()
-	return true, closedAt
+	return true, w.owedClosedAt
 }
 
-func (w *Watcher) markTriggerOwed(owed bool) uint64 {
+func (w *Watcher) markTriggerOwed(owed bool, closedAt time.Time) uint64 {
 	w.mutex.Lock()
 	w.triggerGeneration++
 	w.triggerOwed = owed
+	w.owedClosedAt = closedAt
 	generation := w.triggerGeneration
 	w.mutex.Unlock()
 	return generation
+}
+
+// owedSessionClosedAt reports the session-close key recorded with the debt.
+// Callers hold lifecycleMutex; the read takes the shorter debt lock.
+func (w *Watcher) owedSessionClosedAt() time.Time {
+	w.mutex.Lock()
+	defer w.mutex.Unlock()
+	return w.owedClosedAt
 }
 
 // finishTrigger clears only the debt consumed by this action. A new session
@@ -220,6 +236,7 @@ func (w *Watcher) finishTrigger(generation uint64, settled bool) {
 		if settled {
 			w.triggerOwed = false
 			w.carriedDebt = false
+			w.owedClosedAt = time.Time{}
 		}
 	}
 	w.mutex.Unlock()
@@ -234,6 +251,7 @@ func (w *Watcher) clearSessionDebtUnlessCarried() {
 	if !w.carriedDebt {
 		w.triggerGeneration++
 		w.triggerOwed = false
+		w.owedClosedAt = time.Time{}
 	}
 	w.mutex.Unlock()
 }
@@ -340,8 +358,8 @@ func (w *Watcher) Run(ctx context.Context) {
 		}
 		if monitor.Poll(running, now) == ActionTrigger {
 			pendingTrigger = true
-			pendingTriggerGeneration = w.markTriggerOwed(true)
 			_, pendingTriggerClosedAt = monitor.Countdown()
+			pendingTriggerGeneration = w.markTriggerOwed(true, pendingTriggerClosedAt)
 		}
 		// A cancelled action keeps its sleep debt owed, but the monitor has
 		// already consumed the trigger and returned to idle. Without re-arming
@@ -349,11 +367,19 @@ func (w *Watcher) Run(ctx context.Context) {
 		// session that may never come (for example when an external scan stop
 		// cancelled the action's scan phase). Re-arm on the next quiet poll;
 		// the running branch above still clears the debt if the process
-		// relaunches first.
+		// relaunches first. The fire uses the debt's own session key instead
+		// of the monitor countdown: after a carried debt's new target runs
+		// and stops, the countdown describes that new session, and re-keying
+		// the debt by it would double-book the new session. The fire also
+		// consumes any armed countdown: it belongs to the same stopped session
+		// this fire is settling, and leaving it armed would fire a second,
+		// redundant sleep once the delay passes. A fire cancelled before
+		// settling keeps the debt owed, so the re-arm still runs later.
 		if !pendingTrigger && triggerDone == nil && !running && w.OwesTrigger() {
 			pendingTrigger = true
-			pendingTriggerGeneration = w.markTriggerOwed(true)
-			_, pendingTriggerClosedAt = monitor.Countdown()
+			pendingTriggerClosedAt = w.owedSessionClosedAt()
+			pendingTriggerGeneration = w.markTriggerOwed(true, pendingTriggerClosedAt)
+			monitor.consumeActiveCountdown()
 		}
 		// Fire when a trigger is owed and no action is currently running.
 		// If the previous action is still stopping, this stays pending and

@@ -312,7 +312,7 @@ func selfStoppingWatcher() *autosleep.Watcher {
 		},
 		Trigger: func(context.Context, time.Time) bool { return true },
 	}
-	watcher.SeedOwedSession()
+	watcher.SeedOwedSession(time.Now().Add(-time.Minute))
 	return watcher
 }
 

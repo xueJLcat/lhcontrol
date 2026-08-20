@@ -167,6 +167,21 @@ func (m *Monitor) Countdown() (active bool, closedAt time.Time) {
 	return m.state == stateClosed, m.closedAt
 }
 
+// consumeActiveCountdown drops an armed session-close countdown without
+// waiting for the delay to elapse. It is used by the watcher's re-arm path:
+// a re-arm fire runs the owed sleep immediately for the stations the user
+// stopped using, and any armed countdown at that moment belongs to the same
+// stopped session, so leaving it armed would fire a second, redundant sleep
+// once the delay passes. If the fire is cancelled before settling, the debt
+// stays owed and re-arms, so no sleep is lost by consuming the countdown.
+func (m *Monitor) consumeActiveCountdown() {
+	m.mutex.Lock()
+	if m.state == stateClosed {
+		m.state = stateIdle
+	}
+	m.mutex.Unlock()
+}
+
 // Poll advances the state machine with a fresh observation. running reports
 // whether the watched process is alive; now is the poll timestamp.
 func (m *Monitor) Poll(running bool, now time.Time) Action {
