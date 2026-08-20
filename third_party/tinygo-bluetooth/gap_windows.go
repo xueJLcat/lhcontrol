@@ -126,6 +126,12 @@ type scanControl struct {
 	// must not be released by cleanup (it can still be live); a rescue
 	// goroutine owns its teardown instead.
 	startWedged bool
+	// removeWedged records that RemoveReceived/RemoveStopped exhausted its
+	// bounded budget during teardown. The abandoned COM call keeps executing
+	// against the watcher on its own thread, so releaseWatcher must abandon
+	// the reference instead of freeing it underneath the in-flight call — the
+	// same invariant the device/service/characteristic cleanup paths apply.
+	removeWedged bool
 }
 
 // stopWatcher issues watcher.Stop() once watcher.Start() has been accepted.
@@ -307,6 +313,15 @@ const rescueLateStartMaxPollBackoff = 2 * time.Second
 // permanently failing stop.
 const rescueStopAttempts = 3
 
+// rescueLateStartMaxLifetime bounds the total time the late-start rescue polls
+// before giving up. A wedged Start whose status reads keep succeeding would
+// otherwise poll every scan interval for the life of the process, spawning a
+// COM call (and a locked OS thread) each time; once the budget elapses the
+// rescue stops polling and parks the reference like the other wedged paths. A
+// Start that self-heals within the budget is still stopped and released. It is
+// a variable so tests can shrink it.
+var rescueLateStartMaxLifetime = 5 * time.Minute
+
 // rescueLateStart tears down a watcher whose Start only completed after the
 // start budget abandoned the scan. The watcher came up orphaned (the owning
 // ScanWithStart already returned and skipped the watcher release), so leaving
@@ -340,7 +355,10 @@ func (control *scanControl) rescueLateStart(watcher *advertisement.BluetoothLEAd
 // runRescueLateStart drives the rescue poll loop with injectable watcher
 // calls. Every exit path that observes a terminal state releases the watcher:
 // releaseWatcher deliberately abandons a wedged-start watcher, so the rescue
-// is the only owner left that can free its COM reference.
+// is the only owner left that can free its COM reference. The loop is bounded
+// by rescueLateStartMaxLifetime: a watcher whose status reads keep succeeding
+// but never reaches an actionable state stops being polled once the budget
+// elapses, parking its reference instead of polling for the process lifetime.
 func runRescueLateStart(
 	getStatus func() (advertisement.BluetoothLEAdvertisementWatcherStatus, error),
 	stop func() error,
@@ -348,7 +366,14 @@ func runRescueLateStart(
 ) {
 	backoff := scanStopPollInterval
 	consecutiveFailures := 0
+	deadline := time.Now().Add(rescueLateStartMaxLifetime)
 	for {
+		if time.Now().After(deadline) {
+			// A Start that neither self-healed nor failed within the budget
+			// stays parked. Keep the reference: the Start call may still be in
+			// flight, and releasing could free it under a pending COM call.
+			return
+		}
 		status, statusErr := getStatus()
 		if statusErr == nil {
 			consecutiveFailures = 0
@@ -432,12 +457,14 @@ func rescueStopStartedWatcher(
 // terminal state within the wait is abandoned (reference leaked) rather than
 // released, letting WinRT finish draining on its own. A wedged-start watcher
 // is always abandoned: its Start call may still be in flight, and releasing
-// the object could free it underneath the pending COM call.
+// the object could free it underneath the pending COM call. A wedged event
+// removal is abandoned for the same reason: the abandoned RemoveReceived/
+// RemoveStopped call still executes against the watcher on its own thread.
 func (control *scanControl) releaseWatcher(watcher *advertisement.BluetoothLEAdvertisementWatcher) {
 	control.mutex.Lock()
 	started := control.started
 	terminal := control.terminal
-	wedged := control.startWedged
+	wedged := control.startWedged || control.removeWedged
 	control.mutex.Unlock()
 	if watcher == nil || wedged || !started || terminal {
 		if watcher != nil && !wedged {
@@ -466,6 +493,12 @@ func (control *scanControl) releaseWatcher(watcher *advertisement.BluetoothLEAdv
 func (control *scanControl) markTerminal() {
 	control.mutex.Lock()
 	control.terminal = true
+	control.mutex.Unlock()
+}
+
+func (control *scanControl) markRemoveWedged() {
+	control.mutex.Lock()
+	control.removeWedged = true
 	control.mutex.Unlock()
 }
 
@@ -748,15 +781,41 @@ func (a *Adapter) ScanWithStartSession(callback func(*Adapter, ScanResult), star
 	// and the extra watcher is released. The creation itself is bounded too:
 	// a wedged creation must not keep the adapter scan slot claimed forever.
 	var watcher *advertisement.BluetoothLEAdvertisementWatcher
-	err = boundedWatcherCall(watcherSetupCallLimit, func() error {
-		created, createErr := advertisement.NewBluetoothLEAdvertisementWatcher()
-		if createErr == nil {
-			watcher = created
+	var createErr error
+	createDone := make(chan struct{})
+	go func() {
+		defer close(createDone)
+		leaveThread, threadErr := enterWinRTThread()
+		if threadErr != nil {
+			createErr = threadErr
+			return
 		}
+		defer leaveThread()
+		watcher, createErr = advertisement.NewBluetoothLEAdvertisementWatcher()
+	}()
+	createTimer := time.NewTimer(watcherSetupCallLimit)
+	select {
+	case <-createDone:
+		createTimer.Stop()
+	case <-createTimer.C:
+		// Creation is still in flight and has no owner anymore. Release
+		// whatever it produces once it finishes; a watcher created after the
+		// budget expired would otherwise leak its COM reference. The late
+		// Release runs on its own WinRT thread and is itself bounded so a
+		// wedged release cannot hang the cleanup goroutine.
+		go func() {
+			<-createDone
+			if watcher != nil {
+				_ = boundedWatcherCall(watcherSetupCallLimit, func() error {
+					watcher.Release()
+					return nil
+				})
+			}
+		}()
+		return &WatcherCallTimeoutError{Budget: watcherSetupCallLimit}
+	}
+	if createErr != nil {
 		return createErr
-	})
-	if err != nil {
-		return err
 	}
 	control := &scanControl{watcher: watcher, stopRequests: make(chan error, 1)}
 
@@ -851,14 +910,25 @@ func (a *Adapter) ScanWithStartSession(callback func(*Adapter, ScanResult), star
 		// and a freed handler would turn that dispatch into a crash. The
 		// closed callback gate keeps any such late dispatch a no-op.
 		callbacks.close()
-		receivedRemoved := boundedWatcherCall(watcherSetupCallLimit, func() error {
+		receivedErr := boundedWatcherCall(watcherSetupCallLimit, func() error {
 			return watcher.RemoveReceived(receivedToken)
-		}) == nil
+		})
+		receivedRemoved := receivedErr == nil
+		var stoppedErr error
 		stoppedRemoved := true
 		if stoppedAdded {
-			stoppedRemoved = boundedWatcherCall(watcherSetupCallLimit, func() error {
+			stoppedErr = boundedWatcherCall(watcherSetupCallLimit, func() error {
 				return watcher.RemoveStopped(stoppedToken)
-			}) == nil
+			})
+			stoppedRemoved = stoppedErr == nil
+		}
+		// A removal that exhausted its budget is still executing against the
+		// watcher on its abandoned COM thread. releaseWatcher must then abandon
+		// the watcher reference instead of freeing it underneath that call. A
+		// non-timeout error means the call already completed, so only a timeout
+		// marks the wedge.
+		if isWatcherCallTimeout(receivedErr) || isWatcherCallTimeout(stoppedErr) {
+			control.markRemoveWedged()
 		}
 		callbacks.wait()
 		if stoppedHandler != nil && stoppedRemoved {
@@ -1911,15 +1981,28 @@ func (d Device) cleanup(attempt *deviceCleanupAttempt) {
 			warnings = append(warnings, err)
 		}
 	}
+	// Characteristics whose RemoveValueChanged is still in flight must keep
+	// their reference exactly like the retained handler above: releasing the
+	// object could destroy it underneath the abandoned COM call.
+	busyCharacteristics := make(map[*genericattributeprofile.GattCharacteristic]struct{})
+	for index, notification := range notifications {
+		if notificationBusy[index] && notification.characteristic != nil {
+			busyCharacteristics[notification.characteristic] = struct{}{}
+		}
+	}
 	for _, characteristic := range characteristics {
-		if characteristic != nil {
-			characteristic := characteristic
-			if err := cleanupCall("release characteristic", func() error {
-				characteristic.Release()
-				return nil
-			}); err != nil {
-				warnings = append(warnings, err)
-			}
+		if characteristic == nil {
+			continue
+		}
+		if _, busy := busyCharacteristics[characteristic]; busy {
+			continue
+		}
+		characteristic := characteristic
+		if err := cleanupCall("release characteristic", func() error {
+			characteristic.Release()
+			return nil
+		}); err != nil {
+			warnings = append(warnings, err)
 		}
 	}
 	for _, service := range services {

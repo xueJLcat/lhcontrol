@@ -648,6 +648,48 @@ func TestRescueLateStartBoundedWhenStopKeepsFailing(t *testing.T) {
 	}
 }
 
+// TestRescueLateStartBoundedWhenStatusStaysCreated guards against an endless
+// poll loop: a wedged Start whose status reads keep succeeding but never reach
+// an actionable state must stop being polled once the lifetime budget elapses,
+// parking its reference instead of spawning a COM call every interval for the
+// process lifetime.
+func TestRescueLateStartBoundedWhenStatusStaysCreated(t *testing.T) {
+	originalPoll := scanStopPollInterval
+	originalLifetime := rescueLateStartMaxLifetime
+	scanStopPollInterval = time.Millisecond
+	rescueLateStartMaxLifetime = 20 * time.Millisecond
+	t.Cleanup(func() {
+		scanStopPollInterval = originalPoll
+		rescueLateStartMaxLifetime = originalLifetime
+	})
+
+	var statusCalls atomic.Int32
+	var released atomic.Bool
+	started := time.Now()
+	runRescueLateStart(
+		func() (advertisement.BluetoothLEAdvertisementWatcherStatus, error) {
+			statusCalls.Add(1)
+			return advertisement.BluetoothLEAdvertisementWatcherStatusCreated, nil
+		},
+		func() error {
+			t.Error("a never-started watcher must not be stopped")
+			return nil
+		},
+		func() {
+			released.Store(true)
+		},
+	)
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("rescue polled %v, want it bounded by the lifetime budget", elapsed)
+	}
+	if statusCalls.Load() == 0 {
+		t.Fatal("rescue never polled the watcher status")
+	}
+	if released.Load() {
+		t.Fatal("a watcher whose Start may still be in flight must not be released")
+	}
+}
+
 // TestCallbackGateWaitIsBounded guards against a permanently blocked callback
 // body pinning scan teardown or device cleanup forever: after the drain limit
 // the wait must return even though the callback never ends.
