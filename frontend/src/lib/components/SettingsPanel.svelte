@@ -72,7 +72,7 @@
   import { autosleep as autosleepModels, bluetooth as bluetoothModels } from '../../../wailsjs/go/models';
   import { pushToast } from '../toast';
   import { backendCopy } from '../backend-copy';
-  import { languagePreference, saveLanguagePreference, t, type LanguagePreference } from '../i18n.svelte';
+  import { languagePreference, saveLanguagePreference, t, withDetail, type LanguagePreference } from '../i18n.svelte';
   import SettingsDrawer from './SettingsDrawer.svelte';
   import { AsyncSetting } from './settings/async-setting.svelte';
 
@@ -249,7 +249,7 @@
       const result = await save;
       if (!result.saved) {
         if (result.reverted) onLanguageChanged();
-        pushToast(`${t('Language setting could not be saved')}: ${String(result.error)}`);
+        pushToast(withDetail('Language setting could not be saved', backendCopy(String(result.error))));
       }
     } finally {
       // An exception above must not leave the setting disabled forever: the

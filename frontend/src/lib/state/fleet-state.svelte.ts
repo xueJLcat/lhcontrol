@@ -8,6 +8,14 @@ import {
   sameStationInfo
 } from '../station';
 
+// Mirrors the backend operationSafetyFreshnessWindow: an operational deadline
+// is always a backend read timestamp plus this window, so a legitimately
+// scheduled expiry can never be more than this far ahead. Clamping the timer
+// to it stops a backwards wall-clock adjustment from pinning the fresh flags
+// (and the channel-conflict and duplicated-command guards that trust them)
+// for the whole skew.
+const OPERATIONAL_SAFETY_WINDOW_MS = 45_000;
+
 export class FleetState {
   stations = $state<StationInfo[]>([]);
   private channelMemory = new ChannelMemory();
@@ -177,7 +185,7 @@ export class FleetState {
       }
     }
     if (nearest === Number.POSITIVE_INFINITY) return;
-    const delay = Math.max(0, nearest - Date.now());
+    const delay = Math.min(OPERATIONAL_SAFETY_WINDOW_MS, Math.max(0, nearest - Date.now()));
     this.operationalFreshnessTimer = setTimeout(() => {
       this.operationalFreshnessTimer = null;
       this.expireOperationalFreshnessThrough(nearest);
