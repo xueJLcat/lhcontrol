@@ -245,6 +245,11 @@ type Manager struct {
 	initializeErr      error
 	initializeFailedAt time.Time
 	nextInitializeAt   time.Time
+	// initializeAttempted marks that at least one adapter-enable attempt has
+	// run. A nil initializeErr is ambiguous without it: it means either "the
+	// adapter is initialized" or "no attempt has happened yet", and only the
+	// former may skip a new attempt.
+	initializeAttempted bool
 	// initializePending is non-nil while a bounded initialization attempt runs.
 	// Closed once the attempt's outcome is recorded; later ensureReady calls
 	// adopt the outcome instead of starting a concurrent adapter.Enable.

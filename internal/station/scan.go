@@ -507,7 +507,16 @@ func (m *Manager) runInitialScanReads(ctx context.Context, stationsToFetch []*bl
 			readResults[resultIndex].err = runSafely("initial station read", func() error {
 				return m.bluetoothOps.fetchInitialPowerState(readContext, ptr)
 			})
-			if ctx.Err() == nil && !ownBudget && errors.Is(phaseContext.Err(), context.DeadlineExceeded) &&
+			// A caller deadline is booked like the phase deadline for an
+			// in-flight read: the queued branch above already treats the two
+			// identically, and folding a torn-down but executed read into the
+			// structured failure path would increment the connection-failure
+			// backoff for an interruption that is not evidence the link is
+			// broken. A user cancellation still falls through so the
+			// post-loop pass can keep it clean.
+			interruptedByCallerDeadline := ctx.Err() != nil && errors.Is(ctx.Err(), context.DeadlineExceeded)
+			if (ctx.Err() == nil || interruptedByCallerDeadline) && !ownBudget &&
+				errors.Is(phaseContext.Err(), context.DeadlineExceeded) &&
 				isPureContextError(readResults[resultIndex].err) &&
 				errors.Is(readResults[resultIndex].err, context.DeadlineExceeded) {
 				// A genuine transport failure joined with the phase deadline

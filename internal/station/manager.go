@@ -680,24 +680,40 @@ func (m *Manager) recordUnstructuredStationFailure(
 	m.noteStatusFailure(address)
 }
 
-// Initialize should be called at app startup
+// Initialize should be called at app startup. It routes through the same
+// bounded attempt machinery as ensureReady: adapter.Enable takes no context
+// and WinRT against an unhealthy radio can hang indefinitely, so the
+// startup call must not block the app (or hold initializeMutex, which would
+// stall every concurrent ensureReady before it reaches its bounded wait) on
+// the raw adapter call.
 func (m *Manager) Initialize() error {
 	m.initializeMutex.Lock()
-	defer m.initializeMutex.Unlock()
 	if m.shuttingDown.Load() {
 		// Consistent with ensureReady: do not re-initialize the adapter while
 		// it is being torn down.
+		m.initializeMutex.Unlock()
 		return ErrShuttingDown
 	}
-	m.initializeErr = m.initializeBluetooth()
-	if m.initializeErr != nil {
-		m.initializeFailedAt = time.Now()
-		m.nextInitializeAt = m.initializeFailedAt.Add(m.initializeRetryCooldown())
-	} else {
-		m.initializeFailedAt = time.Time{}
-		m.nextInitializeAt = time.Time{}
+	if m.initializeAttempted && m.initializeErr == nil {
+		m.initializeMutex.Unlock()
+		return nil
 	}
-	return m.initializeErr
+	if pending := m.initializePending; pending != nil {
+		// An attempt is already inside the adapter call: adopt its outcome
+		// instead of starting a concurrent Enable.
+		m.initializeMutex.Unlock()
+		return m.waitInitializeAttempt(pending)
+	}
+	pending := make(chan struct{})
+	m.initializePending = pending
+	initialize := m.initializeBluetooth
+	m.initializeWg.Add(1)
+	m.initializeMutex.Unlock()
+	go func() {
+		defer m.initializeWg.Done()
+		m.completeInitializeAttempt(pending, runSafely("bluetooth adapter initialization", initialize))
+	}()
+	return m.waitInitializeAttempt(pending)
 }
 // initializeWaitLimit bounds how long ensureReady waits for an adapter-enable
 // attempt. adapter.Enable takes no context, and WinRT against an unhealthy
@@ -725,7 +741,11 @@ func (m *Manager) ensureReady() error {
 		return ErrShuttingDown
 	}
 	m.initializeMutex.Lock()
-	if m.initializeErr == nil {
+	// A nil error only means "ready" once no attempt is still in flight:
+	// while the first adapter.Enable hangs, initializeErr is still nil, and
+	// reporting readiness would let operations run on an adapter that was
+	// never enabled. Adopt the pending attempt instead.
+	if m.initializeErr == nil && m.initializePending == nil {
 		m.initializeMutex.Unlock()
 		if m.shuttingDown.Load() {
 			return ErrShuttingDown
@@ -789,6 +809,7 @@ func (m *Manager) completeInitializeAttempt(pending chan struct{}, err error) {
 	if m.initializePending == pending {
 		m.initializePending = nil
 	}
+	m.initializeAttempted = true
 	m.initializeErr = err
 	if err != nil {
 		m.initializeFailedAt = time.Now()

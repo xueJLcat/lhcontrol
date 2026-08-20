@@ -32,6 +32,44 @@ func TestBluetoothInitializationRecoversAfterRetry(t *testing.T) {
 		t.Fatalf("initialization attempts = %d, want 2", attempts)
 	}
 }
+// TestInitializeBoundsHungAdapterEnable guards app startup: Initialize must
+// give up waiting after the bounded window instead of blocking startup (and
+// holding initializeMutex, which would stall every concurrent ensureReady)
+// on a wedged adapter.Enable.
+func TestInitializeBoundsHungAdapterEnable(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	manager.initializeWait = 20 * time.Millisecond
+	release := make(chan struct{})
+	defer close(release)
+	var attempts atomic.Int32
+	manager.initializeBluetooth = func() error {
+		attempts.Add(1)
+		<-release
+		return nil
+	}
+	startedAt := time.Now()
+	err := manager.Initialize()
+	if elapsed := time.Since(startedAt); elapsed > 2*time.Second {
+		t.Fatalf("Initialize() blocked %v on a hung adapter enable, want a bounded wait", elapsed)
+	}
+	if err == nil {
+		t.Fatal("Initialize() unexpectedly succeeded while the adapter call was hung")
+	}
+	// ensureReady must reach its own bounded wait instead of queueing on
+	// initializeMutex behind the hung startup call.
+	startedAt = time.Now()
+	if err := manager.ensureReady(); err == nil {
+		t.Fatal("ensureReady() unexpectedly succeeded while the adapter call was hung")
+	}
+	if elapsed := time.Since(startedAt); elapsed > 2*time.Second {
+		t.Fatalf("ensureReady() blocked %v behind a hung Initialize(), want a bounded wait", elapsed)
+	}
+	if attempts.Load() != 1 {
+		t.Fatalf("initialization attempts = %d, want exactly 1 concurrent adapter.Enable", attempts.Load())
+	}
+}
+
 // TestEnsureReadyBoundsHungAdapterInitialization guards the background
 // recovery loop against a wedged adapter.Enable: initialization must give up
 // waiting after the bounded window instead of blocking the loop (started once
