@@ -79,6 +79,9 @@ type App struct {
 	autoSleepCancel   context.CancelFunc
 	autoSleepWatcher  *autosleep.Watcher
 	autoSleepStopWait time.Duration
+	// autoSleepRebuildWait overrides the self-stop rebuild cooldown in tests;
+	// production runs leave it at zero and follow autoSleepRestartDelay.
+	autoSleepRebuildWait time.Duration
 	autoSleepWG       sync.WaitGroup
 	// autoSleepRebuildTimer holds the pending rebuild scheduled after a
 	// watcher self-stop. It carries one autoSleepWG count that is released

@@ -336,7 +336,7 @@ func (a *App) scheduleAutoSleepRebuild() {
 	a.stopScheduledAutoSleepRebuildLocked()
 	a.autoSleepWG.Add(1)
 	var rebuildTimer *time.Timer
-	rebuildTimer = time.AfterFunc(autoSleepRestartDelay, func() {
+	rebuildTimer = time.AfterFunc(a.autoSleepRebuildDelayDuration(), func() {
 		defer a.autoSleepWG.Done()
 		a.autoSleepMutex.Lock()
 		if a.autoSleepRebuildTimer == rebuildTimer {
@@ -346,6 +346,13 @@ func (a *App) scheduleAutoSleepRebuild() {
 		a.runScheduledAutoSleepRebuild()
 	})
 	a.autoSleepRebuildTimer = rebuildTimer
+}
+
+func (a *App) autoSleepRebuildDelayDuration() time.Duration {
+	if a.autoSleepRebuildWait > 0 {
+		return a.autoSleepRebuildWait
+	}
+	return autoSleepRestartDelay
 }
 
 // runScheduledAutoSleepRebuild re-applies the persisted auto-sleep settings

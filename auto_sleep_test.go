@@ -556,6 +556,50 @@ func TestScheduledAutoSleepRebuildConvergedRuntimeIsNotAFailure(t *testing.T) {
 	}
 }
 
+// TestScheduledAutoSleepRebuildTimerFiresAndRebuildsWatcher exercises the
+// production rebuild path end to end: the scheduled timer must fire after its
+// cooldown, clear its registration, release the wait-group count, and replace
+// the self-stopped watcher with a running one.
+func TestScheduledAutoSleepRebuildTimerFiresAndRebuildsWatcher(t *testing.T) {
+	t.Setenv("AppData", t.TempDir())
+	app := NewApp()
+	app.autoSleepRebuildWait = 20 * time.Millisecond
+	app.scanForAutoSleep = func(context.Context) ([]station.StationInfo, error) {
+		return nil, nil
+	}
+	app.setPowerForAutoSleep = func(context.Context, string) (station.BulkPowerResult, error) {
+		return station.BulkPowerResult{}, nil
+	}
+	settings := autosleep.Settings{
+		Enabled:      true,
+		Target:       string(autosleep.TargetSteamVR),
+		DelaySeconds: autosleep.MinDelaySeconds,
+	}
+	if err := app.config.SetAutoSleep(settings); err != nil {
+		t.Fatalf("SetAutoSleep() error = %v", err)
+	}
+
+	app.scheduleAutoSleepRebuild()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		app.autoSleepMutex.Lock()
+		watcher := app.autoSleepWatcher
+		timer := app.autoSleepRebuildTimer
+		app.autoSleepMutex.Unlock()
+		if watcher != nil {
+			if timer != nil {
+				t.Fatal("fired rebuild left its timer registration pending")
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("scheduled rebuild timer never produced a replacement watcher")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	app.stopAutoSleep()
+}
+
 func TestRunAutoSleepPreservesPartialResultsWhenBulkPowerTimesOut(t *testing.T) {
 	app := NewApp()
 	var events []autoSleepEvent
