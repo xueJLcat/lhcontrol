@@ -21,6 +21,43 @@ $ErrorActionPreference = "Stop"
 # rejects with a misleading 404.
 $ApiBase = $ApiBase.TrimEnd('/')
 
+function Get-HttpErrorStatusCode {
+    param($ErrorRecord)
+    $response = $ErrorRecord.Exception.Response
+    if ($null -eq $response) { return $null }
+    return [int]$response.StatusCode
+}
+
+# Windows PowerShell 5.1 surfaces non-2xx responses as a WebException whose
+# Message only carries "(409) Conflict". The API returns a JSON error body
+# with the actual cause; read it so reports keep the server-side detail.
+function Get-HttpErrorDetail {
+    param($ErrorRecord)
+    $message = $ErrorRecord.Exception.Message
+    try {
+        $response = $ErrorRecord.Exception.Response
+        if ($null -ne $response) {
+            $stream = $response.GetResponseStream()
+            $reader = New-Object System.IO.StreamReader($stream)
+            $body = $reader.ReadToEnd()
+            $reader.Close()
+            if (-not [string]::IsNullOrWhiteSpace($body)) {
+                $parsed = $null
+                try { $parsed = $body | ConvertFrom-Json } catch { $parsed = $null }
+                if ($null -ne $parsed -and $parsed.error) {
+                    return "$message -- $($parsed.error)"
+                }
+                return "$message -- $body"
+            }
+        }
+    }
+    catch {
+        # Error-body extraction is best-effort; the exception message alone
+        # still describes the failure.
+    }
+    return $message
+}
+
 function Get-ChannelSortValue {
     param($Station)
     $channel = [int]$Station.channel
@@ -95,7 +132,15 @@ function Assert-ScanSnapshot {
     Assert-StableOrder $Stations
     $visible = @(Get-VisibleStations $Stations)
     if ([int]$Scan.found -ne $visible.Count) {
-        throw "Scan reported $($Scan.found) found station(s), but status contains $($visible.Count) from this scan"
+        # A mismatch is legitimate under the application's documented
+        # degradation paths (a wedged station lock skipping its presence
+        # bookkeeping, a failed pre-scan connection release leaving presence
+        # uncertain). Only treat it as a hard failure when the scan reported
+        # no warnings at all; otherwise record it and keep the cycle going.
+        if (@($Scan.warnings).Count -eq 0) {
+            throw "Scan reported $($Scan.found) found station(s), but status contains $($visible.Count) from this scan"
+        }
+        Write-Warning "Scan found/visible mismatch ($($Scan.found) vs $($visible.Count)) accepted because the scan reported warnings: $($Scan.warnings -join '; ')"
     }
     if ($visible.Count -lt $Minimum) {
         throw "Scan found $($visible.Count) station(s) in this cycle; expected at least $Minimum"
@@ -108,8 +153,24 @@ function Assert-ScanSnapshot {
     }
 }
 
+# Skip reasons that legitimately keep a station unexercised. Every other
+# reason (a wedged lock, a per-station timeout, cancellation, shutdown,
+# booting) means the station was never exercised and must fail the run.
+$script:BenignSkipReasons = @(
+    "already at target state",
+    "power control is not supported",
+    "standby is not supported"
+)
+
 function Assert-BulkResult {
     param($Result, [string]$Target, [string[]]$Expected)
+    # A timed-out or cancelled bulk returns 200 with structured partial
+    # results; the top-level flags are the only signal that the batch never
+    # ran to completion. Checking items alone would accept a bulk that only
+    # reached a fraction of the fleet.
+    if ([bool]$Result.cancelled -or [bool]$Result.timedOut) {
+        throw "Bulk $Target did not run to completion (cancelled=$([bool]$Result.cancelled), timedOut=$([bool]$Result.timedOut))"
+    }
     $actualAddresses = @($Result.results | ForEach-Object { ([string]$_.address).ToLowerInvariant() } | Sort-Object)
     $expectedAddresses = @($Expected | ForEach-Object { $_.ToLowerInvariant() } | Sort-Object)
     if (($actualAddresses -join "`n") -ne ($expectedAddresses -join "`n")) {
@@ -117,13 +178,25 @@ function Assert-BulkResult {
     }
     foreach ($item in @($Result.results)) {
         if ($item.skipped) {
-            if ([string]::IsNullOrWhiteSpace([string]$item.reason)) {
+            $reason = ([string]$item.reason).ToLowerInvariant()
+            if ([string]::IsNullOrWhiteSpace($reason)) {
                 throw "Bulk $Target skipped $($item.address) without a reason"
+            }
+            if ($script:BenignSkipReasons -notcontains $reason) {
+                throw "Bulk $Target skipped $($item.name) ($($item.address)) without exercising it: $($item.reason)"
             }
             continue
         }
         if (-not $item.success -or -not $item.commandSent) {
             throw "Bulk $Target failed for $($item.name) ($($item.address)): $($item.error)"
+        }
+        if ($Target -eq "sleep") {
+            # Firmware drops the BLE link as the station powers down, so a
+            # successful sleep command reads back as sent-but-unconfirmed
+            # (a sleep-transition disconnect). Requiring confirmed here would
+            # make the sleep phase impossible to pass on real hardware; the
+            # already-asleep no-op is the only confirmed case.
+            continue
         }
         if (-not $item.confirmed) {
             throw "Bulk $Target was not confirmed for $($item.name) ($($item.address)): $($item.error)"
@@ -136,6 +209,12 @@ function Assert-BulkResult {
 
 function Assert-PowerReadback {
     param($Result, [object[]]$Stations, [string]$Target)
+    if ($Target -eq "sleep") {
+        # Sleeping stations dropped the BLE link; there is nothing to read
+        # back. The bulk result's own per-station outcome (validated by
+        # Assert-BulkResult) is authoritative for the sleep phase.
+        return
+    }
     foreach ($item in @($Result.results)) {
         if ($item.skipped) {
             continue
@@ -144,9 +223,15 @@ function Assert-PowerReadback {
         if ($readback.Count -ne 1) {
             throw "Bulk $Target readback is missing station $($item.address)"
         }
-        if (-not $readback[0].powerFresh -or -not $readback[0].powerStateConfirmed -or
+        # The authoritative confirmation is the bulk result's per-station
+        # confirmed flag, computed at confirmation time. A post-bulk status
+        # snapshot can already be stale on long batches (the display freshness
+        # window is shorter than a multi-station bulk), so cross-check the
+        # state name only while the readback is still fresh; a stale readback
+        # must not fail a command the device already confirmed.
+        if ([bool]$readback[0].powerFresh -and
             ([string]$readback[0].powerStateName).ToLowerInvariant() -ne $Target) {
-            throw "Bulk $Target readback was not confirmed for $($item.address)"
+            throw "Bulk $Target readback shows an unexpected state for $($item.address)"
         }
     }
 }
@@ -166,7 +251,17 @@ function Test-ScanTerminalState {
 
 function Test-RestoreSucceeded {
     param($Result, [object[]]$Stations, [string]$Address, [string]$Target)
-    if ($null -eq $Result -or -not [bool]$Result.confirmed) {
+    if ($null -eq $Result) {
+        return $false
+    }
+    if ($Target -eq "sleep") {
+        # Restoring sleep re-sends the sleep command; the firmware disconnect
+        # makes sent-but-unconfirmed the success shape (and a confirmed no-op
+        # when the station was already asleep). A fresh readback of a sleeping
+        # station is not obtainable, so it cannot be required.
+        return [bool]$Result.commandSent -or [bool]$Result.confirmed
+    }
+    if (-not [bool]$Result.confirmed) {
         return $false
     }
     $restoredStation = @($Stations | Where-Object { $_.address -eq $Address })
@@ -177,12 +272,18 @@ function Test-RestoreSucceeded {
 }
 
 function Invoke-SelfTest {
-    $historical = @(
-        [pscustomobject]@{ channel = 1; name = "Known"; address = "AA"; seenInLatestScan = $false }
+    # The visibility filter must decide this fixture: with a correct filter
+    # only AA is visible, so found(2) != visible(1) throws; a broken filter
+    # that returns every station would make found and visible agree, satisfy
+    # the minimum, and list the expected historical address -- no throw, and
+    # the self-test alarm below fires.
+    $mixedVisibility = @(
+        [pscustomobject]@{ channel = 1; name = "Known"; address = "BB"; seenInLatestScan = $false }
+        [pscustomobject]@{ channel = 1; name = "Visible"; address = "AA"; seenInLatestScan = $true }
     )
     $rejectedHistoricalStation = $false
     try {
-        Assert-ScanSnapshot ([pscustomobject]@{ found = 0 }) $historical 1 @("AA")
+        Assert-ScanSnapshot ([pscustomobject]@{ found = 2; warnings = @() }) $mixedVisibility 1 @("BB")
     }
     catch {
         $rejectedHistoricalStation = $true
@@ -194,7 +295,7 @@ function Invoke-SelfTest {
     $visible = @(
         [pscustomobject]@{ channel = 1; name = "Visible"; address = "AA"; seenInLatestScan = $true }
     )
-    Assert-ScanSnapshot ([pscustomobject]@{ found = 1 }) $visible 1 @("AA")
+    Assert-ScanSnapshot ([pscustomobject]@{ found = 1; warnings = @() }) $visible 1 @("AA")
 
     # Prefix-related names must be ordered fieldwise, not by a joined key:
     # LHB-1 precedes LHB-10 (the shorter prefix first), the exact ordering a
@@ -285,10 +386,67 @@ function Invoke-SelfTest {
     }) $confirmedReadback "AA" "sleep")) {
         throw "Self-test failed: a confirmed no-op restore was rejected"
     }
+    # A sleep restore succeeds as sent-but-unconfirmed: the firmware drops
+    # the link while powering down, so that shape is the expected outcome.
+    if (-not (Test-RestoreSucceeded ([pscustomobject]@{
+        commandSent = $true; confirmed = $false
+    }) $confirmedReadback "AA" "sleep")) {
+        throw "Self-test failed: a sleep-transition restore was rejected"
+    }
+    # The same unconfirmed shape is not a successful restore for any other
+    # target; a readback must confirm it.
     if (Test-RestoreSucceeded ([pscustomobject]@{
         commandSent = $true; confirmed = $false
-    }) $confirmedReadback "AA" "sleep") {
-        throw "Self-test failed: an unconfirmed restore was accepted"
+    }) $confirmedReadback "AA" "on") {
+        throw "Self-test failed: an unconfirmed non-sleep restore was accepted"
+    }
+    # A skip whose reason means the station was never exercised must fail the
+    # bulk; a benign no-op skip must pass; a timed-out bulk must fail before
+    # any per-station inspection.
+    $busySkipBulk = [pscustomobject]@{
+        cancelled = $false; timedOut = $false
+        results = @([pscustomobject]@{
+            address = "AA"; name = "Visible"; skipped = $true; reason = "station is busy"
+            success = $false; commandSent = $false; confirmed = $false; error = ""
+            station = $visible[0]
+        })
+    }
+    $rejectedBusySkip = $false
+    try {
+        Assert-BulkResult $busySkipBulk "on" @("AA")
+    }
+    catch {
+        $rejectedBusySkip = $true
+    }
+    if (-not $rejectedBusySkip) {
+        throw "Self-test failed: a busy-skipped station was accepted as exercised"
+    }
+    $noOpSkipBulk = [pscustomobject]@{
+        cancelled = $false; timedOut = $false
+        results = @([pscustomobject]@{
+            address = "AA"; name = "Visible"; skipped = $true; reason = "already at target state"
+            success = $true; commandSent = $false; confirmed = $true; error = ""
+            station = $visible[0]
+        })
+    }
+    Assert-BulkResult $noOpSkipBulk "on" @("AA")
+    $timedOutBulk = [pscustomobject]@{
+        cancelled = $false; timedOut = $true
+        results = @([pscustomobject]@{
+            address = "AA"; name = "Visible"; skipped = $false; reason = ""
+            success = $true; commandSent = $true; confirmed = $true; error = ""
+            station = $visible[0]
+        })
+    }
+    $rejectedTimedOutBulk = $false
+    try {
+        Assert-BulkResult $timedOutBulk "on" @("AA")
+    }
+    catch {
+        $rejectedTimedOutBulk = $true
+    }
+    if (-not $rejectedTimedOutBulk) {
+        throw "Self-test failed: a timed-out bulk was accepted"
     }
     Write-Host "Hardware smoke self-test passed."
 }
@@ -308,6 +466,11 @@ $results = [ordered]@{
 }
 $initialStates = [ordered]@{}
 $operatedAddresses = @{}
+# Stations skipped for a missing capability in every phase were never altered
+# and must not be restored (the restore write would be rejected as
+# unsupported). Tracked separately from $operatedAddresses so a lost bulk
+# response still restores every station whose capability is known.
+$capabilitySkippedAddresses = @{}
 $powerStarted = $false
 $restoreFailed = $false
 $lastScanTimeoutEvidence = $null
@@ -357,6 +520,30 @@ function Get-Stations {
     return @(Invoke-RestMethod -Method Get -Uri "$ApiBase/status")
 }
 
+function Start-ScanWithRetry {
+    param([int]$Attempts = 3)
+    # POST /scan returns 409 whenever another Bluetooth operation is active
+    # (an auto-sleep action, a UI operation, or a previous scan still
+    # draining). A single transient conflict must not fail the whole
+    # multi-cycle run: back off briefly and retry; other errors surface
+    # immediately.
+    for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+        try {
+            Invoke-RestMethod -Method Post -Uri "$ApiBase/scan" | Out-Null
+            return
+        }
+        catch {
+            $statusCode = Get-HttpErrorStatusCode $_
+            if ($statusCode -eq 409 -and $attempt -lt $Attempts) {
+                Write-Warning "POST /scan conflicted (another Bluetooth operation is active); retry $attempt/$($Attempts - 1) in 3s"
+                Start-Sleep -Seconds 3
+                continue
+            }
+            throw
+        }
+    }
+}
+
 function Invoke-StationPower {
     param([string]$Address, [string]$Target)
     $escapedAddress = [uri]::EscapeDataString($Address)
@@ -369,10 +556,18 @@ function Invoke-StationPower {
 
 $outputDirectory = Join-Path $PSScriptRoot "..\build\verification"
 New-Item -ItemType Directory -Force -Path $outputDirectory | Out-Null
-$outputPath = Join-Path $outputDirectory "hardware-smoke-$(Get-Date -Format 'yyyyMMdd-HHmmss').json"
+# Millisecond suffix: two runs started in the same second must not overwrite
+# each other's report.
+$outputPath = Join-Path $outputDirectory "hardware-smoke-$(Get-Date -Format 'yyyyMMdd-HHmmssfff').json"
 
 try {
-    Invoke-RestMethod -Method Get -Uri "$ApiBase/health" | Out-Null
+    $health = Invoke-RestMethod -Method Get -Uri "$ApiBase/health"
+    if (-not [bool]$health.running) {
+        throw "HTTP API is not running at $ApiBase : $($health.error)"
+    }
+    if (@($health.warnings).Count -gt 0 -and -not [string]::IsNullOrWhiteSpace("$($health.warnings)")) {
+        Write-Warning "HTTP API reports warnings before starting: $($health.warnings -join '; ')"
+    }
     for ($cycle = 1; $cycle -le $ScanCycles; $cycle++) {
         $started = Get-Date
         $scanRecord = [ordered]@{
@@ -387,7 +582,7 @@ try {
             stations = @()
         }
         try {
-            Invoke-RestMethod -Method Post -Uri "$ApiBase/scan" | Out-Null
+            Start-ScanWithRetry
             $scan = Wait-Scan
             $stations = Get-Stations
             Set-ScanRecordSnapshot $scanRecord $scan $stations
@@ -408,7 +603,7 @@ try {
             if ($scanRecord.state -ne "cancelled") {
                 $scanRecord.state = "failed"
             }
-            $scanRecord.error = $_.Exception.Message
+            $scanRecord.error = Get-HttpErrorDetail $_
             throw
         }
         finally {
@@ -451,6 +646,11 @@ try {
                     if ([bool]$item.commandSent) {
                         $operatedAddresses[[string]$item.address] = $true
                     }
+                    $skipReason = ([string]$item.reason).ToLowerInvariant()
+                    if ([bool]$item.skipped -and
+                        $skipReason -in @("power control is not supported", "standby is not supported")) {
+                        $capabilitySkippedAddresses[[string]$item.address] = $true
+                    }
                 }
                 $phase = "validation"
                 Assert-BulkResult $result $target $snapshotAddresses
@@ -460,7 +660,7 @@ try {
             }
             catch {
                 if ($phase -eq "request") {
-                    $powerRecord.requestError = $_.Exception.Message
+                    $powerRecord.requestError = Get-HttpErrorDetail $_
                 }
                 else {
                     $powerRecord.validationError = $_.Exception.Message
@@ -482,11 +682,13 @@ catch {
 finally {
     if ($powerStarted) {
         foreach ($entry in $initialStates.GetEnumerator()) {
-            if (-not $operatedAddresses.Contains($entry.Key)) {
-                # A station that never received a command (for example one
-                # skipped for missing power-control capability) was never
-                # altered, so there is nothing to restore; attempting the write
-                # would be rejected as unsupported and fail the run.
+            if ($capabilitySkippedAddresses.Contains($entry.Key) -and -not $operatedAddresses.Contains($entry.Key)) {
+                # A station skipped for a missing capability in every phase
+                # was never altered, so there is nothing to restore; the write
+                # would be rejected as unsupported and fail the run. Every
+                # other station is restored even when a bulk response was
+                # lost: the restore write is idempotent (an already-target
+                # station returns a confirmed no-op skip).
                 continue
             }
             try {
@@ -511,15 +713,16 @@ finally {
             catch {
                 $restoreFailed = $true
                 $results.succeeded = $false
+                $restoreError = Get-HttpErrorDetail $_
                 $results.restore += [ordered]@{
                     address = $entry.Key
                     target = $entry.Value
                     succeeded = $false
                     result = $null
                     readback = $null
-                    error = $_.Exception.Message
+                    error = $restoreError
                 }
-                Write-Warning "Failed to restore $($entry.Key): $($_.Exception.Message)"
+                Write-Warning "Failed to restore $($entry.Key): $restoreError"
             }
         }
     }
@@ -527,7 +730,13 @@ finally {
         $results.error = "One or more stations could not be restored to their initial power state"
     }
     $results.completedAt = (Get-Date).ToString("o")
-    $results | ConvertTo-Json -Depth 16 | Set-Content -LiteralPath $outputPath -Encoding utf8
+    # Write UTF-8 without a BOM: strict JSON parsers reject a leading BOM,
+    # and Set-Content -Encoding utf8 emits one on Windows PowerShell 5.1.
+    [System.IO.File]::WriteAllText(
+        $outputPath,
+        ($results | ConvertTo-Json -Depth 16),
+        (New-Object System.Text.UTF8Encoding $false)
+    )
     Write-Host "Verification report: $((Resolve-Path -LiteralPath $outputPath).Path)"
 }
 
