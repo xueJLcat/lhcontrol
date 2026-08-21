@@ -64,6 +64,14 @@ func (a *App) SetAutoSleepSettings(settings autosleep.Settings) error {
 	}
 	a.autoSleepSettingsMutex.Lock()
 	defer a.autoSleepSettingsMutex.Unlock()
+	return a.setAutoSleepSettingsLocked(settings)
+
+}
+
+// setAutoSleepSettingsLocked persists the settings and converges the runtime
+// watcher onto them. Callers hold autoSleepSettingsMutex so the read-modify-
+// write is atomic with respect to concurrent saves.
+func (a *App) setAutoSleepSettingsLocked(settings autosleep.Settings) error {
 	previousSettings := a.config.GetAutoSleep()
 
 	log.Printf("Setting auto-sleep: enabled=%v target=%s delay=%ds", settings.Enabled, settings.Target, settings.DelaySeconds)
@@ -309,10 +317,15 @@ func (a *App) reapStoppedAutoSleepWatcher(watcher *autosleep.Watcher) {
 	// concurrent settings replacement may have installed a healthy watcher
 	// between the clear and this point, so re-check under the lock first:
 	// a feature that already recovered must get neither a stale failure
-	// event nor a redundant rebuild timer.
+	// event nor a redundant rebuild timer. A user who disabled the feature
+	// in the same window gets neither either: the stop was their own action,
+	// not a failure.
 	if cleared {
+		a.autoSleepSettingsMutex.Lock()
+		stillEnabled := a.config.GetAutoSleep().Enabled
+		a.autoSleepSettingsMutex.Unlock()
 		a.autoSleepMutex.Lock()
-		report := a.autoSleepWatcher == nil && !a.shuttingDown.Load()
+		report := stillEnabled && a.autoSleepWatcher == nil && !a.shuttingDown.Load()
 		a.autoSleepMutex.Unlock()
 		if report {
 			a.emitAutoSleep(autoSleepEvent{Phase: "failed", Error: fmt.Sprintf("automatic sleep stopped watching: %v", err)})
@@ -383,25 +396,35 @@ func (a *App) autoSleepRebuildDelayDuration() time.Duration {
 }
 
 // runScheduledAutoSleepRebuild re-applies the persisted auto-sleep settings
-// so a self-stopped watcher is replaced. A settings save that fails after a
-// blocked-save recovery already converged the runtime watcher is not a
-// rebuild failure: counting it would burn the retry budget and log a give-up
-// message while the feature works.
+// so a self-stopped watcher is replaced. The read and the re-application run
+// under autoSleepSettingsMutex as one atomic unit: a user save that lands in
+// between must not be overwritten by the stale settings a two-phase
+// read-then-write would carry, and a save that lands after the rebuild
+// re-applies its own settings, so the runtime always converges onto the
+// newest value. A settings save that fails after a blocked-save recovery
+// already converged the runtime watcher is not a rebuild failure: counting it
+// would burn the retry budget and log a give-up message while the feature
+// works.
 func (a *App) runScheduledAutoSleepRebuild() {
 	if a.shuttingDown.Load() {
 		return
 	}
+	a.autoSleepSettingsMutex.Lock()
 	settings := a.config.GetAutoSleep()
 	if !settings.Enabled {
+		a.autoSleepSettingsMutex.Unlock()
 		return
 	}
 	if _, err := autosleep.Target(settings.Target).ProcessName(); err != nil {
 		// A configuration error cannot be repaired by a rebuild; it would
 		// only loop. Re-saving valid settings remains the recovery path.
+		a.autoSleepSettingsMutex.Unlock()
 		return
 	}
 	log.Println("Auto-sleep watcher rebuilding after an unexpected stop")
-	if err := a.SetAutoSleepSettings(settings); err != nil {
+	err := a.setAutoSleepSettingsLocked(settings)
+	a.autoSleepSettingsMutex.Unlock()
+	if err != nil {
 		if a.autoSleepMatches(a.config.GetAutoSleep()) {
 			log.Printf("Auto-sleep watcher rebuild converged despite a failed save: %v", err)
 			return

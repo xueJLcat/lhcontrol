@@ -358,6 +358,10 @@ func TestSelfStoppedWatcherDebtSurvivesRebuild(t *testing.T) {
 	app.autoSleepCancel = func() {}
 	app.autoSleepMutex.Unlock()
 
+	// A running watcher implies the feature is enabled; mirror that invariant
+	// so the reap's failure surfacing (gated on the persisted setting) runs.
+	app.config.AutoSleep = autosleep.Settings{Enabled: true, Target: string(autosleep.TargetSteamVR), DelaySeconds: autosleep.MinDelaySeconds}
+
 	app.reapStoppedAutoSleepWatcher(watcher)
 
 	app.autoSleepMutex.Lock()
@@ -442,6 +446,10 @@ func TestSelfStoppedWatcherCountdownSurvivesRebuild(t *testing.T) {
 	app.autoSleepWatcher = watcher
 	app.autoSleepCancel = func() {}
 	app.autoSleepMutex.Unlock()
+
+	// A running watcher implies the feature is enabled; mirror that invariant
+	// so the reap behaves as it does in production.
+	app.config.AutoSleep = autosleep.Settings{Enabled: true, Target: string(autosleep.TargetSteamVR), DelaySeconds: autosleep.MinDelaySeconds}
 
 	app.reapStoppedAutoSleepWatcher(watcher)
 
