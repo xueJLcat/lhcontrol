@@ -94,3 +94,35 @@ func TestRenameStationByAddressIsCaseInsensitive(t *testing.T) {
 		t.Fatalf("display name = %q ok=%v, want normalized address entry", got, ok)
 	}
 }
+
+// TestRenameStationByAddressDoesNotBlockOnWedgedStation guards the rename
+// against a station whose lock a wedged transport call holds. A rename is a
+// pure config write, so it must fall back to the address-only path and return
+// promptly instead of blocking behind the station lock.
+func TestRenameStationByAddressDoesNotBlockOnWedgedStation(t *testing.T) {
+	t.Setenv("AppData", t.TempDir())
+	manager := NewManager(config.NewConfig())
+	address := "11:22:33:44:55:91"
+	station := &internalbluetooth.BaseStation{
+		Name: "LHB-WEDGED-RENAME", Address: mustAddress(t, address), Present: true,
+	}
+	manager.stations[address] = station
+
+	done := make(chan error, 1)
+	go func() {
+		station.HoldLockWhile(func() {
+			done <- manager.RenameStationByAddress(address, "Wedged Rename")
+		})
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("RenameStationByAddress() error = %v, want rename to succeed on a wedged station", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("RenameStationByAddress blocked behind the wedged station lock")
+	}
+	if got, ok := manager.config.GetStationDisplayName(mustAddress(t, address).String(), "LHB-X"); !ok || got != "Wedged Rename" {
+		t.Fatalf("display name = %q ok=%v, want Wedged Rename", got, ok)
+	}
+}

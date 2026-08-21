@@ -34,20 +34,28 @@ func (m *Manager) RenameStationByAddress(address, newName string) error {
 	}
 	defer m.endForegroundSharedOperation()
 	station, err := m.stationByAddress(address)
-	if err != nil {
-		// The station has not been discovered in this session (no successful
-		// scan yet, Bluetooth unavailable, or scan-on-startup disabled). Still
-		// allow renaming by address so callers can manage aliases for known
-		// devices. There is no scan-known original name to preserve, so no
-		// legacy per-name tombstone applies; a malformed address is rejected.
-		canonical, ok := bluetooth.CanonicalAddress(address)
-		if !ok {
+	if err == nil {
+		if snapshot, ok := station.SnapshotNonBlocking(); ok {
+			return m.config.SetRenamedStationByAddress(snapshot.Address, snapshot.Name, newName)
+		}
+		// The station is known but its lock is held by a wedged transport
+		// call. A rename is a pure config write, so fall through to the
+		// address-only path instead of blocking behind the lock.
+	}
+	// The station has not been discovered in this session (no successful
+	// scan yet, Bluetooth unavailable, or scan-on-startup disabled), or its
+	// lock is wedged. Still allow renaming by address so callers can manage
+	// aliases for known devices. There is no scan-known original name to
+	// preserve, so no legacy per-name tombstone applies; a malformed address
+	// is rejected.
+	canonical, ok := bluetooth.CanonicalAddress(address)
+	if !ok {
+		if err != nil {
 			return err
 		}
-		return m.config.SetRenamedStationByAddress(canonical, "", newName)
+		return fmt.Errorf("%w: %s", ErrNotFound, address)
 	}
-	snapshot := station.Snapshot()
-	return m.config.SetRenamedStationByAddress(snapshot.Address, snapshot.Name, newName)
+	return m.config.SetRenamedStationByAddress(canonical, "", newName)
 }
 func (m *Manager) SaveConfig() error {
 	if err := m.beginForegroundSharedOperation(); err != nil {
