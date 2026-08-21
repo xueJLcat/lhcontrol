@@ -277,14 +277,22 @@ describe('App asynchronous operations', () => {
   });
 
   it('ignores a terminal event for an unknown external scan until the backend scan ends', async () => {
-    api.IsScanning.mockResolvedValueOnce(true).mockResolvedValueOnce(true).mockResolvedValue(false);
+    // Calls: startup probe, adoption recheck, then the terminal event's own
+    // probe. The event probe must report the backend scan still running so
+    // the ignore gate is genuinely exercised; a `false` there would let the
+    // coordinator claim the event (the scan-ended path) and the assertion
+    // below would only pass by racing the async claim pipeline.
+    api.IsScanning.mockResolvedValueOnce(true).mockResolvedValueOnce(true).mockResolvedValueOnce(true).mockResolvedValue(false);
     render(App);
     await screen.findByRole('button', { name: 'Stop' });
 
     runtime.handlers.get('external-scan-completed')?.(externalScanEvent(9, {
       stations: [createStation({ name: 'LHB-STALE-EXTERNAL' })]
     }));
-    await Promise.resolve();
+    // Wait for the terminal handler's IsScanning probe (the third call) and
+    // let the synchronous ignore tail settle before asserting no effect.
+    await waitFor(() => expect(api.IsScanning.mock.calls.length).toBeGreaterThanOrEqual(3));
+    await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(screen.getByText('Preparing external scan...')).toBeInTheDocument();
     expect(screen.queryByText('LHB-STALE-EXTERNAL')).not.toBeInTheDocument();

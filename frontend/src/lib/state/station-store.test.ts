@@ -366,6 +366,11 @@ describe('StationStore startup', () => {
     backend.GetScanOnStartup.mockResolvedValue(false);
     mountStore();
     await vi.waitFor(() => expect(backend.GetScanOnStartup).toHaveBeenCalledOnce());
+    // The startup decision spans several microtasks after the preference
+    // resolves; the disabled branch runs the pre-mount recovery probe, so wait
+    // for it to land before asserting the scan never started. A single
+    // microtask could precede the decision and miss a scan-it-anyway regression.
+    await vi.waitFor(() => expect(backend.GetScanStatus).toHaveBeenCalled());
     await Promise.resolve();
     expect(backend.ScanAndFetchStations).not.toHaveBeenCalled();
   });
@@ -1387,7 +1392,11 @@ describe('StationStore external HTTP operation events', () => {
       operationRevision: 0
     });
 
-    await Promise.resolve();
+    // Wait for the health snapshot to commit (it runs the unordered-snapshot
+    // reconcile synchronously) before asserting the flag survived; a single
+    // microtask precedes the commit, so the flag would read true regardless
+    // of whether the guard held.
+    await vi.waitFor(() => expect(store.apiRunning).toBe(true));
     expect(store.externalOperationRunning).toBe(true);
   });
 
