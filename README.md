@@ -153,7 +153,7 @@ lhcontrol-amd64-installer.exe
    * **Power operation timing**、**Connection timing**、**Channel and presence**、**Read budgets**、**Background recovery** 提供高级蓝牙时序设置（确认次数与间隔、重试与退避、读取预算、恢复调度等），默认值适合常见环境，通常无需修改。
    * 在 **HTTP API** 中修改本地 HTTP 接口监听地址（保存后立即重启到新地址），并在 **Bluetooth diagnostics** 中查看 Windows 检测到的蓝牙适配器。
 
-自动休眠只会在监控进程至少运行过一次、随后退出并持续超过设定延迟时触发；如果进程在延迟期间或自动休眠执行期间重新启动，本轮操作会取消，尚未发送的命令不会继续，界面会报告取消前已经完成、失败及跳过的基站数量。批量超时时同样会保留部分执行结果，并分别报告已确认、未确认、失败和因超时跳过的数量。触发后应用先扫描基站，再将全部已知基站设为 Sleep。如果此时已有其他蓝牙操作，本轮自动休眠会跳过，不会自动重试。
+自动休眠只会在监控进程至少运行过一次、随后退出并持续超过设定延迟时触发；如果进程在延迟期间或自动休眠执行期间重新启动，本轮操作会取消，尚未发送的命令不会继续，界面会报告取消前已经完成、失败及跳过的基站数量。批量超时时同样会保留部分执行结果，并分别报告已确认、未确认、失败和因超时跳过的数量；若某个基站的连接锁被尚未结束的蓝牙传输调用占用，该基站会以“忙”为由跳过（命令结果未知），并在后台安排一次状态刷新以便锁释放后对账。触发后应用先扫描基站，再将全部已知基站设为 Sleep。如果此时已有其他蓝牙操作，本轮自动休眠会跳过，不会自动重试。
 
 ## 设置与本地数据
 
@@ -869,7 +869,7 @@ lhcontrol-amd64-installer.exe
    * **Power operation timing**, **Connection timing**, **Channel and presence**, **Read budgets**, and **Background recovery** expose advanced Bluetooth timing settings (confirmation attempts and intervals, retries and backoffs, read budgets, recovery scheduling). The defaults suit typical setups and rarely need changes.
    * Change the local HTTP API listen address under **HTTP API** (the server restarts on the new address after saving), and inspect Windows radios under **Bluetooth diagnostics**.
 
-Auto sleep only arms after the watched process has been observed running. If the process remains closed for the configured delay, the application scans and then puts every known station into Sleep. Relaunching the process during the delay or while automatic sleep is running cancels the action, stops commands not yet sent, and reports how many stations completed, failed, or were skipped before cancellation. A bulk timeout also preserves partial results and separately reports confirmed, unconfirmed, failed, and timeout-skipped stations. If another Bluetooth operation is active when the timer fires, that auto-sleep cycle is skipped without an automatic retry.
+Auto sleep only arms after the watched process has been observed running. If the process remains closed for the configured delay, the application scans and then puts every known station into Sleep. Relaunching the process during the delay or while automatic sleep is running cancels the action, stops commands not yet sent, and reports how many stations completed, failed, or were skipped before cancellation. A bulk timeout also preserves partial results and separately reports confirmed, unconfirmed, failed, and timeout-skipped stations. A station whose connection lock is held by a Bluetooth transport call that has not finished is skipped as busy (its command outcome is unknown) and scheduled for a background status refresh so its state is reconciled once the lock frees. If another Bluetooth operation is active when the timer fires, that auto-sleep cycle is skipped without an automatic retry.
 
 ## Settings and Local Data
 
