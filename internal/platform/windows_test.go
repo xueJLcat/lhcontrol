@@ -255,3 +255,69 @@ func TestActivateWindowFlashesWhenForegroundFails(t *testing.T) {
 		t.Fatalf("foregrounded=%v restored=%v flashed=%v", foregrounded, restored, flashed)
 	}
 }
+
+func TestFocusExistingInstanceReacquiresMutexWhenFirstInstanceExits(t *testing.T) {
+	// No window ever appears; the first instance exits between two mutex
+	// re-checks. The launch must stop waiting and hand back the re-acquired
+	// mutex instead of waiting out the whole budget and exiting.
+	acquireCalls := 0
+	reacquired := func() {}
+	focused, release := focusExistingInstance(
+		"lhcontrol", `Local\lhcontrol-test`, time.Minute,
+		func(string) windowSearchResult { return windowSearchResult{} },
+		func(string) (func(), bool, error) {
+			acquireCalls++
+			if acquireCalls == 1 {
+				return func() {}, true, nil
+			}
+			return reacquired, false, nil
+		},
+		func(time.Duration) {},
+	)
+	if focused {
+		t.Fatal("focusExistingInstance() reported a focused window that never appeared")
+	}
+	if release == nil {
+		t.Fatal("focusExistingInstance() did not hand back the re-acquired mutex")
+	}
+	if acquireCalls != 2 {
+		t.Fatalf("mutex re-checks = %d, want the exit noticed on the second check", acquireCalls)
+	}
+}
+
+func TestFocusExistingInstanceFocusesVerifiedWindow(t *testing.T) {
+	acquireCalls := 0
+	focused, release := focusExistingInstance(
+		"lhcontrol", `Local\lhcontrol-test`, time.Minute,
+		func(string) windowSearchResult {
+			return windowSearchResult{match: syscall.Handle(0x4321)}
+		},
+		func(string) (func(), bool, error) {
+			acquireCalls++
+			return func() {}, true, nil
+		},
+		func(time.Duration) {},
+	)
+	if !focused || release != nil {
+		t.Fatalf("focused=%v reacquired=%v, want the verified window focused without re-acquiring", focused, release != nil)
+	}
+	if acquireCalls != 0 {
+		t.Fatalf("mutex re-checks = %d, want none once the window matched", acquireCalls)
+	}
+}
+
+func TestFocusExistingInstanceExhaustsBudgetWhileInstanceRuns(t *testing.T) {
+	// The instance keeps running and no window appears: the budget exhausts
+	// with nothing focused and nothing re-acquired.
+	focused, release := focusExistingInstance(
+		"lhcontrol", `Local\lhcontrol-test`, 0,
+		func(string) windowSearchResult { return windowSearchResult{} },
+		func(string) (func(), bool, error) {
+			return func() {}, true, nil
+		},
+		func(time.Duration) {},
+	)
+	if focused || release != nil {
+		t.Fatalf("focused=%v reacquired=%v, want the budget to exhaust with the instance still running", focused, release != nil)
+	}
+}

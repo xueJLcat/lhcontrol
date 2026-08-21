@@ -358,8 +358,13 @@ func main() {
 	// window.
 	flagSet := flag.NewFlagSet("lhcontrol", flag.ContinueOnError)
 	mirrorConsole := flagSet.Bool("log", false, "Also mirror diagnostics to the console")
+	helpRequested := false
 	if parseErr := flagSet.Parse(os.Args[1:]); parseErr != nil {
-		log.Printf("Ignoring unrecognized command line arguments: %v", parseErr)
+		if errors.Is(parseErr, flag.ErrHelp) {
+			helpRequested = true
+		} else {
+			log.Printf("Ignoring unrecognized command line arguments: %v", parseErr)
+		}
 	}
 
 	// Setup standard logger flags (applies to console and potentially file)
@@ -376,11 +381,26 @@ func main() {
 	}
 	if alreadyRunning {
 		log.Println("Application is already running. Bringing existing window to front...")
-		if !platform.BringWindowToFront(appTitle) {
+		focused, reacquiredRelease := platform.FocusExistingInstance(appTitle, instanceMutexName)
+		if focused {
+			return
+		}
+		if reacquiredRelease == nil {
 			log.Printf("Existing lhcontrol process was detected, but its window was not found")
 			os.Exit(1)
 		}
-		return
+		// The first instance exited while this launch waited for its window
+		// (the kernel releases the mutex together with the process). This
+		// launch just re-acquired it, so continue as the fresh instance
+		// instead of exiting with nothing to focus.
+		log.Println("Previous instance exited while its window was being focused; starting a fresh instance")
+		releaseInstance = reacquiredRelease
+	}
+	if helpRequested {
+		// A help request exits only once this launch owns the instance: a
+		// second instance must focus the running window instead of printing
+		// usage and quitting.
+		os.Exit(0)
 	}
 	defer releaseInstance()
 

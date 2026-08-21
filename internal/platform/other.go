@@ -24,3 +24,9 @@ func BringWindowToFront(appTitle string) bool {
 	log.Println("BringWindowToFront not implemented for this platform.")
 	return false
 }
+
+// FocusExistingInstance is a no-op on non-Windows platforms for now.
+func FocusExistingInstance(appTitle, mutexName string) (focused bool, reacquiredRelease func()) {
+	log.Println("FocusExistingInstance not implemented for this platform.")
+	return false, nil
+}

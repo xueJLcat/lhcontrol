@@ -409,3 +409,66 @@ func BringWindowToFront(appTitle string) bool {
 	}
 	return true
 }
+
+// instanceRecheckInterval spaces the mutex re-checks a second launch runs
+// while waiting for the first instance's window. The kernel releases the
+// instance mutex together with the process, so a first instance that exits
+// mid-wait (a crash or a forced kill) is noticed within one interval.
+const instanceRecheckInterval = 2 * time.Second
+
+// FocusExistingInstance waits for the running instance's window and focuses
+// it, re-checking the instance mutex between attempts. When the first
+// instance exits while waiting, its window can never appear and the kernel
+// has released the mutex; the returned release then carries the re-acquired
+// mutex so the caller continues as a fresh instance instead of waiting out
+// the whole budget and exiting with nothing to focus. A nil release with
+// focused=false means the budget ran out with the instance still running.
+func FocusExistingInstance(appTitle, mutexName string) (focused bool, reacquiredRelease func()) {
+	return focusExistingInstance(appTitle, mutexName, windowWaitBudget, findWindow, AcquireSingleInstance, time.Sleep)
+}
+
+func focusExistingInstance(
+	appTitle string,
+	mutexName string,
+	budget time.Duration,
+	finder func(string) windowSearchResult,
+	acquire func(string) (func(), bool, error),
+	sleeper func(time.Duration),
+) (focused bool, reacquiredRelease func()) {
+	start := time.Now()
+	for {
+		result := finder(appTitle)
+		if result.err != nil {
+			log.Printf("Error finding window: %v", result.err)
+		} else if result.match != 0 {
+			if !activateWindow(result.match, showWindow, setForegroundWindow, flashWindowEx) {
+				log.Println("SetForegroundWindow failed (maybe window is not allowed to take focus?). Flashing instead.")
+			} else {
+				log.Println("SetForegroundWindow succeeded.")
+			}
+			return true, nil
+		}
+		if time.Since(start) >= budget {
+			// Budget exhausted. The verified-foreign same-titled window is
+			// the final best-effort focus target, matching the plain
+			// single-wait behavior; only a still-running instance can reach
+			// this point because an exited one is caught by the re-check
+			// below before the next attempt.
+			if result.err == nil && result.foreignFallback != 0 {
+				if !activateWindow(result.foreignFallback, showWindow, setForegroundWindow, flashWindowEx) {
+					log.Println("SetForegroundWindow failed (maybe window is not allowed to take focus?). Flashing instead.")
+				}
+				return true, nil
+			}
+			return false, nil
+		}
+		release, stillRunning, acquireErr := acquire(mutexName)
+		if acquireErr == nil && !stillRunning {
+			return false, release
+		}
+		if acquireErr == nil {
+			release()
+		}
+		sleeper(instanceRecheckInterval)
+	}
+}
