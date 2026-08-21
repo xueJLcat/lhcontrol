@@ -202,6 +202,39 @@ func TestRefreshMarkerRespectsRecordedConnectionBackoff(t *testing.T) {
 	}
 }
 
+// TestConnectionBackoffClampsEarlierRefreshMarker guards the inverse ordering
+// of the pending-refresh invariant: when a refresh marker was recorded before
+// a connection backoff, the later backoff must clamp the stale marker. An
+// unclamped marker stays due in the past, so recovery would re-run the read
+// that just failed and negate the backoff the failure recorded.
+func TestConnectionBackoffClampsEarlierRefreshMarker(t *testing.T) {
+	cfg := config.NewConfig()
+	manager := NewManager(cfg)
+	manager.shuttingDown.Store(true) // Keep the scheduler dormant while inspecting its queue.
+	t.Cleanup(manager.Shutdown)
+
+	address := "AA:BB:CC:DD:EE:08"
+	manager.trackStatusRefreshPending(address)
+	retry, tracked := manager.statusRetries[address]
+	if !tracked || retry.refreshNextAt.IsZero() {
+		t.Fatalf("refresh marker did not create a retry entry: %+v tracked=%v", retry, tracked)
+	}
+
+	manager.noteStatusFailureKind(address, statusRetryConnection)
+
+	retry, tracked = manager.statusRetries[address]
+	if !tracked {
+		t.Fatal("connection backoff dropped the retry entry")
+	}
+	if retry.refreshNextAt.Before(retry.nextAt) {
+		t.Fatalf("refresh marker due at %v falls before the connection backoff at %v", retry.refreshNextAt, retry.nextAt)
+	}
+	kind, _, _, selectedNextAt := statusRetryOrderAndKind(retry)
+	if kind != statusRetryConnection || !selectedNextAt.Equal(retry.nextAt) {
+		t.Fatalf("recovery order = kind %v nextAt %v, want the connection backoff to stay the earliest schedule", kind, selectedNextAt)
+	}
+}
+
 // TestRefreshMarkerWithoutBackoffFallsDueImmediately keeps the no-backoff
 // behavior: a pending-refresh marker for a station without a recorded
 // connection failure is due immediately so recovery re-reads it without delay.

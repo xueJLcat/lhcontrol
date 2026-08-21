@@ -182,6 +182,15 @@ func (m *Manager) noteStatusFailureKind(address string, kind statusRetryKind) {
 		retry.failures++
 		retry.lastAttempt = now
 		retry.nextAt = now.Add(m.statusRetryDelay(retry.failures))
+		// A refresh marker recorded before this backoff must not fall due
+		// ahead of it: recovery picks the earliest due schedule, so a stale
+		// marker would re-run the read that just failed, negate the backoff,
+		// and count failures against the absent-station budget ahead of
+		// schedule. This mirrors the clamp trackStatusRefreshPending applies
+		// in the opposite order.
+		if !retry.refreshNextAt.IsZero() && retry.refreshNextAt.Before(retry.nextAt) {
+			retry.refreshNextAt = retry.nextAt
+		}
 	}
 	if kind&statusRetryChannel != 0 {
 		retry.channelFailures++
