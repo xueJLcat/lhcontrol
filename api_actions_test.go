@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"lhcontrol/internal/bluetooth"
 	"lhcontrol/internal/station"
@@ -589,6 +591,65 @@ func TestRegisteredRoutesMapFunctionalErrors(t *testing.T) {
 
 }
 
+// TestChannelErrorResponseKeepsResultFieldNames locks the failure shape of the
+// channel endpoint to the success shape: every ChannelChangeResult field keeps
+// its exact JSON name (including "channel"), with error and expectedChannel as
+// additive diagnostics. A divergent name (a previous revision used
+// "actualChannel" only in errors) breaks clients that parse both shapes.
+func TestChannelErrorResponseKeepsResultFieldNames(t *testing.T) {
+
+	manager := &fakeAPIStationManager{
+
+		channelErr:    station.ErrChannelConflict,
+		channelResult: station.ChannelChangeResult{Address: "AA:BB:CC:DD:EE:FF", PreviousChannel: 3, Channel: 3, Warnings: []string{"conflict risk"}},
+	}
+
+	request := httptest.NewRequest(http.MethodPut, "/stations/AA:BB:CC:DD:EE:FF/channel", strings.NewReader(`{"channel":4}`))
+
+	request.Header.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSON)
+
+	response, err := testAPI(manager).Test(request)
+
+	if err != nil {
+
+		t.Fatal(err)
+
+	}
+
+	defer response.Body.Close()
+
+	if response.StatusCode != fiber.StatusConflict {
+
+		t.Fatalf("status = %d, want %d", response.StatusCode, fiber.StatusConflict)
+
+	}
+
+	var fields map[string]json.RawMessage
+
+	if err := json.NewDecoder(response.Body).Decode(&fields); err != nil {
+
+		t.Fatal(err)
+
+	}
+
+	for _, required := range []string{"error", "expectedChannel", "address", "previousChannel", "channel", "commandSent", "confirmed", "confirmationError", "warnings", "station"} {
+
+		if _, ok := fields[required]; !ok {
+
+			t.Fatalf("channel error response missing field %q: %v", required, fields)
+
+		}
+
+	}
+
+	if _, ok := fields["actualChannel"]; ok {
+
+		t.Fatalf("channel error response still carries the divergent actualChannel field: %v", fields)
+
+	}
+
+}
+
 func TestBulkRoutePreservesPartialResults(t *testing.T) {
 
 	manager := &fakeAPIStationManager{bulkResult: station.BulkPowerResult{
@@ -647,17 +708,63 @@ func TestAPIBodyLimit(t *testing.T) {
 
 	}
 
-	body := `{"state":"` + strings.Repeat("x", 17*1024) + `"}`
+	// Serve on a real listener: fiber's Test() surfaces an oversized-body
+	// rejection as a client-side error instead of the 413 response a live
+	// server writes, so only a live server exercises the production path
+	// (fasthttp BodyLimit -> serverErrorHandler -> the app's JSON error shape).
+	app := testAPI(&fakeAPIStationManager{})
 
-	request := httptest.NewRequest(http.MethodPost, "/stations/power", strings.NewReader(body))
-
-	request.Header.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSON)
-
-	response, err := testAPI(&fakeAPIStationManager{}).Test(request)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
 
 	if err != nil {
 
 		t.Fatal(err)
+
+	}
+
+	serveDone := make(chan struct{})
+
+	go func() {
+
+		defer close(serveDone)
+
+		_ = app.Listener(listener)
+
+	}()
+
+	defer func() {
+
+		_ = app.Shutdown()
+
+		<-serveDone
+
+	}()
+
+	address := listener.Addr().String()
+
+	body := `{"state":"` + strings.Repeat("x", 17*1024) + `"}`
+
+	var response *http.Response
+
+	deadline := time.Now().Add(5 * time.Second)
+
+	for {
+
+		response, err = http.Post("http://"+address+"/stations/power", fiber.MIMEApplicationJSON, strings.NewReader(body))
+
+		if err == nil {
+
+			break
+
+		}
+
+		if time.Now().After(deadline) {
+
+			t.Fatalf("body-limit request never succeeded: %v", err)
+
+		}
+
+		time.Sleep(10 * time.Millisecond)
 
 	}
 

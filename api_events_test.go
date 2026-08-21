@@ -812,7 +812,7 @@ func (f *fakeAPIStationManager) SetStationChannel(address string, channel int, a
 
 func testAPI(manager apiStationManager) *fiber.App {
 
-	api := fiber.New(fiber.Config{ErrorHandler: apiErrorHandler})
+	api := fiber.New(fiber.Config{BodyLimit: apiBodyLimit, ErrorHandler: apiErrorHandler})
 
 	registerAPIRoutes(api, manager, scanEventCallbacks{}, func() APIStatus {
 

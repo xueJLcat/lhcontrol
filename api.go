@@ -102,21 +102,24 @@ func sendPowerActionResponse(c *fiber.Ctx, result station.PowerActionResult, err
 	return sendAPIError(c, err)
 }
 
+// channelActionErrorResponse keeps the failure shape aligned with the success
+// shape: every ChannelChangeResult field keeps its exact JSON name (including
+// "channel"), so clients parsing one shape can parse the other. The extra
+// fields are additive diagnostics only.
+type channelActionErrorResponse struct {
+	station.ChannelChangeResult
+	ExpectedChannel int    `json:"expectedChannel"`
+	Error           string `json:"error"`
+}
+
 func sendChannelActionResponse(c *fiber.Ctx, result station.ChannelChangeResult, expectedChannel int, err error) error {
 	if err == nil || (result.CommandSent && !result.Confirmed) {
 		return c.Status(fiber.StatusOK).JSON(result)
 	}
-	return c.Status(apiStatusForError(err)).JSON(fiber.Map{
-		"error":             err.Error(),
-		"address":           result.Address,
-		"previousChannel":   result.PreviousChannel,
-		"expectedChannel":   expectedChannel,
-		"actualChannel":     result.Channel,
-		"commandSent":       result.CommandSent,
-		"confirmed":         result.Confirmed,
-		"confirmationError": result.ConfirmationError,
-		"warnings":          result.Warnings,
-		"station":           result.Station,
+	return c.Status(apiStatusForError(err)).JSON(channelActionErrorResponse{
+		ChannelChangeResult: result,
+		ExpectedChannel:     expectedChannel,
+		Error:               err.Error(),
 	})
 }
 
@@ -251,12 +254,10 @@ func beginExternalStationOperation(
 }
 
 func registerAPIRoutes(api *fiber.App, manager apiStationManager, events scanEventCallbacks, status func() APIStatus) {
-	api.Use(func(c *fiber.Ctx) error {
-		if len(c.Body()) > apiBodyLimit {
-			return fiber.NewError(fiber.StatusRequestEntityTooLarge, "request body exceeds the allowed limit")
-		}
-		return c.Next()
-	})
+	// Oversized bodies are rejected by the fiber BodyLimit (fasthttp
+	// MaxRequestBodySize) before any handler runs; NewApp and the test harness
+	// both configure it, and the shared ErrorHandler maps the rejection to the
+	// standard JSON error shape.
 	api.Post("/allon", func(c *fiber.Ctx) error {
 		var operationErr error
 		finish := beginExternalStationOperation(events, "bulk-power", "http-power", manager.GetStationInfo, &operationErr)
