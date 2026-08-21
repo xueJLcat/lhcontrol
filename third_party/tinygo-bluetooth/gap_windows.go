@@ -561,6 +561,11 @@ func (gate *callbackGate) close() {
 var callbackDrainLimit = 10 * time.Second
 
 func (gate *callbackGate) wait() {
+	// Capture the limit before spawning the timer goroutine: the goroutine
+	// must not read the mutable global after it is spawned, or a concurrent
+	// test tuning callbackDrainLimit races the read. Mirrors the capture
+	// pattern boundedCleanupCall documents.
+	limit := callbackDrainLimit
 	gate.mutex.Lock()
 	defer gate.mutex.Unlock()
 	if gate.active == 0 {
@@ -569,7 +574,7 @@ func (gate *callbackGate) wait() {
 	stopBroadcast := make(chan struct{})
 	defer close(stopBroadcast)
 	go func() {
-		timer := time.NewTimer(callbackDrainLimit)
+		timer := time.NewTimer(limit)
 		defer timer.Stop()
 		select {
 		case <-stopBroadcast:
@@ -579,7 +584,7 @@ func (gate *callbackGate) wait() {
 			gate.mutex.Unlock()
 		}
 	}()
-	deadline := time.Now().Add(callbackDrainLimit)
+	deadline := time.Now().Add(limit)
 	for gate.active > 0 && time.Now().Before(deadline) {
 		gate.cond.Wait()
 	}
@@ -1499,18 +1504,33 @@ func (r notificationRegistration) release() {
 }
 
 func (s *deviceState) beginCallback() bool {
+	// A malformed deviceState can carry a nil gate; degrade gracefully
+	// (reject the callback) instead of panicking inside a WinRT trampoline,
+	// which cleanup would otherwise convert into a retryable failure storm.
+	if s.callbacks == nil {
+		return false
+	}
 	return s.callbacks.begin()
 }
 
 func (s *deviceState) endCallback() {
+	if s.callbacks == nil {
+		return
+	}
 	s.callbacks.end()
 }
 
 func (s *deviceState) blockCallbacks() {
+	if s.callbacks == nil {
+		return
+	}
 	s.callbacks.close()
 }
 
 func (s *deviceState) waitCallbacks() {
+	if s.callbacks == nil {
+		return
+	}
 	s.callbacks.wait()
 }
 
