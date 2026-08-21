@@ -35,11 +35,14 @@
   } = $props();
 
   function initialTargetChannel(channel: number, occupied: Map<number, string[]>): number {
-    if (channel > 0 && !occupied.has(channel)) return channel;
+    // The backend contract is 1-16; an out-of-range cached value (a stale or
+    // corrupted read) must fall through to the first free channel instead of
+    // becoming a selectable-but-invisible default that Confirm would submit.
+    if (channel >= 1 && channel <= 16 && !occupied.has(channel)) return channel;
     for (let candidate = 1; candidate <= 16; candidate += 1) {
       if (!occupied.has(candidate)) return candidate;
     }
-    return channel > 0 ? channel : 1;
+    return channel >= 1 && channel <= 16 ? channel : 1;
   }
 
   // The modal remounts on every open, so the initial-value capture in the
@@ -77,7 +80,8 @@
     (hasUnknownVisibleChannel && !confirmUnknownChannelRisk) || busy || locked);
 
   function save() {
-    if (!saveDisabled) onSave(targetChannel, confirmUnknownChannelRisk);
+    if (saveDisabled || !Number.isInteger(targetChannel) || targetChannel < 1 || targetChannel > 16) return;
+    onSave(targetChannel, confirmUnknownChannelRisk);
   }
 </script>
 

@@ -15,7 +15,14 @@ export function focusTrap(node: HTMLElement) {
   function keydown(event: KeyboardEvent) {
     if (event.key !== 'Tab') return;
     const items = focusable();
-    if (!items.length) return;
+    if (!items.length) {
+      // Every control can be disabled at once (a modal busy-saving disables
+      // all of them). Without a preventDefault the browser default would move
+      // focus out of the trap; hold it on the dialog container instead.
+      event.preventDefault();
+      if (node.hasAttribute('tabindex')) node.focus();
+      return;
+    }
     const first = items[0];
     const last = items[items.length - 1];
     const active = document.activeElement;
