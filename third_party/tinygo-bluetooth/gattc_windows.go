@@ -534,9 +534,14 @@ func (c DeviceCharacteristic) writeContext(ctx context.Context, p []byte, mode g
 	}
 	defer writer.Release()
 
-	// Add bytes to writer
-	if err := writer.WriteBytes(uint32(len(p)), p); err != nil {
-		return 0, classifyWriteFailure(mode, false, false, err)
+	// Add bytes to writer. An empty payload must skip WriteBytes: winrt-go
+	// indexes the first element of the payload and panics on an empty one.
+	// DetachBuffer on a writer that never received data returns a valid
+	// zero-length buffer that WinRT accepts for the write.
+	if len(p) > 0 {
+		if err := writer.WriteBytes(uint32(len(p)), p); err != nil {
+			return 0, classifyWriteFailure(mode, false, false, err)
+		}
 	}
 
 	value, err := writer.DetachBuffer()
@@ -760,6 +765,12 @@ func (c DeviceCharacteristic) ReadContext(ctx context.Context, data []byte) (int
 	if err != nil {
 		return 0, err
 	}
+	if bufferlen == 0 {
+		// An empty value is a legitimate zero-byte read. winrt-go's
+		// ReadBytes indexes the first element of its result slice and
+		// panics on an empty one, so return without reading.
+		return 0, nil
+	}
 
 	readBuffer, err := datareader.ReadBytes(bufferlen)
 	if err != nil {
@@ -901,10 +912,16 @@ func (c DeviceCharacteristic) EnableNotificationsWithMode(mode NotificationMode,
 			return
 		}
 
-		data, err := reader.ReadBytes(buflen)
-		if err != nil {
-			return
+		var data []byte
+		if buflen > 0 {
+			data, err = reader.ReadBytes(buflen)
+			if err != nil {
+				return
+			}
 		}
+		// An empty notification is delivered as an empty payload: winrt-go's
+		// ReadBytes panics on an empty slice, and silently dropping the value
+		// here would lose data the subscriber is entitled to.
 
 		// Deliver the copied payload outside the WinRT callback stack. User
 		// code that calls Disconnect from inside a notification callback
