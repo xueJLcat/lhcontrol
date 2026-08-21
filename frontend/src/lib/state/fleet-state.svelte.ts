@@ -188,7 +188,13 @@ export class FleetState {
     const delay = Math.min(OPERATIONAL_SAFETY_WINDOW_MS, Math.max(0, nearest - Date.now()));
     this.operationalFreshnessTimer = setTimeout(() => {
       this.operationalFreshnessTimer = null;
-      this.expireOperationalFreshnessThrough(nearest);
+      // setTimeout is armed from a wall-clock deadline but fires on a
+      // monotonic timer; a backward clock change after scheduling would let
+      // `nearest` expire entries whose deadline has not actually been
+      // reached. Clamp the effective deadline to the current time so only
+      // genuinely expired entries downgrade; the reschedule path re-arms
+      // the rest once nothing changes.
+      this.expireOperationalFreshnessThrough(Math.min(nearest, Date.now()));
     }, delay);
   }
 

@@ -21,6 +21,10 @@ export class ExternalStationUpdateCoordinator {
 
   handle(event: ExternalStationUpdateEvent) {
     if (this.dependencies.isDisposed() || !event || !Array.isArray(event.stations)) return;
+    // A non-numeric id would slip through the monotonic gate as "unsequenced"
+    // and merge without advancing it; the backend sequencer always emits
+    // finite numbers, so drop anything else as a malformed event.
+    if (!Number.isFinite(event.id)) return;
     this.apply(event.id, event.stations);
   }
 

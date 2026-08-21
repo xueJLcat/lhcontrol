@@ -231,6 +231,11 @@ export class StationStore {
       this.apiAddress = status.address;
       this.configWarnings = status.warnings ?? [];
       this.configWritable = status.configWritable ?? true;
+      // A snapshot without an activeOperations array is skipped deliberately:
+      // the backend always sends one, so a missing field is malformed, and
+      // feeding it to the reconciler as an empty (idle) snapshot would count
+      // toward clearing the auto-sleep busy flag. Two consecutive idle
+      // snapshots must reflect real operation lists, not malformed polls.
       if (Array.isArray(status.activeOperations)) {
         this.reconcileExternalOperations(status.activeOperations, status.operationRevision ?? 0);
       }
@@ -1059,12 +1064,16 @@ export class StationStore {
     return this.scans.periodicStatusCheck();
   }
 
-  startScan() {
+  async startScan() {
     // A scan the user starts manually fulfills the configured scan-on-startup
     // intent; drop any deferred startup scan so the retry timer does not fire
-    // a redundant automatic scan moments after the user's own scan.
-    if (this.startupScanDeferred) this.setStartupScanDeferred(false);
-    return this.scans.startScan();
+    // a redundant automatic scan moments after the user's own scan. A start
+    // the backend rejects (a lock that landed between the button enabling and
+    // the click) does not fulfill that intent: keep the deferral so the retry
+    // timer still runs the configured startup scan.
+    const started = await this.scans.startScan();
+    if (started && this.startupScanDeferred) this.setStartupScanDeferred(false);
+    return started;
   }
 
   stopScan() {
