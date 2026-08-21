@@ -252,6 +252,9 @@ func TestAutoSleepSettingsNoOpRepairsMissingWatcher(t *testing.T) {
 func TestRecoveryReplayDoesNotCancelMatchingAutoSleepWatcher(t *testing.T) {
 	t.Setenv("AppData", t.TempDir())
 	app := NewApp()
+	// The replay converges the API listener as a side effect; keep it off the
+	// production port.
+	stubFakeAPIListener(t, app)
 	settings := autosleep.Settings{Enabled: true, Target: "steamvr", DelaySeconds: 60}
 	if err := app.config.SetAutoSleep(settings); err != nil {
 		t.Fatalf("config.SetAutoSleep() error = %v", err)
@@ -289,6 +292,9 @@ func TestRecoveryReplayDoesNotCancelMatchingAutoSleepWatcher(t *testing.T) {
 func TestRecoveryReplayConvergesAbsentStationRetryLimit(t *testing.T) {
 	t.Setenv("AppData", t.TempDir())
 	app := NewApp()
+	// The replay converges the API listener as a side effect; keep it off the
+	// production port.
+	stubFakeAPIListener(t, app)
 
 	limit := app.config.GetAbsentStationRetryLimit()
 	raised := limit + 3

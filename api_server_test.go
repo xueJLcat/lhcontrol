@@ -159,6 +159,10 @@ func TestBlockedSaveRecoveryQuarantinePublishesWarning(t *testing.T) {
 
 	app := NewApp()
 
+	// The recovery this test provokes replays the runtime settings, which
+	// restarts the API listener; keep it off the production port.
+	stubFakeAPIListener(t, app)
+
 	loadErr := app.config.Load()
 
 	if loadErr == nil {
@@ -1130,6 +1134,31 @@ func newFakeAPIListener(address string) *fakeAPIListener {
 		panic(err)
 	}
 	return &fakeAPIListener{addr: addr, closed: make(chan struct{})}
+}
+
+// stubFakeAPIListener detaches the app's API listener from real sockets so a
+// recovery-replay side effect (which restarts the listener) cannot bind the
+// production port and leak a live server into later tests. The cleanup cancel
+// releases the spawned listener goroutine once the test ends.
+func stubFakeAPIListener(t *testing.T, app *App) {
+	app.listen = func(_, address string) (net.Listener, error) {
+		return newFakeAPIListener(address), nil
+	}
+	app.serveListener = func(listener net.Listener) error {
+		fake := listener.(*fakeAPIListener)
+		<-fake.closed
+		return nil
+	}
+	t.Cleanup(func() {
+		app.apiLifecycleMutex.Lock()
+		cancel := app.apiCancel
+		app.apiCancel = nil
+		app.apiLifecycleMutex.Unlock()
+		if cancel != nil {
+			cancel()
+		}
+		app.apiWG.Wait()
+	})
 }
 
 // TestSetAPIListenAddressSamePortHostChangeRestartsWithoutProbe guards the
