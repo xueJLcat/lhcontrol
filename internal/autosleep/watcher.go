@@ -420,6 +420,19 @@ func (w *Watcher) Run(ctx context.Context) {
 			triggerCancel()
 			triggerCancel = nil
 			triggerDone = nil
+			// A trigger deferred while the previous action drained must fire
+			// as soon as that action completes; waiting for the next tick
+			// would add up to a full poll interval of dead time.
+			if pendingTrigger {
+				now := time.Now()
+				if w.Now != nil {
+					now = w.Now()
+				}
+				if !poll(now) {
+					stopTrigger()
+					return
+				}
+			}
 		case now := <-ticker.C:
 			if w.Now != nil {
 				now = w.Now()

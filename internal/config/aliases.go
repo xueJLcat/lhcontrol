@@ -141,10 +141,15 @@ func (c *Config) SetRenamedStationByAddress(address, originalName, newName strin
 			// alias once a scan rediscovers the device. With no existing entry
 			// there is nothing to suppress or remove; a blocked persistence
 			// still reports the block like every other setter instead of
-			// claiming success.
+			// claiming success. A pending persistence error also keeps the
+			// rewrite: rewriting unchanged content is exactly what clears it,
+			// matching SetAPIListenAddress.
 			if !addressExisted {
 				if c.persistenceBlockedErr != nil {
 					return blockedSaveError(c.persistenceBlockedErr)
+				}
+				if c.lastPersistenceErr != nil {
+					return c.saveLocked()
 				}
 				return nil
 			}
