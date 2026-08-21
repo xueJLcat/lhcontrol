@@ -125,8 +125,8 @@ func (c *Config) loadLocked(configFilePath string) error {
 	c.ScanOnStartup = boolOrDefault(loaded.ScanOnStartup, true)
 	c.StatusPollingEnabled = boolOrDefault(loaded.StatusPollingEnabled, true)
 	c.APIListenAddress = sanitizeAPIListenAddress(loaded.APIListenAddress)
-	c.applyPersisted(&loaded)
-	c.repairCrossItemInvariants()
+	fallbacks := c.applyPersisted(&loaded)
+	c.repairCrossItemInvariants(fallbacks)
 	c.persistenceBlockedErr = nil
 	c.lastPersistenceErr = nil
 	return nil
@@ -134,8 +134,10 @@ func (c *Config) loadLocked(configFilePath string) error {
 
 // repairCrossItemInvariants realigns coupled settings loaded from disk so a
 // hand-edited or future-version file cannot leave the runtime in a state where
-// budgets contradict each other. Callers must hold c.mutex.
-func (c *Config) repairCrossItemInvariants() {
+// budgets contradict each other. Callers must hold c.mutex. The fallbacks
+// record which values were defaulted by sanitizing so the repair can prefer
+// adjusting a corrupted side over demoting a persisted one.
+func (c *Config) repairCrossItemInvariants(fallbacks crossItemFallbacks) {
 	repairCrossItemValues(
 		&c.BulkPowerTimeoutSeconds,
 		&c.StationOperationTimeoutSeconds,
@@ -145,6 +147,7 @@ func (c *Config) repairCrossItemInvariants() {
 		&c.StatusRefreshTimeoutSeconds,
 		&c.RecoveryRetryBaseSeconds,
 		&c.RecoveryRetryMaxSeconds,
+		fallbacks,
 	)
 }
 
@@ -157,22 +160,62 @@ func repairCrossItemValues(
 	statusRefreshTimeoutSeconds *int,
 	recoveryRetryBaseSeconds *int,
 	recoveryRetryMaxSeconds *int,
+	fallbacks crossItemFallbacks,
 ) {
+	// Each invariant prefers adjusting the side that fell back to its default
+	// (a missing or corrupted persisted value) over demoting a value the user
+	// actually persisted; the historical direction remains the fallback when
+	// both sides were persisted (or both defaulted).
 	if *bulkPowerTimeoutSeconds < *stationOperationTimeoutSeconds {
-		*bulkPowerTimeoutSeconds = *stationOperationTimeoutSeconds
+		if fallbacks.stationOperationTimeout && !fallbacks.bulkPowerTimeout {
+			*stationOperationTimeoutSeconds = clampInt(*bulkPowerTimeoutSeconds, MinStationOperationTimeoutSeconds, MaxStationOperationTimeoutSeconds)
+		}
+		if *bulkPowerTimeoutSeconds < *stationOperationTimeoutSeconds {
+			*bulkPowerTimeoutSeconds = *stationOperationTimeoutSeconds
+		}
 	}
 	if *initialReadTimeoutSeconds > *stationOperationTimeoutSeconds {
-		*initialReadTimeoutSeconds = *stationOperationTimeoutSeconds
+		if fallbacks.stationOperationTimeout && !fallbacks.initialReadTimeout {
+			*stationOperationTimeoutSeconds = clampInt(*initialReadTimeoutSeconds, MinStationOperationTimeoutSeconds, MaxStationOperationTimeoutSeconds)
+		}
+		if *initialReadTimeoutSeconds > *stationOperationTimeoutSeconds {
+			*initialReadTimeoutSeconds = *stationOperationTimeoutSeconds
+		}
 	}
 	if *scanReadPhaseTimeoutSeconds < *initialReadTimeoutSeconds {
-		*scanReadPhaseTimeoutSeconds = *initialReadTimeoutSeconds
+		if fallbacks.initialReadTimeout && !fallbacks.scanReadPhaseTimeout {
+			*initialReadTimeoutSeconds = clampInt(*scanReadPhaseTimeoutSeconds, MinInitialReadTimeoutSeconds, MaxInitialReadTimeoutSeconds)
+		}
+		if *scanReadPhaseTimeoutSeconds < *initialReadTimeoutSeconds {
+			*scanReadPhaseTimeoutSeconds = *initialReadTimeoutSeconds
+		}
 	}
 	if *statusRefreshTimeoutSeconds < *statusReadTimeoutSeconds {
-		*statusRefreshTimeoutSeconds = *statusReadTimeoutSeconds
+		if fallbacks.statusReadTimeout && !fallbacks.statusRefreshTimeout {
+			*statusReadTimeoutSeconds = clampInt(*statusRefreshTimeoutSeconds, MinStatusReadTimeoutSeconds, MaxStatusReadTimeoutSeconds)
+		}
+		if *statusRefreshTimeoutSeconds < *statusReadTimeoutSeconds {
+			*statusRefreshTimeoutSeconds = *statusReadTimeoutSeconds
+		}
 	}
 	if *recoveryRetryBaseSeconds > *recoveryRetryMaxSeconds {
-		*recoveryRetryBaseSeconds = *recoveryRetryMaxSeconds
+		if fallbacks.recoveryRetryMax && !fallbacks.recoveryRetryBase {
+			*recoveryRetryMaxSeconds = clampInt(*recoveryRetryBaseSeconds, MinRecoveryRetryMaxSeconds, MaxRecoveryRetryMaxSeconds)
+		}
+		if *recoveryRetryBaseSeconds > *recoveryRetryMaxSeconds {
+			*recoveryRetryBaseSeconds = *recoveryRetryMaxSeconds
+		}
 	}
+}
+
+func clampInt(value, min, max int) int {
+	if value < min {
+		return min
+	}
+	if value > max {
+		return max
+	}
+	return value
 }
 
 func boolOrDefault(value *bool, fallback bool) bool {

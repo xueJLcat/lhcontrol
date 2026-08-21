@@ -1557,6 +1557,35 @@ func TestLoadRepairsContradictoryAdvancedSettings(t *testing.T) {
 	}
 }
 
+// TestLoadRepairPrefersPersistedValuesOverCorruptedAnchors guards the repair
+// direction for corrupted files: when one side of an invariant fell back to
+// its default (out-of-range or missing), the repair must pull that defaulted
+// side toward the persisted value instead of demoting the value the user
+// actually saved.
+func TestLoadRepairPrefersPersistedValuesOverCorruptedAnchors(t *testing.T) {
+	configDirectory := useTemporaryConfigDirectory(t)
+	// stationOperationTimeoutSeconds is out of range and falls back to its
+	// default (30); the persisted initial read timeout (50) must survive the
+	// cross-item repair instead of being clamped down to the corrupted anchor.
+	if err := os.WriteFile(
+		filepath.Join(configDirectory, "config.json"),
+		[]byte(`{"stationOperationTimeoutSeconds":999,"initialReadTimeoutSeconds":50}`),
+		0o644,
+	); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	cfg := NewConfig()
+	if err := cfg.Load(); err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if got := cfg.GetInitialReadTimeoutSeconds(); got != 50 {
+		t.Fatalf("repaired initial read timeout = %d, want the persisted 50 kept", got)
+	}
+	if got := cfg.GetStationOperationTimeoutSeconds(); got != 50 {
+		t.Fatalf("repaired station operation timeout = %d, want it raised to the persisted initial read timeout 50", got)
+	}
+}
+
 func TestLoadRepairsBulkTimeoutBelowStationTimeout(t *testing.T) {
 	configDirectory := useTemporaryConfigDirectory(t)
 	if err := os.WriteFile(

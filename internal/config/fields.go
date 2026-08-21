@@ -104,12 +104,51 @@ func (c *Config) applyDefaults() {
 	}
 }
 
-// applyPersisted sanitizes every ranged runtime field from a loaded snapshot.
-// Callers must hold c.mutex.
-func (c *Config) applyPersisted(loaded *persistedConfig) {
+// crossItemFallbacks records which coupled settings fell back to their
+// defaults while sanitizing a loaded file (missing or out-of-range values).
+// The cross-item repair prefers adjusting such a defaulted side over
+// demoting a value the user actually persisted.
+type crossItemFallbacks struct {
+	bulkPowerTimeout        bool
+	stationOperationTimeout bool
+	initialReadTimeout      bool
+	scanReadPhaseTimeout    bool
+	statusReadTimeout       bool
+	statusRefreshTimeout    bool
+	recoveryRetryBase       bool
+	recoveryRetryMax        bool
+}
+
+// applyPersisted sanitizes every ranged runtime field from a loaded snapshot
+// and reports which coupled settings fell back to their defaults. Callers
+// must hold c.mutex.
+func (c *Config) applyPersisted(loaded *persistedConfig) crossItemFallbacks {
+	var fallbacks crossItemFallbacks
 	for _, binding := range c.intSettingBindings(loaded) {
-		*binding.runtime = sanitizeRangedInt(*binding.persisted, binding.min, binding.max, binding.fallback)
+		value := *binding.persisted
+		if value == nil || *value < binding.min || *value > binding.max {
+			switch binding.runtime {
+			case &c.BulkPowerTimeoutSeconds:
+				fallbacks.bulkPowerTimeout = true
+			case &c.StationOperationTimeoutSeconds:
+				fallbacks.stationOperationTimeout = true
+			case &c.InitialReadTimeoutSeconds:
+				fallbacks.initialReadTimeout = true
+			case &c.ScanReadPhaseTimeoutSeconds:
+				fallbacks.scanReadPhaseTimeout = true
+			case &c.StatusReadTimeoutSeconds:
+				fallbacks.statusReadTimeout = true
+			case &c.StatusRefreshTimeoutSeconds:
+				fallbacks.statusRefreshTimeout = true
+			case &c.RecoveryRetryBaseSeconds:
+				fallbacks.recoveryRetryBase = true
+			case &c.RecoveryRetryMaxSeconds:
+				fallbacks.recoveryRetryMax = true
+			}
+		}
+		*binding.runtime = sanitizeRangedInt(value, binding.min, binding.max, binding.fallback)
 	}
+	return fallbacks
 }
 
 // sanitizeRuntimeInPlace repairs directly-assigned or zero-value runtime

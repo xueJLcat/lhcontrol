@@ -136,7 +136,10 @@ func (c *Config) saveLocked() error {
 		}
 	}
 	c.sanitizeRuntimeInPlace()
-	c.repairCrossItemInvariants()
+	// The save path repairs runtime values the setters already validated; no
+	// value is a load-time fallback, so the repair keeps its historical
+	// direction (empty fallback record).
+	c.repairCrossItemInvariants(crossItemFallbacks{})
 
 	snapshot := persistedConfig{
 		RenamedStations:          make(map[string]string, len(c.RenamedStations)),
