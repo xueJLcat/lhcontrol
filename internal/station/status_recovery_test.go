@@ -556,6 +556,62 @@ func TestStatusRefreshAbandonDoesNotWaitOnWedgedStationLock(t *testing.T) {
 	}
 }
 
+// TestRecoveryRoundSkipsWedgedStationLock guards the recovery loop itself: the
+// loop is a single goroutine, and a station whose lock is held by a transport
+// call that ignores cancellation (an abandoned refresh or scan worker) must be
+// skipped via the lock probe instead of blocking the loop. Blocking there
+// would stall every other station's background recovery until the lock frees.
+func TestRecoveryRoundSkipsWedgedStationLock(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	manager.statusRecoveryStart.Do(func() {})
+	address := "11:22:33:44:55:7B"
+	station := &internalbluetooth.BaseStation{
+		Name: "LHB-WEDGED-RECOVERY", Address: mustAddress(t, address), Present: true,
+	}
+	manager.stations[address] = station
+	// Prime the cached snapshot so candidate selection (SnapshotNonBlocking)
+	// still sees the station once its lock is wedged.
+	station.Snapshot()
+	// A due connection retry makes the station a recovery candidate.
+	manager.statusRetryMutex.Lock()
+	manager.statusRetries[address] = statusRetry{
+		kinds:       statusRetryConnection,
+		failures:    1,
+		lastAttempt: time.Now().Add(-time.Minute),
+		nextAt:      time.Now().Add(-time.Second),
+	}
+	manager.statusRetryMutex.Unlock()
+
+	release := make(chan struct{})
+	defer close(release)
+	go station.HoldLockWhile(func() { <-release })
+	wedgeDeadline := time.Now().Add(time.Second)
+	for {
+		if _, ok := station.TrySnapshot(); !ok {
+			break
+		}
+		if time.Now().After(wedgeDeadline) {
+			t.Fatal("station lock was not wedged before the recovery round")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	started := time.Now()
+	manager.runStatusRecoveryRound()
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("recovery round took %v, want it to skip the wedged station lock", elapsed)
+	}
+	// The skipped station's retry entry must stay scheduled so it is retried
+	// once its lock frees, rather than being consumed by the skipped round.
+	manager.statusRetryMutex.Lock()
+	_, tracked := manager.statusRetries[address]
+	manager.statusRetryMutex.Unlock()
+	if !tracked {
+		t.Fatal("recovery round consumed the wedged station's retry entry")
+	}
+}
+
 // TestStatusRefreshAbandonKeepsDrainChannel guards the abandoned-worker
 // lifecycle: while the wedged worker still holds the shared read lock, the
 // refresh's done channel must stay published so an exclusive foreground

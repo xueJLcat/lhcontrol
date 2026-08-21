@@ -319,6 +319,17 @@ func (m *Manager) runStatusRecoveryRound() time.Duration {
 		return left.sortKey < right.sortKey
 	})
 	for _, candidate := range candidates {
+		// A station whose lock is held by a transport call that ignores
+		// cancellation (an abandoned status-refresh or scan worker) cannot be
+		// recovered right now. The recovery loop is a single goroutine, so
+		// blocking it on that lock would stall every other station's recovery
+		// until the lock frees; probe the lock and skip so the remaining
+		// candidates still run this round and this one is retried next tick.
+		// Candidate selection used SnapshotNonBlocking, which serves a cached
+		// snapshot for such a station, so only this probe detects the wedge.
+		if _, ok := candidate.station.TrySnapshot(); !ok {
+			continue
+		}
 		if err := m.beginRecoveryStationOperation(candidate.address); err != nil {
 			if errors.Is(err, ErrShuttingDown) {
 				return 0
