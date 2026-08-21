@@ -1036,11 +1036,11 @@ func TestSleepPairRebuildsSessionInvalidatedDuringPrepareGap(t *testing.T) {
 	}
 
 	station.mutex.Lock()
-	finalAttempted, gapErr, writeErr := writeSleepCommandPair(context.Background(), station, 0x00)
+	finalAttempted, writeErr := writeSleepCommandPair(context.Background(), station, 0x00)
 	station.mutex.Unlock()
 
-	if !finalAttempted || gapErr != nil {
-		t.Fatalf("pair outcome = finalAttempted:%v gapErr:%v, want the final write attempted", finalAttempted, gapErr)
+	if !finalAttempted {
+		t.Fatal("sleep pair did not attempt the final write")
 	}
 	if counting.connectCalls.Load() == 0 {
 		t.Fatal("invalidated sleep pair did not attempt to rebuild the session")

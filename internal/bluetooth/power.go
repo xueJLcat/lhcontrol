@@ -277,23 +277,38 @@ const maxConfirmReconnectExtensions = 3
 // snapshots and other short readers are not queued behind the whole polling
 // window; the lock is always held again on return. Attempt counts and the
 // poll interval follow the user-configured TimingPolicy.
+//
+// bootFallbackConfirmAttempts sizes the poll budget that covers the boot
+// fallback window: ceiling division for the fractional window/poll ratio
+// (+1), plus slack for up to reconnectThreshold-1 consecutive read failures
+// before a boot-like value is first observed. Each such failure defers the
+// bootingSince anchor by one poll interval without triggering a fresh
+// reconnect, so the window coverage must start that many polls later.
+// interval must be the cadence the loop actually sleeps.
+func bootFallbackConfirmAttempts(window, interval time.Duration, reconnectThreshold int) int {
+	if interval <= 0 {
+		return 0
+	}
+	slack := reconnectThreshold - 1
+	if slack < 0 {
+		slack = 0
+	}
+	return int((window+interval-1)/interval) + 1 + slack
+}
+
 func confirmPowerStateInternalContext(ctx context.Context, station *BaseStation, expectedState PowerState) error {
 	timing := CurrentTiming()
 	attempts := timing.ConfirmAttemptsOff
 	if expectedState == PowerStateOn {
 		attempts = timing.ConfirmAttemptsOn
-		if timing.ConfirmPollInterval > 0 {
+		if fallbackAttempts := bootFallbackConfirmAttempts(timing.BootFallbackAfter, timing.ConfirmPollInterval, timing.ConfirmReconnectThreshold); fallbackAttempts > attempts {
 			// Firmware that keeps reporting boot-like raw values only decodes to
 			// a trusted On once the boot fallback window has elapsed. The poll
 			// must cover that window regardless of the configured attempt count,
 			// otherwise every power-on is reported unconfirmed even when the
 			// station actually turned on. The surrounding context still bounds
-			// the real wait. Ceiling division: with a fractional window/poll
-			// ratio the final poll still has to reach past the window.
-			fallbackAttempts := int((timing.BootFallbackAfter+timing.ConfirmPollInterval-1)/timing.ConfirmPollInterval) + 1
-			if fallbackAttempts > attempts {
-				attempts = fallbackAttempts
-			}
+			// the real wait.
+			attempts = fallbackAttempts
 		}
 	}
 	var lastErr error
@@ -391,9 +406,14 @@ func confirmPowerStateInternalContext(ctx context.Context, station *BaseStation,
 				// caller supplies no deadline, as the context.Background wrappers
 				// do.
 				if expectedState == PowerStateOn && reconnectExtensions < maxConfirmReconnectExtensions {
+					// The restarted window follows the policy at decode time, so
+					// its length comes from the refreshed policy; the cadence
+					// and the reconnect gate are this loop's snapshot values,
+					// so the coverage math must divide by the interval the
+					// loop actually sleeps and budget for the same number of
+					// read failures the loop tolerates between reconnects.
 					refreshed := CurrentTiming()
-					if refreshed.ConfirmPollInterval > 0 {
-						fallbackAttempts := int((refreshed.BootFallbackAfter+refreshed.ConfirmPollInterval-1)/refreshed.ConfirmPollInterval) + 1
+					if fallbackAttempts := bootFallbackConfirmAttempts(refreshed.BootFallbackAfter, timing.ConfirmPollInterval, timing.ConfirmReconnectThreshold); fallbackAttempts > 0 {
 						if remaining := attempt + 1 + fallbackAttempts; remaining > attempts {
 							attempts = remaining
 							reconnectExtensions++
@@ -580,11 +600,7 @@ func SetPowerStateContext(ctx context.Context, station *BaseStation, target Powe
 		station.bootingSince = time.Time{}
 		log.Printf("Bluetooth: Sending %s command to %s", target, station.Name)
 		if target == PowerStateSleep {
-			var gapErr error
-			sleepFinalAttempted, gapErr, err = writeSleepCommandPair(ctx, station, command)
-			if gapErr != nil {
-				return PowerControlResult{}, gapErr
-			}
+			sleepFinalAttempted, err = writeSleepCommandPair(ctx, station, command)
 		} else {
 			err = writePowerValueInternal(ctx, station, command)
 		}
@@ -686,24 +702,22 @@ func (station *BaseStation) restoreBootInference(bootRawTrustedOn bool, bootingS
 // writes that some Lighthouse 2.0 firmware expects. Once the prepare has
 // been sent the pair must complete even when the caller context is already
 // cancelled: leaving a sleeping station prepared can wake it, so both waits
-// detach from ctx cancellation. A non-nil gapErr abandons the pair between
-// the two writes and must terminate the whole operation immediately; writeErr
-// carries the final-write outcome through the normal retry classification.
-func writeSleepCommandPair(ctx context.Context, station *BaseStation, command byte) (finalAttempted bool, gapErr, writeErr error) {
+// detach from ctx cancellation. Every outcome after a successful prepare
+// reports finalAttempted=true so the caller books the pair as a sent
+// command (confirmed or not) and never replays the prepare.
+func writeSleepCommandPair(ctx context.Context, station *BaseStation, command byte) (finalAttempted bool, writeErr error) {
 	if prepareErr := writePowerValueInternal(ctx, station, 0x01); prepareErr != nil {
-		return false, nil, prepareErr
+		return false, prepareErr
 	}
 	timing := CurrentTiming()
 	if timing.PrepareGap > 0 {
 		// Release the station lock during the firmware settling gap so
 		// short readers are not queued behind it, matching every other
-		// wait in this package.
+		// wait in this package. The detached context never cancels, so the
+		// gap always runs to completion; the pair is never abandoned here.
 		station.mutex.Unlock()
-		waitErr := sleepContext(context.WithoutCancel(ctx), timing.PrepareGap)
+		_ = sleepContext(context.WithoutCancel(ctx), timing.PrepareGap)
 		station.mutex.Lock()
-		if waitErr != nil {
-			return false, waitErr, nil
-		}
 	}
 	// Once prepare succeeds, the final sleep write is a bounded cleanup
 	// action. Give it an independent hard deadline: reusing an expired
@@ -721,10 +735,10 @@ func writeSleepCommandPair(ctx context.Context, station *BaseStation, command by
 	// prepared (and awake) with the pair abandoned.
 	if station.characteristic == nil {
 		if reconnectErr := connectAndDiscoverInternalContext(finalContext, station); reconnectErr != nil {
-			return true, nil, fmt.Errorf("sleep pair lost the session during the prepare gap: %w", reconnectErr)
+			return true, fmt.Errorf("sleep pair lost the session during the prepare gap: %w", reconnectErr)
 		}
 	}
-	return true, nil, writePowerValueInternal(finalContext, station, command)
+	return true, writePowerValueInternal(finalContext, station, command)
 }
 
 // resolvePowerCommandOutcome converts the retry loop's terminal state into
