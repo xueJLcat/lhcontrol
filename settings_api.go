@@ -104,12 +104,15 @@ func (a *App) SetAPIListenAddress(address string) error {
 		return nil
 	}
 
-	previous := a.config.GetAPIListenAddress()
 	// The address the listener currently serves can differ from the persisted
 	// one while an earlier change is still settling; a failed switch restores
-	// each layer to its own previous value.
+	// each layer to its own previous value. The persisted-rollback baseline is
+	// captured inside the setter, after any blocked-save recovery, so a
+	// recovery that restored a different address is not overwritten by a stale
+	// pre-recovery read.
 	published := a.GetAPIStatus().Address
-	if err := a.config.SetAPIListenAddress(normalized); err != nil {
+	previous, err := a.config.SetAPIListenAddressWithPrevious(normalized)
+	if err != nil {
 		a.setConfigPersistenceStatus()
 		// Same recovery window as the unchanged-address branch: converge the
 		// listener onto whatever address the recovered configuration holds.

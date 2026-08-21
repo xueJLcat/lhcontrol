@@ -1385,6 +1385,33 @@ func TestAPIListenAddressValidatesAndPersists(t *testing.T) {
 	}
 }
 
+// TestAPIListenAddressWithPreviousReportsEffectiveBaseline guards the rollback
+// baseline contract: the reported previous value is captured under the config
+// lock after any blocked-save recovery, so a caller rolling back a failed
+// listener switch restores the effective pre-write address rather than a stale
+// pre-recovery read.
+func TestAPIListenAddressWithPreviousReportsEffectiveBaseline(t *testing.T) {
+	useTemporaryConfigDirectory(t)
+	cfg := NewConfig()
+	previous, err := cfg.SetAPIListenAddressWithPrevious("127.0.0.1:8080")
+	if err != nil {
+		t.Fatalf("SetAPIListenAddressWithPrevious() error = %v", err)
+	}
+	if previous != DefaultAPIListenAddress {
+		t.Fatalf("first baseline = %q, want the default %q", previous, DefaultAPIListenAddress)
+	}
+	previous, err = cfg.SetAPIListenAddressWithPrevious("127.0.0.1:9090")
+	if err != nil {
+		t.Fatalf("SetAPIListenAddressWithPrevious() error = %v", err)
+	}
+	if previous != "127.0.0.1:8080" {
+		t.Fatalf("second baseline = %q, want the previously persisted 127.0.0.1:8080", previous)
+	}
+	if _, err := cfg.SetAPIListenAddressWithPrevious("not-an-address"); err == nil {
+		t.Fatal("SetAPIListenAddressWithPrevious accepted an invalid address")
+	}
+}
+
 func TestAdvancedSettingsPersistValidateAndCouple(t *testing.T) {
 	useTemporaryConfigDirectory(t)
 	cfg := NewConfig()
