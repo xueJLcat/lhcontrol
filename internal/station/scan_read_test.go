@@ -826,6 +826,9 @@ func TestCancelledScanAbandonsWedgedReaderPromptly(t *testing.T) {
 	originalGrace := initialReadJoinGrace
 	initialReadJoinGrace = time.Hour
 	t.Cleanup(func() { initialReadJoinGrace = originalGrace })
+	originalDrain := initialReadDrainGrace
+	initialReadDrainGrace = 20 * time.Millisecond
+	t.Cleanup(func() { initialReadDrainGrace = originalDrain })
 
 	address := "11:22:33:44:55:A5"
 	manager.bluetoothOps.scanForDurationContext = func(context.Context, time.Duration) ([]internalbluetooth.DiscoveredStation, error) {

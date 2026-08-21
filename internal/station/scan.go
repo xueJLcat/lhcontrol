@@ -21,6 +21,13 @@ import (
 // cannot hang behind a wedged lock. It is a variable so tests can shrink it.
 var initialReadJoinGrace = 10 * time.Second
 
+// initialReadDrainGrace bounds how long the interrupted join waits for healthy
+// workers to settle before abandoning wedged ones. A read that finished (or
+// failed) just before the cancellation must keep its own bookkeeping; only a
+// reader wedged on a station lock outlives the drain. It is a variable so
+// tests can shrink it.
+var initialReadDrainGrace = 2 * time.Second
+
 func (m *Manager) ScanAndFetchStations() ([]StationInfo, error) {
 	return m.ScanAndFetchStationsContext(context.Background())
 }
@@ -595,7 +602,19 @@ func (m *Manager) runInitialScanReads(ctx context.Context, stationsToFetch []*bl
 	case <-joinTimer.C:
 		log.Printf("Bluetooth initial reads did not finish within the join budget; abandoning wedged readers")
 	case <-ctx.Done():
-		log.Printf("Bluetooth initial reads interrupted; abandoning wedged readers")
+		// Healthy workers observe the interruption and settle quickly; give
+		// them a short drain so a read that finished (or failed) just before
+		// the interruption keeps its own bookkeeping, then abandon whatever
+		// is still wedged on a station lock. Abandoning immediately would
+		// fold those real outcomes into a clean cancellation and drop their
+		// disconnect/backoff/recovery accounting.
+		drainTimer := time.NewTimer(initialReadDrainGrace)
+		select {
+		case <-joined:
+			drainTimer.Stop()
+		case <-drainTimer.C:
+			log.Printf("Bluetooth initial reads did not finish within %s of the interruption; abandoning wedged readers", initialReadDrainGrace)
+		}
 	}
 	// Collect the results of finished workers only. An abandoned worker keeps
 	// writing its result slot, so those slots must not be read; book them
