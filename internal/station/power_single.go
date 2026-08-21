@@ -23,12 +23,15 @@ func (m *Manager) SetStationPower(address, state string) (PowerActionResult, err
 	// A station whose lock is held by a wedged transport call (for example an
 	// abandoned cleanup that ignores cancellation) cannot be operated on. The
 	// lock acquisition below is blocking and context-blind, so report the
-	// station busy instead of hanging behind the lock.
-	if _, ok := stationPtr.TrySnapshot(); !ok {
+	// station busy instead of hanging behind the lock. Reuse the snapshot the
+	// probe captured: a second blocking Snapshot call would reopen the exact
+	// wedge window the Try probe exists to detect.
+	snapshot, ok := stationPtr.TrySnapshot()
+	if !ok {
 		return PowerActionResult{}, ErrOperationInProgress
 	}
-	canonicalAddress := stationPtr.Snapshot().Address
-	if classifyCachedPower(stationPtr.Snapshot(), target, time.Now()) == cachedPowerBooting {
+	canonicalAddress := snapshot.Address
+	if classifyCachedPower(snapshot, target, time.Now()) == cachedPowerBooting {
 		return PowerActionResult{}, fmt.Errorf("station is booting; retry after transition: %w", ErrStationTransitioning)
 	}
 	operationContext, cancelOperation := m.newStationOperationContext(m.lifecycleContext)
@@ -37,7 +40,7 @@ func (m *Manager) SetStationPower(address, state string) (PowerActionResult, err
 		return PowerActionResult{}, m.stationOperationContextError(err)
 	}
 	defer m.endStationOperation(canonicalAddress)
-	snapshot := stationPtr.Snapshot()
+	snapshot = stationPtr.Snapshot()
 	metadataReadRevision := snapshot.MetadataReadRevision
 	defer func() {
 		m.reconcileMetadataReadResult(canonicalAddress, metadataReadRevision, stationPtr.Snapshot())

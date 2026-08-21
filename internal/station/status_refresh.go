@@ -101,6 +101,7 @@ func (m *Manager) CheckAllStationStatuses() ([]StationInfo, error) {
 	type statusReadWork struct {
 		index   int
 		station *bluetooth.BaseStation
+		address string
 	}
 	statusErrors := make([]error, len(stationsToRead))
 	stationCompleted := make([]atomic.Bool, len(stationsToRead))
@@ -115,7 +116,7 @@ func (m *Manager) CheckAllStationStatuses() ([]StationInfo, error) {
 		go func() {
 			defer wg.Done()
 			for item := range work {
-				if readErr := m.readStationStatus(refreshContext, item.station); readErr != nil {
+				if readErr := m.readStationStatus(refreshContext, item.station, item.address); readErr != nil {
 					statusErrors[item.index] = readErr
 				}
 				stationCompleted[item.index].Store(true)
@@ -125,7 +126,7 @@ func (m *Manager) CheckAllStationStatuses() ([]StationInfo, error) {
 dispatch:
 	for index, station := range stationsToRead {
 		select {
-		case work <- statusReadWork{index: index, station: station}:
+		case work <- statusReadWork{index: index, station: station, address: addressesToRead[index]}:
 		case <-refreshContext.Done():
 			m.recordSkippedStatusReads(refreshContext, addressesToRead[index:], statusErrors[index:])
 			break dispatch
@@ -267,9 +268,11 @@ func (m *Manager) selectStatusRefreshCandidates() ([]statusRefreshCandidate, []s
 // readStationStatus performs one station's refresh read and returns the
 // per-station error the caller should record, if any. Every failure shape
 // (busy slot, interruption, fleet deadline, per-station budget, transport
-// error) runs its own bookkeeping here so the dispatch loop stays flat.
-func (m *Manager) readStationStatus(refreshContext context.Context, stationPtr *bluetooth.BaseStation) error {
-	address := stationPtr.Snapshot().Address
+// error) runs its own bookkeeping here so the dispatch loop stays flat. The
+// address was captured at candidate selection: re-deriving it from a blocking
+// Snapshot here would let a wedged station lock stall the worker before it
+// even registers its operation slot.
+func (m *Manager) readStationStatus(refreshContext context.Context, stationPtr *bluetooth.BaseStation, address string) error {
 	readContext, cancelRead := context.WithTimeout(refreshContext, m.statusReadTimeoutDuration())
 	// Distinguish this station's own read budget from the fleet-wide
 	// refresh deadline: only when the refresh deadline is the binding

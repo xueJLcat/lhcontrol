@@ -74,7 +74,12 @@ type BaseStation struct {
 	MetadataReadRevision uint64
 	LastError            string
 	MissedScans          int
-	bootingSince         time.Time
+	// everSeen records that the station was observed at least once (scan
+	// discovery or an explicit presence mark). Miss counts alone are absence
+	// evidence, not presence history: treating MissedScans > 0 as history
+	// could manufacture presence for a station that never advertised.
+	everSeen     bool
+	bootingSince time.Time
 	// bootRawTrustedOn remembers that this connection has continuously
 	// reported a boot-like raw value for long enough to use the compatibility
 	// fallback. It is cleared on disconnect and before a power command so a
@@ -343,6 +348,9 @@ func (bs *BaseStation) snapshotLocked() BaseStationSnapshot {
 func (bs *BaseStation) SetPresent(present bool) {
 	bs.mutex.Lock()
 	bs.Present = present
+	if present {
+		bs.everSeen = true
+	}
 	bs.mutex.Unlock()
 }
 
@@ -361,12 +369,30 @@ func (bs *BaseStation) HoldLockWhile(fn func()) {
 // away.
 func (bs *BaseStation) MarkSeen(now time.Time) bool {
 	bs.mutex.Lock()
+	defer bs.mutex.Unlock()
+	return bs.markSeenLocked(now)
+}
+
+// TryMarkSeen is MarkSeen without the wait: it reports ok=false when the
+// station lock is currently held by another operation (a worker wedged inside
+// an adapter call that ignores cancellation can hold it indefinitely). The
+// caller keeps the station's previous presence bookkeeping for this round
+// instead of blocking behind the lock.
+func (bs *BaseStation) TryMarkSeen(now time.Time) (transitioned, ok bool) {
+	if !bs.mutex.TryLock() {
+		return false, false
+	}
+	defer bs.mutex.Unlock()
+	return bs.markSeenLocked(now), true
+}
+
+func (bs *BaseStation) markSeenLocked(now time.Time) bool {
 	wasAbsent := !bs.Present
 	bs.Present = true
 	bs.MissedScans = 0
 	bs.LastSeenAt = now
 	bs.presenceUncertain = false
-	bs.mutex.Unlock()
+	bs.everSeen = true
 	return wasAbsent
 }
 
@@ -375,15 +401,33 @@ func (bs *BaseStation) MarkSeen(now time.Time) bool {
 // Windows BLE scan can miss a station while its GATT session is still being
 // released).
 func (bs *BaseStation) MarkMissed() {
-	threshold := CurrentTiming().PresenceMissThreshold
 	bs.mutex.Lock()
+	defer bs.mutex.Unlock()
+	bs.markMissedLocked()
+}
+
+// TryMarkMissed is MarkMissed without the wait: it reports false when the
+// station lock is currently held by another operation (a worker wedged inside
+// an adapter call that ignores cancellation can hold it indefinitely). The
+// caller keeps the station's previous presence bookkeeping for this round
+// instead of blocking behind the lock.
+func (bs *BaseStation) TryMarkMissed() bool {
+	if !bs.mutex.TryLock() {
+		return false
+	}
+	defer bs.mutex.Unlock()
+	bs.markMissedLocked()
+	return true
+}
+
+func (bs *BaseStation) markMissedLocked() {
+	threshold := CurrentTiming().PresenceMissThreshold
 	bs.presenceUncertain = false
-	hasPresenceHistory := bs.Present || bs.MissedScans > 0
+	hasPresenceHistory := bs.Present || bs.everSeen
 	bs.MissedScans++
 	if hasPresenceHistory {
 		bs.Present = bs.MissedScans < threshold
 	}
-	bs.mutex.Unlock()
 }
 
 // ApplyPresenceMissThreshold immediately reclassifies a station with reliable
@@ -414,7 +458,10 @@ func (bs *BaseStation) TryApplyPresenceMissThreshold(threshold int) bool {
 }
 
 func (bs *BaseStation) applyPresenceMissThresholdLocked(threshold int) bool {
-	if bs.MissedScans == 0 {
+	// Only stations with real presence history are reclassified: miss counts
+	// are absence evidence, so a station never observed must not be revived
+	// by a raised threshold.
+	if bs.MissedScans == 0 || !(bs.Present || bs.everSeen) {
 		return false
 	}
 	present := bs.MissedScans < threshold
@@ -432,10 +479,38 @@ func (bs *BaseStation) MarkPresenceUncertain() {
 	bs.mutex.Unlock()
 }
 
+// TryMarkPresenceUncertain is MarkPresenceUncertain without the wait: it
+// reports false when the station lock is currently held by another operation
+// (a worker wedged inside an adapter call that ignores cancellation can hold
+// it indefinitely). The caller keeps the station's previous presence
+// bookkeeping for this round instead of blocking behind the lock.
+func (bs *BaseStation) TryMarkPresenceUncertain() bool {
+	if !bs.mutex.TryLock() {
+		return false
+	}
+	defer bs.mutex.Unlock()
+	bs.presenceUncertain = true
+	return true
+}
+
 func (bs *BaseStation) UpdateName(name string) {
 	bs.mutex.Lock()
 	bs.Name = name
 	bs.mutex.Unlock()
+}
+
+// TryUpdateName is UpdateName without the wait: it reports false when the
+// station lock is currently held by another operation (a worker wedged inside
+// an adapter call that ignores cancellation can hold it indefinitely). The
+// caller keeps the previous name for this round instead of blocking behind
+// the lock.
+func (bs *BaseStation) TryUpdateName(name string) bool {
+	if !bs.mutex.TryLock() {
+		return false
+	}
+	defer bs.mutex.Unlock()
+	bs.Name = name
+	return true
 }
 
 // Initialize sets up the Bluetooth adapter and parses UUIDs.

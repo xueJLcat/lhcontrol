@@ -392,6 +392,73 @@ func TestScanDoesNotReviveStationThatOnlyCrossedMissThreshold(t *testing.T) {
 	}
 }
 
+// TestScanMergeSkipsWedgedStationLock guards the merge phase: presence and
+// name bookkeeping must never block on a station lock held by a transport
+// call that ignores cancellation (an abandoned initial reader or release
+// cleanup). The wedged station keeps its previous bookkeeping for the round
+// and the scan completes instead of pinning isScanning and the scan slot
+// forever.
+func TestScanMergeSkipsWedgedStationLock(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	manager.statusRecoveryStart.Do(func() {})
+	manager.adapterCleanupWait = 20 * time.Millisecond
+	manager.initialReadPhaseTimeout = time.Hour
+	manager.initialReadTimeout = time.Hour
+	originalGrace := initialReadJoinGrace
+	initialReadJoinGrace = time.Hour
+	t.Cleanup(func() { initialReadJoinGrace = originalGrace })
+
+	address := "11:22:33:44:55:B1"
+	manager.bluetoothOps.scanForDurationContext = func(context.Context, time.Duration) ([]internalbluetooth.DiscoveredStation, error) {
+		return []internalbluetooth.DiscoveredStation{{Name: "LHB-WEDGED", Address: mustAddress(t, address)}}, nil
+	}
+	manager.bluetoothOps.fetchInitialPowerState = func(context.Context, *internalbluetooth.BaseStation) error {
+		return nil
+	}
+	if _, err := manager.ScanAndFetchStationsContext(context.Background()); err != nil {
+		t.Fatalf("setup scan failed: %v", err)
+	}
+	stationPtr, ok := manager.stations[address]
+	if !ok {
+		t.Fatal("setup scan did not register the station")
+	}
+
+	// Emulate an abandoned transport call holding the station lock across the
+	// whole next scan: the pre-scan release queues behind it and gives up
+	// after the bounded wait, and the merge must skip its bookkeeping instead
+	// of hanging on the same lock.
+	release := make(chan struct{})
+	defer close(release)
+	lockHeld := make(chan struct{})
+	go stationPtr.HoldLockWhile(func() {
+		close(lockHeld)
+		<-release
+	})
+	<-lockHeld
+
+	started := time.Now()
+	_, err := manager.ScanAndFetchStationsContext(context.Background())
+	if elapsed := time.Since(started); elapsed > 5*time.Second {
+		t.Fatalf("scan took %v, want the merge to skip the wedged station", elapsed)
+	}
+	if err != nil {
+		t.Fatalf("scan with a wedged station lock failed: %v", err)
+	}
+	if manager.IsScanning() {
+		t.Fatal("scan slot stayed pinned after the wedged merge")
+	}
+	if status := manager.GetScanStatus(); status.State != "completed" {
+		t.Fatalf("scan status = %+v, want completed", status)
+	}
+	// The skipped station keeps its previous presence bookkeeping for the
+	// round; a cached snapshot remains readable without the lock.
+	snapshot, ok := stationPtr.SnapshotNonBlocking()
+	if !ok || !snapshot.Present {
+		t.Fatalf("wedged station presence = %+v (ok=%v), want the previous present state preserved", snapshot, ok)
+	}
+}
+
 // TestScanRevivesAbsentStationWhoseReleaseFailed guards the revival hook for
 // unreliable-presence stations: when a genuinely absent station's cached
 // connection cannot be released before the scan, presence for that station is

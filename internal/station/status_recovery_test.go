@@ -47,8 +47,13 @@ func TestApplyPresenceMissThresholdReclassifiesAndRevivesRecovery(t *testing.T) 
 	manager.shuttingDown.Store(true)
 	address := "11:22:33:44:55:64"
 	station := &internalbluetooth.BaseStation{
-		Address: mustAddress(t, address), Present: false, MissedScans: 2,
+		Address: mustAddress(t, address), MissedScans: 2,
 	}
+	// Establish presence history (the station was observed before its cached
+	// misses): threshold reclassification only applies to stations with real
+	// presence evidence.
+	station.SetPresent(true)
+	station.SetPresent(false)
 	manager.stations[address] = station
 
 	manager.ApplyPresenceMissThreshold()
@@ -80,8 +85,13 @@ func TestPresenceThresholdReviveRebasesExistingBackoff(t *testing.T) {
 	manager.shuttingDown.Store(true)
 	address := "11:22:33:44:55:6B"
 	station := &internalbluetooth.BaseStation{
-		Address: mustAddress(t, address), Present: false, MissedScans: 3,
+		Address: mustAddress(t, address), MissedScans: 3,
 	}
+	// Establish presence history (the station was observed before its cached
+	// misses): threshold reclassification only applies to stations with real
+	// presence evidence.
+	station.SetPresent(true)
+	station.SetPresent(false)
 	manager.stations[address] = station
 
 	futureAttempt := time.Now().Add(time.Hour)

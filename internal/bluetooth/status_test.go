@@ -1113,7 +1113,7 @@ func TestMarkMissedUsesRaisedPresenceThresholdForExistingHistory(t *testing.T) {
 	}
 }
 func TestApplyPresenceMissThresholdReclassifiesCachedMisses(t *testing.T) {
-	station := &BaseStation{Present: false, MissedScans: 2}
+	station := &BaseStation{Present: false, MissedScans: 2, everSeen: true}
 	if changed := station.ApplyPresenceMissThreshold(4); !changed {
 		t.Fatal("raising the threshold did not report a presence change")
 	}
@@ -1131,6 +1131,19 @@ func TestApplyPresenceMissThresholdReclassifiesCachedMisses(t *testing.T) {
 	unknown.MarkMissed()
 	if snapshot := unknown.Snapshot(); snapshot.Present {
 		t.Fatalf("a miss incorrectly created presence without prior seen history: %+v", snapshot)
+	}
+	// A station that was never observed has no presence history: raising the
+	// threshold must not manufacture presence from absence evidence alone.
+	neverSeen := &BaseStation{MissedScans: 2}
+	if changed := neverSeen.ApplyPresenceMissThreshold(4); changed {
+		t.Fatal("raising the threshold created presence for a never-seen station")
+	}
+	if snapshot := neverSeen.Snapshot(); snapshot.Present {
+		t.Fatalf("a never-seen station incorrectly gained presence: %+v", snapshot)
+	}
+	neverSeen.MarkMissed()
+	if snapshot := neverSeen.Snapshot(); snapshot.Present {
+		t.Fatalf("repeated misses incorrectly created presence for a never-seen station: %+v", snapshot)
 	}
 }
 func TestUncertainPresenceDoesNotCountAsMiss(t *testing.T) {

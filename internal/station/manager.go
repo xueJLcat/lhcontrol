@@ -133,10 +133,19 @@ func (m *Manager) noteMetadataFailure(address string) {
 	m.noteStatusFailureKind(address, statusRetryMetadata)
 }
 func (m *Manager) noteStatusRefreshPending(address string) {
+	if address == "" {
+		return
+	}
 	m.trackStatusRefreshPending(address)
 	m.scheduleStatusRecovery()
 }
 func (m *Manager) trackStatusRefreshPending(address string) {
+	if address == "" {
+		// An empty address can never match a real station snapshot in
+		// recovery scheduling; recording it would leave a retry entry that
+		// stays pending forever.
+		return
+	}
 	m.statusRetryMutex.Lock()
 	retry := m.statusRetries[address]
 	retry.kinds |= statusRetryRefresh
@@ -159,6 +168,12 @@ func (m *Manager) trackStatusRefreshPending(address string) {
 	m.statusRetryMutex.Unlock()
 }
 func (m *Manager) noteStatusFailureKind(address string, kind statusRetryKind) {
+	if address == "" {
+		// An empty address can never match a real station snapshot in
+		// recovery scheduling; recording it would leave a retry entry that
+		// stays pending forever.
+		return
+	}
 	m.statusRetryMutex.Lock()
 	retry := m.statusRetries[address]
 	retry.kinds |= kind

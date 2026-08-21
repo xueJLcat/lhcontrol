@@ -308,8 +308,13 @@ func (m *Manager) releaseStationsForScan(ctx context.Context) (map[string]struct
 		}
 		// Non-blocking snapshot: a station wedged inside a transport call must
 		// not hang the pre-scan release loop (and with it the whole scan).
+		// The Address field is immutable after creation, so it is a safe
+		// fallback when no snapshot has ever succeeded.
 		snapshot, _ := stationPtr.SnapshotNonBlocking()
 		address := snapshot.Address
+		if address == "" {
+			address = stationPtr.Address.String()
+		}
 		releaseErr := m.releaseStationForScanBounded(stationPtr)
 		if releaseErr == nil {
 			continue
@@ -325,7 +330,11 @@ func (m *Manager) releaseStationsForScan(ctx context.Context) (map[string]struct
 			// returns.
 			for _, remaining := range connectedStations[index+1:] {
 				remainingSnapshot, _ := remaining.SnapshotNonBlocking()
-				unreliablePresence[strings.ToLower(remainingSnapshot.Address)] = struct{}{}
+				remainingAddress := remainingSnapshot.Address
+				if remainingAddress == "" {
+					remainingAddress = remaining.Address.String()
+				}
+				unreliablePresence[strings.ToLower(remainingAddress)] = struct{}{}
 			}
 			break
 		}
@@ -380,13 +389,16 @@ func (m *Manager) mergeDiscoveredStations(
 			if !snapshot.Present {
 				previouslyAbsent[stationPtr] = true
 			}
-			stationPtr.MarkPresenceUncertain()
+			// Non-blocking mark: the same wedged lock that can stall a
+			// snapshot can be held here too; the station keeps its previous
+			// presence bookkeeping instead of hanging the whole scan.
+			stationPtr.TryMarkPresenceUncertain()
 			continue
 		}
 		if !snapshot.Present {
 			previouslyAbsent[stationPtr] = true
 		}
-		stationPtr.MarkMissed()
+		stationPtr.TryMarkMissed()
 	}
 	// Resolve map membership under the write lock, but restrict that section
 	// to map work: newly created stations are not published until they are
@@ -414,9 +426,11 @@ func (m *Manager) mergeDiscoveredStations(
 			PowerState:    bluetooth.PowerStateUnknown,
 			RawPowerState: bluetooth.RawPowerStateUnknown,
 			Channel:       bluetooth.ChannelUnknown,
-			Present:       true,
-			LastSeenAt:    scanTime,
 		}
+		// MarkSeen (instead of bare Present/LastSeenAt fields) also records
+		// the observation as presence history, keeping threshold
+		// reclassification consistent with scanned stations.
+		newStationPtr.MarkSeen(scanTime)
 		m.stations[addrStr] = newStationPtr
 		merges = append(merges, discoveredMerge{value: currentScanStation, station: newStationPtr, isNew: true})
 	}
@@ -428,10 +442,13 @@ func (m *Manager) mergeDiscoveredStations(
 			stationsToFetch = append(stationsToFetch, stationPtr)
 			continue
 		}
+		// Non-blocking marks: a wedged station lock must not hang the merge.
+		// A skipped update keeps the previous name/presence for this round;
+		// the next scan or refresh redelivers both.
 		if merge.value.Name != "" {
-			stationPtr.UpdateName(merge.value.Name)
+			stationPtr.TryUpdateName(merge.value.Name)
 		}
-		if stationPtr.MarkSeen(scanTime) && previouslyAbsent[stationPtr] {
+		if transitioned, ok := stationPtr.TryMarkSeen(scanTime); ok && transitioned && previouslyAbsent[stationPtr] {
 			revivedStations = append(revivedStations, stationPtr)
 		}
 		if snapshot, ok := stationPtr.SnapshotNonBlocking(); !ok || !snapshot.Connected {
@@ -488,9 +505,14 @@ func (m *Manager) runInitialScanReads(ctx context.Context, stationsToFetch []*bl
 			defer wg.Done()
 			defer readDone[resultIndex].Store(true)
 			// Non-blocking snapshot: a station wedged inside a transport call
-			// must not block the address capture that precedes the read.
-			if snapshot, ok := ptr.SnapshotNonBlocking(); ok {
+			// must not block the address capture that precedes the read. The
+			// Address field is immutable after creation, so it is a safe
+			// fallback when no snapshot has ever succeeded; an empty address
+			// here would book a retry entry that never matches a real station.
+			if snapshot, ok := ptr.SnapshotNonBlocking(); ok && snapshot.Address != "" {
 				readResults[resultIndex].address = snapshot.Address
+			} else {
+				readResults[resultIndex].address = ptr.Address.String()
 			}
 			readResults[resultIndex].station = ptr
 			select {
@@ -587,7 +609,11 @@ func (m *Manager) runInitialScanReads(ctx context.Context, stationsToFetch []*bl
 			continue
 		}
 		snapshot, _ := ptr.SnapshotNonBlocking()
-		record := initialScanReadResult{address: snapshot.Address, station: ptr}
+		address := snapshot.Address
+		if address == "" {
+			address = ptr.Address.String()
+		}
+		record := initialScanReadResult{address: address, station: ptr}
 		if errors.Is(ctxErr, context.Canceled) {
 			record.cancelSkipped = true
 		} else {
