@@ -183,6 +183,42 @@ const PATTERNS: readonly CopyPattern[] = [
     }
   },
   {
+    // station/status_refresh.go aggregate of per-station read failures. The
+    // detail is an errors.Join of "<MAC>: <error>" lines; mapJoinedLines
+    // keeps each address and translates the error half (which is itself a
+    // "station status read was incomplete: ..." shape mapped below).
+    pattern: /^one or more station status reads were incomplete: (.+)$/s,
+    render: (m) => locale() === 'zh-CN'
+      ? t('status.refreshIncomplete', { detail: mapJoinedLines(m[1]) })
+      : `one or more station status reads were incomplete: ${mapJoinedLines(m[1])}`
+  },
+  {
+    // station/status_refresh.go per-station read outcomes that appear inside
+    // the aggregate above (after mapJoinedLines strips the "<MAC>: " prefix).
+    pattern: /^status read skipped: (.+)$/s,
+    render: (m) => locale() === 'zh-CN'
+      ? t('status.readSkipped', { detail: backendCopy(m[1]) })
+      : `status read skipped: ${backendCopy(m[1])}`
+  },
+  {
+    pattern: /^status read cancelled: (.+)$/s,
+    render: (m) => locale() === 'zh-CN'
+      ? t('status.readCancelled', { detail: backendCopy(m[1]) })
+      : `status read cancelled: ${backendCopy(m[1])}`
+  },
+  {
+    pattern: /^status read deadline exceeded: (.+)$/s,
+    render: (m) => locale() === 'zh-CN'
+      ? t('status.readDeadlineExceeded', { detail: backendCopy(m[1]) })
+      : `status read deadline exceeded: ${backendCopy(m[1])}`
+  },
+  {
+    pattern: /^status refresh deadline exceeded: (.+)$/s,
+    render: (m) => locale() === 'zh-CN'
+      ? t('status.refreshDeadlineExceeded', { detail: backendCopy(m[1]) })
+      : `status refresh deadline exceeded: ${backendCopy(m[1])}`
+  },
+  {
     // bluetooth/status.go aggregate read failures; the detail is an
     // errors.Join rendered on separate lines.
     pattern: /^station status read was incomplete: (.+)$/s,
@@ -253,6 +289,20 @@ const PATTERNS: readonly CopyPattern[] = [
     render: (m) => locale() === 'zh-CN'
       ? t('channel.error.bootingRetry', { detail: backendCopy(m[1]) })
       : `station is booting; retry channel change after transition: ${m[1]}`
+  },
+  {
+    // station/manager.go: adapter unavailable wrapping the underlying cause.
+    pattern: /^Bluetooth is unavailable; turn on Bluetooth or check the adapter, then retry: (.+)$/s,
+    render: (m) => locale() === 'zh-CN'
+      ? t('bluetooth.unavailable', { detail: backendCopy(m[1]) })
+      : `Bluetooth is unavailable; turn on Bluetooth or check the adapter, then retry: ${backendCopy(m[1])}`
+  },
+  {
+    // station/power_bulk.go: CancelBulkPower wait exceeded after cancellation.
+    pattern: /^bulk operation did not stop within (.+) after cancellation$/,
+    render: (m) => locale() === 'zh-CN'
+      ? t('bulk.cancelTimeout', { duration: m[1] })
+      : `bulk operation did not stop within ${m[1]} after cancellation`
   },
   {
     // station_lookup.go: not-found sentinel with the address as detail.
