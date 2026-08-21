@@ -20,6 +20,13 @@ func (m *Manager) SetStationPower(address, state string) (PowerActionResult, err
 	if m.shuttingDown.Load() {
 		return PowerActionResult{}, ErrShuttingDown
 	}
+	// A station whose lock is held by a wedged transport call (for example an
+	// abandoned cleanup that ignores cancellation) cannot be operated on. The
+	// lock acquisition below is blocking and context-blind, so report the
+	// station busy instead of hanging behind the lock.
+	if _, ok := stationPtr.TrySnapshot(); !ok {
+		return PowerActionResult{}, ErrOperationInProgress
+	}
 	canonicalAddress := stationPtr.Snapshot().Address
 	if classifyCachedPower(stationPtr.Snapshot(), target, time.Now()) == cachedPowerBooting {
 		return PowerActionResult{}, fmt.Errorf("station is booting; retry after transition: %w", ErrStationTransitioning)

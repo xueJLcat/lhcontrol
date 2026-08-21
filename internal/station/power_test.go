@@ -1056,3 +1056,58 @@ func TestBulkSleepTransitionDoesNotScheduleConnectionRecovery(t *testing.T) {
 		t.Fatalf("bulk sleep transition left connection recovery scheduled: %+v", retry)
 	}
 }
+
+// TestSingleStationOperationsReportBusyWhenLocked guards the single-station
+// entry points against a station whose lock a wedged transport call holds.
+// The lock acquisition inside the operation is blocking and context-blind, so
+// the operation must report the station busy (409) instead of hanging behind
+// the lock.
+func TestSingleStationOperationsReportBusyWhenLocked(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	manager.statusRecoveryStart.Do(func() {})
+	address := "11:22:33:44:88:05"
+	station := &internalbluetooth.BaseStation{
+		Name:              "LHB-LOCKED",
+		Address:           mustAddress(t, address),
+		Present:           true,
+		PowerState:        internalbluetooth.PowerStateOn,
+		RawPowerState:     0x0B,
+		Channel:           3,
+		LastPowerReadAt:   time.Now(),
+		LastChannelReadAt: time.Now(),
+		Capabilities:      internalbluetooth.Capabilities{PowerRead: true, PowerWrite: true, ChannelRead: true, ChannelWrite: true, Identify: true},
+		CapabilitiesKnown: true,
+	}
+	manager.stations[address] = station
+
+	type busyCase struct {
+		name string
+		call func() error
+	}
+	cases := []busyCase{
+		{"SetStationPower", func() error { _, err := manager.SetStationPower(address, "on"); return err }},
+		{"SetStationChannel", func() error { _, err := manager.SetStationChannel(address, 4, false); return err }},
+		{"IdentifyStation", func() error { return manager.IdentifyStation(address) }},
+		{"RefreshStationCapabilities", func() error { _, err := manager.RefreshStationCapabilities(address); return err }},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			done := make(chan error, 1)
+			go func() {
+				station.HoldLockWhile(func() {
+					done <- tc.call()
+				})
+			}()
+			select {
+			case err := <-done:
+				if !errors.Is(err, ErrOperationInProgress) {
+					t.Fatalf("%s() error = %v, want ErrOperationInProgress for a locked station", tc.name, err)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatalf("%s blocked behind the locked station", tc.name)
+			}
+		})
+	}
+}

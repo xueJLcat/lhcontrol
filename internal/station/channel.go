@@ -24,6 +24,13 @@ func (m *Manager) SetStationChannel(
 	if m.shuttingDown.Load() {
 		return result, ErrShuttingDown
 	}
+	// A station whose lock is held by a wedged transport call (for example an
+	// abandoned cleanup that ignores cancellation) cannot be operated on. The
+	// lock acquisition below is blocking and context-blind, so report the
+	// station busy instead of hanging behind the lock.
+	if _, ok := stationPtr.TrySnapshot(); !ok {
+		return result, ErrOperationInProgress
+	}
 	canonicalAddress := stationPtr.Snapshot().Address
 	defer func() {
 		if info, err := m.stationInfoByAddress(canonicalAddress); err == nil {

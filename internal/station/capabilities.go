@@ -15,6 +15,13 @@ func (m *Manager) IdentifyStation(address string) error {
 	if m.shuttingDown.Load() {
 		return ErrShuttingDown
 	}
+	// A station whose lock is held by a wedged transport call (for example an
+	// abandoned cleanup that ignores cancellation) cannot be operated on. The
+	// lock acquisition below is blocking and context-blind, so report the
+	// station busy instead of hanging behind the lock.
+	if _, ok := stationPtr.TrySnapshot(); !ok {
+		return ErrOperationInProgress
+	}
 	canonicalAddress := stationPtr.Snapshot().Address
 	operationContext, cancelOperation := m.newStationOperationContext(m.lifecycleContext)
 	defer cancelOperation()
@@ -77,6 +84,13 @@ func (m *Manager) RefreshStationCapabilities(address string) (StationInfo, error
 	}
 	if m.shuttingDown.Load() {
 		return StationInfo{}, ErrShuttingDown
+	}
+	// A station whose lock is held by a wedged transport call (for example an
+	// abandoned cleanup that ignores cancellation) cannot be operated on. The
+	// lock acquisition below is blocking and context-blind, so report the
+	// station busy instead of hanging behind the lock.
+	if _, ok := stationPtr.TrySnapshot(); !ok {
+		return StationInfo{}, ErrOperationInProgress
 	}
 	canonicalAddress := stationPtr.Snapshot().Address
 	operationContext, cancelOperation := m.newStationOperationContext(m.lifecycleContext)
