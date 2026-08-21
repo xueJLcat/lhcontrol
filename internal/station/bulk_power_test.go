@@ -84,6 +84,53 @@ func TestBulkPowerSkipsOnlyAfterFreshVerification(t *testing.T) {
 	}
 }
 
+// TestBulkPowerSkipsBusyStation guards the bulk against a station whose lock
+// is held by a transport call that ignores cancellation. The worker must skip
+// such a station (reporting it busy) instead of wedging the whole bulk behind
+// its lock. No command has been sent at the skip point, so the station keeps
+// its seeded identity in the result and no write is attempted.
+func TestBulkPowerSkipsBusyStation(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	address := "11:22:33:44:55:B1"
+	station := &internalbluetooth.BaseStation{
+		Name:              "LHB-BUSY",
+		Address:           mustAddress(t, address),
+		Present:           true,
+		PowerState:        internalbluetooth.PowerStateSleep,
+		RawPowerState:     0x00,
+		LastPowerReadAt:   time.Now(),
+		Capabilities:      internalbluetooth.Capabilities{PowerWrite: true},
+		CapabilitiesKnown: true,
+	}
+	manager.stations[address] = station
+	// Prime the snapshot cache so the busy station stays in the candidate set
+	// (projected from its last-known state) instead of being dropped.
+	station.Snapshot()
+	var writes atomic.Int32
+	manager.bluetoothOps.setPowerState = func(context.Context, *internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
+		writes.Add(1)
+		return internalbluetooth.PowerControlResult{State: internalbluetooth.PowerStateOn, Confirmed: true}, nil
+	}
+
+	var result BulkPowerResult
+	var bulkErr error
+	station.HoldLockWhile(func() {
+		result, bulkErr = manager.SetAllStationsPowerDetailed("on")
+	})
+	if bulkErr != nil {
+		t.Fatalf("SetAllStationsPowerDetailed() error = %v", bulkErr)
+	}
+	if writes.Load() != 0 {
+		t.Fatalf("power writes = %d, want none for a busy station", writes.Load())
+	}
+	if len(result.Results) != 1 || !result.Results[0].Skipped || result.Results[0].Reason != ReasonStationBusy {
+		t.Fatalf("bulk result = %+v, want the busy station skipped with reason %q", result.Results, ReasonStationBusy)
+	}
+	if result.Results[0].Address != address {
+		t.Fatalf("busy station lost its identity in the result: %+v", result.Results[0])
+	}
+}
+
 func TestBulkPowerDoesNotTrustStaleTargetCacheAfterLiveRead(t *testing.T) {
 	manager := NewManager(config.NewConfig())
 	address := "11:22:33:44:55:65"

@@ -420,6 +420,7 @@ const zhCN = {
   'already at target state': '已处于目标状态',
   'power control is not supported': '不支持电源控制',
   'standby is not supported': '不支持待机',
+  'station is busy': '基站忙',
   'another Bluetooth operation is already in progress': '已有另一个蓝牙操作正在进行',
   'another Bluetooth operation is in progress': '另一个蓝牙操作正在进行',
   'Bluetooth scan is already active': '蓝牙扫描已在进行中',

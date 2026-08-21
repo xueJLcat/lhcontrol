@@ -17,6 +17,7 @@ const EXACT: ReadonlyMap<string, TranslationKey> = new Map([
   ['already at target state', 'already at target state'],
   ['power control is not supported', 'power control is not supported'],
   ['standby is not supported', 'standby is not supported'],
+  ['station is busy', 'station is busy'],
   // Result-contract sentinel errors.
   ['another Bluetooth operation is already in progress', 'another Bluetooth operation is already in progress'],
   ['another Bluetooth operation is in progress', 'another Bluetooth operation is in progress'],

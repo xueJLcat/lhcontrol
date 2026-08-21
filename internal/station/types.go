@@ -42,6 +42,7 @@ const (
 	ReasonAlreadyAtTarget         = "already at target state"
 	ReasonUnsupportedCapability   = "power control is not supported"
 	ReasonUnsupportedStandby      = "standby is not supported"
+	ReasonStationBusy             = "station is busy"
 )
 
 // Timing budgets live in config (user-tunable) and are read through the

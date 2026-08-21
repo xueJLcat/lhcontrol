@@ -421,8 +421,18 @@ func (m *Manager) runBulkPowerWorker(ctx context.Context, semaphore chan struct{
 	}
 	// Seed the entry with the authoritative snapshot before any work that
 	// could panic: a recovered panic must still report the station identity
-	// instead of an empty address that matches no station.
-	initialSnapshot := s.Snapshot()
+	// instead of an empty address that matches no station. The snapshot is
+	// lock-free: a station whose lock is held by a transport call that ignores
+	// cancellation cannot be communicated with, so skip it instead of letting
+	// the worker wedge the whole bulk behind its lock. No command has been sent
+	// at this point, so skipping carries no possibly-sent hazard; the entry
+	// keeps its seeded identity so the result still reports the station.
+	initialSnapshot, snapshotOk := s.TrySnapshot()
+	if !snapshotOk {
+		entry.Skipped = true
+		entry.Reason = ReasonStationBusy
+		return false
+	}
 	stationResult := BulkPowerStationResult{
 		Address: initialSnapshot.Address,
 		Name:    initialSnapshot.Name,

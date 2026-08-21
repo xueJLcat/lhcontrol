@@ -22,6 +22,7 @@ describe('backendCopy', () => {
   it('keeps English output byte-identical for known constants', () => {
     expect(backendCopy('station is booting')).toBe('station is booting');
     expect(backendCopy('bulk operation timed out')).toBe('bulk operation timed out');
+    expect(backendCopy('station is busy')).toBe('station is busy');
     expect(backendCopy('another Bluetooth operation is in progress'))
       .toBe('another Bluetooth operation is in progress');
   });
@@ -30,6 +31,7 @@ describe('backendCopy', () => {
     setLanguagePreference('zh-CN');
     expect(backendCopy('station is booting')).toBe('基站正在启动');
     expect(backendCopy('operation cancelled')).toBe('操作已取消');
+    expect(backendCopy('station is busy')).toBe('基站忙');
     expect(backendCopy('another Bluetooth operation is in progress')).toBe('另一个蓝牙操作正在进行');
   });
 
