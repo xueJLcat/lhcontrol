@@ -303,6 +303,20 @@ func (s *scanSession) issueStop() {
 	target := s.transportSession
 	s.mutex.Unlock()
 	go func() {
+		if target == nil {
+			// Re-check slot ownership as late as possible: between the check
+			// in issueStop and this goroutine running, the session body can
+			// finish draining and a newer scan can take the global slot. A
+			// global stop would then tear down the wrong watcher. Session-
+			// scoped stops carry their own identity and need no re-check.
+			activeScanMutex.Lock()
+			stillOwnsSlot := activeScan == s
+			activeScanMutex.Unlock()
+			if !stillOwnsSlot {
+				s.doneOnce.Do(func() { close(s.stopDone) })
+				return
+			}
+		}
 		err := stopScanSessionSafely(target)
 		s.mutex.Lock()
 		// A bounded waiter can have recorded an abandonment first; whichever
