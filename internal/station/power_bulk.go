@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"lhcontrol/internal/bluetooth"
+	"log"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -297,23 +299,87 @@ func (m *Manager) setAllStationsPowerDetailed(ctx context.Context, state string)
 
 	var wg sync.WaitGroup
 	semaphore := make(chan struct{}, 2)
-	contextAffected := make([]bool, len(result.Results))
+	// Workers write staging slots and mark them done; the bounded join below
+	// copies only finished slots into the returned result. A worker wedged on
+	// a station lock inside a transport call that ignores cancellation never
+	// reaches its done mark, so the join can abandon it without racing the
+	// entries already handed back to the caller.
+	workerResults := make([]BulkPowerStationResult, len(result.Results))
+	workerAffected := make([]bool, len(result.Results))
+	workerDone := make([]atomic.Bool, len(result.Results))
 
 	for _, item := range work {
+		// Seed the staging slot with the entry's identity so every worker
+		// outcome (including a busy skip that mutates the slot in place)
+		// keeps the address and name the selection phase attached.
+		workerResults[item.resultIndex] = result.Results[item.resultIndex]
 		wg.Add(1)
 		go func(resultIndex int, s *bluetooth.BaseStation) {
 			defer wg.Done()
-			if m.runBulkPowerWorker(ctx, semaphore, target, s, &result.Results[resultIndex]) {
-				contextAffected[resultIndex] = true
+			defer workerDone[resultIndex].Store(true)
+			if m.runBulkPowerWorker(ctx, semaphore, target, s, &workerResults[resultIndex]) {
+				workerAffected[resultIndex] = true
 			}
 		}(item.resultIndex, item.station)
 	}
 
-	wg.Wait()
-	for _, affected := range contextAffected {
-		if !affected {
+	joined := make(chan struct{})
+	go func() {
+		defer close(joined)
+		wg.Wait()
+	}()
+	// The bulk context bounds every worker's adapter work; the only unbounded
+	// part is a station lock held by a transport call that ignores
+	// cancellation (an OS-disconnect cleanup, in particular). Wait the
+	// context plus a grace, then abandon wedged workers so the batch, its
+	// lifecycle slot, and every later bulk operation cannot hang behind one
+	// station — matching the bounded joins used by initial scan reads and
+	// status refreshes.
+	joinTimer := time.NewTimer(m.bulkWorkerJoinBudget(ctx))
+	defer joinTimer.Stop()
+	abandoned := false
+	select {
+	case <-joined:
+	case <-ctx.Done():
+		// Healthy workers observe the stopped context and settle quickly; give
+		// them a short drain so their terminal classifications are kept, then
+		// abandon whatever is still wedged on a lock.
+		drainTimer := time.NewTimer(bulkWorkerDrainGrace)
+		select {
+		case <-joined:
+			drainTimer.Stop()
+		case <-drainTimer.C:
+			abandoned = true
+			log.Printf("Bulk power workers did not finish within %s of the batch stopping; abandoning wedged workers", bulkWorkerDrainGrace)
+		}
+	case <-joinTimer.C:
+		abandoned = true
+		log.Printf("Bulk power workers did not finish within the join budget; abandoning wedged workers")
+	}
+	anyAffected := false
+	for _, item := range work {
+		resultIndex := item.resultIndex
+		if !workerDone[resultIndex].Load() {
+			// The abandoned worker's command outcome is unknown; keep the
+			// seeded entry identity and report the station busy instead of
+			// letting the outer interruption backfill claim a result shape
+			// the worker never confirmed. A refresh re-read reconciles the
+			// station state once its lock frees.
+			entry := &result.Results[resultIndex]
+			entry.Skipped = true
+			entry.Reason = ReasonStationBusy
+			m.trackStatusRefreshPending(entry.Address)
 			continue
 		}
+		result.Results[resultIndex] = workerResults[resultIndex]
+		if workerAffected[resultIndex] {
+			anyAffected = true
+		}
+	}
+	if abandoned {
+		m.scheduleStatusRecovery()
+	}
+	if anyAffected {
 		if err := ctx.Err(); err != nil {
 			return result, true, err
 		}
@@ -323,6 +389,31 @@ func (m *Manager) setAllStationsPowerDetailed(ctx context.Context, state string)
 		return result, true, context.Canceled
 	}
 	return result, false, nil
+}
+
+// bulkWorkerDrainGrace is how long the bounded join waits for healthy workers
+// to settle after the bulk context stops before abandoning wedged ones. It is
+// a variable so tests can shrink it.
+var bulkWorkerDrainGrace = 5 * time.Second
+
+// bulkWorkerJoinGrace is added to the bulk context's remaining budget for the
+// backstop join timer. Healthy workers cannot outlive the context; the grace
+// covers a worker wedged on a station lock that never observes cancellation.
+var bulkWorkerJoinGrace = 15 * time.Second
+
+// bulkWorkerJoinBudget bounds the backstop join wait: the bulk context's
+// remaining budget plus a grace for lock-wedged workers. The context-stop
+// drain path normally settles first; this backstop only matters if the
+// context somehow never stops.
+func (m *Manager) bulkWorkerJoinBudget(ctx context.Context) time.Duration {
+	budget := m.config.BulkPowerTimeout()
+	if deadline, ok := ctx.Deadline(); ok {
+		budget = time.Until(deadline)
+	}
+	if budget < 0 {
+		budget = 0
+	}
+	return budget + bulkWorkerJoinGrace
 }
 
 // selectBulkPowerCandidates snapshots every known station, applies

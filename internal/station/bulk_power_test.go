@@ -131,6 +131,70 @@ func TestBulkPowerSkipsBusyStation(t *testing.T) {
 	}
 }
 
+// TestBulkPowerAbandonsWedgedWorker guards the bounded worker join: a worker
+// wedged on a station lock inside a transport call that ignores cancellation
+// must not hang the bulk past its budget, and the batch's lifecycle slot must
+// be released so later bulk operations are not reported busy forever. The
+// abandoned station is reported busy (its command outcome is unknown) and
+// scheduled for a refresh re-read.
+func TestBulkPowerAbandonsWedgedWorker(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	manager.statusRecoveryStart.Do(func() {})
+	address := "11:22:33:44:55:B2"
+	station := &internalbluetooth.BaseStation{
+		Name:              "LHB-WEDGED",
+		Address:           mustAddress(t, address),
+		Present:           true,
+		PowerState:        internalbluetooth.PowerStateSleep,
+		RawPowerState:     0x00,
+		LastPowerReadAt:   time.Now(),
+		Capabilities:      internalbluetooth.Capabilities{PowerWrite: true},
+		CapabilitiesKnown: true,
+	}
+	manager.stations[address] = station
+	release := make(chan struct{})
+	defer close(release)
+	manager.bluetoothOps.setPowerState = func(context.Context, *internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
+		// Mirrors a transport call that wedges while holding the station's
+		// write lock, ignoring the operation context.
+		station.HoldLockWhile(func() { <-release })
+		return internalbluetooth.PowerControlResult{}, nil
+	}
+	originalDrain := bulkWorkerDrainGrace
+	bulkWorkerDrainGrace = 50 * time.Millisecond
+	t.Cleanup(func() { bulkWorkerDrainGrace = originalDrain })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	result, err := manager.SetAllStationsPowerDetailedContext(ctx, "on")
+	if elapsed := time.Since(started); elapsed > 5*time.Second {
+		t.Fatalf("bulk took %v, want the worker join bounded", elapsed)
+	}
+	if err != nil {
+		t.Fatalf("SetAllStationsPowerDetailedContext() error = %v, want the abandoned worker booked without a top-level error", err)
+	}
+	if len(result.Results) != 1 || !result.Results[0].Skipped || result.Results[0].Reason != ReasonStationBusy {
+		t.Fatalf("bulk result = %+v, want the wedged station skipped busy", result.Results)
+	}
+	if result.Results[0].Address != address {
+		t.Fatalf("wedged station lost its identity in the result: %+v", result.Results[0])
+	}
+	manager.statusRetryMutex.Lock()
+	retry, tracked := manager.statusRetries[address]
+	manager.statusRetryMutex.Unlock()
+	if !tracked || retry.kinds&statusRetryRefresh == 0 {
+		t.Fatalf("abandoned bulk station retry = %+v tracked=%v, want a refresh marker", retry, tracked)
+	}
+	manager.bulkLifecycleMutex.Lock()
+	lifecycle := manager.bulkLifecycle
+	manager.bulkLifecycleMutex.Unlock()
+	if lifecycle != nil {
+		t.Fatal("bulk lifecycle stayed registered after the bounded join abandoned the wedged worker")
+	}
+}
+
 func TestBulkPowerDoesNotTrustStaleTargetCacheAfterLiveRead(t *testing.T) {
 	manager := NewManager(config.NewConfig())
 	address := "11:22:33:44:55:65"

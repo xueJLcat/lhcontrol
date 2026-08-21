@@ -141,7 +141,12 @@ func (m *Manager) recordPowerVerificationResult(
 	before bluetooth.BaseStationSnapshot,
 	err error,
 ) {
-	after := station.Snapshot()
+	// Non-blocking snapshot: this runs while the caller's operation budget is
+	// already spent on the read itself; a station lock held by a transport
+	// call that ignores cancellation must not hang the bookkeeping (and with
+	// it the whole operation). A stale cached snapshot only reports the new
+	// observations as not-yet-visible; the next refresh reconciles them.
+	after, _ := station.SnapshotNonBlocking()
 	powerObserved := after.LastPowerReadAt.After(before.LastPowerReadAt)
 	channelObserved := after.LastChannelReadAt.After(before.LastChannelReadAt)
 	var powerErr error
