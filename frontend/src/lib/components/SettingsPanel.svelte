@@ -182,7 +182,15 @@
   const apiListenAddressSetting = new AsyncSetting({
     getter: GetAPIListenAddress, setter: SetAPIListenAddress,
     loadMessage: 'HTTP API settings could not be loaded', saveMessage: 'HTTP API settings could not be saved',
-    afterSave: () => onAPIListenAddressChanged()
+    // The address switch restarts the listener and verifies the bind in
+    // bounded windows (worst case ~9s across verify/rollback/converge); the
+    // default watchdog would race that boundary and roll back mid-switch.
+    timeoutMs: 30000,
+    // Fire-and-forget: the status poller refreshes the API projection on its
+    // own, and awaiting the refresh here would race its internal read budget
+    // into a spurious "could not apply immediately" warning after a
+    // successful save.
+    afterSave: () => { void onAPIListenAddressChanged(); }
   });
   const powerWriteAttempts = new AsyncSetting({ getter: GetPowerWriteAttempts, setter: SetPowerWriteAttempts, loadMessage: powerTimingLoad, saveMessage: powerTimingSave });
   const operationRetryDelay = new AsyncSetting({ getter: GetOperationRetryDelayMs, setter: SetOperationRetryDelayMs, loadMessage: powerTimingLoad, saveMessage: powerTimingSave });

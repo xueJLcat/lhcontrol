@@ -9,6 +9,10 @@ export interface AsyncSettingOptions<T> {
   saveMessage: TranslationKey;
   map?: (value: T) => T;
   afterSave?: (value: T) => void | Promise<void>;
+  // Slow setters whose backend work legitimately exceeds the default watchdog
+  // (the API listen-address switch waits for listener restarts) override the
+  // timeout instead of racing the rollback path.
+  timeoutMs?: number;
 }
 
 // Every other long-lived backend call in the store carries a watchdog; a
@@ -16,11 +20,21 @@ export interface AsyncSettingOptions<T> {
 // operation queued behind it) busy forever.
 const SETTING_OPERATION_TIMEOUT_MS = 10000;
 
-function withTimeout<T>(promise: Promise<T>, action: string): Promise<T> {
+// A timeout means the backend call may still be running (Wails calls cannot
+// be cancelled), which makes the compensating rollback re-read observe a
+// mid-transition value; the catch path treats this shape specially.
+class SettingOperationTimeoutError extends Error {
+  constructor(action: string, timeoutMs: number) {
+    super(`${action} timed out after ${timeoutMs}ms`);
+    this.name = 'SettingOperationTimeoutError';
+  }
+}
+
+function withTimeout<T>(promise: Promise<T>, action: string, timeoutMs: number): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(
-      () => reject(new Error(`${action} timed out after ${SETTING_OPERATION_TIMEOUT_MS}ms`)),
-      SETTING_OPERATION_TIMEOUT_MS
+      () => reject(new SettingOperationTimeoutError(action, timeoutMs)),
+      timeoutMs
     );
     void promise.then(
       (value) => {
@@ -59,16 +73,35 @@ export class AsyncSetting<T> {
   // Advances with every accepted edit so a failed queued save can tell
   // whether a newer edit already owns the displayed value.
   private saveRevision = 0;
+  // A Retry click that lands while a save is still settling (the error card
+  // renders a microtask before busy clears) is remembered and re-run by the
+  // settling operation's finally instead of being dropped silently.
+  private reloadPending = false;
 
   constructor(private readonly options: AsyncSettingOptions<T>) {}
 
+  private get timeoutMs(): number {
+    return this.options.timeoutMs ?? SETTING_OPERATION_TIMEOUT_MS;
+  }
+
+  private finishBusy() {
+    this.busy = false;
+    if (this.reloadPending) {
+      this.reloadPending = false;
+      void this.load();
+    }
+  }
+
   load = async (): Promise<void> => {
-    if (this.busy) return;
+    if (this.busy) {
+      this.reloadPending = true;
+      return;
+    }
     this.busy = true;
     this.error = null;
     try {
       const value = await serializeSettingOperation(this.options.setter, () =>
-        withTimeout(this.options.getter(), 'reading the setting')
+        withTimeout(this.options.getter(), 'reading the setting', this.timeoutMs)
       );
       this.value = this.options.map ? this.options.map(value) : value;
     } catch (error) {
@@ -76,7 +109,7 @@ export class AsyncSetting<T> {
       this.error = backendCopy(String(error));
       pushToast(withDetail(this.options.loadMessage, backendCopy(String(error))));
     } finally {
-      this.busy = false;
+      this.finishBusy();
     }
   };
 
@@ -93,7 +126,7 @@ export class AsyncSetting<T> {
     try {
       await serializeSettingOperation(this.options.setter, async () => {
         try {
-          await withTimeout(this.options.setter(next), 'saving the setting');
+          await withTimeout(this.options.setter(next), 'saving the setting', this.timeoutMs);
         } catch (error) {
           if (revision !== this.saveRevision) {
             // A newer queued edit owns the displayed value, and its save
@@ -103,12 +136,22 @@ export class AsyncSetting<T> {
             pushToast(withDetail(this.options.saveMessage, backendCopy(String(error))));
             return;
           }
+          if (error instanceof SettingOperationTimeoutError) {
+            // The setter may still be running on the backend, so an immediate
+            // re-read can observe a mid-transition value that a later commit
+            // then contradicts. Drop the value and surface the error instead;
+            // Retry reloads the actually persisted state.
+            this.value = null;
+            this.error = backendCopy(String(error));
+            pushToast(withDetail(this.options.saveMessage, backendCopy(String(error))));
+            return;
+          }
           // Another drawer instance may have completed an earlier queued save
           // after this instance captured `previous`. Re-read inside the same
           // serialization slot so a failed save rolls back to the value that
           // is actually persisted, not to an older local snapshot.
           try {
-            const persisted = await withTimeout(this.options.getter(), 'reading the setting');
+            const persisted = await withTimeout(this.options.getter(), 'reading the setting', this.timeoutMs);
             this.value = this.options.map ? this.options.map(persisted) : persisted;
             this.error = null;
           } catch {
@@ -125,7 +168,7 @@ export class AsyncSetting<T> {
 
         try {
           const followUp = this.options.afterSave?.(next);
-          if (followUp) await withTimeout(followUp, 'applying the setting');
+          if (followUp) await withTimeout(followUp, 'applying the setting', this.timeoutMs);
         } catch (error) {
           // Persistence already succeeded. Keep the saved value visible and
           // report only the local follow-up failure; rolling back here would
@@ -135,7 +178,7 @@ export class AsyncSetting<T> {
       });
     } finally {
       this.pendingSaves -= 1;
-      if (this.pendingSaves === 0) this.busy = false;
+      if (this.pendingSaves === 0) this.finishBusy();
     }
   };
 }
