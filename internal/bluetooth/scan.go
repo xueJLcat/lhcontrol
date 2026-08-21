@@ -281,6 +281,24 @@ func (s *scanSession) issueStop() {
 		s.mutex.Unlock()
 		return
 	}
+	if s.finished && s.transportSession == nil {
+		// An abandoned session without a transport identity can only stop
+		// through the global adapter slot. Once this session no longer owns
+		// that slot, a newer scan may be running behind it, and a global
+		// stop would tear down the wrong watcher; leave the late platform
+		// scan to its own outcome instead of stopping a scan this session
+		// no longer owns. While the session still owns the slot no other
+		// scan can start, so the stop is safe and still cleans up the
+		// orphaned watcher. (The Windows transport always hands back a
+		// session identity, so production stops stay session-scoped.)
+		activeScanMutex.Lock()
+		stillOwnsSlot := activeScan == s
+		activeScanMutex.Unlock()
+		if !stillOwnsSlot {
+			s.mutex.Unlock()
+			return
+		}
+	}
 	s.stopStarted = true
 	target := s.transportSession
 	s.mutex.Unlock()

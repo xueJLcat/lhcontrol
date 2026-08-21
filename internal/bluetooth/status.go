@@ -225,8 +225,14 @@ func ReadPowerStateContext(ctx context.Context, station *BaseStation) error {
 			// nil: a nil channel error looks like a clean observation and
 			// makes callers clear the station's channel-retry state for a
 			// channel that was never read. The pure-context classification
-			// routes upstream to a pending re-read instead.
-			return finishStatusReadResult(station, powerReadErr, contextErr)
+			// routes upstream to a pending re-read instead. A station without
+			// a readable channel has no channel state to preserve, so
+			// recording the interruption there would only book channel
+			// retries for an observation that can never happen.
+			if station.Capabilities.ChannelRead {
+				return finishStatusReadResult(station, powerReadErr, contextErr)
+			}
+			return finishStatusReadResult(station, powerReadErr, nil)
 		}
 		if station.Capabilities.ChannelRead {
 			return finishStatusReadResult(station, nil, contextErr)
@@ -271,7 +277,10 @@ func InvalidateAllConnections() error {
 	var cleanupErrors []error
 	for _, station := range stations {
 		if err := DisconnectStation(station); err != nil {
-			cleanupErrors = append(cleanupErrors, fmt.Errorf("%s: %w", station.Snapshot().Address, err))
+			// The Address field is immutable after creation: formatting the
+			// error must not block on a station lock a wedged transport call
+			// may be holding.
+			cleanupErrors = append(cleanupErrors, fmt.Errorf("%s: %w", station.Address.String(), err))
 		}
 	}
 	return errors.Join(cleanupErrors...)
@@ -529,6 +538,7 @@ func finishInterruptedInitialRead(
 	station *BaseStation,
 	contextErr error,
 	powerReadCompleted bool,
+	channelReadAttempted bool,
 	channelReadCompleted bool,
 	powerReadErr error,
 	channelReadErr error,
@@ -547,7 +557,12 @@ func finishInterruptedInitialRead(
 	if channelReadCompleted {
 		station.LastChannelReadAt = channelReadAt
 	}
-	if channelReadErr == nil && !channelReadCompleted {
+	// Only an attempted channel read carries the interruption into the channel
+	// domain: a station without a readable channel (or one whose read never
+	// started) has no channel state to preserve, and recording the context
+	// error there would book channel retries for an observation that can never
+	// happen.
+	if channelReadAttempted && channelReadErr == nil && !channelReadCompleted {
 		channelReadErr = contextErr
 	} else if channelReadErr != nil {
 		channelReadErr = errors.Join(channelReadErr, contextErr)
@@ -630,11 +645,14 @@ func FetchInitialPowerStateContext(ctx context.Context, station *BaseStation) er
 			// context errors as clean interruptions, so the transport fault
 			// would lose its disconnect/backoff bookkeeping. A failure that is
 			// itself only the expired budget or the cancellation stays pure and
-			// keeps the clean-interruption path below.
+			// keeps the clean-interruption path below. The channel read never
+			// started here; only stations with a readable channel carry the
+			// interruption in the channel domain to preserve their retry state.
 			return finishInterruptedInitialRead(
 				station,
 				contextErr,
 				powerReadCompleted,
+				station.Capabilities.ChannelRead,
 				false,
 				powerReadErr,
 				nil,
@@ -666,6 +684,7 @@ func FetchInitialPowerStateContext(ctx context.Context, station *BaseStation) er
 				station,
 				contextErr,
 				powerReadCompleted,
+				true,
 				channelReadCompleted,
 				powerReadErr,
 				channelReadErr,

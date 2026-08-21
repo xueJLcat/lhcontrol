@@ -237,7 +237,14 @@ func connectAndDiscoverInternalContext(ctx context.Context, station *BaseStation
 			break
 		}
 		if err != nil {
-			permanentlyUnsupported := IsUnsupportedCapabilityError(err)
+			// Only an explicit operation-level rejection marks the station
+			// permanently capability-less. Raw ATT codes surfaced during
+			// discovery (for example a characteristic probe answered with
+			// Request Not Supported) are more likely transient link
+			// instability than a final capability verdict; freezing an empty
+			// capability set here would stop recovery until a manual refresh.
+			var unsupportedErr *UnsupportedCapabilityError
+			permanentlyUnsupported := errors.As(err, &unsupportedErr)
 			station.CapabilitiesKnown = permanentlyUnsupported
 			if permanentlyUnsupported {
 				station.Capabilities = Capabilities{}
@@ -696,7 +703,10 @@ func DisconnectAllStations() error {
 	var disconnectErrors []error
 	for _, station := range stationsToDisconnect {
 		if err := DisconnectStation(station); err != nil {
-			disconnectErrors = append(disconnectErrors, fmt.Errorf("%s: %w", station.Snapshot().Address, err))
+			// The Address field is immutable after creation: formatting the
+			// error must not block on a station lock a wedged transport call
+			// may be holding.
+			disconnectErrors = append(disconnectErrors, fmt.Errorf("%s: %w", station.Address.String(), err))
 		}
 	}
 	log.Println("Bluetooth: Disconnect all stations attempt finished.")
