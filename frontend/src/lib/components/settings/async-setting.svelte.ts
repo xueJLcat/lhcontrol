@@ -11,6 +11,30 @@ export interface AsyncSettingOptions<T> {
   afterSave?: (value: T) => void | Promise<void>;
 }
 
+// Every other long-lived backend call in the store carries a watchdog; a
+// hung setting binding must not keep its row (and every later serialized
+// operation queued behind it) busy forever.
+const SETTING_OPERATION_TIMEOUT_MS = 10000;
+
+function withTimeout<T>(promise: Promise<T>, action: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error(`${action} timed out after ${SETTING_OPERATION_TIMEOUT_MS}ms`)),
+      SETTING_OPERATION_TIMEOUT_MS
+    );
+    void promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      }
+    );
+  });
+}
+
 const settingOperationTails = new WeakMap<object, Promise<void>>();
 
 function serializeSettingOperation<T>(key: object, operation: () => Promise<T>): Promise<T> {
@@ -43,7 +67,9 @@ export class AsyncSetting<T> {
     this.busy = true;
     this.error = null;
     try {
-      const value = await serializeSettingOperation(this.options.setter, this.options.getter);
+      const value = await serializeSettingOperation(this.options.setter, () =>
+        withTimeout(this.options.getter(), 'reading the setting')
+      );
       this.value = this.options.map ? this.options.map(value) : value;
     } catch (error) {
       this.value = null;
@@ -67,7 +93,7 @@ export class AsyncSetting<T> {
     try {
       await serializeSettingOperation(this.options.setter, async () => {
         try {
-          await this.options.setter(next);
+          await withTimeout(this.options.setter(next), 'saving the setting');
         } catch (error) {
           if (revision !== this.saveRevision) {
             // A newer queued edit owns the displayed value, and its save
@@ -82,7 +108,7 @@ export class AsyncSetting<T> {
           // serialization slot so a failed save rolls back to the value that
           // is actually persisted, not to an older local snapshot.
           try {
-            const persisted = await this.options.getter();
+            const persisted = await withTimeout(this.options.getter(), 'reading the setting');
             this.value = this.options.map ? this.options.map(persisted) : persisted;
             this.error = null;
           } catch {
@@ -98,7 +124,8 @@ export class AsyncSetting<T> {
         }
 
         try {
-          await this.options.afterSave?.(next);
+          const followUp = this.options.afterSave?.(next);
+          if (followUp) await withTimeout(followUp, 'applying the setting');
         } catch (error) {
           // Persistence already succeeded. Keep the saved value visible and
           // report only the local follow-up failure; rolling back here would

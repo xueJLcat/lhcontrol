@@ -305,14 +305,17 @@ export class StationActionController {
     this.host.statusMessage = t('Setting all available stations to {target}…', { target: targetLabel });
     try {
       const result = await SetAllStationsPowerDetailed(state);
+      // A Go nil slice serializes to null; treat it as an empty result set
+      // instead of failing every access below with a TypeError.
+      const results = result.results ?? [];
       let committable = this.host.gates.canCommitOperation(operationEpoch);
       if (committable) {
-        this.host.mergeStationUpdates(result.results.map((item) => item.station).filter((item) => Boolean(item?.address)));
+        this.host.mergeStationUpdates(results.map((item) => item.station).filter((item) => Boolean(item?.address)));
         await this.fetchLatestList();
         committable = this.host.gates.canCommitOperation(operationEpoch);
       }
       if (committable) {
-        for (const item of result.results) {
+        for (const item of results) {
           const feedback: Pick<PowerFeedback, 'kind' | 'text'> = item.skipped
             ? item.success && item.confirmed
               ? { kind: 'success', text: t('Already {target}', { target: targetLabel }) }
@@ -329,7 +332,7 @@ export class StationActionController {
           });
         }
       }
-      const summary = summarizeBulkResult(result.results);
+      const summary = summarizeBulkResult(results);
       const summaryText = formatBulkResult(targetLabel, summary);
       const statusText = result.timedOut
         ? `${t('Bulk {target} timed out', { target: targetLabel })}: ${summaryText}`

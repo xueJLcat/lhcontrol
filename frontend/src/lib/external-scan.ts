@@ -100,6 +100,11 @@ export class ExternalScanCoordinator {
     this.recoveryStatusId = null;
     this.recoveryAttempts = 0;
     this.pendingTerminal = null;
+    // A stopped scan whose terminal event never arrived leaves this marker
+    // set; a local scan supersedes that debt exactly like begin() does, and
+    // keeping it would silently swallow a later untracked external scan's
+    // terminal event.
+    this.stoppedScanTerminalPending = false;
     this.failureNotified = false;
   }
 
@@ -486,7 +491,12 @@ export class ExternalScanCoordinator {
     const stillScanning = await this.host.isScanning().catch(() => true);
     if (!this.host.canCommitOperation(operationEpoch) || !isStopRequestCurrent()) return 'aborted';
     if (stillScanning) {
-      this.host.setStatusMessage(t('Stopping scan...'));
+      // Gated like every other status write in this flow: the stop-recheck
+      // chain retries every 1.5s, and a newer owner (an auto-sleep or HTTP
+      // event) that took the line between retries must keep its message.
+      if (this.host.canCommitStatus(statusOperation)) {
+        this.host.setStatusMessage(t('Stopping scan...'));
+      }
       return 'still-scanning';
     }
     // The backend always delivers a terminal event for a stopped scan. Since

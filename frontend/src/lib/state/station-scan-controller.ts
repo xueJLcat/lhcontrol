@@ -364,7 +364,12 @@ export class StationScanController {
       this.host.externalScanning = scanning && !this.host.isLoading &&
         (this.host.externalScanning || (!this.host.stoppingScan && !this.host.stopRequestPending));
       if (!scanning) {
-        this.host.stoppingScan = false;
+        // While a local stop request is still in flight the marker belongs to
+        // stopScan and its recheck chain (both carry their own budgets, so the
+        // marker cannot hang forever). Clearing it here would make stopScan's
+        // late settle bail out before writing the terminal status line,
+        // leaving the footer stuck on "Stopping scan...".
+        if (!this.host.stopRequestPending) this.host.stoppingScan = false;
         // Mark a recovery only while the displayed scan is still unclaimed. A
         // terminal event handler that already ran advanced the scan epoch when
         // claiming the outcome, and armed its own recovery epochs; re-marking
@@ -383,7 +388,11 @@ export class StationScanController {
         } else if (!this.host.applyStationList(await CheckAllStationStatuses(), revision, capturedStationRevisions)) return;
         this.host.maybeEndScanTimer();
       } else {
-        this.host.beginScanTimer();
+        // Only a genuinely external scan needs the timer (re)started here: a
+        // local scan starts its own timer in startScan, and during the local
+        // stop drain window the backend can transiently keep reporting a
+        // running scan after the local timer already ended.
+        if (this.host.externalScanning) this.host.beginScanTimer();
         if (this.host.externalScanning) {
           const scanStatus = await GetScanStatus().catch(() => null);
           // A pending stop owns the status message; letting the poll
