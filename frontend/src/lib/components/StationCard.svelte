@@ -7,7 +7,7 @@
     LoaderCircle, Moon, Pause, SquarePen, TriangleAlert, X, Zap
   } from 'lucide-svelte';
   import type { PowerFeedback, PowerTarget, StationInfo } from '../types';
-  import { canSetPower, channelLabel, hasCurrentChannel, isCurrentPowerState, stateClass, stateLabel } from '../station';
+  import { canSetPower, channelLabel, hasCurrentChannel, isCurrentPowerState, isFreshBooting, stateClass, stateLabel } from '../station';
   import { relativeTime } from '../relative-time';
   import { autofocus } from '../actions';
   import { dur } from '../motion';
@@ -233,7 +233,7 @@
   <div class="card-sub">
     <Bluetooth size={12} />
     <span class="mono addr">{station.address}</span>
-    <StateBadge label={stateLabel(station)} state={stateClass(station)} {unverified} stale={stalePower} booting={station.powerFresh && station.powerState === 3} />
+    <StateBadge label={stateLabel(station)} state={stateClass(station)} {unverified} stale={stalePower} booting={isFreshBooting(station)} />
     {#if stalePower}
       <span class="fresh-icon stale" role="img" title={t('Last known state; last successful read {time}', { time: relativeTime(station.lastPowerReadAt, now) || t('unknown') })} aria-label={t('Last known state; last successful read {time}', { time: relativeTime(station.lastPowerReadAt, now) || t('unknown') })}><History size={11} aria-hidden="true" /></span>
     {:else if unverified}

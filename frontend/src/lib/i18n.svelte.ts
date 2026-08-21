@@ -559,7 +559,22 @@ export async function saveLanguagePreference(next: LanguagePreference): Promise<
 // preference instead of leaving the window blank forever.
 const LANGUAGE_PROBE_TIMEOUT_MS = 5000;
 
+// A "follow the system" preference must keep following while the app runs:
+// a Windows display-language change fires languagechange on the webview, and
+// without a listener the UI would stay on the startup language until a
+// restart. Explicit en/zh-CN preferences ignore the event.
+let languageChangeListening = false;
+
+function listenForSystemLanguageChanges(): void {
+  if (languageChangeListening || typeof window === 'undefined') return;
+  languageChangeListening = true;
+  window.addEventListener('languagechange', () => {
+    if (currentLanguagePreference === 'system') setLanguagePreference('system');
+  });
+}
+
 export async function initializeLocale(): Promise<Locale> {
+  listenForSystemLanguageChanges();
   let preference: LanguagePreference = 'system';
   let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
   try {

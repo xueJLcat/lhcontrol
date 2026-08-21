@@ -5,7 +5,7 @@
   import { CircleCheck, Eye, LoaderCircle, RefreshCw, Settings2, X } from 'lucide-svelte';
   import type { Capabilities, StationInfo } from '../types';
   import { backendCopy } from '../backend-copy';
-  import { channelChangeBlockedReason, stateClass, stateLabel } from '../station';
+  import { channelChangeBlockedReason, isFreshBooting, stateClass, stateLabel } from '../station';
   import { relativeTime } from '../relative-time';
   import { focusTrap } from '../actions';
   import { dur } from '../motion';
@@ -87,7 +87,7 @@
           state={stateClass(station)}
           unverified={station.powerState >= 0 && station.powerFresh && !station.powerStateConfirmed}
           stale={station.powerState >= 0 && !station.powerFresh}
-          booting={station.powerFresh && station.powerState === 3}
+          booting={isFreshBooting(station)}
         />
       </div>
     </div>

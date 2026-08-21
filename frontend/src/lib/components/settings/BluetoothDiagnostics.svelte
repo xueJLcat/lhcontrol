@@ -22,7 +22,7 @@
         {/each}
       </div>
       <div class="drawer-actions">
-        <button class="btn" onclick={settings.onRefresh} disabled={settings.loading}>{#if settings.loading}<LoaderCircle class="spin" size={15} />{:else}<RefreshCw size={15} />{/if} {t('Refresh adapters')}</button>
+        <button class="btn" onclick={settings.onRefresh}><RefreshCw size={15} /> {t('Refresh adapters')}</button>
       </div>
       <p class="hint">{t('Windows controls which radio handles BLE discovery and connections. The application cannot route a Lighthouse operation through one specific adapter.')}</p>
     {/if}

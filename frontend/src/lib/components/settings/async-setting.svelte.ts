@@ -140,7 +140,10 @@ export class AsyncSetting<T> {
             // The setter may still be running on the backend, so an immediate
             // re-read can observe a mid-transition value that a later commit
             // then contradicts. Drop the value and surface the error instead;
-            // Retry reloads the actually persisted state.
+            // Retry reloads the actually persisted state. A Retry click that
+            // queued while this save was busy targeted the same unsettled
+            // backend state, so discard it with the same reasoning.
+            this.reloadPending = false;
             this.value = null;
             this.error = backendCopy(String(error));
             pushToast(withDetail(this.options.saveMessage, backendCopy(String(error))));
