@@ -144,12 +144,13 @@ type scanControl struct {
 func (control *scanControl) stopWatcher() (stopErr error, deferred bool) {
 	control.mutex.Lock()
 	if control.terminal {
-		// The watcher already reached Stopped/Aborted on its own; issuing
-		// another Stop can be rejected by WinRT and turn a clean finish into
-		// a spurious stop failure. Report the recorded result instead.
-		stopErr = control.stopErr
+		// The watcher already reached Stopped/Aborted on its own; a late
+		// stop is a successful no-op regardless of what an earlier Stop
+		// attempt recorded. Reporting that stale result would misclassify a
+		// finished scan as a stop failure, violating the not-scanning
+		// contract for late stops.
 		control.mutex.Unlock()
-		return stopErr, false
+		return nil, false
 	}
 	if !control.started {
 		control.pendingStop = true
@@ -159,7 +160,12 @@ func (control *scanControl) stopWatcher() (stopErr error, deferred bool) {
 	if control.stopIssued {
 		stopErr = control.stopErr
 		control.mutex.Unlock()
-		return stopErr, false
+		// A nil result means the first stop is still inside its bounded COM
+		// call: the real outcome is not known yet, and the first caller
+		// delivers it through stopOnce. Report this stop as deferred so the
+		// caller does not consume the one-shot delivery with a premature nil
+		// that would mask a real failure still in flight.
+		return stopErr, stopErr == nil
 	}
 	if alreadyTerminal(control.watcher) {
 		// The watcher stopped or aborted on its own (radio removed, disabled
@@ -218,7 +224,15 @@ func stopWatcherSafely(watcher *advertisement.BluetoothLEAdvertisementWatcher) (
 // Stop was never retried.
 func (control *scanControl) forceStop() error {
 	control.mutex.Lock()
-	if !control.started || control.terminal {
+	if control.terminal {
+		// The watcher reached Stopped/Aborted on its own: the retry
+		// trivially succeeded, and the initial failure no longer describes
+		// the outcome. Reporting nil lets waitForScanStop drop the stale
+		// error instead of poisoning a scan the watcher already finished.
+		control.mutex.Unlock()
+		return nil
+	}
+	if !control.started {
 		stopErr := control.stopErr
 		control.mutex.Unlock()
 		return stopErr
@@ -585,7 +599,10 @@ func scanStoppedError(code bluetooth.BluetoothError) error {
 	switch code {
 	case bluetooth.BluetoothErrorSuccess:
 		return nil
-	case bluetooth.BluetoothErrorRadioNotAvailable:
+	case bluetooth.BluetoothErrorRadioNotAvailable, bluetooth.BluetoothErrorDisabledByUser:
+		// A radio the user switched off is just as unavailable as one the
+		// system cannot reach: classify both so adapter-recovery handling
+		// applies instead of treating the stop as an untyped failure.
 		return fmt.Errorf("%w (WinRT error code %d)", ErrRadioNotAvailable, code)
 	case bluetooth.BluetoothErrorResourceInUse:
 		return fmt.Errorf("%w (WinRT error code %d)", ErrResourceInUse, code)
@@ -1025,9 +1042,14 @@ func (a *Adapter) ScanWithStartSession(callback func(*Adapter, ScanResult), star
 		// the real stop now that Start has been accepted. Deliver that real
 		// result here (the deferred StopScan did not deliver one) so
 		// waitForScanStop sees the actual stop outcome instead of a bare
-		// timeout when this deferred Stop fails.
-		stopErr, _ := control.stopWatcher()
-		control.stopOnce.Do(func() { control.stopRequests <- stopErr })
+		// timeout when this deferred Stop fails. A stop that raced this
+		// delivery can claim the issue first; while that stop is still in
+		// flight the delivery is deferred too, and the issuing caller
+		// delivers the real result.
+		stopErr, deferred := control.stopWatcher()
+		if !deferred {
+			control.stopOnce.Do(func() { control.stopRequests <- stopErr })
+		}
 	}
 	if started != nil {
 		started(scanSessionToken{control: control})
@@ -1096,12 +1118,16 @@ func waitForScanStop(stopped <-chan error, stopRequests <-chan error, stop func(
 				}
 				return eventErr
 			}
-			if originalErr != nil {
-				return originalErr
-			}
 			if status == advertisement.BluetoothLEAdvertisementWatcherStatusAborted {
+				if originalErr != nil {
+					return originalErr
+				}
 				return errors.New("Bluetooth scan watcher aborted without a Stopped event")
 			}
+			// The watcher reached Stopped: the stop completed regardless of
+			// what the initial attempt recorded, so a stale failure must not
+			// poison the outcome (matching the retry branch, which drops the
+			// initial error once its own Stop is accepted).
 			return nil
 		}
 
@@ -1113,7 +1139,9 @@ func waitForScanStop(stopped <-chan error, stopRequests <-chan error, stop func(
 				}
 				return eventErr
 			}
-			return originalErr
+			// A clean Stopped event completes the stop; the initial failure
+			// is stale and must not be reported as the outcome.
+			return nil
 		case <-ticker.C:
 			// Retry the stop only when the initial attempt failed. A
 			// watcher that was stopped successfully can stay in the
@@ -1404,7 +1432,6 @@ var _ GAPDevice = Device{}
 type Device struct {
 	Address Address // the MAC address of the device
 	state   *deviceState
-	ctx     context.Context
 }
 
 // deviceState owns all WinRT objects for one connection. Device is copied by
@@ -1689,7 +1716,7 @@ func (a *Adapter) ConnectContext(ctx context.Context, address Address, params Co
 		return Device{}, err
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	_, cancel := context.WithCancel(context.Background())
 	state := &deviceState{
 		cancel:    cancel,
 		device:    bleDevice,
@@ -1700,7 +1727,6 @@ func (a *Adapter) ConnectContext(ctx context.Context, address Address, params Co
 	device := Device{
 		Address: address,
 		state:   state,
-		ctx:     ctx,
 	}
 
 	// https://learn.microsoft.com/es-es/uwp/api/windows.devices.bluetooth.bluetoothledevice.connectionstatuschanged?view=winrt-26100
@@ -1757,6 +1783,9 @@ func (a *Adapter) ConnectContext(ctx context.Context, address Address, params Co
 	if err != nil {
 		state.operationMutex.Unlock()
 		handler.Release()
+		// The state owns the cancellation; dropping it here would leak the
+		// context for every failed connection attempt.
+		cancel()
 		return Device{}, err
 	}
 	state.connectionStatusListenerToken = token

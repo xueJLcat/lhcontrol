@@ -23,6 +23,7 @@ func TestScanStoppedErrorMapping(t *testing.T) {
 	}{
 		{winbluetooth.BluetoothErrorSuccess, nil},
 		{winbluetooth.BluetoothErrorRadioNotAvailable, ErrRadioNotAvailable},
+		{winbluetooth.BluetoothErrorDisabledByUser, ErrRadioNotAvailable},
 		{winbluetooth.BluetoothErrorResourceInUse, ErrResourceInUse},
 		{winbluetooth.BluetoothErrorDisabledByPolicy, ErrDisabledByPolicy},
 	}
@@ -332,7 +333,74 @@ func TestStopScanSessionTargetsItsOwnScan(t *testing.T) {
 	}
 }
 
-func TestWaitForScanStopReturnsStopErrorWithoutStoppedEvent(t *testing.T) {
+// TestStopWatcherDefersWhileFirstStopInFlight guards the one-shot stop
+// delivery: while the first Stop is still inside its bounded COM call
+// (stopIssued set, stopErr not yet recorded), a concurrent second stop must
+// not deliver a premature nil through stopOnce. The first caller owns the
+// delivery and reports the actual outcome; a nil delivered early would make
+// waitForScanStop treat a still-unknown stop as accepted and mask a real
+// failure.
+func TestStopWatcherDefersWhileFirstStopInFlight(t *testing.T) {
+	control := &scanControl{stopRequests: make(chan error, 1), started: true, stopIssued: true}
+	err, deferred := control.stopWatcher()
+	if err != nil {
+		t.Fatalf("stopWatcher() error = %v, want no recorded result yet", err)
+	}
+	if !deferred {
+		t.Fatal("stopWatcher() reported an issued stop while the first stop is still in flight")
+	}
+	if err := stopScanControl(control); err != nil {
+		t.Fatalf("stopScanControl() error = %v, want the in-flight stop reported as ongoing", err)
+	}
+	select {
+	case delivered := <-control.stopRequests:
+		t.Fatalf("concurrent stop consumed the one-shot delivery with %v", delivered)
+	default:
+	}
+	// Once the first stop records its outcome, a later stop reports and
+	// delivers that recorded result.
+	control.mutex.Lock()
+	control.stopErr = errors.New("stop failed")
+	control.mutex.Unlock()
+	if err := stopScanControl(control); err == nil {
+		t.Fatal("stopScanControl() after the first stop failed unexpectedly succeeded")
+	}
+	select {
+	case delivered := <-control.stopRequests:
+		if delivered == nil || delivered.Error() != "stop failed" {
+			t.Fatalf("delivered stop outcome = %v, want the recorded failure", delivered)
+		}
+	default:
+		t.Fatal("recorded stop failure was not delivered")
+	}
+}
+
+// TestStopWatcherTerminalStopIsCleanNoOp guards the late-stop contract: once
+// the watcher reached Stopped/Aborted, a stop is a successful no-op
+// regardless of what an earlier Stop attempt recorded. Returning that stale
+// failure would misclassify a finished scan as a stop failure.
+func TestStopWatcherTerminalStopIsCleanNoOp(t *testing.T) {
+	control := &scanControl{
+		stopRequests: make(chan error, 1),
+		started:      true,
+		stopIssued:   true,
+		terminal:     true,
+		stopErr:      errors.New("earlier stop failed"),
+	}
+	if err := stopScanControl(control); err != nil {
+		t.Fatalf("stopScanControl() on a terminal control error = %v, want a clean no-op", err)
+	}
+	select {
+	case delivered := <-control.stopRequests:
+		if delivered != nil {
+			t.Fatalf("terminal stop delivered %v, want a clean outcome", delivered)
+		}
+	default:
+		t.Fatal("terminal stop did not deliver its clean outcome")
+	}
+}
+
+func TestWaitForScanStopDropsStaleErrorOnceWatcherStopped(t *testing.T) {
 	originalTimeout := scanStopTimeout
 	originalPoll := scanStopPollInterval
 	scanStopTimeout = 100 * time.Millisecond
@@ -352,8 +420,11 @@ func TestWaitForScanStopReturnsStopErrorWithoutStoppedEvent(t *testing.T) {
 	}, func() (advertisement.BluetoothLEAdvertisementWatcherStatus, error) {
 		return advertisement.BluetoothLEAdvertisementWatcherStatusStopped, nil
 	})
-	if !errors.Is(err, stopErr) {
-		t.Fatalf("waitForScanStop() error = %v, want original stop error", err)
+	// The watcher reaching Stopped means the stop completed regardless of
+	// what the initial attempt recorded; the stale failure must not make
+	// callers discard an otherwise completed scan's results.
+	if err != nil {
+		t.Fatalf("waitForScanStop() error = %v, want the stale stop error dropped", err)
 	}
 	if calls.Load() != 0 {
 		t.Fatalf("stop retries = %d, want 0 after terminal status", calls.Load())
