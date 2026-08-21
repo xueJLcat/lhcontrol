@@ -170,7 +170,11 @@ func (m *Manager) SetStationChannel(
 			continue
 		}
 		if snapshot.Channel == channel {
-			return result, fmt.Errorf("%w: channel %d is used by %s (%s)", ErrChannelConflict, channel, snapshot.Name, snapshot.Address)
+			// Name the occupant the way the UI shows it (a user alias when
+			// set) instead of the factory broadcast name, so the conflict
+			// message matches what the user sees in the fleet list.
+			occupantName, _ := m.config.GetStationDisplayName(snapshot.Address, snapshot.Name)
+			return result, fmt.Errorf("%w: channel %d is used by %s (%s)", ErrChannelConflict, channel, occupantName, snapshot.Address)
 		}
 	}
 	if hasUnknown {
