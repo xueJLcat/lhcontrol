@@ -33,6 +33,7 @@ func TestBluetoothInitializationRecoversAfterRetry(t *testing.T) {
 		t.Fatalf("initialization attempts = %d, want 2", attempts)
 	}
 }
+
 // TestInitializeBoundsHungAdapterEnable guards app startup: Initialize must
 // give up waiting after the bounded window instead of blocking startup (and
 // holding initializeMutex, which would stall every concurrent ensureReady)
@@ -306,6 +307,7 @@ func TestStructuredPowerReadDeadlineDoesNotDisconnectStation(t *testing.T) {
 		t.Fatalf("deadline retry = %+v tracked=%v, want a connection backoff", retry, tracked)
 	}
 }
+
 // TestStructuredChannelReadWithContextJoinedTransportFailureTakesFailurePath
 // covers a channel read whose genuine transport failure is joined with the
 // cancelling context error, the shape ReadPowerStateContext produces when a

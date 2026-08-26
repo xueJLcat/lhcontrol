@@ -80,6 +80,7 @@ func (m *Manager) newStationOperationContext(parent context.Context) (context.Co
 	}
 	return context.WithTimeout(parent, timeout)
 }
+
 // adapterCleanupWaitLimit bounds how long error-cleanup paths block on the
 // contextless disconnect/release calls. WinRT cleanup of an unresponsive
 // device can stretch past the surrounding operation timeout, and the caller
@@ -759,6 +760,7 @@ func (m *Manager) Initialize() error {
 	}()
 	return m.waitInitializeAttempt(pending)
 }
+
 // initializeWaitLimit bounds how long ensureReady waits for an adapter-enable
 // attempt. adapter.Enable takes no context, and WinRT against an unhealthy
 // radio can hang indefinitely; the background recovery loop is started once

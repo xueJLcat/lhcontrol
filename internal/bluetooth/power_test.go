@@ -940,8 +940,8 @@ func TestDefinitelyUnsentWritePreservesCompatibilityBootInference(t *testing.T) 
 	ConfigureTiming(TimingPolicy{WriteAttempts: 1, OperationRetryDelay: time.Millisecond})
 	t.Cleanup(func() { ConfigureTiming(TimingPolicy{}) })
 	power := &fakeCharacteristic{
-		value:                    []byte{0x01},
-		writeWithoutResponseErr:  &classifiedWriteError{possiblySent: false},
+		value:                   []byte{0x01},
+		writeWithoutResponseErr: &classifiedWriteError{possiblySent: false},
 	}
 	station := connectedFakeStation(power, nil, nil, Capabilities{PowerRead: true, PowerWrite: true})
 	station.setPowerStateInternal(PowerStateOn, 0x01)

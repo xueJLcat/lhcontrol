@@ -66,10 +66,10 @@ func TestAPINeverPanicsOrReturns5xxOnMalformedInput(t *testing.T) {
 	}
 	for _, address := range addresses {
 		for pathTemplate, method := range map[string]string{
-			"/stations/%s/power":   http.MethodPost,
+			"/stations/%s/power":    http.MethodPost,
 			"/stations/%s/identify": http.MethodPost,
-			"/stations/%s/refresh": http.MethodPost,
-			"/stations/%s/channel": http.MethodPut,
+			"/stations/%s/refresh":  http.MethodPost,
+			"/stations/%s/channel":  http.MethodPut,
 		} {
 			path := strings.Replace(pathTemplate, "%s", address, 1)
 			body := `{"state":"on","channel":5}`
@@ -123,4 +123,3 @@ func TestAPIErrorResponsesCarryErrorShape(t *testing.T) {
 		}
 	}
 }
-

@@ -82,7 +82,7 @@ type App struct {
 	// autoSleepRebuildWait overrides the self-stop rebuild cooldown in tests;
 	// production runs leave it at zero and follow autoSleepRestartDelay.
 	autoSleepRebuildWait time.Duration
-	autoSleepWG       sync.WaitGroup
+	autoSleepWG          sync.WaitGroup
 	// autoSleepRebuildTimer holds the pending rebuild scheduled after a
 	// watcher self-stop. It carries one autoSleepWG count that is released
 	// either by the timer callback or by stopScheduledAutoSleepRebuildLocked
@@ -102,13 +102,13 @@ type App struct {
 	// continues counting it down instead of restarting from idle and never
 	// firing for the already-closed session.
 	autoSleepSelfStopCountdownAt time.Time
-	autoSleepActionID         atomic.Uint64
-	autoSleepActionSlot       chan struct{}
-	autoSleepSettledSession   time.Time
-	scanForAutoSleep          func(context.Context) ([]station.StationInfo, error)
-	setPowerForAutoSleep      func(context.Context, string) (station.BulkPowerResult, error)
-	autoSleepIsRunning        func(string) (bool, error)
-	autoSleepEventSink        func(autoSleepEvent)
+	autoSleepActionID            atomic.Uint64
+	autoSleepActionSlot          chan struct{}
+	autoSleepSettledSession      time.Time
+	scanForAutoSleep             func(context.Context) ([]station.StationInfo, error)
+	setPowerForAutoSleep         func(context.Context, string) (station.BulkPowerResult, error)
+	autoSleepIsRunning           func(string) (bool, error)
+	autoSleepEventSink           func(autoSleepEvent)
 }
 
 func NewApp() *App {

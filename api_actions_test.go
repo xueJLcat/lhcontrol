@@ -238,13 +238,17 @@ func TestStationRoutesDecodePercentEncodedAddress(t *testing.T) {
 
 		{
 			name: "power", method: http.MethodPost, path: "/stations/AA%3ABB%3ACC%3ADD%3AEE%3AFF/power", body: `{"state":"on"}`,
-			send: func(manager *fakeAPIStationManager) { manager.powerResult = station.PowerActionResult{CommandSent: true, Confirmed: true} },
+			send: func(manager *fakeAPIStationManager) {
+				manager.powerResult = station.PowerActionResult{CommandSent: true, Confirmed: true}
+			},
 		},
 		{name: "identify", method: http.MethodPost, path: "/stations/AA%3ABB%3ACC%3ADD%3AEE%3AFF/identify", body: ""},
 		{name: "refresh", method: http.MethodPost, path: "/stations/AA%3ABB%3ACC%3ADD%3AEE%3AFF/refresh", body: ""},
 		{
 			name: "channel", method: http.MethodPut, path: "/stations/AA%3ABB%3ACC%3ADD%3AEE%3AFF/channel", body: `{"channel":5}`,
-			send: func(manager *fakeAPIStationManager) { manager.channelResult = station.ChannelChangeResult{Address: "AA:BB:CC:DD:EE:FF", Channel: 5, Confirmed: true} },
+			send: func(manager *fakeAPIStationManager) {
+				manager.channelResult = station.ChannelChangeResult{Address: "AA:BB:CC:DD:EE:FF", Channel: 5, Confirmed: true}
+			},
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {

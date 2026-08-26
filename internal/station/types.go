@@ -209,43 +209,43 @@ func (e *deviceOperationBusyError) Unwrap() error {
 }
 
 type Manager struct {
-	stations                map[string]*bluetooth.BaseStation
-	stationsMutex           sync.RWMutex
-	config                  *config.Config
+	stations                 map[string]*bluetooth.BaseStation
+	stationsMutex            sync.RWMutex
+	config                   *config.Config
 	operationMutex           sync.RWMutex
 	globalOperationMutex     sync.Mutex
 	exclusiveOperationActive bool
 	foregroundGlobalActive   bool
 	foregroundSharedActive   int
-	scanTransitionMutex     sync.Mutex
-	statusOperationMutex    sync.Mutex
-	statusLifecycleMutex    sync.Mutex
-	statusOperationDone     chan struct{}
-	cancelStatusOperation   context.CancelFunc
-	channelOperationMutex   sync.Mutex
-	bulkLifecycleMutex      sync.Mutex
-	bulkLifecycle           *bulkPowerLifecycle
-	deviceOperationMutex    sync.Mutex
-	activeDeviceOperations  map[string]activeDeviceOperation
-	deviceOperationSlots    chan struct{}
-	recoveryOperationMutex  sync.Mutex
-	recoveryOperationDone   chan struct{}
-	recoveryContext         context.Context
-	cancelRecovery          context.CancelFunc
-	recoveryGeneration      uint64
-	foregroundSlotMissHook  func()
-	scanLifecycleStartHook  func()
-	scanReadyHook           func()
-	isScanning              atomic.Bool
-	scanStatusMutex         sync.RWMutex
-	scanStatus              ScanStatus
-	scanStatusID            uint64
-	scanLifecycleMutex      sync.Mutex
-	scanLifecycle           *scanLifecycle
-	initializeMutex    sync.Mutex
-	initializeErr      error
-	initializeFailedAt time.Time
-	nextInitializeAt   time.Time
+	scanTransitionMutex      sync.Mutex
+	statusOperationMutex     sync.Mutex
+	statusLifecycleMutex     sync.Mutex
+	statusOperationDone      chan struct{}
+	cancelStatusOperation    context.CancelFunc
+	channelOperationMutex    sync.Mutex
+	bulkLifecycleMutex       sync.Mutex
+	bulkLifecycle            *bulkPowerLifecycle
+	deviceOperationMutex     sync.Mutex
+	activeDeviceOperations   map[string]activeDeviceOperation
+	deviceOperationSlots     chan struct{}
+	recoveryOperationMutex   sync.Mutex
+	recoveryOperationDone    chan struct{}
+	recoveryContext          context.Context
+	cancelRecovery           context.CancelFunc
+	recoveryGeneration       uint64
+	foregroundSlotMissHook   func()
+	scanLifecycleStartHook   func()
+	scanReadyHook            func()
+	isScanning               atomic.Bool
+	scanStatusMutex          sync.RWMutex
+	scanStatus               ScanStatus
+	scanStatusID             uint64
+	scanLifecycleMutex       sync.Mutex
+	scanLifecycle            *scanLifecycle
+	initializeMutex          sync.Mutex
+	initializeErr            error
+	initializeFailedAt       time.Time
+	nextInitializeAt         time.Time
 	// initializeAttempted marks that at least one adapter-enable attempt has
 	// run. A nil initializeErr is ambiguous without it: it means either "the
 	// adapter is initialized" or "no attempt has happened yet", and only the
@@ -258,8 +258,8 @@ type Manager struct {
 	// initializeWg tracks in-flight initialization attempts so shutdown joins
 	// them before the fleet disconnect; an attempt an ensureReady waiter
 	// abandoned on a timeout keeps running and must not race the drain.
-	initializeWg        sync.WaitGroup
-	initializeBluetooth func() error
+	initializeWg            sync.WaitGroup
+	initializeBluetooth     func() error
 	asyncScanWg             sync.WaitGroup
 	scanCallbackWg          sync.WaitGroup
 	statusRetryMutex        sync.Mutex
@@ -279,21 +279,21 @@ type Manager struct {
 	shutdownDrainTimeout    time.Duration
 	// Tunable wait limits; tests pin them directly. Production runs leave
 	// them at zero and follow the package defaults.
-	stopScanTimeout        time.Duration
-	adapterCleanupWait     time.Duration
-	initializeWait         time.Duration
-	foregroundDrainWait    time.Duration
-	statusRefreshJoinWait  time.Duration
-	shuttingDown            atomic.Bool
-	shutdownOnce            sync.Once
-	shutdownCh              chan struct{}
-	shutdownDraining        chan struct{}
-	lifecycleContext        context.Context
-	cancelLifecycle         context.CancelFunc
-	lifecycleMutex          sync.Mutex
-	lifecycleCond           *sync.Cond
-	activeOperations        int
-	bluetoothOps            bluetoothOperations
+	stopScanTimeout       time.Duration
+	adapterCleanupWait    time.Duration
+	initializeWait        time.Duration
+	foregroundDrainWait   time.Duration
+	statusRefreshJoinWait time.Duration
+	shuttingDown          atomic.Bool
+	shutdownOnce          sync.Once
+	shutdownCh            chan struct{}
+	shutdownDraining      chan struct{}
+	lifecycleContext      context.Context
+	cancelLifecycle       context.CancelFunc
+	lifecycleMutex        sync.Mutex
+	lifecycleCond         *sync.Cond
+	activeOperations      int
+	bluetoothOps          bluetoothOperations
 }
 type statusRetry struct {
 	// The original fields are the connection retry schedule. Keeping them

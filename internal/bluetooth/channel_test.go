@@ -246,6 +246,7 @@ func TestSetChannelUnsupportedConfirmationReportsCommandSent(t *testing.T) {
 		t.Fatal("unsupported confirmation read discarded a healthy connection")
 	}
 }
+
 // cancelOnSecondConnectAdapter fails every connect and cancels the caller's
 // context on the second attempt, deterministically landing the interruption
 // between identify attempts.

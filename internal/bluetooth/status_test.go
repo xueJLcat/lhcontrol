@@ -351,6 +351,7 @@ func TestReadPowerStateContextCancelsBlockingRead(t *testing.T) {
 		t.Fatal("cancelled status read did not return")
 	}
 }
+
 // TestReadPowerStateContextKeepsFreshnessWhenReadCancelled guards the
 // interrupted-read observation contract: a pure cancellation delivered no new
 // observation and is not evidence the link broke, so the previous read's
