@@ -191,10 +191,12 @@ func (a *App) startup(ctx context.Context) {
 
 	a.applyBluetoothTiming()
 
-	if err := a.stationManager.Initialize(); err != nil {
-		log.Printf("Error initializing Bluetooth: %v", err)
-	}
-
+	// Bring up the local API listener (and the auto-sleep watcher) before the
+	// adapter initialization below: Initialize waits up to initializeWaitLimit
+	// on a wedged WinRT radio, and keeping /health unreachable for that whole
+	// window breaks startup probes from external integrations. Manager
+	// operations arriving meanwhile route through ensureReady, which adopts the
+	// in-flight initialization attempt and fails gracefully while it hangs.
 	a.setAPIAddress(a.config.GetAPIListenAddress())
 	a.applyAutoSleep(a.config.GetAutoSleep())
 
@@ -237,6 +239,10 @@ func (a *App) startup(ctx context.Context) {
 		},
 	}, a.GetAPIStatus)
 	a.startAPIServer()
+
+	if err := a.stationManager.Initialize(); err != nil {
+		log.Printf("Error initializing Bluetooth: %v", err)
+	}
 
 	log.Println("Startup sequence complete.")
 }

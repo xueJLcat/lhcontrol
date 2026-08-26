@@ -739,6 +739,15 @@ func (m *Manager) Initialize() error {
 		m.initializeMutex.Unlock()
 		return m.waitInitializeAttempt(pending)
 	}
+	if time.Now().Before(m.nextInitializeAt) {
+		// Same cooldown rule as ensureReady: a repeated startup call must not
+		// hammer adapter.Enable while the recorded retry window is still
+		// open. Without this check Initialize alone bypassed the backoff that
+		// every other entry point honors.
+		err := m.initializeErr
+		m.initializeMutex.Unlock()
+		return bluetoothUnavailableError(err)
+	}
 	pending := make(chan struct{})
 	m.initializePending = pending
 	initialize := m.initializeBluetooth
