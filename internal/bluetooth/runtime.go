@@ -285,8 +285,15 @@ func invalidateDisconnectedDevice(station *BaseStation, disconnected bluetooth.D
 	// survive an OS disconnect, or the next connection inherits a fast-forward.
 	station.bootingSince = time.Time{}
 	station.setConnectionErrorInternal(errors.New("Bluetooth device disconnected"))
-	station.mutex.Unlock()
-
+	// Update the tracking lists while still holding the station lock, before
+	// the session state above becomes visible to a concurrent operation. The
+	// unlock must not open a window in which a reconnect (a status poll or
+	// recovery reader racing this invalidation) rebuilds the connection and
+	// runs the address-based tracking dedup against the stale entry: it would
+	// skip the append, and the unconditional removal below would then strip
+	// the live rebuilt connection from tracking, silencing every later OS
+	// disconnect notification for it. disconnectInternal guards its filter
+	// the same way while it holds the lock.
 	connectedStationsMutex.Lock()
 	remaining := connectedStations[:0]
 	for _, tracked := range connectedStations {
@@ -306,6 +313,7 @@ func invalidateDisconnectedDevice(station *BaseStation, disconnected bluetooth.D
 		pendingCleanupStations = append(pendingCleanupStations, station)
 	}
 	connectedStationsMutex.Unlock()
+	station.mutex.Unlock()
 
 	// Kick an eager cleanup of the detached handle. The transport's own
 	// connection-status callback normally starts one, but that fallback can

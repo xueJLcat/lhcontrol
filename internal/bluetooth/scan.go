@@ -561,17 +561,25 @@ waitScan:
 		case <-session.stopDone:
 			// The stop handshake completed or was abandoned. Give the platform
 			// scan call a grace to drain its own tail; when it never returns,
-			// abandon the blocked goroutine and proceed. The hang stays isolated
-			// on the already-resolved watcher and cannot affect a later scan
-			// session. A scan whose duration elapsed gets the stop-handshake
-			// budget instead of the short abandonment grace: the adapter layer
-			// can still be repairing a failed first stop (its retry and drain
-			// budgets exceed the abandonment grace), and abandoning early would
-			// discard a completed scan's discovery results through the stale
-			// first-stop error. Cancelled scans keep the short grace so the
-			// active-scan slot frees quickly.
+			// abandon the blocked goroutine and proceed. A scan whose duration
+			// elapsed gets the stop-handshake budget instead of the short
+			// abandonment grace: the adapter layer can still be repairing a
+			// failed first stop (its retry and drain budgets exceed the
+			// abandonment grace), and abandoning early would discard a
+			// completed scan's discovery results through the stale first-stop
+			// error. A stop handshake that completed cleanly gets the same
+			// budget even when the scan was cancelled: WinRT's watcher Stop()
+			// returns before the watcher reaches Stopped, the adapter exposes
+			// a single watcher slot that is only released when the platform
+			// Scan call returns, and its accepted-stop drain is bounded by the
+			// same 10s budget. Abandoning after the short grace would free
+			// this package's slot while the adapter slot is still held, so an
+			// immediate rescan fails one-shot with "a scan is already in
+			// progress". A stop that failed or was abandoned keeps the short
+			// grace so a wedged watcher still frees the application slot
+			// quickly.
 			graceBudget := session.abandonGrace
-			if session.durationStopIssuedFlag() {
+			if session.durationStopIssuedFlag() || session.stopError() == nil {
 				graceBudget = session.stopWaitLimit
 			}
 			grace := time.NewTimer(graceBudget)

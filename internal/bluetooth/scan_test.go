@@ -243,7 +243,7 @@ func TestScanKeepsResultsWhenFirstStopFailsButHandshakeRecovers(t *testing.T) {
 
 // TestScanKeepsResultsWhenFirstStopFailsAndPlatformDrainsSlowly covers the
 // wedge variant where the first watcher.Stop() fails and the platform Scan
-// call only returns after the adapter-level retry and drain — later than the
+// call only returns after the adapter-level retry and drain 鈥?later than the
 // short abandonment grace. A duration scan keeps its results there: the
 // duration stop gets the stop-handshake budget instead of the abandonment
 // grace, so the late clean finish clears the stale first-stop error instead
@@ -386,6 +386,76 @@ func TestScanForDurationContextReportsDeadlineAsTimeout(t *testing.T) {
 	}
 	if errors.Is(err, ErrScanCancelled) {
 		t.Fatalf("deadline scan misclassified as cancelled: %v", err)
+	}
+}
+
+// TestCancelledScanWaitsForCleanStopDrainBeforeReleasingSlot pins the
+// cancel-path grace budget: after a stop handshake that completed cleanly,
+// the platform Scan goroutine is still draining the watcher inside the
+// adapter's single watcher slot (WinRT's Stop() returns before the watcher
+// reaches Stopped). The scan body must wait the stop-handshake budget for
+// that drain instead of abandoning after the short grace, otherwise an
+// immediate rescan collides with the still-held adapter slot and fails
+// one-shot with "a scan is already in progress".
+func TestCancelledScanWaitsForCleanStopDrainBeforeReleasingSlot(t *testing.T) {
+	originalAdapter := adapter
+	originalWait := scanStopWaitLimit
+	originalGrace := scanAbandonGrace
+	fake := newFakeBLEAdapter()
+	fake.releaseOn = make(chan struct{})
+	adapter = fake
+	scanStopWaitLimit = 2 * time.Second
+	scanAbandonGrace = 50 * time.Millisecond
+	t.Cleanup(func() {
+		adapter = originalAdapter
+		scanStopWaitLimit = originalWait
+		scanAbandonGrace = originalGrace
+	})
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	type cancelOutcome struct {
+		err        error
+		returnedAt time.Time
+	}
+	result := make(chan cancelOutcome, 1)
+	go func() {
+		_, scanErr := ScanForDurationContext(ctx, time.Hour)
+		result <- cancelOutcome{err: scanErr, returnedAt: time.Now()}
+	}()
+	select {
+	case <-fake.started:
+	case <-time.After(time.Second):
+		t.Fatal("scan did not start")
+	}
+	cancel()
+	// The clean stop handshake completes when StopScan returns; the platform
+	// goroutine stays inside its drain until releaseOn closes.
+	select {
+	case <-fake.stopped:
+	case <-time.After(time.Second):
+		t.Fatal("stop handshake never completed")
+	}
+	// The drain outlasts the short abandonment grace but stays inside the
+	// stop-handshake budget.
+	time.Sleep(2 * scanAbandonGrace)
+	releasedAt := time.Now()
+	close(fake.releaseOn)
+	select {
+	case outcome := <-result:
+		if !errors.Is(outcome.err, ErrScanCancelled) {
+			t.Fatalf("ScanForDurationContext() error = %v, want ErrScanCancelled", outcome.err)
+		}
+		// The body must still have been waiting when the drain released:
+		// returning at the short abandonment grace would abandon the platform
+		// goroutine while it still owned the adapter watcher slot.
+		if outcome.returnedAt.Before(releasedAt) {
+			t.Fatalf("cancelled scan returned at %v, before the platform drain released at %v; the short grace abandoned a cleanly stopped scan", outcome.returnedAt, releasedAt)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("cancelled scan did not finish")
 	}
 }
 

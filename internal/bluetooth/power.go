@@ -640,6 +640,9 @@ func SetPowerStateContext(ctx context.Context, station *BaseStation, target Powe
 			protocolErr == bluetooth.ErrAttValueNotAllowed {
 			station.restoreBootInference(previousBootRawTrustedOn, previousBootingSince)
 			station.Capabilities.Standby = false
+			// The rejection describes the firmware, not this connection, so a
+			// later re-discovery must not reset the downgrade.
+			station.standbyWriteRejected = true
 			station.setOperationErrorInternal(err)
 			return PowerControlResult{}, unsupportedCapability("standby", err)
 		}

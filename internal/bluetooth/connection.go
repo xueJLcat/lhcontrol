@@ -385,6 +385,13 @@ func applyDiscoveryOutcome(station *BaseStation, outcome discoveryOutcome) {
 	station.modeCharacteristic = outcome.mode
 	station.identifyCharacteristic = outcome.identify
 	station.Capabilities = outcome.capabilities
+	// Standby support is inferred from the power-write property, but a write
+	// this station's firmware already answered with Value Not Allowed stays
+	// rejected across connections: re-arming it here would replay the refused
+	// write (and surface a fresh failure) once per reconnection.
+	if station.standbyWriteRejected {
+		station.Capabilities.Standby = false
+	}
 	station.CapabilitiesKnown = true
 	if !outcome.capabilities.PowerRead {
 		// Capability discovery is authoritative for this connection. Do

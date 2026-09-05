@@ -84,14 +84,21 @@ type BaseStation struct {
 	// reported a boot-like raw value for long enough to use the compatibility
 	// fallback. It is cleared on disconnect and before a power command so a
 	// genuine reconnect/reboot gets a fresh transition window.
-	bootRawTrustedOn  bool
-	presenceUncertain bool
-	connectionError   string
-	powerError        string
-	channelError      string
-	metadataError     string
-	metadataReadError error
-	operationError    string
+	bootRawTrustedOn bool
+	// standbyWriteRejected records that this station's firmware answered a
+	// standby write with ATT Value Not Allowed. The rejection is a property
+	// of the device, not of one connection, so a re-discovery (which infers
+	// standby support from the power-write property again) must keep the
+	// downgrade instead of replaying the rejected write once per connection.
+	// Protected by mutex.
+	standbyWriteRejected bool
+	presenceUncertain    bool
+	connectionError      string
+	powerError           string
+	channelError         string
+	metadataError        string
+	metadataReadError    error
+	operationError       string
 }
 
 // PossiblySentError reports that a write failed after the transport may have

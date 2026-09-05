@@ -1407,3 +1407,97 @@ func TestDecodeChannelStillRejectsInvalidPayload(t *testing.T) {
 		t.Fatalf("invalid channel value error = %v, want a device value error", err)
 	}
 }
+
+// cancelThenFailConnectAdapter emulates a connect attempt that observes the
+// caller's cancellation at the same moment the link genuinely fails: Connect
+// cancels the context and then reports a transport failure, the exact
+// interleaving where a bare context error would swallow the connect failure's
+// upstream bookkeeping.
+type cancelThenFailConnectAdapter struct {
+	reconnectCountingAdapter
+	cancel context.CancelFunc
+}
+
+func (a *cancelThenFailConnectAdapter) Connect(addr tinybluetooth.Address, params tinybluetooth.ConnectionParams) (tinybluetooth.Device, error) {
+	a.connectCalls.Add(1)
+	a.cancel()
+	return tinybluetooth.Device{}, a.connectErr
+}
+
+func disconnectedFakeStation(power, mode characteristicIO, capabilities Capabilities) *BaseStation {
+	station := connectedFakeStation(power, mode, nil, capabilities)
+	station.device = nil
+	station.isConnected = false
+	station.characteristic = nil
+	station.modeCharacteristic = nil
+	station.identifyCharacteristic = nil
+	return station
+}
+
+func installCancelThenFailAdapter(t *testing.T, connectErr error) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	originalAdapter := adapter
+	failing := &cancelThenFailConnectAdapter{cancel: cancel}
+	failing.connectErr = connectErr
+	adapter = failing
+	t.Cleanup(func() { adapter = originalAdapter })
+	return ctx
+}
+
+// TestFetchInitialPowerStateContextKeepsConnectFailureUnderCancellation pins
+// the joining rule for an initial read whose connect/discover genuinely fails
+// while the scan context is cancelled concurrently: the returned error must
+// carry both leaves so scan read classification books the transport failure
+// instead of reading it as a clean cancel-skip.
+func TestFetchInitialPowerStateContextKeepsConnectFailureUnderCancellation(t *testing.T) {
+	connectErr := errors.New("GATT handshake failed")
+	ctx := installCancelThenFailAdapter(t, connectErr)
+	station := disconnectedFakeStation(&fakeCharacteristic{}, nil, Capabilities{PowerRead: true})
+
+	err := FetchInitialPowerStateContext(ctx, station)
+	if !errors.Is(err, connectErr) {
+		t.Fatalf("FetchInitialPowerStateContext() error = %v, want the connect failure preserved", err)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("FetchInitialPowerStateContext() error = %v, want the cancellation retained", err)
+	}
+	if isContextOnlyError(err) {
+		t.Fatalf("FetchInitialPowerStateContext() error = %v must not classify as a clean interruption", err)
+	}
+}
+
+func TestEnsureCapabilitiesContextKeepsConnectFailureUnderCancellation(t *testing.T) {
+	connectErr := errors.New("discovery transport failed")
+	ctx := installCancelThenFailAdapter(t, connectErr)
+	station := disconnectedFakeStation(&fakeCharacteristic{}, nil, Capabilities{})
+
+	_, err := EnsureCapabilitiesContext(ctx, station)
+	if !errors.Is(err, connectErr) {
+		t.Fatalf("EnsureCapabilitiesContext() error = %v, want the connect failure preserved", err)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("EnsureCapabilitiesContext() error = %v, want the cancellation retained", err)
+	}
+	if isContextOnlyError(err) {
+		t.Fatalf("EnsureCapabilitiesContext() error = %v must not classify as a clean interruption", err)
+	}
+}
+
+func TestRefreshCapabilitiesContextKeepsConnectFailureUnderCancellation(t *testing.T) {
+	connectErr := errors.New("rediscovery transport failed")
+	ctx := installCancelThenFailAdapter(t, connectErr)
+	station := connectedFakeStation(&fakeCharacteristic{}, nil, nil, Capabilities{PowerRead: true})
+
+	_, err := RefreshCapabilitiesContext(ctx, station)
+	if !errors.Is(err, connectErr) {
+		t.Fatalf("RefreshCapabilitiesContext() error = %v, want the connect failure preserved", err)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("RefreshCapabilitiesContext() error = %v, want the cancellation retained", err)
+	}
+	if isContextOnlyError(err) {
+		t.Fatalf("RefreshCapabilitiesContext() error = %v must not classify as a clean interruption", err)
+	}
+}

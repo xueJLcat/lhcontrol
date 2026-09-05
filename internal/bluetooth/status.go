@@ -443,7 +443,11 @@ func EnsureCapabilitiesContext(ctx context.Context, station *BaseStation) (Capab
 			return Capabilities{}, err
 		}
 		if contextErr := ctx.Err(); contextErr != nil {
-			return Capabilities{}, finishCancelledCapabilityDiscovery(station, contextErr)
+			// A cancellation that lands together with a genuine connect or
+			// discovery failure must not swallow the transport leaf: a bare
+			// context error reads upstream as a clean interruption and drops
+			// the failure's disconnect/backoff bookkeeping.
+			return Capabilities{}, finishCancelledCapabilityDiscovery(station, errors.Join(err, contextErr))
 		}
 		return Capabilities{}, err
 	}
@@ -486,7 +490,10 @@ func RefreshCapabilitiesContext(ctx context.Context, station *BaseStation) (Capa
 			return Capabilities{}, err
 		}
 		if contextErr := ctx.Err(); contextErr != nil {
-			return Capabilities{}, finishCancelledCapabilityDiscovery(station, contextErr)
+			// Same joining rule as FetchInitialPowerStateContext: the genuine
+			// connect/discovery failure must survive the concurrent
+			// cancellation for upstream failure classification.
+			return Capabilities{}, finishCancelledCapabilityDiscovery(station, errors.Join(err, contextErr))
 		}
 		return Capabilities{}, err
 	}
@@ -606,7 +613,11 @@ func FetchInitialPowerStateContext(ctx context.Context, station *BaseStation) er
 			return err
 		}
 		if contextErr := ctx.Err(); contextErr != nil {
-			return finishCancelledInitialRead(station, contextErr)
+			// Join the interruption with the genuine connect/discovery
+			// failure: a bare context error would read upstream (scan initial
+			// read classification) as a clean cancel-skip and drop the
+			// disconnect/backoff booking this station's link failure owes.
+			return finishCancelledInitialRead(station, errors.Join(err, contextErr))
 		}
 		station.setConnectionErrorInternal(err)
 		log.Printf("Bluetooth: Failed to connect/discover in FetchInitialPowerState for %s: %v", station.Name, err)

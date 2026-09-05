@@ -594,6 +594,138 @@ func TestDisconnectAllStationsRetriesAdapterDisconnectedCleanup(t *testing.T) {
 		t.Fatal("pending cleanup was not retried during shutdown")
 	}
 }
+
+// TestInvalidationUpdatesTrackingBeforeReleasingStationLock pins the ordering
+// between the session teardown and the tracking-list bookkeeping of an OS
+// disconnect invalidation. A concurrent reconnect races this invalidation: if
+// the station lock is released before the tracking lists are updated, the
+// reconnect's address-based dedup sees the stale entry, skips its own append,
+// and the unconditional removal then strips the rebuilt live connection from
+// tracking. Holding the tracking-list lock blocks the bookkeeping, so the
+// invalidation must keep the station lock (TrySnapshot fails) until the lists
+// are available again.
+func TestInvalidationUpdatesTrackingBeforeReleasingStationLock(t *testing.T) {
+	mac, err := tinybluetooth.ParseMAC("11:22:33:44:55:68")
+	if err != nil {
+		t.Fatalf("ParseMAC() error = %v", err)
+	}
+	address := tinybluetooth.Address{MACAddress: tinybluetooth.MACAddress{MAC: mac}}
+	device := tinybluetooth.Device{Address: address}
+	station := connectedFakeStation(&fakeCharacteristic{}, nil, nil, Capabilities{})
+	station.Address = address
+	station.device = device
+	connectedStationsMutex.Lock()
+	previousConnected := connectedStations
+	previousPending := pendingCleanupStations
+	connectedStations = []*BaseStation{station}
+	pendingCleanupStations = nil
+	connectedStationsMutex.Unlock()
+	t.Cleanup(func() {
+		connectedStationsMutex.Lock()
+		connectedStations = previousConnected
+		pendingCleanupStations = previousPending
+		connectedStationsMutex.Unlock()
+	})
+
+	// Take the tracking-list lock before the goroutine starts so its
+	// bookkeeping deterministically blocks; the invalidation cannot complete
+	// while the test owns the lists.
+	connectedStationsMutex.Lock()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		invalidateDisconnectedDevice(station, device)
+	}()
+
+	violation := false
+	settled := false
+	var lockObservedAt time.Time
+	deadline := time.Now().Add(2 * time.Second)
+	for !settled && !violation && time.Now().Before(deadline) {
+		select {
+		case <-done:
+			connectedStationsMutex.Unlock()
+			t.Fatal("invalidation finished while the test still held the tracking-list lock")
+		default:
+		}
+		if snapshot, ok := station.TrySnapshot(); ok {
+			if !snapshot.Connected {
+				// The cleared session state became observable while the
+				// bookkeeping was still blocked: the ordering the fix must
+				// prevent.
+				violation = true
+				break
+			}
+			lockObservedAt = time.Time{}
+		} else {
+			if lockObservedAt.IsZero() {
+				lockObservedAt = time.Now()
+			}
+			if time.Since(lockObservedAt) >= 150*time.Millisecond {
+				// The station lock stayed held while the bookkeeping waited
+				// for the tracking lists: exactly the fixed ordering.
+				settled = true
+			}
+		}
+		time.Sleep(time.Millisecond)
+	}
+	connectedStationsMutex.Unlock()
+	<-done
+
+	if violation {
+		t.Fatal("invalidation released the station lock before updating the tracking lists")
+	}
+	if !settled {
+		t.Fatal("invalidation did not hold the station lock while blocked on the tracking lists")
+	}
+	if snapshot := station.Snapshot(); snapshot.Connected {
+		t.Fatalf("invalidation did not tear the session down: %+v", snapshot)
+	}
+	// The eager cleanup goroutine the invalidation spawned runs concurrently:
+	// it clears the pending handle before its out-of-lock Disconnect and
+	// re-registers or removes the tracking entry only afterwards, so a single
+	// observation can catch a legitimate transient. Poll for a consistent
+	// snapshot under both locks (station lock → tracking-list lock is the
+	// established order): registration must match the pending handle once the
+	// cleanup settles, and a permanently inconsistent registration is exactly
+	// the tracking leak this test guards against.
+	settleDeadline := time.Now().Add(2 * time.Second)
+	for {
+		station.mutex.Lock()
+		pendingHandle := station.pendingCleanup
+		connectedStationsMutex.Lock()
+		stillTracked := false
+		for _, tracked := range connectedStations {
+			if tracked == station {
+				stillTracked = true
+				break
+			}
+		}
+		pendingRegistered := false
+		for _, tracked := range pendingCleanupStations {
+			if tracked == station {
+				pendingRegistered = true
+				break
+			}
+		}
+		connectedStationsMutex.Unlock()
+		station.mutex.Unlock()
+		if stillTracked {
+			t.Fatal("invalidation left the station in the connected tracking list")
+		}
+		if pendingRegistered == (pendingHandle != nil) {
+			break
+		}
+		if time.Now().After(settleDeadline) {
+			t.Fatalf(
+				"pending-cleanup tracking never settled: registered=%v while pending handle=%v",
+				pendingRegistered,
+				pendingHandle != nil,
+			)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
 func TestWriteCharacteristicFallsBackOnlyForUnsupportedWriteMode(t *testing.T) {
 	characteristic := &fakeCharacteristic{
 		properties: uint32(tinybluetooth.CharacteristicWriteWithoutResponsePermission |
@@ -720,6 +852,48 @@ func TestStandbyRejectionPreservesCompatibilityBootInference(t *testing.T) {
 			station.PowerState,
 			station.bootRawTrustedOn,
 		)
+	}
+}
+
+// TestStandbyDowngradeSurvivesRediscovery pins that the standby downgrade a
+// Value Not Allowed rejection installs survives a later re-discovery: standby
+// support is re-inferred from the power-write property on every discovery
+// pass, but the rejection describes the firmware, not one connection. Without
+// the sticky flag each reconnection would replay the refused write and
+// surface a fresh standby failure once per connection.
+func TestStandbyDowngradeSurvivesRediscovery(t *testing.T) {
+	device := &trackingConnectedDevice{}
+	power := &fakeCharacteristic{
+		value:    []byte{0x00},
+		writeErr: tinybluetooth.ErrAttValueNotAllowed,
+	}
+	station := connectedFakeStation(power, nil, nil, Capabilities{PowerRead: true, PowerWrite: true, Standby: true})
+	station.device = device
+	if _, err := SetPowerState(station, PowerStateStandby); !IsUnsupportedCapabilityError(err) {
+		t.Fatalf("SetPowerState() error = %v, want unsupported standby", err)
+	}
+
+	// A reconnect-triggered discovery pass re-infers standby from the generic
+	// power-write property.
+	replacement := &fakeCharacteristic{value: []byte{0x00}}
+	station.mutex.Lock()
+	applyDiscoveryOutcome(station, discoveryOutcome{
+		power:        replacement,
+		capabilities: Capabilities{PowerRead: true, PowerWrite: true, Standby: true},
+	})
+	station.mutex.Unlock()
+	snapshot := station.Snapshot()
+	if snapshot.Capabilities.Standby || !snapshot.Capabilities.PowerWrite {
+		t.Fatalf("re-discovery reset the standby downgrade: %+v", snapshot.Capabilities)
+	}
+
+	// The next standby command must be refused up front instead of replaying
+	// the rejected write on the rebuilt session.
+	if _, err := SetPowerState(station, PowerStateStandby); !IsUnsupportedCapabilityError(err) {
+		t.Fatalf("SetPowerState() after re-discovery error = %v, want unsupported standby", err)
+	}
+	if len(replacement.writes) != 0 {
+		t.Fatalf("standby write replayed after re-discovery: %v", replacement.writes)
 	}
 }
 func TestSetPowerStateContextRejectsCancelledContext(t *testing.T) {
