@@ -1457,6 +1457,168 @@ func TestBoundedCleanupCallBoundsWedgedCleanupCalls(t *testing.T) {
 	}
 }
 
+// TestCleanupAbandonsObjectsWhenOperationLockStaysWedged guards the drain
+// budget: a device operation wedged inside an uncancellable COM call holds
+// the operation lock forever. The cleanup attempt must give up within the
+// drain budget, abandon the object references (never clear or release them
+// underneath the abandoned operation), report a retryable error, and — most
+// importantly — let Disconnect return instead of hanging every caller on the
+// attempt channel forever.
+func TestCleanupAbandonsObjectsWhenOperationLockStaysWedged(t *testing.T) {
+	originalLimit := cleanupDrainLockLimit
+	cleanupDrainLockLimit = 30 * time.Millisecond
+	t.Cleanup(func() { cleanupDrainLockLimit = originalLimit })
+	originalRetryDelay := cleanupRetryBaseDelay
+	cleanupRetryBaseDelay = 2 * time.Millisecond
+	t.Cleanup(func() { cleanupRetryBaseDelay = originalRetryDelay })
+	originalEnter := enterWinRTThread
+	enterWinRTThread = func() (func(), error) { return func() {}, nil }
+	t.Cleanup(func() { enterWinRTThread = originalEnter })
+
+	// A COM object placeholder: only its pointer identity matters; the
+	// abandonment path must never call methods on it.
+	state := &deviceState{
+		callbacks: newCallbackGate(),
+		device:    &winbluetooth.BluetoothLEDevice{},
+		session:   nil,
+	}
+	device := Device{state: state}
+
+	wedgeAcquired := make(chan struct{})
+	wedgeExited := make(chan struct{})
+	release := make(chan struct{})
+	go func() {
+		// Simulates an operation wedged inside an uncancellable COM call
+		// (for example GetConnectionStatus against a removed radio): the
+		// lock is held until the test releases it, long past every budget.
+		defer close(wedgeExited)
+		state.operationMutex.Lock()
+		close(wedgeAcquired)
+		<-release
+		state.operationMutex.Unlock()
+	}()
+	<-wedgeAcquired
+
+	returned := make(chan error, 1)
+	go func() { returned <- device.Disconnect() }()
+	select {
+	case err := <-returned:
+		if err == nil || !strings.Contains(err.Error(), "still in flight") {
+			t.Fatalf("Disconnect() error = %v, want the abandonment error", err)
+		}
+		if IsDisconnectCleanupComplete(err) {
+			t.Fatalf("Disconnect() error = %v, want a retryable (incomplete) classification", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Disconnect() hung behind a wedged operation lock; the drain budget must bound it")
+	}
+
+	// The abandoned references must stay attached to the state: clearing or
+	// releasing them underneath the wedged operation would let the abandoned
+	// COM call use freed objects.
+	state.cleanupMutex.Lock()
+	complete := state.cleanupComplete
+	state.cleanupMutex.Unlock()
+	if complete {
+		t.Fatal("abandoned cleanup was marked complete; it must stay retryable")
+	}
+	if state.device == nil {
+		t.Fatal("abandoned cleanup detached the device reference")
+	}
+
+	// Settle the test's goroutines before returning: release the wedge and
+	// wait for the scheduled cleanup retry to reach a terminal state. The
+	// retry attempt runs with the stubbed thread initializer and the
+	// fabricated device placeholder, so it must terminate on its own; letting
+	// it leak past the test boundary races the enterWinRTThread package
+	// variable against whichever test mutates it next.
+	close(release)
+	<-wedgeExited
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		state.cleanupMutex.Lock()
+		complete = state.cleanupComplete
+		state.cleanupMutex.Unlock()
+		if complete {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("scheduled cleanup retry did not settle after the wedge was released")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
+// TestCleanupSurvivesNotificationRegistrationRacingDrain guards the
+// notification snapshot sizing: an EnableNotifications rollback can append a
+// registration while cleanup waits for the operation lock. The busy slice is
+// sized from the in-lock snapshot, so the release loop must not panic with
+// an index-out-of-range on the late registration (previously the length was
+// read before the lock was acquired).
+func TestCleanupSurvivesNotificationRegistrationRacingDrain(t *testing.T) {
+	originalEnter := enterWinRTThread
+	enterWinRTThread = func() (func(), error) { return func() {}, nil }
+	t.Cleanup(func() { enterWinRTThread = originalEnter })
+
+	registration := notificationRegistration{
+		removeValueChanged: func() error {
+			// The rollback only retains the registration when WinRT refuses
+			// the removal — the exact path that appends to the state list.
+			return errors.New("remove value changed refused")
+		},
+		releaseHandler: func() {},
+	}
+	state := &deviceState{callbacks: newCallbackGate()}
+	device := Device{state: state}
+
+	rollbackLocked := make(chan struct{})
+	rollbackDone := make(chan struct{})
+	go func() {
+		defer close(rollbackDone)
+		// Simulates an EnableNotifications rollback holding the operation
+		// lock: cleanup starts, waits for the lock at the drain, and only
+		// then observes the appended registration. The lock is taken before
+		// Disconnect is invoked so the interleaving is deterministic.
+		state.operationMutex.Lock()
+		defer state.operationMutex.Unlock()
+		close(rollbackLocked)
+		time.Sleep(20 * time.Millisecond)
+		if err := device.rollbackNotificationRegistration(registration); err == nil {
+			t.Error("rollback unregister unexpectedly succeeded")
+		}
+	}()
+	<-rollbackLocked
+
+	err := device.Disconnect()
+	<-rollbackDone
+	if err == nil {
+		t.Fatal("Disconnect() unexpectedly succeeded with a failing notification unregister")
+	}
+	if strings.Contains(err.Error(), "panicked") || strings.Contains(err.Error(), "index out of range") {
+		t.Fatalf("Disconnect() error = %v, want the unregister warning without a snapshot panic", err)
+	}
+	if !IsDisconnectCleanupComplete(err) {
+		t.Fatalf("Disconnect() error = %v, want a completed cleanup warning", err)
+	}
+	if state.notifications != nil {
+		t.Fatal("completed cleanup retained the notification list")
+	}
+}
+
+// TestBoundedWatcherCallContainsPanic guards the worker goroutine's panic
+// boundary: the winrt-go wrappers call MustQueryInterface, which panics on
+// any interface-query failure. A broken COM object state during scan
+// teardown must surface as the call's error, not an unrecovered goroutine
+// panic that terminates the host process.
+func TestBoundedWatcherCallContainsPanic(t *testing.T) {
+	err := boundedWatcherCall(time.Second, func() error {
+		panic("fixture COM panic")
+	})
+	if err == nil || !strings.Contains(err.Error(), "panicked") {
+		t.Fatalf("boundedWatcherCall() error = %v, want the contained panic", err)
+	}
+}
+
 func TestBoundedCleanupCallReportsFastOutcomes(t *testing.T) {
 	originalEnter := enterWinRTThread
 	enterWinRTThread = func() (func(), error) { return func() {}, nil }

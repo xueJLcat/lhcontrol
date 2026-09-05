@@ -69,7 +69,13 @@ func writeValueWithResultAndOptionAsync(characteristic *genericattributeprofile.
 		uintptr(unsafe.Pointer(&operation)),
 	)
 	if hr != 0 {
-		return nil, true, ole.NewError(hr)
+		// A failing HRESULT means the out-param was never written: no async
+		// operation was created and the write definitely was not submitted —
+		// the same reasoning as the missing-vtable-slot branch above.
+		// Reporting operationCreated would misclassify the failure as
+		// possibly sent, forcing the caller into confirm polling and hiding
+		// that an immediate retry is safe.
+		return nil, false, ole.NewError(hr)
 	}
 	if operation == nil {
 		return nil, true, errors.New("bluetooth: write returned nil async operation")

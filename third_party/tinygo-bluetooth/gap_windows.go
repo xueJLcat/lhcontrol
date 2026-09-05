@@ -88,7 +88,7 @@ func boundedWatcherCall(limit time.Duration, call func() error) error {
 			return
 		}
 		defer leaveThread()
-		done <- call()
+		done <- watcherCallSafely(call)
 	}()
 	timer := time.NewTimer(limit)
 	defer timer.Stop()
@@ -98,6 +98,22 @@ func boundedWatcherCall(limit time.Duration, call func() error) error {
 	case <-timer.C:
 		return &WatcherCallTimeoutError{Budget: limit}
 	}
+}
+
+// watcherCallSafely bounds a panic inside a watcher COM call so it surfaces as
+// the call's error instead of an unrecovered goroutine panic terminating the
+// host process. The winrt-go wrappers call MustQueryInterface, which panics
+// on any interface-query failure — a broken COM object state during scan
+// teardown must degrade to the typed timeout/failure path, not a crash.
+// Only watcher.Stop() was previously guarded (stopWatcherSafely); every other
+// bounded watcher call deserves the same protection.
+func watcherCallSafely(call func() error) (err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("Bluetooth watcher call panicked: %v", recovered)
+		}
+	}()
+	return call()
 }
 
 // isWatcherCallTimeout reports an error produced by a bounded watcher call
@@ -1534,21 +1550,59 @@ func (s *deviceState) waitCallbacks() {
 	s.callbacks.wait()
 }
 
+// cleanupDrainLockLimit bounds how long a cleanup attempt waits for the
+// device operation lock. A device operation (or an admitted status callback)
+// wedged inside an uncancellable COM call — the removed-radio scenario this
+// fork defends against everywhere — holds the lock forever; blocking on it
+// would hang the cleanup attempt indefinitely, block every later Disconnect
+// on its attempt channel, and defeat the automatic retry machinery. Giving up
+// instead abandons the object references for the lifetime of the process,
+// the same degradation a wedged boundedCleanupCall release already applies.
+// It is a var so tests can exercise the budget without the production wait.
+var cleanupDrainLockLimit = 5 * time.Second
+
+// cleanupDrainPollInterval spaces the lock acquisition attempts while a
+// cleanup attempt waits for a wedged operation to release the mutex.
+const cleanupDrainPollInterval = 5 * time.Millisecond
+
+// lockWithBudget acquires the mutex unless the budget expires first.
+func lockWithBudget(mutex *sync.Mutex, budget time.Duration) bool {
+	deadline := time.Now().Add(budget)
+	for {
+		if mutex.TryLock() {
+			return true
+		}
+		if !time.Now().Before(deadline) {
+			return false
+		}
+		time.Sleep(cleanupDrainPollInterval)
+	}
+}
+
 // drainCallbacksForCleanup unregisters event sources while device operations
 // are excluded, then releases the operation lock before waiting for callbacks.
 // A callback that passed the callback gate immediately before shutdown may
 // still be waiting for operationMutex. Releasing the lock lets that callback
 // observe closed and leave, avoiding a cleanup/callback lock-order deadlock.
 //
-// The method returns with operationMutex held. This provides a final barrier
-// before the caller releases the WinRT objects used by device operations.
-func (s *deviceState) drainCallbacksForCleanup(unregister func()) {
-	s.operationMutex.Lock()
+// On success the method returns with operationMutex held, providing a final
+// barrier before the caller releases the WinRT objects used by device
+// operations. It reports false when an operation wedged inside an
+// uncancellable COM call kept the lock past cleanupDrainLockLimit: the caller
+// must then abandon the object references instead of releasing them
+// underneath the abandoned operation.
+func (s *deviceState) drainCallbacksForCleanup(unregister func()) bool {
+	if !lockWithBudget(&s.operationMutex, cleanupDrainLockLimit) {
+		return false
+	}
 	unregister()
 	s.operationMutex.Unlock()
 
 	s.waitCallbacks()
-	s.operationMutex.Lock()
+	if !lockWithBudget(&s.operationMutex, cleanupDrainLockLimit) {
+		return false
+	}
+	return true
 }
 
 func (d Device) beginOperation() (*deviceState, error) {
@@ -1955,8 +2009,15 @@ func (d Device) cleanup(attempt *deviceCleanupAttempt) {
 	// keep its reference: releasing it could destroy the object underneath
 	// the abandoned call. Track the wedged objects and skip their releases.
 	deviceBusy := false
-	notificationBusy := make([]bool, len(state.notifications))
-	state.drainCallbacksForCleanup(func() {
+	// The unregister snapshot is captured under the operation lock inside
+	// the drain: an EnableNotifications rollback can append a registration
+	// while cleanup waits for the lock, and sizing the busy slice from a
+	// pre-drain length would panic the release loop below.
+	unregisterNotifications := []notificationRegistration{}
+	notificationBusy := []bool{}
+	drained := state.drainCallbacksForCleanup(func() {
+		unregisterNotifications = state.notifications
+		notificationBusy = make([]bool, len(unregisterNotifications))
 		if state.cancel != nil {
 			if err := cleanupCall("cancel device context", func() error {
 				state.cancel()
@@ -1976,7 +2037,7 @@ func (d Device) cleanup(attempt *deviceCleanupAttempt) {
 				deviceBusy = true
 			}
 		}
-		for index, notification := range state.notifications {
+		for index, notification := range unregisterNotifications {
 			unregisterErr, hung := boundedCleanupCall("remove characteristic notification", notification.unregister)
 			if unregisterErr != nil {
 				warnings = append(warnings, unregisterErr)
@@ -1986,12 +2047,35 @@ func (d Device) cleanup(attempt *deviceCleanupAttempt) {
 			}
 		}
 	})
+	if !drained {
+		// A device operation or admitted callback holds the operation lock
+		// past the drain budget, wedged inside an uncancellable COM call.
+		// Transferring and releasing ownership underneath it would let the
+		// abandoned operation use freed COM objects, so abandon every
+		// reference for the lifetime of the process — the same degradation a
+		// wedged release applies — and leave the attempt retryable so a
+		// later attempt can still free everything once the wedged call
+		// returns.
+		attempt.err = errors.New("bluetooth: device operation still in flight after cleanup budgets; object references abandoned")
+		retryable = true
+		return
+	}
+
+	// Re-read the notification list after the final barrier: a rollback may
+	// have appended an entry while the drain waited for callbacks between
+	// its two lock holds. Entries appended after the unregister phase were
+	// never unregistered, so their handlers and characteristics must keep
+	// their references — marking them busy applies the same degradation a
+	// wedged unregister would.
+	notifications := state.notifications
+	for len(notificationBusy) < len(notifications) {
+		notificationBusy = append(notificationBusy, true)
+	}
 
 	// Transfer final COM ownership out of shared state before releasing any
 	// object. A panic can then never expose an already-released pointer to a
 	// subsequent Disconnect attempt.
 	listener := state.connectionStatusListener
-	notifications := state.notifications
 	characteristics := state.characteristics
 	services := state.services
 	session := state.session
