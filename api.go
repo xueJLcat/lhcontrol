@@ -254,6 +254,21 @@ func beginExternalStationOperation(
 }
 
 func registerAPIRoutes(api *fiber.App, manager apiStationManager, events scanEventCallbacks, status func() APIStatus) {
+	// Route handlers run on fasthttp's per-connection worker goroutines, and
+	// neither fasthttp nor fiber recovers a panicking handler: without this
+	// middleware a single panic (for example a projection regression triggered
+	// by an odd BLE state, reachable by any local process through the
+	// loopback API) would kill the whole desktop process, losing the window
+	// and skipping the bounded BLE shutdown sequence. serveAPIListener's
+	// recover only covers the accept-loop goroutine, not handler workers.
+	api.Use(func(c *fiber.Ctx) (returnErr error) {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				returnErr = fmt.Errorf("API handler panicked: %v", recovered)
+			}
+		}()
+		return c.Next()
+	})
 	// Oversized bodies are rejected by the fiber BodyLimit (fasthttp
 	// MaxRequestBodySize) before any handler runs; NewApp and the test harness
 	// both configure it, and the shared ErrorHandler maps the rejection to the

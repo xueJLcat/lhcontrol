@@ -321,3 +321,38 @@ func TestFocusExistingInstanceExhaustsBudgetWhileInstanceRuns(t *testing.T) {
 		t.Fatalf("focused=%v reacquired=%v, want the budget to exhaust with the instance still running", focused, release != nil)
 	}
 }
+
+func TestFocusExistingInstanceReacquiresMutexWhenExitLandsInFinalInterval(t *testing.T) {
+	// No window ever appears; the first instance exits during the re-check
+	// interval that precedes the budget check. The loop's regular re-check
+	// still saw it running, so only the final re-check at budget exhaustion
+	// can notice the exit: without it this launch would wait out the whole
+	// budget and exit with nothing instead of taking over as the fresh
+	// instance.
+	acquireCalls := 0
+	reacquired := func() {}
+	focused, release := focusExistingInstance(
+		"lhcontrol", `Local\lhcontrol-test`, 100*time.Millisecond,
+		func(string) windowSearchResult { return windowSearchResult{} },
+		func(string) (func(), bool, error) {
+			acquireCalls++
+			// The loop's own re-checks (calls 1 and 2) still observe the
+			// instance running; the final re-check at budget exhaustion
+			// (call 3) observes the exit.
+			if acquireCalls <= 2 {
+				return func() {}, true, nil
+			}
+			return reacquired, false, nil
+		},
+		func(time.Duration) { time.Sleep(60 * time.Millisecond) },
+	)
+	if focused {
+		t.Fatal("focusExistingInstance() reported a focused window that never appeared")
+	}
+	if release == nil {
+		t.Fatal("focusExistingInstance() did not hand back the re-acquired mutex after the exit in the final interval")
+	}
+	if acquireCalls != 3 {
+		t.Fatalf("mutex re-checks = %d, want the exit noticed by the final re-check", acquireCalls)
+	}
+}

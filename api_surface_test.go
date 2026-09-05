@@ -88,6 +88,53 @@ func TestAPINeverPanicsOrReturns5xxOnMalformedInput(t *testing.T) {
 	}
 }
 
+// TestAPIRecoversFromHandlerPanic pins the recover middleware: fasthttp runs
+// handlers on worker goroutines it does not guard, so a panicking route would
+// otherwise take down the entire desktop process. The response must use the
+// JSON error envelope, and the same fiber app must keep serving later
+// requests.
+func TestAPIRecoversFromHandlerPanic(t *testing.T) {
+	panicAPI := fiber.New(fiber.Config{ErrorHandler: apiErrorHandler})
+	registerAPIRoutes(panicAPI, &panickingAPIStationManager{}, scanEventCallbacks{}, func() APIStatus {
+		return APIStatus{Running: true, Address: "127.0.0.1:7575"}
+	})
+	panicResponse, err := panicAPI.Test(httptest.NewRequest(http.MethodGet, "/status", nil), -1)
+	if err != nil {
+		t.Fatalf("panicking request error: %v", err)
+	}
+	if panicResponse.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("panicking /status => %d, want 500", panicResponse.StatusCode)
+	}
+	var payload struct {
+		Error string `json:"error"`
+	}
+	if decodeErr := json.NewDecoder(panicResponse.Body).Decode(&payload); decodeErr != nil {
+		t.Fatalf("panicking /status body is not JSON: %v", decodeErr)
+	}
+	_ = panicResponse.Body.Close()
+	if payload.Error == "" {
+		t.Fatal("panicking /status returned an empty error field")
+	}
+
+	// The same app must keep serving requests afterwards.
+	response, err := panicAPI.Test(httptest.NewRequest(http.MethodGet, "/health", nil), -1)
+	if err != nil {
+		t.Fatalf("/health after panic: request error: %v", err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("/health after panic => %d, want 200", response.StatusCode)
+	}
+}
+
+type panickingAPIStationManager struct {
+	fakeAPIStationManager
+}
+
+func (f *panickingAPIStationManager) GetStationInfo() []station.StationInfo {
+	panic("projection regression")
+}
+
 // TestAPIErrorResponsesCarryErrorShape verifies every non-2xx response uses
 // the documented {"error": "..."} envelope.
 func TestAPIErrorResponsesCarryErrorShape(t *testing.T) {

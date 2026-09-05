@@ -642,4 +642,4 @@ func (a *App) ListBluetoothAdapters() ([]bluetooth.AdapterInfo, error) {
 
 // autoSleepEvent is the frontend payload for the "auto-sleep" event. Phase is
 // "started", "completed", "cancelled" (the watched session restarted),
-// "skipped" (user was operating Bluetooth) or "failed".
+// "skipped" (user was operating Bluetooth), "failed" or "timed-out".

@@ -449,11 +449,21 @@ func focusExistingInstance(
 			return true, nil
 		}
 		if time.Since(start) >= budget {
-			// Budget exhausted. The verified-foreign same-titled window is
-			// the final best-effort focus target, matching the plain
-			// single-wait behavior; only a still-running instance can reach
-			// this point because an exited one is caught by the re-check
-			// below before the next attempt.
+			// Budget exhausted. An instance that exited during the final
+			// re-check interval released the mutex with this launch never
+			// observing it; prefer taking over as the fresh instance over
+			// waiting out the budget and exiting with nothing, so re-check
+			// ownership one last time before any best-effort focus.
+			release, stillRunning, acquireErr := acquire(mutexName)
+			if acquireErr == nil && !stillRunning {
+				return false, release
+			}
+			if acquireErr == nil {
+				release()
+			}
+			// The verified-foreign same-titled window is the final best-effort
+			// focus target, matching the plain single-wait behavior; the
+			// mutex-backed instance is still running at this point.
 			if result.err == nil && result.foreignFallback != 0 {
 				if !activateWindow(result.foreignFallback, showWindow, setForegroundWindow, flashWindowEx) {
 					log.Println("SetForegroundWindow failed (maybe window is not allowed to take focus?). Flashing instead.")
