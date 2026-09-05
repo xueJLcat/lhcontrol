@@ -119,4 +119,14 @@ describe('StatusFooter', () => {
     await fireEvent.click(ok);
     expect(screen.getByText('HTTP API 127.0.0.1:9000')).toBeInTheDocument();
   });
+
+  it('translates the API poll timeout in the API pill', async () => {
+    const { setLanguagePreference } = await import('../i18n.svelte');
+    setLanguagePreference('zh-CN');
+    renderFooter({ apiRunning: false, apiError: 'Error: API status read timed out' });
+    const control = screen.getByRole('button', { name: 'API 离线' });
+    await fireEvent.click(control);
+    expect(screen.getByText('API 状态读取超时')).toBeInTheDocument();
+    setLanguagePreference('en');
+  });
 });

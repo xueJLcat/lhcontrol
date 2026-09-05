@@ -192,9 +192,12 @@ export class ExternalScanCoordinator {
     this.recoveryStatusId = null;
     this.recoveryAttempts = 0;
     this.pendingTerminal = null;
-    // A new scan supersedes any stop that is still owed its terminal event:
-    // backend ordering guarantees the old terminal is delivered before this
-    // new scan's own started event, so the debt cannot belong to this scan.
+    // A new scan supersedes any stop that is still owed its terminal event.
+    // The manager serializes scans and releases the scan slot before the old
+    // scan's terminal callback is delivered, so a late terminal can arrive
+    // after this started event; it cannot claim this scan (ids differ) and is
+    // dropped by the untracked-terminal guards, so the debt cannot belong to
+    // this scan.
     this.stoppedScanTerminalPending = false;
     this.scanID = id;
     this.host.setExternalScanning(true);

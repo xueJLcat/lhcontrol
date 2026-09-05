@@ -249,7 +249,7 @@ build\verification
 
 脚本要求所有基站的初始状态均能够被确认。
 
-每次电源操作都会执行状态回读验证，并在 `finally` 阶段尝试恢复所有设备的初始状态。
+On 与 Standby 操作会执行状态回读验证（Sleep 操作依赖批量结果的逐站回执确认，休眠基站会主动断开蓝牙链路，无法回读），并在 `finally` 阶段尝试恢复所有设备的初始状态。
 
 如果状态恢复失败，脚本会以失败状态退出。
 
@@ -261,7 +261,7 @@ build\verification
 .\scripts\hardware-smoke.ps1 -SelfTest
 ```
 
-该模式无需蓝牙硬件，用于验证报告生成及断言逻辑本身。
+该模式无需蓝牙硬件，用于验证断言与证据收集逻辑本身。
 
 ## 诊断日志
 
@@ -965,7 +965,7 @@ The script exercises:
 
 It requires confirmed initial states for all stations.
 
-Each operation is validated through readback. The script restores the original states in a `finally` block and exits unsuccessfully if restoration fails.
+On and Standby operations are validated through readback (Sleep is validated through the per-station bulk outcome: a sleeping station drops its Bluetooth link, so readback is not possible). The script restores the original states in a `finally` block and exits unsuccessfully if restoration fails.
 
 ### Hardware-Free Self Test
 
@@ -975,7 +975,7 @@ Run:
 .\scripts\hardware-smoke.ps1 -SelfTest
 ```
 
-This validates the reporting and assertion logic without requiring Bluetooth hardware.
+This validates the assertion and evidence-collection logic without requiring Bluetooth hardware.
 
 ## Diagnostic Log
 

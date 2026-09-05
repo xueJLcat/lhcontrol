@@ -6,6 +6,9 @@ export type MessageValues = Record<string, string | number>;
 
 const zhCN = {
   'Backend status read timed out': '后端状态读取超时',
+  'API status read timed out': 'API 状态读取超时',
+  'Setting {action} timed out after {timeout}ms': '{action}设置超时（{timeout} 毫秒）',
+  'Language save timed out': '语言设置保存超时',
   'Scanning and refresh': '扫描与刷新',
   'Scan when the application starts': '应用启动时扫描',
   'Discover nearby stations automatically after startup.': '应用启动后自动发现附近的基站。',
@@ -435,8 +438,10 @@ const zhCN = {
   'standby is unavailable': '待机不可用',
   'identify is unavailable': '识别不可用',
   'safe channel changes require read and write support': '安全频道修改需要读写支持',
+  // Auto-sleep lifecycle event errors.
   'cancelled before power commands were sent': '已在发送电源命令前取消',
   'cancelled after scanning and before power commands were sent': '已在扫描后、发送电源命令前取消',
+  'cancelled while power commands were in progress': '电源命令执行中已取消',
   'bulk power timeout reached': '已达到批量电源操作超时',
   'One or more visible stations have an unknown channel; conflicts cannot be fully verified.': '一个或多个可见基站的频道未知，无法完全排除冲突。',
   'The channel command was sent, but its result could not be confirmed.': '频道命令已发送，但结果无法确认。',
@@ -520,8 +525,38 @@ export function systemLocale(): Locale {
 }
 
 export function setLocale(next: Locale): void {
+  const previous = currentLocale;
+  if (previous === next) return;
   currentLocale = next;
   if (typeof document !== 'undefined') document.documentElement.lang = next;
+  notifyLocaleApplied(previous, next);
+}
+
+// A locale change must also refresh snapshot-translated strings — the footer
+// status line, toasts, and per-station feedback store rendered copy in the
+// locale active when they were produced. The settings path drives that
+// refresh through its own callback; the OS languagechange path has no such
+// wiring, so the applied-locale change is published here and the app shell
+// subscribes. Template labels need no notification: they re-render by
+// reading the reactive locale.
+type LocaleAppliedListener = (locale: Locale) => void;
+const localeAppliedListeners = new Set<LocaleAppliedListener>();
+
+function notifyLocaleApplied(previous: Locale, next: Locale): void {
+  for (const listener of [...localeAppliedListeners]) {
+    try {
+      listener(next);
+    } catch {
+      // One listener failing must not block applying a locale or the others.
+    }
+  }
+}
+
+export function onLocaleApplied(listener: LocaleAppliedListener): () => void {
+  localeAppliedListeners.add(listener);
+  return () => {
+    localeAppliedListeners.delete(listener);
+  };
 }
 
 export function setLanguagePreference(next: LanguagePreference): Locale {
@@ -542,7 +577,7 @@ export async function saveLanguagePreference(next: LanguagePreference): Promise<
   setLanguagePreference(next);
 
   const operation = languageSaveTail.then(async () => {
-    await SetLanguage(next === 'system' ? '' : next);
+    await saveLanguageWithTimeout(next);
     confirmedLanguagePreference = next;
   });
   languageSaveTail = operation.then(
@@ -566,6 +601,32 @@ export async function saveLanguagePreference(next: LanguagePreference): Promise<
 // initialization, so a hung language getter must fall back to the system
 // preference instead of leaving the window blank forever.
 const LANGUAGE_PROBE_TIMEOUT_MS = 5000;
+
+// A hung SetLanguage binding would keep the save chain (and the settings
+// drawer's language radios) busy forever: every later save queues behind the
+// module-scoped languageSaveTail, so one hang disables language switching
+// for the whole session with no error surface. Bound the physical call; a
+// timeout is treated as a failed save, and the existing revision/revert
+// logic decides what the UI shows. The backend write may still land later —
+// the next launch then applies the persisted preference.
+const LANGUAGE_SAVE_TIMEOUT_MS = 10_000;
+
+function saveLanguageWithTimeout(preference: LanguagePreference): Promise<void> {
+  const value = preference === 'system' ? '' : preference;
+  return new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('Language save timed out')), LANGUAGE_SAVE_TIMEOUT_MS);
+    void SetLanguage(value).then(
+      () => {
+        clearTimeout(timer);
+        resolve();
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      }
+    );
+  });
+}
 
 // A "follow the system" preference must keep following while the app runs:
 // a Windows display-language change fires languagechange on the webview, and

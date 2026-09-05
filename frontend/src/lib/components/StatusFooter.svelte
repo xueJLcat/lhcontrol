@@ -25,7 +25,10 @@
 
   let detail = $state<'config' | 'api' | null>(null);
 
-  const apiTitle = $derived(apiError || (apiAddress ? `HTTP API ${apiAddress}` : t('HTTP API unavailable')));
+  // apiError can carry a locally constructed timeout message or a backend
+  // listener error; route both through backendCopy so zh-CN never shows raw
+  // English where a translation exists.
+  const apiTitle = $derived(backendCopy(apiError) || (apiAddress ? `HTTP API ${apiAddress}` : t('HTTP API unavailable')));
   const translatedWarnings = $derived(configWarnings.map((warning) => backendCopy(warning)));
   const configTitle = $derived(translatedWarnings.join('\n') || t('Configuration changes cannot be saved'));
 

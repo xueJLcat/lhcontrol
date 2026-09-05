@@ -35,6 +35,41 @@ describe('backendCopy', () => {
     expect(backendCopy('another Bluetooth operation is in progress')).toBe('另一个蓝牙操作正在进行');
   });
 
+  it('translates every auto-sleep cancellation reason under zh-CN', () => {
+    setLanguagePreference('zh-CN');
+    expect(backendCopy('cancelled before power commands were sent')).toBe('已在发送电源命令前取消');
+    expect(backendCopy('cancelled after scanning and before power commands were sent'))
+      .toBe('已在扫描后、发送电源命令前取消');
+    expect(backendCopy('cancelled while power commands were in progress')).toBe('电源命令执行中已取消');
+  });
+
+  it('translates locally generated timeout messages under zh-CN', () => {
+    setLanguagePreference('zh-CN');
+    // The API health poller rejects with a local Error, which reaches the
+    // display layer through String(error) with the "Error: " prefix.
+    expect(backendCopy('Error: API status read timed out')).toBe('API 状态读取超时');
+    expect(backendCopy('API status read timed out')).toBe('API 状态读取超时');
+    // The settings watchdog composes "<action> the setting timed out".
+    expect(backendCopy('Error: saving the setting timed out after 10000ms')).toBe('保存设置超时（10000 毫秒）');
+    expect(backendCopy('Error: reading the setting timed out after 10000ms')).toBe('读取设置超时（10000 毫秒）');
+    expect(backendCopy('applying the setting timed out after 3000ms')).toBe('应用设置超时（3000 毫秒）');
+    // The language save watchdog (i18n.svelte.ts).
+    expect(backendCopy('Error: Language save timed out')).toBe('语言设置保存超时');
+  });
+
+  it('keeps locally generated timeout messages byte-identical in English', () => {
+    expect(backendCopy('Error: API status read timed out')).toBe('API status read timed out');
+    expect(backendCopy('Error: saving the setting timed out after 10000ms'))
+      .toBe('saving the setting timed out after 10000ms');
+  });
+
+  it('keeps unmatched Error-prefixed diagnostics verbatim', () => {
+    const raw = 'Error: config locked';
+    expect(backendCopy(raw)).toBe(raw);
+    setLanguagePreference('zh-CN');
+    expect(backendCopy(raw)).toBe(raw);
+  });
+
   it('translates scan warning templates and keeps nested detail', () => {
     setLanguagePreference('zh-CN');
     const raw = '2 station(s) were discovered, but some initial values could not be read: some transport failure';

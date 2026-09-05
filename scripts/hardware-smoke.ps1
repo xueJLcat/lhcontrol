@@ -711,9 +711,29 @@ finally {
                 }
             }
             catch {
+                $restoreError = Get-HttpErrorDetail $_
+                # A station whose power control the app rejects as unsupported
+                # was never altered, so this is not a restoration failure —
+                # most commonly a station whose capability skip was never
+                # learned because an earlier bulk response was lost. Record a
+                # skipped restore instead of false failure evidence.
+                $unsupportedRestore = $restoreError -match "operation is not supported" -or
+                    $restoreError -match "power control is not supported" -or
+                    $restoreError -match "power write is unavailable"
+                if ($unsupportedRestore -and -not $operatedAddresses.Contains($entry.Key)) {
+                    $results.restore += [ordered]@{
+                        address = $entry.Key
+                        target = $entry.Value
+                        succeeded = $true
+                        result = $null
+                        readback = $null
+                        error = "skipped: power control is unsupported and the station was never altered"
+                    }
+                    Write-Warning "Skipped restore for $($entry.Key): power control is unsupported"
+                    continue
+                }
                 $restoreFailed = $true
                 $results.succeeded = $false
-                $restoreError = Get-HttpErrorDetail $_
                 $results.restore += [ordered]@{
                     address = $entry.Key
                     target = $entry.Value

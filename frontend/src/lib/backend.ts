@@ -194,7 +194,11 @@ export function IsScanning(): Promise<boolean> {
 }
 
 export function ListBluetoothAdapters(): Promise<bluetooth.AdapterInfo[]> {
-  return call(() => bindings.ListBluetoothAdapters());
+  // Adapter enumeration reaches into WinRT radio discovery; a wedged
+  // enumeration is a real hang class, so bound it like the other reads
+  // instead of leaving the diagnostics section's spinner (which hides its
+  // Retry control while loading) pending forever.
+  return read(() => bindings.ListBluetoothAdapters());
 }
 
 export function RefreshStationCapabilities(address: string): Promise<station.StationInfo> {

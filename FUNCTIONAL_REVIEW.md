@@ -2,7 +2,69 @@
 
 本次检查范围为应用功能与状态一致性，不包含安全性专项审查。检查基于仓库源码、现有测试、新增故障注入测试及 Windows 上的构建工具链；没有以真实 Lighthouse 基站执行电源或通道操作。
 
-## 已确认并修复的问题
+## 第四轮检查（新增）
+
+| 问题 | 触发条件与影响 | 实现方案 |
+| --- | --- | --- |
+| 设备清理排水的锁获取无界，楔死操作可永久挂起断连/关机 | `drainCallbacksForCleanup` 直接 `operationMutex.Lock()`：设备操作或已放行的状态回调楔死在不可取消的 COM 调用（移除无线电场景）中永久持锁 → 清理尝试永不返回，后续每个 `Disconnect` 阻塞在 attempt 通道上，自动重试被 `cleanupStarted` 抑制，Wails 关机挂死 | 新增 `cleanupDrainLockLimit`（5s）预算的 `lockWithBudget` 轮询获取；超限时放弃全部对象引用（与楔死释放同一降级）、保持尝试可重试并让 `Disconnect` 有界返回。锁下快照通知数组并处理排水间隙回滚追加的注册（晚到条目标记为忙、不释放）。新增楔锁有界返回与注册竞态两个测试（后者在旧代码确定性 OOB panic） |
+| watcher COM 调用 goroutine 无 panic 恢复，进程级崩溃 | `boundedWatcherCall` 工作协程裸调 `call()`：winrt-go 包装器经 `MustQueryInterface`，QI 失败即 panic——扫描停止路径上损坏的 COM 对象状态会以未恢复的 goroutine panic 终止整个桌面进程（此前仅 `watcher.Stop()` 有 `stopWatcherSafely` 防护） | 工作协程统一经 `watcherCallSafely` 包装，panic 转为该调用的错误并按既有类型化超时/失败路径分类；新增 panic 包含测试 |
+| 写入创建失败的错误被分类为"可能已发送" | `writeValueWithResultAndOptionAsync` 在 HRESULT 失败时返回 `operationCreated=true`：创建失败的写入绝无可能已提交，却让 power/channel 层标记 `CommandSent=true` 并走确认轮询而非立即重试，UI 短暂误报命令可能已生效且重试延迟放大 | HRESULT 失败返回 `false`，与缺失 vtable 槽位分支同一"确定未提交"推理 |
+| 装载修复提升单站超时可突破批量超时 | `repairCrossItemValues` 先检查 bulk≥station 再在第二块把回退的 station 提升到 persisted initial read：手工配置 {bulk:45, station:9999, initial:60} 装载后 station=60 > bulk=45——设置器会拒绝的状态却由装载修复产生，整段会话内批量条目的单站预算超出全批截止时间，多站批量中途超时弃管 | 提升分支以 `min(initial, bulk)` 封顶；实证复现（旧代码 station=60 确定性失败），新增装载修复测试，保存修复等价性保持 |
+| `.gitignore` 的 `.exe` 模式从不匹配可执行文件 | 无通配的模式只匹配字面名为 ".exe" 的文件：仓库根 `go build` 产出的 `lhcontrol.exe` 未被忽略，`git add -A` 会提交 ~15MB 二进制 | 改为 `*.exe`，`git check-ignore` 验证生效 |
+| 验收脚本对从未变更的能力缺失站点误报"恢复失败" | `capabilitySkippedAddresses` 仅来自实际收到的批量响应；响应丢失或早期阶段中止时，恢复阶段对不支持电源控制的站点发起写入 → 422 被记为恢复失败，报告包含与设计目标矛盾的伪失败证据 | 恢复 catch 中 422/不支持类错误且该站未被操作过时记为跳过而非失败 |
+| pending 电源反馈 60s 过期窗口短于 120s 合法操作预算 | 单站操作超时可调至 120s 而 pending 备注保留窗口固定 60s：慢站操作 90s 时"切换中"备注中途消失再重现（忙碌标志与分段高亮仍在），违背自身"备注随操作沉降被替换"的约定 | 以 busy 为条件续期，但总寿命封顶 150s（重整排程到截止时刻，恰好在上限过期）——楔死绑定的备注不会永久存在；既有 pinned 测试更新为新契约，新增续期与硬上限单元测试 |
+| README 与验收脚本能力描述不符 | 中文 README 称 `-SelfTest` 验证"报告生成"（实际只验证断言与证据收集，不写报告文件）；两语言 README 称"每次电源操作都执行状态回读验证"（Sleep 阶段刻意无回读，休眠基站主动断链） | 文档改为准确描述：自检验证断言与证据收集逻辑；On/Standby 经回读验证、Sleep 经批量逐站回执 |
+
+第四轮检查同时确认以下上报项不构成需修复缺陷：`alreadyTerminal` 在 control 锁内做有界状态读（2s 上限，仅停顿延迟非死锁）；`forceStop` 把"在途首停"报为已接受（后续失败以超时形态呈现，应用层按楔死停止同型处理）；`gatts_windows.go` 外设角色未被本应用使用；config 包其余面（锁定、原子写、隔离恢复、别名、API 地址校验）二遍验证保持干净；测试入口脚本（test.ps1/test.sh 顺序、退出码传播、fork 模块引用）、build_prod.bat、wails.json、.releaserc.json 均验证一致。
+
+### 第四轮回归验证
+
+- `go vet ./...` 与 `go test -race ./...`（主模块 + fork 模块）全部通过；fork 新测试在旧实现下确定性失败（楔锁挂起、通知快照 OOB panic）；新竞态测试以 `-race -count=15` 无抖动，并修复了测试自身与自动清理重试链的跨测试竞态（缩短重试延迟并在测试内等待沉降）。
+- 前端 `svelte-check` 0 错误/0 警告，40 个测试文件 553 项测试通过（新增 6 项：fork 之外的前端单元测试与更新后的 pinned 契约）。
+- `scripts/hardware-smoke.ps1 -SelfTest` 通过；全部修改过的 Go 文件 gofmt 干净；`git diff --check` 通过。
+
+## 第三轮检查（新增）
+
+| 问题 | 触发条件与影响 | 实现方案 |
+| --- | --- | --- |
+| 取消扫描后立即重扫描间歇性一次性失败 | WinRT 的 watcher.Stop() 在 watcher 到达 Stopped 前返回，适配器只有一个 watcher 槽位且要等平台 Scan 调用返回才释放；取消路径的 2 秒弃管宽限早于 fork 的 10 秒排水预算，宽限期一到就释放应用层槽位，紧接的扫描 B 撞上仍被持有的适配器槽位，以"bluetooth: a scan is already in progress"失败一次 | 停止握手干净完成（stopErr 为 nil）时取消路径同样使用停止握手预算（10 秒，与时长路径一致）；停止失败或被弃管的楔死场景仍保留短宽限以尽快释放应用层槽位。新增测试断言干净停止后主体必须等完平台排水（旧代码确定性失败） |
+| 一次尝试中同一条死链被计为两次连接失败 | 批量/单站电源先做缓存校验读取：结构化电源读取失败（死链证据）在 `recordPowerVerificationResult` 记账一次（断连+退避）；代码继续落到能力刷新/写入，同链失败再经 `observeStationBluetoothError` 记账第二次——违反自身"一条死链每次尝试只记一次"的不变量：缺站恢复预算按 2 倍速率耗尽（默认 5 次约 3 次耗尽），指数退避多翻一倍 | `recordPowerVerificationResult` 返回"校验已证明死链"标志（谓词精确镜像 `recordObservedReadResult` 电源分支的断连条件）；后续步骤失败时经 `observePostVerificationBluetoothError` 保留适配器级观察（无线电丢失仍触发全舰队清理）但跳过按站重复记账与冗余有界断连；命令确认失败除外（写入在重建的连接上成功，回读失败是新证据）。批量与单站两条路径各新增测试（旧代码 failures=2 确定性失败） |
+| 遗留批量契约把忙跳过当成功 | 错误式契约 `PowerOnAllStations`/`SetAllStationsPower` 只上浮超时跳过：join 预算弃管的 worker（命令结果未知）与锁楔死站点（未尝试）都以 `ReasonStationBusy` 跳过，整批返回 nil，用户请求的"全部开机"实际未覆盖该站 | 将 `ReasonStationBusy` 加入遗留聚合的上浮集合（与超时跳过同类：非良性跳过）；新增遗留契约测试（旧代码返回 nil 确定性失败） |
+| SetLanguage 无看门狗，一次挂起永久禁用语言切换 | 语言保存是前端唯一无超时的 Wails 调用：绑定挂起使 `languageBusy` 永久为真（单选钮永久禁用、无错误无提示），且模块级 `languageSaveTail` 把后续所有保存排在挂起调用之后——重开设置抽屉也永久失效 | 与语言读取探针同一模式：`saveLanguageWithTimeout` 以 10 秒竞速，超时按失败保存走既有版本/回退逻辑；新增超时消息词条（`Language save timed out` → `语言设置保存超时`）与挂起后重试仍可用的测试 |
+| ListBluetoothAdapters 无看门狗，诊断区永久转圈 | 适配器枚举是设置抽屉里唯一无界读取：WinRT 枚举楔死时 `loading` 永久为真，而加载分支不渲染 Retry 按钮，抽屉内无恢复途径 | 经 `backend.ts` 的 `read()` 统一 10 秒上限，超时进入既有错误卡片 + Retry 路径（超时消息已在翻译映射内）；新增挂起枚举有界测试 |
+| OS 语言变更不刷新快照翻译 | `languagechange` 只切换 locale：模板标签经响应式更新，但 `statusMessage`、可见 toast、按站反馈等已渲染文案停留在旧语言；设置面板路径有 `clearToasts + onLocaleChanged` 刷新，OS 路径没有 | i18n 模块在 `setLocale` 实际变更 locale 时发布 `onLocaleApplied` 通知（幂等、可退订），App 壳订阅并执行与设置路径相同的刷新；新增通知仅在真实变更时触发且可退订的测试 |
+| 契约注释与映射补全 | `autoSleepEvent` 文档缺 `timed-out` 阶段；自动休眠第三个取消原因（`cancelled while power commands were in progress`）不在翻译映射；`external-scan.ts` 注释声称后端保证"旧终态先于新 started 送达"，实际 `finishScan` 先释放槽位再投递终态回调 | 文档补全阶段枚举；EXACT 映射与 zh-CN 词条补全该取消原因并加测试；注释改为描述实际不变量（单扫描串行 + 迟到终态被未跟踪终态守卫丢弃） |
+
+第三轮检查同时确认以下上报项不构成需修复缺陷：扫描终态回调晚于新扫描 started 送达的交错（现有前端各路径经未跟踪终态守卫自愈，仅注释误导，已修正）；并发设置保存下 `applyBluetoothTiming` 短暂混合策略（读取与发布窗口内的瞬态，最终必然收敛到已写入配置）；`ParsePowerTarget` 接受未记录的 `off` 别名（向后兼容的额外宽容）；`persistence.go` 目录无 fsync（该原子写模式的固有限制，仅断电时回退到上一版有效配置）。
+
+### 第三轮回归验证
+
+- `go vet ./...` 通过；`go test -race ./...` 全部通过；新测试在旧实现下均确定性失败（扫描取消排水、死链单次计数×2、遗留忙跳过契约），新实现下重复运行无抖动（bluetooth 新测试 -race ×15，station 新测试 -race ×10）。
+- 前端 `svelte-check` 0 错误/0 警告，39 个测试文件 549 项测试通过（新增 4 项）。
+- `scripts/hardware-smoke.ps1 -SelfTest` 通过；全部修改过的 Go 文件 gofmt 干净（以 LF 规范化后校验）；`git diff --check` 通过。
+
+## 第二轮检查（新增）
+
+| 问题 | 触发条件与影响 | 实现方案 |
+| --- | --- | --- |
+| OS 断连失效与并发重连的跟踪竞态 | `invalidateDisconnectedDevice` 先释放站点锁再更新跟踪表：重连在此窗口完成地址去重后会跳过登记，随后失效例程无条件删除该条目，活连接脱离跟踪，后续 OS 断连通知不再触发失效 | 将 `connectedStations`/`pendingCleanupStations` 记账移入站点锁临界区（与 `disconnectInternal` 的守卫过滤同一锁序）；新增测试在测试方持有跟踪表锁时断言失效例程必须持站点锁阻塞 |
+| 通道冲突检查误拒并发刷新的最新读数 | 冲突检查用循环开始前捕获的时间戳评估每站新鲜度，`isRecent` 的 `age>=0` 把"检查开始后才完成的通道读取"判为过期 → 间歇性以"未知通道"拒绝合法修改 | 每站快照后取该快照的评估时刻；快照内时间戳必然早于该时刻，未来值防护语义不变 |
+| API handler panic 直接杀死整个桌面进程 | fasthttp 在工作协程执行 handler 且不做 panic 恢复，fiber 默认同样不恢复；任一路由 panic（本机任意进程可经回环 API 触发）导致窗口消失且绕过有界 BLE 关停 | `registerAPIRoutes` 顶部注册 recover 中间件，将 panic 转为经 `ErrorHandler` 的 JSON 500；新增 panic 存活测试 |
+| 取消并发到达时吞掉真实连接失败 | `FetchInitialPowerStateContext`、`Ensure/RefreshCapabilitiesContext` 在连接/发现失败与取消同时到达时返回纯 context 错误，上游扫描分类按"干净跳过"处理，丢失断连/退避记账（power.go 已有正确的 join 模式） | 三处改为 `errors.Join(真实错误, context错误)`，纯取消行为不变；新增三个 join 保持测试 |
+| 适配器清理去抖存在冷却后空洞 | 去抖条件含"冷却未到期"：冷却过期但重初始化尚未成功时，迟到观察者重复触发最长 15 秒的全舰队清理，纯重复工作 | 新增 `adapterCleanupIssued` 纪元（由 `initializeMutex` 保护），仅成功的适配器初始化会复位；清理函数经 `invalidateAllConnections` 注入点可测试 |
+| standby 降级被重新发现重置 | 固件以 Value Not Allowed 拒绝 standby 写入后的能力降级存于每次发现会覆盖的 `Capabilities`：每次重连后第一条 standby 命令重放被拒写入并再次向用户报错 | 新增会话级 `standbyWriteRejected` 标志，`applyDiscoveryOutcome` 重放降级；新增跨重发现回归测试 |
+| 单实例等待末尾错过接管窗口 | 预算耗尽分支不复查互斥体：首实例在最后一次复查间隔内退出时，二次启动等满预算后以退出码 1 结束，尽管互斥体已空闲 | 预算耗尽时先做最终互斥体复查，空闲则直接作为新实例接管；新增退出落在末段间隔的测试 |
+| 前端本地超时消息绕过翻译层 | API 健康轮询超时与设置操作看门狗超时为前端构造的 Error，`String(error)` 带 `Error: ` 前缀无法匹配映射，zh-CN 下显示英文原文 | `backendCopy` 仅在匹配时剥离去 `Error: ` 前缀（未匹配原文保留）；新增 EXACT/模式映射与 zh-CN 词条，`StatusFooter` 的 API 标题经 `backendCopy` |
+
+第二轮检查同时确认以下上报项不构成需修复缺陷：`FocusExistingInstance` 帮助退出路径跳过延迟释放（内核随进程回收句柄）；`BringWindowToFront` 为无引用死代码；前端"接管中的外部扫描终态事件被丢弃"窗口极窄且随新扫描终态自愈，改动高风险状态机收益有限，暂记录不改。
+
+### 第二轮回归验证
+
+- `go vet ./...` 通过；`go test -race ./...` 全部通过（bluetooth 包含新测试重复 50 次无抖动，并验证旧实现下相关新测试确定性失败）。
+- 前端 `svelte-check` 0 错误/0 警告，39 个测试文件 545 项测试通过（新增 4 项）。
+- `scripts/hardware-smoke.ps1 -SelfTest` 通过；全部修改过的 Go 文件 gofmt 干净（以 LF 规范化后校验）；`git diff --check` 通过。
+
+## 已确认并修复的问题（第一轮）
 
 | 问题 | 触发条件与影响 | 实现方案 |
 | --- | --- | --- |

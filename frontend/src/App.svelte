@@ -4,6 +4,7 @@
   import type { PowerTarget } from './lib/types';
   import { clearToasts } from './lib/toast';
   import { dur } from './lib/motion';
+  import { onLocaleApplied } from './lib/i18n.svelte';
   import { StationStore } from './lib/state/station-store.svelte.ts';
   import AppHeader from './lib/components/AppHeader.svelte';
   import FleetView from './lib/components/FleetView.svelte';
@@ -85,6 +86,7 @@
   });
 
   onDestroy(() => {
+    stopLocaleApplied();
     store.dispose();
     clearToasts();
   });
@@ -110,6 +112,12 @@
     clearToasts();
     store.onLocaleChanged();
   }
+
+  // The OS languagechange path applies a new locale without going through the
+  // settings drawer, so subscribe to every applied change: snapshot-translated
+  // strings (status line, toasts, per-station feedback) must be rebuilt the
+  // same way the settings path rebuilds them.
+  const stopLocaleApplied = onLocaleApplied(handleLanguageChanged);
 
   function openChannelEditor() {
     store.clearChannelEditorFeedback();

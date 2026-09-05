@@ -9,6 +9,10 @@ import { locale, t, type TranslationKey } from './i18n.svelte';
 
 const EXACT: ReadonlyMap<string, TranslationKey> = new Map([
   ['Backend status read timed out', 'Backend status read timed out'],
+  // Locally constructed timeout messages (backend.ts, api-status-poller.ts):
+  // they surface through String(error) like backend strings and must not
+  // bypass the translation layer under zh-CN.
+  ['API status read timed out', 'API status read timed out'],
   // Bulk skip reasons (internal/station/types.go Reason* constants).
   ['bulk operation timed out', 'bulk operation timed out'],
   ['station operation timed out', 'station operation timed out'],
@@ -39,7 +43,10 @@ const EXACT: ReadonlyMap<string, TranslationKey> = new Map([
   // Auto-sleep lifecycle event errors.
   ['cancelled before power commands were sent', 'cancelled before power commands were sent'],
   ['cancelled after scanning and before power commands were sent', 'cancelled after scanning and before power commands were sent'],
+  ['cancelled while power commands were in progress', 'cancelled while power commands were in progress'],
   ['bulk power timeout reached', 'bulk power timeout reached'],
+  // Frontend-constructed watchdog message (i18n.svelte.ts).
+  ['Language save timed out', 'Language save timed out'],
   // Fixed channel-operation warnings.
   ['One or more visible stations have an unknown channel; conflicts cannot be fully verified.',
     'One or more visible stations have an unknown channel; conflicts cannot be fully verified.'],
@@ -145,6 +152,15 @@ const SETTINGS_SUBJECT_ZH: Record<string, string> = {
   'Bluetooth init retry': '适配器初始化冷却'
 };
 
+// Setting-operation actions used by AsyncSetting's watchdog errors
+// (async-setting.svelte.ts), translated where they surface in toasts and the
+// settings error card.
+const SETTING_ACTION_ZH: Record<string, string> = {
+  reading: '读取',
+  saving: '保存',
+  applying: '应用'
+};
+
 interface CopyPattern {
   pattern: RegExp;
   render(match: RegExpMatchArray): string;
@@ -152,6 +168,15 @@ interface CopyPattern {
 
 // Parameterized backend strings. More specific patterns come first.
 const PATTERNS: readonly CopyPattern[] = [
+  {
+    // AsyncSetting watchdog: "<action> the setting timed out after <ms>ms".
+    // The message is constructed in the frontend, so the English shape is
+    // part of this contract, not a backend detail.
+    pattern: /^(reading|saving|applying) the setting timed out after (\d+)ms$/,
+    render: (m) => locale() === 'zh-CN'
+      ? t('Setting {action} timed out after {timeout}ms', { action: SETTING_ACTION_ZH[m[1]], timeout: m[2] })
+      : `${m[1]} the setting timed out after ${m[2]}ms`
+  },
   {
     // station/scan.go: connections not released before scanning. The detail
     // is an errors.Join of "<MAC>: <error>" lines.
@@ -390,10 +415,15 @@ export function backendCopy(raw: string | null | undefined): string {
   if (raw === null || raw === undefined) return '';
   const trimmed = raw.trim();
   if (trimmed === '') return '';
-  const exact = EXACT.get(trimmed);
+  // Locally constructed Error objects reach this layer as String(error),
+  // which prefixes "Error: " to the message; backend strings never carry that
+  // prefix. Strip it for matching only, so a mapped message translates while
+  // an unmapped one keeps its original diagnostics verbatim.
+  const matchable = trimmed.startsWith('Error: ') ? trimmed.slice('Error: '.length) : trimmed;
+  const exact = EXACT.get(matchable);
   if (exact) return t(exact);
   for (const { pattern, render } of PATTERNS) {
-    const match = trimmed.match(pattern);
+    const match = matchable.match(pattern);
     if (match) return render(match);
   }
   return raw;

@@ -2,10 +2,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 const bindings = vi.hoisted(() => ({
   IsScanning: vi.fn(), GetScanStatus: vi.fn(), GetCurrentStationInfo: vi.fn(),
-  CheckAllStationStatuses: vi.fn()
+  CheckAllStationStatuses: vi.fn(), ListBluetoothAdapters: vi.fn()
 }));
 vi.mock('../../wailsjs/go/main/App', () => bindings);
-import { IsScanning, GetScanStatus, GetCurrentStationInfo, CheckAllStationStatuses } from './backend';
+import { IsScanning, GetScanStatus, GetCurrentStationInfo, CheckAllStationStatuses, ListBluetoothAdapters } from './backend';
 
 afterEach(() => { vi.useRealTimers(); vi.resetAllMocks(); });
 
@@ -50,5 +50,15 @@ describe('backend read deadlines', () => {
     expect(settled).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(60_000);
     expect(settled).toHaveBeenCalledOnce();
+  });
+
+  it('bounds a hung adapter enumeration so diagnostics can recover', async () => {
+    vi.useFakeTimers();
+    bindings.ListBluetoothAdapters.mockReturnValue(new Promise(() => {}));
+    const settled = vi.fn();
+    void ListBluetoothAdapters().then(settled, settled);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(settled).toHaveBeenCalledOnce();
+    expect(settled.mock.calls[0][0]).toBeInstanceOf(Error);
   });
 });

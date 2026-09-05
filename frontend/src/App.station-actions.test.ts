@@ -428,7 +428,15 @@ describe('App asynchronous operations', () => {
     await waitFor(() => expect(api.SetStationPower).toHaveBeenCalledOnce());
     expect(await screen.findByText('Switching to On…')).toBeInTheDocument();
 
+    // The wedged binding still owns the operation flag, so the pending note
+    // survives the initial window: a legitimate operation can run the whole
+    // station operation budget (user-tunable up to 120s).
     await vi.advanceTimersByTimeAsync(60_000);
+    expect(screen.getByText('Switching to On…')).toBeInTheDocument();
+
+    // Past the hard pending-age cap the note expires even though the busy
+    // flag never clears: a wedged binding's commit is never coming.
+    await vi.advanceTimersByTimeAsync(90_000);
     await vi.waitFor(() => expect(screen.queryByText('Switching to On…')).not.toBeInTheDocument());
   });
 

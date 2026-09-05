@@ -171,7 +171,7 @@ export class StationStore {
 
   readonly powerFeedback = new PowerFeedbackRegistry((next) => {
     this.powerFeedbackMap = next;
-  });
+  }, (address) => this.stationBusy(address));
   private scanTimer = new ScanTimer((seconds) => {
     this.scanElapsed = seconds;
   });

@@ -1,9 +1,20 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+
+const backend = vi.hoisted(() => ({
+  GetLanguage: vi.fn(),
+  SetLanguage: vi.fn()
+}));
+vi.mock('./backend', () => backend);
 import {
-  languagePreference, locale, localeFromLanguages, setLanguagePreference, setLocale, t
+  languagePreference, locale, localeFromLanguages, onLocaleApplied,
+  saveLanguagePreference, setLanguagePreference, setLocale, t
 } from './i18n.svelte';
 
-afterEach(() => setLanguagePreference('system'));
+afterEach(() => {
+  vi.useRealTimers();
+  vi.resetAllMocks();
+  setLanguagePreference('system');
+});
 
 describe('i18n', () => {
   it('detects Simplified Chinese from the system language list', () => {
@@ -34,5 +45,44 @@ describe('i18n', () => {
     setLocale('en');
     expect(t('Settings')).toBe('Settings');
     expect(t('raw {value}', { value: '0x0B' })).toBe('raw 0x0B');
+  });
+});
+
+describe('language persistence', () => {
+  it('bounds a hung SetLanguage binding and reports the failed save', async () => {
+    vi.useFakeTimers();
+    backend.SetLanguage.mockReturnValue(new Promise(() => {}));
+
+    const save = saveLanguagePreference('zh-CN');
+    await vi.advanceTimersByTimeAsync(10_000);
+    const result = await save;
+
+    if (result.saved) {
+      throw new Error('expected the hung language save to fail');
+    }
+    expect(String(result.error)).toContain('Language save timed out');
+    // The timed-out save reverted the applied preference; a later save must
+    // still run instead of queueing forever behind the hung call.
+    backend.SetLanguage.mockResolvedValue(undefined);
+    const retry = await saveLanguagePreference('zh-CN');
+    expect(retry.saved).toBe(true);
+    expect(backend.SetLanguage).toHaveBeenCalledWith('zh-CN');
+  });
+});
+
+describe('applied-locale notifications', () => {
+  it('notifies subscribers when the applied locale actually changes', () => {
+    const applied: string[] = [];
+    const stop = onLocaleApplied((next) => applied.push(next));
+
+    setLanguagePreference('zh-CN');
+    // Re-applying the same preference or an identical locale stays silent.
+    setLanguagePreference('zh-CN');
+    setLocale('zh-CN');
+
+    stop();
+    setLanguagePreference('system');
+
+    expect(applied).toEqual(['zh-CN']);
   });
 });
