@@ -25,6 +25,30 @@ function createSetting(getter: () => Promise<number>, setter: (value: number) =>
 }
 
 describe('AsyncSetting', () => {
+  it.each(['resolved', 'rejected'] as const)('preserves a newer edit while an older rollback read is %s', async (outcome) => {
+    let persisted = 5;
+    let finishRollback!: () => void;
+    const getter = vi.fn().mockResolvedValueOnce(5).mockImplementationOnce(() =>
+      new Promise<number>((resolve, reject) => {
+        finishRollback = () => outcome === 'resolved' ? resolve(5) : reject(new Error('read failed'));
+      })
+    );
+    const setter = vi.fn(async (value: number) => {
+      if (value === 10) throw new Error('first save failed');
+      persisted = value;
+    });
+    const { setting } = createSetting(getter, setter);
+    await setting.load();
+    const first = setting.change(10);
+    await vi.waitFor(() => expect(getter).toHaveBeenCalledTimes(2));
+    const second = setting.change(20);
+    finishRollback();
+    await Promise.all([first, second]);
+    expect(persisted).toBe(20);
+    expect(setting.value).toBe(20);
+    expect(setting.error).toBeNull();
+    expect(setting.busy).toBe(false);
+  });
   it('marks a load busy and coalesces overlapping retries', async () => {
     const pending = deferred<number>();
     const getter = vi.fn(() => pending.promise);

@@ -155,15 +155,24 @@ export class AsyncSetting<T> {
           // is actually persisted, not to an older local snapshot.
           try {
             const persisted = await withTimeout(this.options.getter(), 'reading the setting', this.timeoutMs);
-            this.value = this.options.map ? this.options.map(persisted) : persisted;
-            this.error = null;
+            // The compensating read is part of the serialized save, so a
+            // newer edit can be queued while it is pending. That edit already
+            // owns the optimistic value; applying this older snapshot after
+            // the await would make the control visibly jump back and leave it
+            // disagreeing with the save that is about to run.
+            if (revision === this.saveRevision) {
+              this.value = this.options.map ? this.options.map(persisted) : persisted;
+              this.error = null;
+            }
           } catch {
             // The compensating re-read failed as well, so the rolled-back value
             // may not match the backend. Drop the value so the template's
             // error branch renders with the Retry action instead of silently
             // showing a possibly stale value; retrying the load recovers it.
-            this.value = null;
-            this.error = backendCopy(String(error));
+            if (revision === this.saveRevision) {
+              this.value = null;
+              this.error = backendCopy(String(error));
+            }
           }
           pushToast(withDetail(this.options.saveMessage, backendCopy(String(error))));
           return;

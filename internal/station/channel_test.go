@@ -139,6 +139,9 @@ func TestSetStationChannelRejectsVisibleConflictBeforeWrite(t *testing.T) {
 	if !errors.Is(err, ErrChannelConflict) {
 		t.Fatalf("SetStationChannel() error = %v, want ErrChannelConflict", err)
 	}
+	if !strings.Contains(err.Error(), "LHB-OTHER") {
+		t.Fatalf("conflict omitted the factory name of the station without an alias: %v", err)
+	}
 }
 
 func TestSetStationChannelAlreadyAtFreshTargetIsNoOp(t *testing.T) {

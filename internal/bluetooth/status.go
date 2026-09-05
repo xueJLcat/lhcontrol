@@ -613,9 +613,13 @@ func FetchInitialPowerStateContext(ctx context.Context, station *BaseStation) er
 		return err
 	}
 
+	// Discovery may have run as part of the connection above. Read the
+	// metadata outcome only after it completes so a recovered discovery can
+	// clear an older metadata error instead of reporting that stale error as
+	// part of this initial read.
+	metadataReadErr := station.metadataReadError
 	var powerReadErr error
 	var channelReadErr error
-	metadataReadErr := station.metadataReadError
 	powerReadCompleted := false
 	if station.Capabilities.PowerRead {
 		log.Printf("Bluetooth: FetchInitialPowerState proceeding to read state for %s.", station.Name)
