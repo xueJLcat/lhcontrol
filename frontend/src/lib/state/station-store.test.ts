@@ -87,6 +87,36 @@ beforeEach(() => {
 });
 
 describe('StationStore projection settings', () => {
+  it('discards a watchdog-abandoned scan without needing a later poll', async () => {
+    vi.useFakeTimers();
+    store = new StationStore(createUi());
+    store.startupPending = false;
+    const scan = deferred<ReturnType<typeof createStation>[]>();
+    backend.ScanAndFetchStations.mockReturnValueOnce(scan.promise);
+    const pending = store.startScan();
+    await vi.advanceTimersByTimeAsync(360_000);
+    expect(store.globalOperation).toBe('idle');
+    store.stations = [createStation({ name: 'CURRENT' })];
+    scan.resolve([createStation({ name: 'OBSOLETE' })]);
+    await pending;
+    expect(store.stations[0].name).toBe('CURRENT');
+  });
+
+  it('releases a completed local scan when an external epoch supersedes its final status read', async () => {
+    store = new StationStore(createUi());
+    store.startupPending = false;
+    const status = deferred<{ state: string; found: number; warnings: string[] }>();
+    backend.GetScanStatus.mockReturnValueOnce(status.promise);
+    const pending = store.startScan();
+    await vi.waitFor(() => expect(backend.GetScanStatus).toHaveBeenCalledOnce());
+    store.externalScan.handleStarted({ id: 1 });
+    status.resolve({ state: 'completed', found: 1, warnings: [] });
+    await pending;
+    expect(store.globalOperation).toBe('idle');
+    expect(store.externalScanning).toBe(true);
+    await store.externalScan.handleCompleted({ id: 1, stations: [createStation()] });
+    expect(store.scanningActive).toBe(false);
+  });
   it('refreshes derived station fields without performing a Bluetooth status read', async () => {
     store = new StationStore(createUi());
     store.startupPending = false;

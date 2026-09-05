@@ -12,6 +12,13 @@ function station(overrides: Partial<StationInfo> = {}): StationInfo {
 }
 
 describe('ChannelMap', () => {
+  it('does not report operationally stale duplicate channels as a confirmed conflict', () => {
+    render(ChannelMap, { props: {
+      stations: [station(), station({ name: 'LHB-B', address: 'BB', channelOperationallyFresh: false })],
+      onSelect: vi.fn()
+    } });
+    expect(screen.getByRole('button', { name: /CH 3/ })).not.toHaveClass('conflict');
+  });
   it('renders free channels as disabled cells and occupied channels as actionable', () => {
     render(ChannelMap, { props: { stations: [station()], onSelect: vi.fn() } });
     expect(screen.getByRole('button', { name: 'CH 1 — free' })).toBeDisabled();

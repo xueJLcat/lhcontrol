@@ -106,7 +106,7 @@ describe('App asynchronous operations', () => {
     })).mockResolvedValue(false);
     render(App);
 
-    await vi.advanceTimersByTimeAsync(15_000);
+    await vi.advanceTimersByTimeAsync(5_000);
     expect(api.CheckAllStationStatuses).not.toHaveBeenCalled();
     resolveStartupScan(false);
 
@@ -522,6 +522,7 @@ describe('App asynchronous operations', () => {
     api.GetCurrentStationInfo.mockResolvedValue([createStation({ name: 'LHB-RECOVERED' })]);
     render(App);
     await screen.findByText('LHB-TEST');
+    await vi.waitFor(() => expect(screen.getByRole('button', { name: 'Scan' })).toBeEnabled());
     runtime.handlers.get('external-scan-started')?.(externalScanEvent(1));
     api.GetScanStatus.mockReset();
     api.GetScanStatus.mockRejectedValueOnce(new Error('temporary scan status failure'))
@@ -700,6 +701,7 @@ describe('App asynchronous operations', () => {
     api.GetCurrentStationInfo.mockResolvedValue([createStation({ name: 'LHB-STOP-STATUS-RECOVERED' })]);
     render(App);
     await screen.findByText('LHB-TEST');
+    await vi.waitFor(() => expect(screen.getByRole('button', { name: 'Scan' })).toBeEnabled());
     api.GetScanStatus.mockRejectedValueOnce(new Error('temporary scan status failure'))
       .mockResolvedValue({ state: 'cancelled', found: 0, warnings: [] });
 
@@ -867,6 +869,35 @@ describe('App asynchronous operations', () => {
     expect(screen.getByRole('status')).toHaveTextContent('Scan stopped.');
   });
 
+  it('allows a long configured scan to finish without an automatic stop', async () => {
+    vi.useFakeTimers();
+    let finish!: (stations: StationInfo[]) => void;
+    api.ScanAndFetchStations.mockReturnValue(new Promise((resolve) => { finish = resolve; }));
+    api.IsScanning.mockResolvedValueOnce(false).mockResolvedValue(true);
+    render(App);
+    await vi.waitFor(() => expect(api.ScanAndFetchStations).toHaveBeenCalledOnce());
+    await vi.advanceTimersByTimeAsync(150_000);
+    expect(api.StopScan).not.toHaveBeenCalled();
+    finish([createStation()]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(screen.getByRole('button', { name: 'Scan' })).toBeEnabled();
+  });
+
+  it('rejects a late scan snapshot after watchdog recovery even with polling disabled', async () => {
+    vi.useFakeTimers();
+    api.GetStatusPollingEnabled.mockResolvedValue(false);
+    let finish!: (stations: StationInfo[]) => void;
+    api.ScanAndFetchStations.mockReturnValue(new Promise((resolve) => { finish = resolve; }));
+    api.IsScanning.mockResolvedValue(false);
+    render(App);
+    await vi.waitFor(() => expect(api.ScanAndFetchStations).toHaveBeenCalledOnce());
+    await vi.advanceTimersByTimeAsync(360_000);
+    expect(screen.getByRole('button', { name: 'Scan' })).toBeEnabled();
+    finish([createStation({ name: 'OBSOLETE-SCAN' })]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(screen.queryByText('OBSOLETE-SCAN')).not.toBeInTheDocument();
+  });
+
   it('force-settles a wedged local scan via the watchdog instead of staying stuck', async () => {
     vi.useFakeTimers();
     // The scan promise never settles (the backend call is wedged behind an
@@ -884,7 +915,7 @@ describe('App asynchronous operations', () => {
     expect(screen.getByRole('status')).toHaveTextContent('Scanning for base stations...');
 
     // Cross the watchdog window; it must request a stop of the wedged scan.
-    await vi.advanceTimersByTimeAsync(90_000);
+    await vi.advanceTimersByTimeAsync(360_000);
     await vi.waitFor(() => expect(api.StopScan).toHaveBeenCalledOnce());
 
     // The next recheck observes no scan running and force-settles the state,
@@ -909,7 +940,7 @@ describe('App asynchronous operations', () => {
     render(App);
     await vi.waitFor(() => expect(api.ScanAndFetchStations).toHaveBeenCalledOnce());
 
-    await vi.advanceTimersByTimeAsync(90_000);
+    await vi.advanceTimersByTimeAsync(360_000);
     await vi.waitFor(() => expect(api.StopScan).toHaveBeenCalledOnce());
     await vi.advanceTimersByTimeAsync(5_000);
     expect(await screen.findByRole('button', { name: 'Scan' })).toBeEnabled();
@@ -940,7 +971,7 @@ describe('App asynchronous operations', () => {
     render(App);
     await vi.waitFor(() => expect(api.ScanAndFetchStations).toHaveBeenCalledOnce());
 
-    await vi.advanceTimersByTimeAsync(90_000);
+    await vi.advanceTimersByTimeAsync(360_000);
     await vi.waitFor(() => expect(api.StopScan).toHaveBeenCalledOnce());
     await vi.advanceTimersByTimeAsync(5_000);
     expect(await screen.findByRole('button', { name: 'Scan' })).toBeEnabled();
@@ -951,7 +982,7 @@ describe('App asynchronous operations', () => {
     resolveFirstScan([]);
     await vi.advanceTimersByTimeAsync(0);
 
-    await vi.advanceTimersByTimeAsync(90_000);
+    await vi.advanceTimersByTimeAsync(360_000);
     await vi.waitFor(() => expect(api.StopScan).toHaveBeenCalledTimes(2));
     await vi.advanceTimersByTimeAsync(5_000);
     expect(await screen.findByRole('button', { name: 'Scan' })).toBeEnabled();

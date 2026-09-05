@@ -33,7 +33,10 @@ const STOP_RECHECK_MAX_ATTEMPTS = 10;
 // longest configured scan plus the read-phase budgets — the watchdog requests
 // a backend stop and reconciles the local state instead of waiting on the
 // hung promise indefinitely.
-const SCAN_WATCHDOG_DELAY_MS = 90000;
+// Cover the maximum configured scan (30s), read phase (120s), read join
+// allowance (60s + 10s), foreground drain (45s), initialization (15s), and
+// watcher startup/teardown. The former 90s limit cancelled valid long scans.
+const SCAN_WATCHDOG_DELAY_MS = 360_000;
 const SCAN_WATCHDOG_RECHECK_DELAY_MS = 5000;
 const SCAN_WATCHDOG_MAX_ATTEMPTS = 24;
 // The backend bounds every StopScan wait (30s in the station layer), so a
@@ -87,6 +90,9 @@ export interface StationScanHost {
 export class StationScanController {
   private stopRecheckTimer: ReturnType<typeof setTimeout> | null = null;
   private scanWatchdogTimer: ReturnType<typeof setTimeout> | null = null;
+  // Cleanup ownership is independent of snapshot epochs: an external scan
+  // can supersede our result while our final status query is still settling.
+  private activeLocalScanEpoch: number | null = null;
 
   constructor(private host: StationScanHost) {}
 
@@ -185,15 +191,22 @@ export class StationScanController {
         return;
       }
     }
+    // Revoke the abandoned promise before unlocking controls, even if no
+    // later scan or periodic poll ever advances the list revision.
+    host.gates.beginScanEpoch();
+    host.listRevisions.next();
+    this.activeLocalScanEpoch = null;
+    const ownsStatus = host.gates.canCommitStatus(statusOperation);
+    const recoveryStatus = ownsStatus ? host.gates.beginStatusOperation() : null;
     host.globalOperation = 'idle';
     host.stoppingScan = false;
+    host.maybeEndScanTimer();
     const summary = await this.completedScanSummary();
     // Claim the status line before writing: while the probe was awaiting the
     // backend an auto-sleep event can take the line (its message must win),
     // and the hung scan promise settling late must not overwrite this outcome
     // with its own status write.
-    if (!host.disposed && host.gates.canCommitStatus(statusOperation)) {
-      host.gates.beginStatusOperation();
+    if (recoveryStatus !== null && host.gates.canCommitStatus(recoveryStatus)) {
       host.statusMessage = summary ?? t('Scan stopped.');
     }
     host.maybeEndScanTimer();
@@ -441,6 +454,7 @@ export class StationScanController {
     const statusOperation = this.host.gates.beginStatusOperation();
     this.host.beginScanTimer();
     const operationEpoch = this.host.gates.beginScanEpoch();
+    this.activeLocalScanEpoch = operationEpoch;
     this.armScanWatchdog(operationEpoch, statusOperation);
     const revision = this.host.listRevisions.next();
     this.host.statusMessage = t('Scanning for base stations...');
@@ -508,11 +522,13 @@ export class StationScanController {
       }
     } finally {
       // The watchdog can force-settle this scan when the backend hangs, and
-      // a newer scan may start before this late promise resolves. The epoch
-      // check keeps the settled scan's cleanup from clearing a newer owner's
+      // a newer scan may start before this late promise resolves. The run
+      // identity keeps the settled scan's cleanup from clearing a newer owner's
       // scanning state — including its watchdog, which is the only recovery
-      // left when the newer scan wedges the same way.
-      if (!this.host.disposed && this.host.gates.canCommitOperation(operationEpoch)) {
+      // left when the newer scan wedges the same way. An external snapshot
+      // epoch alone must not prevent this local run from cleaning up.
+      if (!this.host.disposed && this.activeLocalScanEpoch === operationEpoch) {
+        this.activeLocalScanEpoch = null;
         this.cancelScanWatchdog();
         if (this.host.globalOperation === 'scanning') this.host.globalOperation = 'idle';
         if (!this.host.stopRequestPending && !this.host.externalScanning && this.host.stoppingScan) {

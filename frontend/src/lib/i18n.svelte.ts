@@ -5,6 +5,7 @@ export type LanguagePreference = 'system' | Locale;
 export type MessageValues = Record<string, string | number>;
 
 const zhCN = {
+  'Backend status read timed out': '后端状态读取超时',
   'Scanning and refresh': '扫描与刷新',
   'Scan when the application starts': '应用启动时扫描',
   'Discover nearby stations automatically after startup.': '应用启动后自动发现附近的基站。',

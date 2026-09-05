@@ -98,6 +98,33 @@ describe('FleetState channel memory', () => {
 });
 
 describe('FleetState channel conflict risk', () => {
+  it('clears both conflict markers when a peer changes channel in a partial update', () => {
+    const fleet = new FleetState();
+    try {
+      fleet.commit([
+        createStation({ address: 'AA', channel: 3, channelConflict: true }),
+        createStation({ address: 'BB', channel: 3, channelConflict: true })
+      ]);
+      fleet.merge([createStation({ address: 'BB', channel: 4 })]);
+      expect(fleet.stations.every((station) => !station.channelConflict)).toBe(true);
+      expect(fleet.conflictDetails).toBe('');
+    } finally { fleet.stopChannelMemoryExpiry(); }
+  });
+
+  it('clears conflict markers when the peer observation expires between polls', async () => {
+    vi.useFakeTimers();
+    const fleet = new FleetState();
+    try {
+      fleet.commit([
+        createStation({ address: 'AA', channel: 3, channelConflict: true }),
+        createStation({ address: 'BB', channel: 3, channelConflict: true,
+          channelOperationalFreshUntil: new Date(Date.now() + 1000).toISOString() })
+      ]);
+      await vi.advanceTimersByTimeAsync(1001);
+      expect(fleet.stations.every((station) => !station.channelConflict)).toBe(true);
+      expect(fleet.conflictDetails).toBe('');
+    } finally { fleet.stopChannelMemoryExpiry(); vi.useRealTimers(); }
+  });
   it('treats a display-fresh but operationally stale peer channel as unknown rather than occupied', () => {
     const fleet = new FleetState();
     fleet.replace([

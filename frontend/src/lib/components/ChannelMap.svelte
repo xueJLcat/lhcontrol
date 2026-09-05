@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { StationInfo } from '../types';
-  import { hasCurrentChannel, stateClass, stateLabel } from '../station';
+  import { hasCurrentChannel, hasOperationallyCurrentChannel, stateClass, stateLabel } from '../station';
   import { t } from '../i18n.svelte';
 
   let {
@@ -48,10 +48,15 @@
     return map;
   }, new Map<number, Occupant[]>()));
 
-  const conflictChannels = $derived(new Set(
-    stations.filter((station) => station.channelConflict && hasCurrentChannel(station))
-      .map((station) => station.channel)
-  ));
+  const conflictChannels = $derived.by(() => {
+    const counts = new Map<number, number>();
+    for (const station of stations) {
+      if (hasOperationallyCurrentChannel(station)) {
+        counts.set(station.channel, (counts.get(station.channel) ?? 0) + 1);
+      }
+    }
+    return new Set([...counts].filter(([, count]) => count > 1).map(([channel]) => channel));
+  });
 
   function cellLabel(channel: number, occupants: Occupant[]): string {
     if (!occupants.length) return t('CH {channel} — free', { channel });
@@ -80,7 +85,7 @@
         class="cm-cell"
         class:occupied={occupants.length > 0}
         class:stale={occupants.length > 0 && occupants.every((occupant) => !occupant.current)}
-        class:conflict={occupants.filter((occupant) => occupant.current).length > 1 || conflictChannels.has(channel)}
+        class:conflict={conflictChannels.has(channel)}
         class:selected={selectedAddress !== null && occupants.some((occupant) => occupant.address === selectedAddress)}
         style:--cm={occupants.length ? `var(--color-${occupants[0].styleKey}, var(--text-muted))` : null}
         style:--cm-deep={occupants.length ? `var(--color-${occupants[0].styleKey}-deep, var(--text-secondary))` : null}

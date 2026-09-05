@@ -324,6 +324,7 @@ describe('App asynchronous operations', () => {
 
     render(App);
     await screen.findByText('LHB-TEST');
+    await vi.waitFor(() => expect(screen.getByRole('button', { name: 'Scan' })).toBeEnabled());
     runtime.handlers.get('external-scan-started')?.(externalScanEvent(1));
     runtime.handlers.get('external-scan-failed')?.(externalScanEvent(1, { error: 'old external failure' }));
     await waitFor(() => expect(api.GetCurrentStationInfo).toHaveBeenCalledOnce());

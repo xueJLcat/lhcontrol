@@ -18,7 +18,8 @@ export function hasCurrentChannel(station: StationInfo): boolean {
 }
 
 export function hasOperationallyCurrentChannel(station: StationInfo): boolean {
-  return station.isPresent && station.scanFresh && station.channelOperationallyFresh && station.channel > 0;
+  return station.isPresent && !station.presenceUncertain && station.missedScans === 0 &&
+    station.scanFresh && station.channelOperationallyFresh && station.channel > 0;
 }
 
 export function hasVerifiedPowerState(station: StationInfo, state: PowerTarget): boolean {

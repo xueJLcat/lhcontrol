@@ -123,8 +123,7 @@ export class FleetState {
   }
 
   replace(stations: StationInfo[]) {
-    this.stations = stations;
-    this.scheduleOperationalFreshnessExpiry();
+    this.commit(stations);
   }
 
   commit(updated: StationInfo[]) {
@@ -135,8 +134,19 @@ export class FleetState {
     const deduped = new Map(
       updated.filter((station) => Boolean(station?.address)).map((station) => [station.address, station])
     );
+    // A single-station response cannot update the peer's old conflict flag.
+    // Recompute this fleet property after every merge and freshness expiry,
+    // using the same operational evidence as channel-change validation.
+    const counts = new Map<number, number>();
+    for (const station of deduped.values()) {
+      if (hasOperationallyCurrentChannel(station)) {
+        counts.set(station.channel, (counts.get(station.channel) ?? 0) + 1);
+      }
+    }
     const previousByAddress = new Map(this.stations.map((station) => [station.address, station]));
     this.stations = [...deduped.values()].map((station) => {
+      const conflict = hasOperationallyCurrentChannel(station) && (counts.get(station.channel) ?? 0) > 1;
+      if (station.channelConflict !== conflict) station = this.patch(station, { channelConflict: conflict });
       const previous = previousByAddress.get(station.address);
       return previous && sameStationInfo(previous, station) ? previous : station;
     });
@@ -242,8 +252,7 @@ export class FleetState {
   hasUnknownVisibleChannelExcluding(selectedAddress: string | null): boolean {
     return this.stations.some(
       (station) => station.isPresent && station.address !== selectedAddress &&
-        (station.presenceUncertain || !station.scanFresh ||
-          !station.channelOperationallyFresh || station.channel === 0)
+        !hasOperationallyCurrentChannel(station)
     );
   }
 

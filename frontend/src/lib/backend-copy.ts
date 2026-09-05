@@ -8,6 +8,7 @@ import { locale, t, type TranslationKey } from './i18n.svelte';
 // are never lost.
 
 const EXACT: ReadonlyMap<string, TranslationKey> = new Map([
+  ['Backend status read timed out', 'Backend status read timed out'],
   // Bulk skip reasons (internal/station/types.go Reason* constants).
   ['bulk operation timed out', 'bulk operation timed out'],
   ['station operation timed out', 'station operation timed out'],

@@ -14,8 +14,23 @@ function call<T>(invoke: () => T): Promise<Awaited<T>> {
   }
 }
 
+// Snapshot queries perform no BLE work. Bound their bridge wait centrally so
+// scan recovery, external events and post-command reconciliation cannot hang
+// behind a lost Wails response. A timeout rejects; it never fabricates an idle
+// scan or empty fleet. Callers retain their own conservative fallback policy.
+function read<T>(invoke: () => Promise<T>, timeoutMs = 10_000): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('Backend status read timed out')), timeoutMs);
+    void call(invoke).then(
+      (value) => { clearTimeout(timer); resolve(value); },
+      (error) => { clearTimeout(timer); reject(error); }
+    );
+  });
+}
+
 export function CheckAllStationStatuses(): Promise<station.StationInfo[]> {
-  return call(() => bindings.CheckAllStationStatuses());
+  // BLE refresh may use 120s plus adapter initialization and worker drain.
+  return read(() => bindings.CheckAllStationStatuses(), 180_000);
 }
 
 export function CancelBulkPower(): Promise<void> {
@@ -163,11 +178,11 @@ export function GetStatusPollingEnabled(): Promise<boolean> {
 }
 
 export function GetCurrentStationInfo(): Promise<station.StationInfo[]> {
-  return call(() => bindings.GetCurrentStationInfo());
+  return read(() => bindings.GetCurrentStationInfo());
 }
 
 export function GetScanStatus(): Promise<station.ScanStatus> {
-  return call(() => bindings.GetScanStatus());
+  return read(() => bindings.GetScanStatus());
 }
 
 export function IdentifyStation(address: string): Promise<void> {
@@ -175,7 +190,7 @@ export function IdentifyStation(address: string): Promise<void> {
 }
 
 export function IsScanning(): Promise<boolean> {
-  return call(() => bindings.IsScanning());
+  return read(() => bindings.IsScanning());
 }
 
 export function ListBluetoothAdapters(): Promise<bluetooth.AdapterInfo[]> {
