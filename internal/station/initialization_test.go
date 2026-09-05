@@ -206,6 +206,48 @@ func TestStatusRecoveryRoundSurvivesHungAdapterInitialization(t *testing.T) {
 	}
 }
 
+// TestAdapterCleanupRunsOncePerUnavailabilityPeriod pins the debounce
+// semantics of markBluetoothUnavailable: the fleet-wide connection cleanup is
+// issued once per adapter-unavailability period, not once per observer. The
+// retry cooldown alone cannot provide that — an observer arriving after the
+// cooldown expired but before a re-initialization succeeded would re-run the
+// bounded cleanup even though no new connection can exist. Only a successful
+// adapter enable ends the period and re-arms the cleanup.
+func TestAdapterCleanupRunsOncePerUnavailabilityPeriod(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	manager.adapterCleanupWait = 5 * time.Millisecond
+	var cleanupCalls atomic.Int32
+	manager.invalidateAllConnections = func() error {
+		cleanupCalls.Add(1)
+		return nil
+	}
+
+	// The first observer of the adapter loss issues the fleet cleanup.
+	manager.observeBluetoothError(tinybluetooth.ErrRadioNotAvailable)
+	if got := cleanupCalls.Load(); got != 1 {
+		t.Fatalf("fleet cleanup runs = %d, want 1 after the first observer", got)
+	}
+
+	// A late observer, recorded after the retry cooldown already expired but
+	// before any re-initialization attempt could succeed, must not re-run it.
+	manager.initializeMutex.Lock()
+	manager.nextInitializeAt = time.Now().Add(-time.Second)
+	manager.initializeMutex.Unlock()
+	manager.observeBluetoothError(tinybluetooth.ErrRadioNotAvailable)
+	if got := cleanupCalls.Load(); got != 1 {
+		t.Fatalf("fleet cleanup runs = %d, want it debounced while no re-initialization succeeded", got)
+	}
+
+	// A successful adapter initialization ends the period: the next adapter
+	// loss must issue a fresh cleanup for the connections it can affect.
+	manager.completeInitializeAttempt(make(chan struct{}), nil)
+	manager.observeBluetoothError(tinybluetooth.ErrRadioNotAvailable)
+	if got := cleanupCalls.Load(); got != 2 {
+		t.Fatalf("fleet cleanup runs after recovery = %d, want a fresh cleanup for the new period", got)
+	}
+}
+
 func TestUnsupportedPowerReadDoesNotHideChannelRecovery(t *testing.T) {
 	manager := NewManager(config.NewConfig())
 	manager.statusRetryBase = time.Hour

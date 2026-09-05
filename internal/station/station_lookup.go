@@ -131,16 +131,45 @@ func powerReadSucceeded(err error) bool {
 	return errors.As(err, &initialErr) && initialErr.Power == nil
 }
 
+// structuredPowerErrorProvesDeadLink reports whether a verification read
+// failure carries unambiguous dead-link evidence: a structured power read
+// error of exactly the class the power branch of recordObservedReadResult
+// answers with a disconnect plus backoff. Callers that proceed to another
+// Bluetooth step on the same link use this to avoid counting that one dead
+// link twice within a single attempt.
+func structuredPowerErrorProvesDeadLink(err error) bool {
+	var initialErr *bluetooth.InitialReadError
+	if err == nil || !errors.As(err, &initialErr) || initialErr.Power == nil {
+		return false
+	}
+	powerErr := initialErr.Power
+	if bluetooth.IsUnsupportedCapabilityError(powerErr) || bluetooth.IsDeviceValueError(powerErr) {
+		return false
+	}
+	if (errors.Is(powerErr, context.DeadlineExceeded) || errors.Is(powerErr, context.Canceled)) &&
+		!bluetooth.RequiresReconnect(powerErr) {
+		return false
+	}
+	if bluetooth.IsProtocolRejection(powerErr) {
+		return false
+	}
+	return true
+}
+
 // recordPowerVerificationResult tracks the power and channel observations made
 // by a cache verification independently. Metadata errors are deliberately
 // excluded because a connected fetch can surface an old discovery error rather
-// than a fresh metadata attempt.
+// than a fresh metadata attempt. It reports whether the power observation
+// proved the link dead (the disconnect-plus-backoff class), so a caller that
+// continues with another Bluetooth step on the same link does not re-count
+// that failure.
 func (m *Manager) recordPowerVerificationResult(
 	station *bluetooth.BaseStation,
 	address string,
 	before bluetooth.BaseStationSnapshot,
 	err error,
-) {
+) bool {
+	deadLinkProven := structuredPowerErrorProvesDeadLink(err)
 	// Non-blocking snapshot: this runs while the caller's operation budget is
 	// already spent on the read itself; a station lock held by a transport
 	// call that ignores cancellation must not hang the bookkeeping (and with
@@ -160,7 +189,7 @@ func (m *Manager) recordPowerVerificationResult(
 		// link and records it once. Recording it here as well would count
 		// one dead link twice, doubling the exponential backoff and
 		// abandoning absent stations early.
-		return
+		return false
 	}
 	if initialErr != nil {
 		powerErr = initialErr.Power
@@ -177,4 +206,5 @@ func (m *Manager) recordPowerVerificationResult(
 		channelObserved,
 		channelErr,
 	)
+	return deadLinkProven
 }

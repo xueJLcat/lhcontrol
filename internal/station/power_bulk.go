@@ -44,9 +44,15 @@ func (m *Manager) setAllStationsPower(state string) error {
 		// A timeout stop interrupted an attempt in flight and is not a benign
 		// skip: a station whose own budget expired while the batch stayed
 		// healthy carries no top-level error, so the error-only contract would
-		// otherwise report the whole batch as successful.
+		// otherwise report the whole batch as successful. A busy skip is the
+		// same class of non-benign outcome: the join budget abandoned a worker
+		// whose command outcome is unknown, or the station's lock was wedged
+		// so no command was ever attempted — either way the user-requested
+		// batch did not reach that station.
 		if !stationResult.Success &&
-			(stationResult.Reason == ReasonStationOperationTimeout || stationResult.Reason == ReasonBulkOperationTimeout) {
+			(stationResult.Reason == ReasonStationOperationTimeout ||
+				stationResult.Reason == ReasonBulkOperationTimeout ||
+				stationResult.Reason == ReasonStationBusy) {
 			operationErrors = append(operationErrors, fmt.Errorf("%s: %s", stationResult.Address, stationResult.Reason))
 		}
 	}
@@ -533,9 +539,10 @@ func (m *Manager) runBulkPowerWorker(ctx context.Context, semaphore chan struct{
 		m.reconcileMetadataReadResult(stationResult.Address, metadataReadRevision, s.Snapshot())
 	}()
 	cachedSkip := false
+	verificationDeadLink := false
 	workerErr := runSafely("bulk power worker", func() error {
 		var applyErr error
-		cachedSkip, applyErr = m.applyBulkPowerCommand(operationContext, s, target, &stationResult)
+		cachedSkip, verificationDeadLink, applyErr = m.applyBulkPowerCommand(operationContext, s, target, &stationResult)
 		return applyErr
 	})
 	contextAffected := false
@@ -545,7 +552,7 @@ func (m *Manager) runBulkPowerWorker(ctx context.Context, semaphore chan struct{
 		}
 		// A context interruption owns the entry entirely and skips the
 		// post-error bookkeeping the other outcomes share.
-		if m.finalizeBulkPowerWorkerOutcome(ctx, s, &stationResult, workerErr) {
+		if m.finalizeBulkPowerWorkerOutcome(ctx, s, &stationResult, workerErr, verificationDeadLink) {
 			*entry = stationResult
 			return contextAffected
 		}
@@ -566,8 +573,10 @@ func (m *Manager) runBulkPowerWorker(ctx context.Context, semaphore chan struct{
 // applyBulkPowerCommand performs one station's cached-state verification,
 // capability gate, and power write for a bulk attempt. It mutates the result
 // incrementally so a recovered panic still reports the fields already settled,
-// and reports whether the outcome was a cached skip that never communicated.
-func (m *Manager) applyBulkPowerCommand(operationContext context.Context, s *bluetooth.BaseStation, target bluetooth.PowerState, stationResult *BulkPowerStationResult) (bool, error) {
+// reports whether the outcome was a cached skip that never communicated, and
+// reports whether the verification read already proved the link dead (so the
+// failure bookkeeping of a later step on the same link must not re-count it).
+func (m *Manager) applyBulkPowerCommand(operationContext context.Context, s *bluetooth.BaseStation, target bluetooth.PowerState, stationResult *BulkPowerStationResult) (bool, bool, error) {
 	snapshot := s.Snapshot()
 	stationResult.Address = snapshot.Address
 	stationResult.Name = snapshot.Name
@@ -575,8 +584,9 @@ func (m *Manager) applyBulkPowerCommand(operationContext context.Context, s *blu
 	if disposition == cachedPowerBooting {
 		stationResult.Skipped = true
 		stationResult.Reason = ReasonStationBooting
-		return true, nil
+		return true, false, nil
 	}
+	verificationProvedDeadLink := false
 	if disposition == cachedPowerAtTarget || !isOperationallyFresh(snapshot.LastPowerReadAt, time.Now()) {
 		readContext, cancelRead := context.WithTimeout(operationContext, m.initialReadTimeoutDuration())
 		readErr := m.bluetoothOps.fetchInitialPowerState(readContext, s)
@@ -589,19 +599,19 @@ func (m *Manager) applyBulkPowerCommand(operationContext context.Context, s *blu
 			// but it cannot invalidate the power value read just beforehand.
 			verifiedDisposition = classifyCachedPower(s.Snapshot(), target, time.Now())
 		}
-		m.recordPowerVerificationResult(s, stationResult.Address, snapshot, readErr)
+		verificationProvedDeadLink = m.recordPowerVerificationResult(s, stationResult.Address, snapshot, readErr)
 		if readSucceeded {
 			switch verifiedDisposition {
 			case cachedPowerBooting:
 				stationResult.Skipped = true
 				stationResult.Reason = ReasonStationBooting
-				return true, nil
+				return true, false, nil
 			case cachedPowerAtTarget:
 				stationResult.Skipped = true
 				stationResult.Success = true
 				stationResult.Confirmed = true
 				stationResult.Reason = ReasonAlreadyAtTarget
-				return true, nil
+				return true, false, nil
 			}
 		}
 	}
@@ -618,7 +628,7 @@ func (m *Manager) applyBulkPowerCommand(operationContext context.Context, s *blu
 		capabilities, err = m.bluetoothOps.ensureCapabilities(discoveryContext, s)
 	}
 	if err != nil {
-		return false, err
+		return false, verificationProvedDeadLink, err
 	}
 	// The station may enter a boot transition while capability
 	// discovery is in flight. Re-evaluate at the final write boundary
@@ -626,17 +636,17 @@ func (m *Manager) applyBulkPowerCommand(operationContext context.Context, s *blu
 	if isFreshBootingPower(s.Snapshot(), time.Now()) {
 		stationResult.Skipped = true
 		stationResult.Reason = ReasonStationBooting
-		return true, nil
+		return true, false, nil
 	}
 	if !capabilities.PowerWrite {
 		stationResult.Skipped = true
 		stationResult.Reason = ReasonUnsupportedCapability
-		return false, nil
+		return false, false, nil
 	}
 	if target == bluetooth.PowerStateStandby && !capabilities.Standby {
 		stationResult.Skipped = true
 		stationResult.Reason = ReasonUnsupportedStandby
-		return false, nil
+		return false, false, nil
 	}
 	var controlResult bluetooth.PowerControlResult
 	controlResult, err = m.bluetoothOps.setPowerState(operationContext, s, target)
@@ -645,19 +655,23 @@ func (m *Manager) applyBulkPowerCommand(operationContext context.Context, s *blu
 	if err == nil {
 		stationResult.Success = true
 	}
-	return false, err
+	return false, verificationProvedDeadLink, err
 }
 
 // finalizeBulkPowerWorkerOutcome classifies a failed bulk attempt into the
 // entry's terminal shape. It reports whether the failure was a context
 // interruption, in which case the entry is complete and needs no further
-// bookkeeping.
-func (m *Manager) finalizeBulkPowerWorkerOutcome(ctx context.Context, s *bluetooth.BaseStation, stationResult *BulkPowerStationResult, workerErr error) bool {
+// bookkeeping. verificationProvedDeadLink suppresses the per-station failure
+// re-count when the attempt's verification read already booked the same dead
+// link (see observePostVerificationBluetoothError).
+func (m *Manager) finalizeBulkPowerWorkerOutcome(ctx context.Context, s *bluetooth.BaseStation, stationResult *BulkPowerStationResult, workerErr error, verificationProvedDeadLink bool) bool {
 	var confirmationErr *bluetooth.PowerConfirmationError
 	switch {
 	case errors.As(workerErr, &confirmationErr):
 		// A possibly-sent command keeps its command-sent outcome even
-		// when shutdown cancelled the confirmation read.
+		// when shutdown cancelled the confirmation read. Its write landed
+		// on a rebuilt connection, so the failed readback counts as a new
+		// observation regardless of an earlier dead-link verification.
 		m.observeStationBluetoothError(s, stationResult.Address, workerErr)
 		stationResult.CommandSent = true
 		stationResult.Success = true
@@ -676,7 +690,7 @@ func (m *Manager) finalizeBulkPowerWorkerOutcome(ctx context.Context, s *bluetoo
 		m.attachBulkPowerStationInfo(stationResult)
 		return true
 	default:
-		m.observeStationBluetoothError(s, stationResult.Address, workerErr)
+		m.observePostVerificationBluetoothError(s, stationResult.Address, workerErr, verificationProvedDeadLink)
 		if bluetooth.IsUnsupportedCapabilityError(workerErr) {
 			// Reason is a closed public contract: classify through the
 			// constants instead of leaking the raw error string.

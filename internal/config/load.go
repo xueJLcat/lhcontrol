@@ -176,7 +176,19 @@ func repairCrossItemValues(
 	}
 	if *initialReadTimeoutSeconds > *stationOperationTimeoutSeconds {
 		if fallbacks.stationOperationTimeout && !fallbacks.initialReadTimeout {
-			*stationOperationTimeoutSeconds = clampInt(*initialReadTimeoutSeconds, MinStationOperationTimeoutSeconds, MaxStationOperationTimeoutSeconds)
+			// The raise must respect the bulk invariant checked above: the
+			// fallback branch runs after that check, so raising the station
+			// operation timeout past the persisted bulk timeout would leave
+			// the loaded state violating bulk >= station for the whole
+			// session — a state no setter can produce (they reject it) and
+			// that starves later bulk entries against their per-station
+			// budgets. Cap the raise at the bulk value; the demote step
+			// below then clamps the initial read to the same bound.
+			*stationOperationTimeoutSeconds = clampInt(
+				min(*initialReadTimeoutSeconds, *bulkPowerTimeoutSeconds),
+				MinStationOperationTimeoutSeconds,
+				MaxStationOperationTimeoutSeconds,
+			)
 		}
 		if *initialReadTimeoutSeconds > *stationOperationTimeoutSeconds {
 			*initialReadTimeoutSeconds = *stationOperationTimeoutSeconds

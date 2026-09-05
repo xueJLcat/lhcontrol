@@ -14,18 +14,19 @@ import (
 func NewManager(cfg *config.Config) *Manager {
 	lifecycleContext, cancelLifecycle := context.WithCancel(context.Background())
 	manager := &Manager{
-		stations:               make(map[string]*bluetooth.BaseStation),
-		config:                 cfg,
-		activeDeviceOperations: make(map[string]activeDeviceOperation),
-		deviceOperationSlots:   make(chan struct{}, 2),
-		statusRetries:          make(map[string]statusRetry),
-		statusRecoveryWake:     make(chan struct{}, 1),
-		statusBusyRetry:        250 * time.Millisecond,
-		scanStatus:             ScanStatus{State: "idle", Warnings: []string{}},
-		initializeBluetooth:    bluetooth.Initialize,
-		shutdownCh:             make(chan struct{}),
-		lifecycleContext:       lifecycleContext,
-		cancelLifecycle:        cancelLifecycle,
+		stations:                 make(map[string]*bluetooth.BaseStation),
+		config:                   cfg,
+		activeDeviceOperations:   make(map[string]activeDeviceOperation),
+		deviceOperationSlots:     make(chan struct{}, 2),
+		statusRetries:            make(map[string]statusRetry),
+		statusRecoveryWake:       make(chan struct{}, 1),
+		statusBusyRetry:          250 * time.Millisecond,
+		scanStatus:               ScanStatus{State: "idle", Warnings: []string{}},
+		initializeBluetooth:      bluetooth.Initialize,
+		invalidateAllConnections: bluetooth.InvalidateAllConnections,
+		shutdownCh:               make(chan struct{}),
+		lifecycleContext:         lifecycleContext,
+		cancelLifecycle:          cancelLifecycle,
 		bluetoothOps: bluetoothOperations{
 			scanForDurationContext: bluetooth.ScanForDurationContext,
 			readPowerStateContext:  bluetooth.ReadPowerStateContext,
@@ -869,6 +870,10 @@ func (m *Manager) completeInitializeAttempt(pending chan struct{}, err error) {
 	} else {
 		m.initializeFailedAt = time.Time{}
 		m.nextInitializeAt = time.Time{}
+		// A successful adapter enable is the only event that lets new
+		// connections exist again, so the next unavailability period must
+		// issue its own fleet cleanup instead of being debounced forever.
+		m.adapterCleanupIssued = false
 	}
 	m.initializeMutex.Unlock()
 	close(pending)
@@ -879,12 +884,16 @@ func (m *Manager) markBluetoothUnavailable(err error) {
 	}
 	m.initializeMutex.Lock()
 	// Debounce: an adapter loss marks every operation that observes it (a
-	// scan release loop reports one per failing station). While the cooldown
-	// from the first mark is still pending, the adapter state cannot change
-	// — ensureReady refuses re-initialization until nextInitializeAt — so the
-	// fleet-wide cleanup already issued for that loss must not be re-issued
-	// for every subsequent observer (each copy pays the same bounded wait).
-	alreadyMarked := bluetooth.IsAdapterUnavailable(m.initializeErr) && time.Now().Before(m.nextInitializeAt)
+	// scan release loop reports one per failing station). Until an
+	// initialization attempt succeeds, no new connection can exist (ensureReady
+	// refuses re-initialization while the recorded failure stands), so the
+	// fleet-wide cleanup already issued for this unavailability period must
+	// not be re-issued for later observers 鈥?including observers arriving
+	// after the retry cooldown expired but before a re-initialization attempt
+	// completed, each copy of which would otherwise pay the same bounded wait
+	// again.
+	alreadyMarked := m.adapterCleanupIssued
+	m.adapterCleanupIssued = true
 	m.initializeErr = err
 	m.initializeFailedAt = time.Now()
 	m.nextInitializeAt = m.initializeFailedAt.Add(m.initializeRetryCooldown())
@@ -898,7 +907,7 @@ func (m *Manager) markBluetoothUnavailable(err error) {
 	// calls are most likely to stall, and this path is invoked synchronously
 	// from scan, refresh, recovery, and bulk workers that must not hang
 	// indefinitely behind a wedged adapter.
-	if cleanupErr := m.runBoundedAdapterCleanup(bluetooth.InvalidateAllConnections); cleanupErr != nil {
+	if cleanupErr := m.runBoundedAdapterCleanup(m.invalidateAllConnections); cleanupErr != nil {
 		log.Printf("Bluetooth cleanup after adapter loss is pending: %v", cleanupErr)
 	}
 	m.wakeStatusRecovery()
@@ -920,4 +929,32 @@ func (m *Manager) observeStationBluetoothError(station *bluetooth.BaseStation, a
 		m.noteStatusFailure(address)
 	}
 	return err
+}
+
+// observePostVerificationBluetoothError records a Bluetooth failure from the
+// step that follows a failed cache-verification read (capability refresh or
+// the power write). When that read already proved the link dead — the class
+// recordPowerVerificationResult answers with a disconnect plus backoff — a
+// connection-class failure from the follow-up step is the same dead link
+// observed a second time inside one attempt: re-counting it would double the
+// exponential backoff and abandon absent stations early, and the bounded
+// disconnect is redundant. Adapter-level observation is preserved either way
+// so a radio loss still triggers the fleet cleanup. A command-confirmation
+// failure is excluded: its write succeeded on a rebuilt connection, so the
+// failed readback is new evidence on a new link.
+func (m *Manager) observePostVerificationBluetoothError(
+	station *bluetooth.BaseStation,
+	address string,
+	err error,
+	verificationProvedDeadLink bool,
+) error {
+	if verificationProvedDeadLink && err != nil {
+		var confirmationErr *bluetooth.PowerConfirmationError
+		if !errors.As(err, &confirmationErr) &&
+			(bluetooth.RequiresReconnect(err) || bluetooth.IsAdapterUnavailable(err)) {
+			m.observeBluetoothError(err)
+			return err
+		}
+	}
+	return m.observeStationBluetoothError(station, address, err)
 }

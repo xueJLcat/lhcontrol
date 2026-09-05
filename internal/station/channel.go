@@ -136,7 +136,6 @@ func (m *Manager) SetStationChannel(
 		return result, nil
 	}
 	hasUnknown := false
-	conflictCheckTime := time.Now()
 	// Snapshot each other station outside the fleet lock: a wedged WinRT
 	// cleanup on another station can hold its mutex far longer than this
 	// operation's budget.
@@ -157,12 +156,19 @@ func (m *Manager) SetStationChannel(
 			hasUnknown = true
 			continue
 		}
+		// Evaluate freshness against the moment this snapshot was captured,
+		// not against a time taken before the loop: a concurrent status
+		// refresh can complete a channel read between those two instants, and
+		// that observation is the freshest possible evidence, not stale data.
+		// Every timestamp in the snapshot is at or before the capture, so the
+		// future-reading guard inside isRecent keeps its meaning.
+		snapshotTime := time.Now()
 		if !snapshot.Present {
 			continue
 		}
 		if snapshot.MissedScans > 0 || snapshot.PresenceUncertain ||
-			!isRecent(snapshot.LastSeenAt, conflictCheckTime, m.channelScanFreshnessWindowDuration()) ||
-			!isOperationallyFresh(snapshot.LastChannelReadAt, conflictCheckTime) {
+			!isRecent(snapshot.LastSeenAt, snapshotTime, m.channelScanFreshnessWindowDuration()) ||
+			!isOperationallyFresh(snapshot.LastChannelReadAt, snapshotTime) {
 			hasUnknown = true
 			continue
 		}

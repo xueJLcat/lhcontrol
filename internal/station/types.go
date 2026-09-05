@@ -258,8 +258,19 @@ type Manager struct {
 	// initializeWg tracks in-flight initialization attempts so shutdown joins
 	// them before the fleet disconnect; an attempt an ensureReady waiter
 	// abandoned on a timeout keeps running and must not race the drain.
-	initializeWg            sync.WaitGroup
-	initializeBluetooth     func() error
+	initializeWg             sync.WaitGroup
+	initializeBluetooth      func() error
+	invalidateAllConnections func() error
+	// adapterCleanupIssued records that the fleet-wide connection cleanup for
+	// the current adapter-unavailability period has already been issued. The
+	// retry-cooldown clock alone cannot debounce the cleanup: after the
+	// cooldown expires but before a re-initialization succeeds, the adapter
+	// state cannot have changed (ensureReady refuses to enable it until
+	// nextInitializeAt), yet every late observer would re-run the bounded
+	// fleet cleanup. Guarded by initializeMutex; reset by a successful
+	// adapter initialization, which is the only event that can make new
+	// connections exist again.
+	adapterCleanupIssued    bool
 	asyncScanWg             sync.WaitGroup
 	scanCallbackWg          sync.WaitGroup
 	statusRetryMutex        sync.Mutex

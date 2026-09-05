@@ -56,6 +56,111 @@ func TestVerificationChannelFailureStillRecordsChannelRetry(t *testing.T) {
 	}
 }
 
+// TestBulkPowerDeadLinkCountsConnectionFailureOnce pins the single-record
+// rule across the verification read and the write of one bulk attempt: a
+// verification read that proves the link dead disconnects the station and
+// books one connection failure; the write step then failing on the same dead
+// link must not re-count it. Counting one dead link twice per attempt would
+// double the exponential backoff and abandon absent stations early.
+func TestBulkPowerDeadLinkCountsConnectionFailureOnce(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	manager.statusRecoveryStart.Do(func() {})
+	manager.statusRetryBase = time.Hour
+	address := "11:22:33:44:55:D1"
+	station := &internalbluetooth.BaseStation{
+		Name:              "LHB-DEAD-LINK-BULK",
+		Address:           mustAddress(t, address),
+		Present:           true,
+		Capabilities:      internalbluetooth.Capabilities{PowerRead: true, PowerWrite: true},
+		CapabilitiesKnown: true,
+	}
+	manager.stations[address] = station
+	var disconnects int
+	manager.bluetoothOps.disconnectStation = func(*internalbluetooth.BaseStation) error {
+		disconnects++
+		return nil
+	}
+	deadLink := func(operation string) error {
+		return &internalbluetooth.DeviceTransportError{
+			Operation: operation,
+			Err:       errors.New("station unreachable"),
+		}
+	}
+	manager.bluetoothOps.fetchInitialPowerState = func(context.Context, *internalbluetooth.BaseStation) error {
+		return &internalbluetooth.InitialReadError{Power: deadLink("read power characteristic")}
+	}
+	manager.bluetoothOps.setPowerState = func(context.Context, *internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
+		return internalbluetooth.PowerControlResult{}, deadLink("write power characteristic")
+	}
+
+	result, err := manager.SetAllStationsPowerDetailed("on")
+	if err != nil {
+		t.Fatalf("SetAllStationsPowerDetailed() error = %v", err)
+	}
+	if len(result.Results) != 1 || result.Results[0].Success || result.Results[0].Skipped || result.Results[0].Error == "" {
+		t.Fatalf("dead-link bulk result = %+v, want one failed entry with its error", result.Results)
+	}
+	manager.statusRetryMutex.Lock()
+	retry, tracked := manager.statusRetries[address]
+	manager.statusRetryMutex.Unlock()
+	if !tracked || retry.failures != 1 {
+		t.Fatalf("connection failures = %d (tracked=%v), want exactly 1 for one dead link in one attempt", retry.failures, tracked)
+	}
+	if disconnects != 1 {
+		t.Fatalf("bounded disconnects = %d, want exactly 1", disconnects)
+	}
+}
+
+// TestSinglePowerDeadLinkCountsConnectionFailureOnce is the SetStationPower
+// mirror of the bulk rule above: the verification read's dead-link failure is
+// the attempt's single connection-failure record even when the capability or
+// write step fails on the same link afterwards.
+func TestSinglePowerDeadLinkCountsConnectionFailureOnce(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	manager.statusRecoveryStart.Do(func() {})
+	manager.statusRetryBase = time.Hour
+	address := "11:22:33:44:55:D2"
+	manager.stations[address] = &internalbluetooth.BaseStation{
+		Name:              "LHB-DEAD-LINK-SINGLE",
+		Address:           mustAddress(t, address),
+		Present:           true,
+		Capabilities:      internalbluetooth.Capabilities{PowerRead: true, PowerWrite: true},
+		CapabilitiesKnown: true,
+	}
+	var disconnects int
+	manager.bluetoothOps.disconnectStation = func(*internalbluetooth.BaseStation) error {
+		disconnects++
+		return nil
+	}
+	deadLink := func(operation string) error {
+		return &internalbluetooth.DeviceTransportError{
+			Operation: operation,
+			Err:       errors.New("station unreachable"),
+		}
+	}
+	manager.bluetoothOps.fetchInitialPowerState = func(context.Context, *internalbluetooth.BaseStation) error {
+		return &internalbluetooth.InitialReadError{Power: deadLink("read power characteristic")}
+	}
+	manager.bluetoothOps.setPowerState = func(context.Context, *internalbluetooth.BaseStation, internalbluetooth.PowerState) (internalbluetooth.PowerControlResult, error) {
+		return internalbluetooth.PowerControlResult{}, deadLink("write power characteristic")
+	}
+
+	if _, err := manager.SetStationPower(address, "on"); err == nil {
+		t.Fatal("SetStationPower() unexpectedly succeeded against a dead link")
+	}
+	manager.statusRetryMutex.Lock()
+	retry, tracked := manager.statusRetries[address]
+	manager.statusRetryMutex.Unlock()
+	if !tracked || retry.failures != 1 {
+		t.Fatalf("connection failures = %d (tracked=%v), want exactly 1 for one dead link in one attempt", retry.failures, tracked)
+	}
+	if disconnects != 1 {
+		t.Fatalf("bounded disconnects = %d, want exactly 1", disconnects)
+	}
+}
+
 // TestForegroundStationOperationWaitDoesNotHoldScanTransitionLock covers a
 // foreground device action waiting for background recovery: finishScan and
 // every other scan transition need the same lock, so the wait must not hold it.

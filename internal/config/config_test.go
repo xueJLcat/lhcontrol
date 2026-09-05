@@ -1631,6 +1631,37 @@ func TestLoadRepairsBulkTimeoutBelowStationTimeout(t *testing.T) {
 	}
 }
 
+// TestLoadRepairRaiseRespectsBulkTimeout pins the repair ordering: the
+// station-operation-timeout fallback branch runs after the bulk invariant
+// check, so raising the station timeout toward a persisted initial read
+// timeout must stay capped at the persisted bulk timeout. Raising it past
+// the bulk value loaded a session in which every bulk entry's per-station
+// budget exceeded the whole batch's deadline — a state the setters reject
+// and the save repair resolves differently.
+func TestLoadRepairRaiseRespectsBulkTimeout(t *testing.T) {
+	configDirectory := useTemporaryConfigDirectory(t)
+	if err := os.WriteFile(
+		filepath.Join(configDirectory, "config.json"),
+		[]byte(`{"bulkPowerTimeoutSeconds":45,"stationOperationTimeoutSeconds":9999,"initialReadTimeoutSeconds":60}`),
+		0o644,
+	); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	cfg := NewConfig()
+	if err := cfg.Load(); err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if got := cfg.GetStationOperationTimeoutSeconds(); got != 45 {
+		t.Fatalf("repaired station operation timeout = %d, want it capped at the persisted bulk timeout 45", got)
+	}
+	if got := cfg.GetBulkPowerTimeoutSeconds(); got != 45 {
+		t.Fatalf("persisted bulk power timeout = %d, want 45 untouched", got)
+	}
+	if got := cfg.GetInitialReadTimeoutSeconds(); got != 45 {
+		t.Fatalf("repaired initial read timeout = %d, want it demoted to the capped station timeout 45", got)
+	}
+}
+
 func TestLoadSanitizesInvalidAPIListenAddress(t *testing.T) {
 	configDirectory := useTemporaryConfigDirectory(t)
 	if err := os.WriteFile(

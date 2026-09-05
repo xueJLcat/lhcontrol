@@ -62,6 +62,7 @@ func (m *Manager) SetStationPower(address, state string) (PowerActionResult, err
 		// still protect the station, matching the bulk re-check in the workers.
 		return PowerActionResult{}, fmt.Errorf("station is booting; retry after transition: %w", ErrStationTransitioning)
 	}
+	verificationProvedDeadLink := false
 	if disposition == cachedPowerAtTarget || !isOperationallyFresh(snapshot.LastPowerReadAt, time.Now()) {
 		readErr := runSafely("power cache verification", func() error {
 			readContext, cancelRead := context.WithTimeout(operationContext, m.initialReadTimeoutDuration())
@@ -87,7 +88,7 @@ func (m *Manager) SetStationPower(address, state string) (PowerActionResult, err
 				return result, outcomeErr
 			}
 		}
-		m.recordPowerVerificationResult(stationPtr, canonicalAddress, snapshot, readErr)
+		verificationProvedDeadLink = m.recordPowerVerificationResult(stationPtr, canonicalAddress, snapshot, readErr)
 		if err := operationContext.Err(); err != nil {
 			return PowerActionResult{}, m.stationOperationContextError(err)
 		}
@@ -112,7 +113,7 @@ func (m *Manager) SetStationPower(address, state string) (PowerActionResult, err
 			if m.shuttingDown.Load() && errors.Is(err, context.Canceled) {
 				return PowerActionResult{}, ErrShuttingDown
 			}
-			m.observeStationBluetoothError(stationPtr, canonicalAddress, err)
+			m.observePostVerificationBluetoothError(stationPtr, canonicalAddress, err, verificationProvedDeadLink)
 			return PowerActionResult{}, m.stationOperationContextError(err)
 		}
 	}
@@ -136,7 +137,7 @@ func (m *Manager) SetStationPower(address, state string) (PowerActionResult, err
 		return controlErr
 	})
 	if err != nil {
-		m.observeStationBluetoothError(stationPtr, canonicalAddress, err)
+		m.observePostVerificationBluetoothError(stationPtr, canonicalAddress, err, verificationProvedDeadLink)
 		var confirmationErr *bluetooth.PowerConfirmationError
 		if errors.As(err, &confirmationErr) {
 			if errors.Is(err, bluetooth.ErrSleepTransitionDisconnect) ||

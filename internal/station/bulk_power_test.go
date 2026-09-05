@@ -131,6 +131,40 @@ func TestBulkPowerSkipsBusyStation(t *testing.T) {
 	}
 }
 
+// TestLegacyBulkPowerSurfacesBusySkip guards the error-only legacy contract:
+// a batch that could not reach one station (lock wedged, so no command was
+// attempted) must not report overall success. The busy skip leaves the
+// station unpowered in a user-requested "power all" batch — the same
+// non-benign class as a timeout-interrupted attempt.
+func TestLegacyBulkPowerSurfacesBusySkip(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	address := "11:22:33:44:55:B7"
+	station := &internalbluetooth.BaseStation{
+		Name:              "LHB-BUSY-LEGACY",
+		Address:           mustAddress(t, address),
+		Present:           true,
+		PowerState:        internalbluetooth.PowerStateSleep,
+		RawPowerState:     0x00,
+		LastPowerReadAt:   time.Now(),
+		Capabilities:      internalbluetooth.Capabilities{PowerWrite: true},
+		CapabilitiesKnown: true,
+	}
+	manager.stations[address] = station
+	station.Snapshot()
+
+	var bulkErr error
+	station.HoldLockWhile(func() {
+		bulkErr = manager.SetAllStationsPower("on")
+	})
+	if bulkErr == nil {
+		t.Fatal("SetAllStationsPower() reported success while one station was skipped busy")
+	}
+	if !strings.Contains(bulkErr.Error(), address) || !strings.Contains(bulkErr.Error(), ReasonStationBusy) {
+		t.Fatalf("SetAllStationsPower() error = %v, want the busy station surfaced", bulkErr)
+	}
+}
+
 // TestBulkPowerAbandonsWedgedWorker guards the bounded worker join: a worker
 // wedged on a station lock inside a transport call that ignores cancellation
 // must not hang the bulk past its budget, and the batch's lifecycle slot must
