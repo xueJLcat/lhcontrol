@@ -50,6 +50,39 @@ function withTimeout<T>(promise: Promise<T>, action: string, timeoutMs: number):
 }
 
 const settingOperationTails = new WeakMap<object, Promise<void>>();
+const timedOutSaves = new WeakMap<object, Set<Promise<void>>>();
+
+function trackTimedOutSave<T>(
+  key: object,
+  save: Promise<void>,
+  getter: () => Promise<T>,
+  afterSave: ((value: T) => void | Promise<void>) | undefined,
+  timeoutMs: number
+) {
+  let pending = timedOutSaves.get(key);
+  if (!pending) {
+    pending = new Set();
+    timedOutSaves.set(key, pending);
+  }
+  pending.add(save);
+  // The physical call has both outcomes observed even when it outlives the
+  // logical watchdog. Keep it visible to a newly opened settings panel until
+  // settlement, then release the shared reference. A late write may also
+  // change live application behavior, so apply the actual persisted value
+  // once after it settles, even if the settings panel has since closed.
+  const settled = () => {
+    pending.delete(save);
+    if (!afterSave) return;
+    void serializeSettingOperation(key, async () => {
+      const persisted = await withTimeout(getter(), 'reading the setting', timeoutMs);
+      const followUp = afterSave(persisted);
+      if (followUp) await withTimeout(followUp, 'applying the setting', timeoutMs);
+    }).catch((error) => {
+      pushToast(withDetail('Setting was saved, but the current view could not apply it immediately', backendCopy(String(error))), 'warning');
+    });
+  };
+  void save.then(settled, settled);
+}
 
 function serializeSettingOperation<T>(key: object, operation: () => Promise<T>): Promise<T> {
   const previous = settingOperationTails.get(key);
@@ -73,6 +106,7 @@ export class AsyncSetting<T> {
   // Advances with every accepted edit so a failed queued save can tell
   // whether a newer edit already owns the displayed value.
   private saveRevision = 0;
+  private readonly watchedLateSaves = new WeakSet<Promise<void>>();
   // A Retry click that lands while a save is still settling (the error card
   // renders a microtask before busy clears) is remembered and re-run by the
   // settling operation's finally instead of being dropped silently.
@@ -92,7 +126,32 @@ export class AsyncSetting<T> {
     }
   }
 
+  private reconcileLateSave() {
+    // A timed-out Wails call keeps running. A Retry read may have returned
+    // the old value before that call finally wrote the setting, so read once
+    // more when it settles. This also catches an old physical write that
+    // finishes after a newer save and overwrites its persisted value.
+    void this.load();
+  }
+
+  private watchLateSaves() {
+    const pending = timedOutSaves.get(this.options.setter);
+    if (!pending) return;
+    for (const save of pending) {
+      if (this.watchedLateSaves.has(save)) continue;
+      this.watchedLateSaves.add(save);
+      // A closed drawer need not be kept alive by a hung binding. A newly
+      // opened drawer subscribes through its first load instead.
+      const instance = new WeakRef(this);
+      void save.then(
+        () => instance.deref()?.reconcileLateSave(),
+        () => instance.deref()?.reconcileLateSave()
+      );
+    }
+  }
+
   load = async (): Promise<void> => {
+    this.watchLateSaves();
     if (this.busy) {
       this.reloadPending = true;
       return;
@@ -125,9 +184,21 @@ export class AsyncSetting<T> {
     this.busy = true;
     try {
       await serializeSettingOperation(this.options.setter, async () => {
+        let physicalSave: Promise<void> | null = null;
         try {
-          await withTimeout(this.options.setter(next), 'saving the setting', this.timeoutMs);
+          physicalSave = this.options.setter(next);
+          await withTimeout(physicalSave, 'saving the setting', this.timeoutMs);
         } catch (error) {
+          if (error instanceof SettingOperationTimeoutError && physicalSave) {
+            trackTimedOutSave(
+              this.options.setter,
+              physicalSave,
+              this.options.getter,
+              this.options.afterSave,
+              this.timeoutMs
+            );
+            this.watchLateSaves();
+          }
           if (revision !== this.saveRevision) {
             // A newer queued edit owns the displayed value, and its save
             // settles the backend state next. Rolling back here would

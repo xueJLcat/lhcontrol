@@ -215,6 +215,22 @@ func (w *Watcher) markTriggerOwed(owed bool, closedAt time.Time) uint64 {
 	return generation
 }
 
+// queueMonitorTrigger preserves an inherited debt's identity when a new
+// target's countdown expires while the previous action is still draining.
+// The pending generation must supersede that action, but its session key
+// still belongs to the inherited debt for downstream de-duplication.
+func (w *Watcher) queueMonitorTrigger(closedAt time.Time) (uint64, time.Time) {
+	w.mutex.Lock()
+	defer w.mutex.Unlock()
+	if w.triggerOwed && w.carriedDebt {
+		closedAt = w.owedClosedAt
+	}
+	w.triggerGeneration++
+	w.triggerOwed = true
+	w.owedClosedAt = closedAt
+	return w.triggerGeneration, closedAt
+}
+
 // owedSessionClosedAt reports the session-close key recorded with the debt.
 // Callers hold lifecycleMutex; the read takes the shorter debt lock.
 func (w *Watcher) owedSessionClosedAt() time.Time {
@@ -358,8 +374,8 @@ func (w *Watcher) Run(ctx context.Context) {
 		}
 		if monitor.Poll(running, now) == ActionTrigger {
 			pendingTrigger = true
-			_, pendingTriggerClosedAt = monitor.Countdown()
-			pendingTriggerGeneration = w.markTriggerOwed(true, pendingTriggerClosedAt)
+			_, closedAt := monitor.Countdown()
+			pendingTriggerGeneration, pendingTriggerClosedAt = w.queueMonitorTrigger(closedAt)
 		}
 		// A cancelled action keeps its sleep debt owed, but the monitor has
 		// already consumed the trigger and returned to idle. Without re-arming

@@ -16,14 +16,12 @@ import (
 // holds its lock indefinitely, and every list consumer (the UI polls, the HTTP
 // status endpoint, scan results, the status refresh return) would otherwise
 // queue behind it. Such a station is projected from its most recent snapshot
-// instead; a station that has never been snapshotted is omitted.
+// or a conservative identity-only fallback when no snapshot exists yet.
 func (m *Manager) GetStationInfo() []StationInfo {
 	stationPtrs := m.stationPointers()
 	snapshots := make([]bluetooth.BaseStationSnapshot, 0, len(stationPtrs))
 	for _, stationPtr := range stationPtrs {
-		if stationSnapshot, ok := stationPtr.SnapshotNonBlocking(); ok {
-			snapshots = append(snapshots, stationSnapshot)
-		}
+		snapshots = append(snapshots, stationSnapshotOrIdentity(stationPtr))
 	}
 	channelCounts := make(map[int]int)
 	now := time.Now()
@@ -115,6 +113,24 @@ func (m *Manager) GetStationInfo() []StationInfo {
 		)
 	})
 	return stationInfos
+}
+
+// stationSnapshotOrIdentity keeps a newly discovered station visible while
+// its first transport call holds the lock. Address is immutable after
+// creation; all other fields are unknown until a real snapshot succeeds.
+func stationSnapshotOrIdentity(stationPtr *bluetooth.BaseStation) bluetooth.BaseStationSnapshot {
+	if snapshot, ok := stationPtr.SnapshotNonBlocking(); ok {
+		return snapshot
+	}
+	address := stationPtr.Address.String()
+	return bluetooth.BaseStationSnapshot{
+		Name:              fallbackStationName(address),
+		Address:           address,
+		PowerState:        bluetooth.PowerStateUnknown,
+		RawPowerState:     bluetooth.RawPowerStateUnknown,
+		Channel:           bluetooth.ChannelUnknown,
+		PresenceUncertain: true,
+	}
 }
 func stationValuesLess(leftChannel int, leftName, leftAddress string, rightChannel int, rightName, rightAddress string) bool {
 	if leftChannel <= bluetooth.ChannelUnknown {

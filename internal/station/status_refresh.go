@@ -13,12 +13,26 @@ import (
 	"time"
 )
 
-// statusRefreshJoinLimit bounds the wait for status-read workers after the
-// dispatch loop closes. A wedged WinRT cleanup can keep a worker blocked on a
-// transport lock long past its read budget; without this cap a single wedged
-// device would hold statusOperationMutex forever and stop every later status
-// refresh (and the exclusive front-door operations that queue behind it).
+// statusRefreshJoinLimit is the minimum worker join allowance. A configured
+// read may legitimately take longer, so the actual wait also covers its
+// remaining budget. A wedged WinRT cleanup still cannot hold the refresh
+// operation indefinitely after that budget expires.
 const statusRefreshJoinLimit = 20 * time.Second
+
+const statusRefreshDrainGrace = 2 * time.Second
+
+func statusRefreshJoinBudget(readBudget, refreshRemaining time.Duration) time.Duration {
+	if refreshRemaining < 0 {
+		refreshRemaining = 0
+	}
+	if readBudget < refreshRemaining {
+		refreshRemaining = readBudget
+	}
+	if budget := refreshRemaining + statusRefreshDrainGrace; budget > statusRefreshJoinLimit {
+		return budget
+	}
+	return statusRefreshJoinLimit
+}
 
 // isPureContextError reports whether every leaf in the error tree is a context
 // cancellation or deadline. The bluetooth layer joins the stopping context
@@ -140,7 +154,12 @@ dispatch:
 	}()
 	joinLimit := m.statusRefreshJoinWait
 	if joinLimit <= 0 {
-		joinLimit = statusRefreshJoinLimit
+		deadline, _ := refreshContext.Deadline()
+		remaining := time.Until(deadline)
+		if refreshContext.Err() != nil {
+			remaining = 0
+		}
+		joinLimit = statusRefreshJoinBudget(m.statusReadTimeoutDuration(), remaining)
 	}
 	joinTimer := time.NewTimer(joinLimit)
 	select {
@@ -246,6 +265,11 @@ func (m *Manager) selectStatusRefreshCandidates() ([]statusRefreshCandidate, []s
 	for _, stationPtr := range stationPtrs {
 		snapshot, ok := stationPtr.SnapshotNonBlocking()
 		if !ok {
+			// The first GATT operation can hold the station lock before any
+			// snapshot is cached. The station is already in the discovered
+			// fleet; retain its immutable address for a later recovery attempt
+			// instead of dropping it from this refresh altogether.
+			disconnectedAddresses = append(disconnectedAddresses, stationPtr.Address.String())
 			continue
 		}
 		if !snapshot.Present {

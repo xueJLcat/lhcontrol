@@ -131,6 +131,32 @@ func TestBulkPowerSkipsBusyStation(t *testing.T) {
 	}
 }
 
+func TestBulkPowerReportsBusyStationBeforeFirstSnapshot(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	address := "11:22:33:44:55:B8"
+	station := &internalbluetooth.BaseStation{Address: mustAddress(t, address)}
+	manager.stations[address] = station
+	var result BulkPowerResult
+	var bulkErr error
+	station.HoldLockWhile(func() {
+		// No snapshot has ever succeeded. The status projection must retain
+		// the station's identity without inventing a known power state.
+		infos := manager.GetStationInfo()
+		if len(infos) != 1 || infos[0].Address != address ||
+			infos[0].PowerState != int(internalbluetooth.PowerStateUnknown) || infos[0].Channel != internalbluetooth.ChannelUnknown {
+			t.Fatalf("identity-only station projection = %+v", infos)
+		}
+		result, bulkErr = manager.SetAllStationsPowerDetailed("on")
+	})
+	if bulkErr != nil {
+		t.Fatalf("SetAllStationsPowerDetailed() error = %v", bulkErr)
+	}
+	if len(result.Results) != 1 || result.Results[0].Address != address ||
+		!result.Results[0].Skipped || result.Results[0].Reason != ReasonStationBusy {
+		t.Fatalf("first-snapshot busy station was omitted: %+v", result.Results)
+	}
+}
+
 // TestLegacyBulkPowerSurfacesBusySkip guards the error-only legacy contract:
 // a batch that could not reach one station (lock wedged, so no command was
 // attempted) must not report overall success. The busy skip leaves the

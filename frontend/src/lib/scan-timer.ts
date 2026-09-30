@@ -1,4 +1,4 @@
-// Owns the wall-clock timer behind the scan elapsed display. The elapsed
+// Owns the monotonic timer behind the scan elapsed display. The elapsed
 // seconds are pushed through a callback so the component keeps a plain
 // reactive variable and the timer itself never touches UI state directly.
 export class ScanTimer {
@@ -11,13 +11,11 @@ export class ScanTimer {
   // re-arming the active scan's timer and must not reset the elapsed time.
   begin() {
     if (this.timer) return;
-    this.startedAt = Date.now();
+    this.startedAt = performance.now();
     this.onElapsed(0);
     this.timer = setInterval(() => {
       if (this.startedAt !== null) {
-        // Clamp against a backwards wall-clock adjustment so the elapsed
-        // display never goes negative or freezes on a skewed clock.
-        this.onElapsed(Math.max(0, Math.floor((Date.now() - this.startedAt) / 1000)));
+        this.onElapsed(Math.max(0, Math.floor((performance.now() - this.startedAt) / 1000)));
       }
     }, 1000);
   }
@@ -27,7 +25,7 @@ export class ScanTimer {
   // previous scan's time.
   restart() {
     if (this.timer) {
-      this.startedAt = Date.now();
+      this.startedAt = performance.now();
       this.onElapsed(0);
       return;
     }

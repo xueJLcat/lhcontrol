@@ -33,6 +33,7 @@ export class PowerFeedbackRegistry {
   set(address: string, feedback: Omit<PowerFeedback, 'createdAt'>) {
     this.clearTimer(address);
     const createdAt = Date.now();
+    const startedAt = performance.now();
     this.record = {
       ...this.record,
       [address]: { ...feedback, createdAt }
@@ -40,7 +41,7 @@ export class PowerFeedbackRegistry {
     this.onChange(this.record);
     const retentionMs = feedback.kind === 'pending' ? PENDING_RETENTION_MS : RETENTION_MS;
     this.timers.set(address, setTimeout(() => {
-      this.expire(address, createdAt, feedback.kind === 'pending');
+      this.expire(address, createdAt, startedAt, feedback.kind === 'pending');
     }, retentionMs));
   }
 
@@ -50,15 +51,17 @@ export class PowerFeedbackRegistry {
   // The re-arm is scheduled to the hard age cap (never a full window past it)
   // so a wedged binding whose busy flag never clears still loses its note at
   // exactly PENDING_MAX_AGE_MS.
-  private expire(address: string, createdAt: number, pending: boolean) {
+  private expire(address: string, createdAt: number, startedAt: number, pending: boolean) {
     const current = this.record[address];
     if (!current || current.createdAt !== createdAt) return;
     if (pending && current.kind === 'pending' && this.isBusy(address)) {
-      const age = Date.now() - createdAt;
+      // The hard cap is elapsed time; changing the system clock must not
+      // keep a wedged operation's pending note alive indefinitely.
+      const age = performance.now() - startedAt;
       if (age < PENDING_MAX_AGE_MS) {
         const rearmMs = Math.min(PENDING_RETENTION_MS, PENDING_MAX_AGE_MS - age);
         this.timers.set(address, setTimeout(() => {
-          this.expire(address, createdAt, true);
+          this.expire(address, createdAt, startedAt, true);
         }, rearmMs));
         return;
       }

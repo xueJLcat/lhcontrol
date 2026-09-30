@@ -6,6 +6,26 @@ afterEach(() => {
 });
 
 describe('focusTrap', () => {
+  it.each([false, true])('keeps focus inside when the focused control becomes disabled (reverse=%s)', (reverse) => {
+    const dialog = document.createElement('div');
+    dialog.tabIndex = -1;
+    const cancel = document.createElement('button');
+    const confirm = document.createElement('button');
+    dialog.append(cancel, confirm);
+    document.body.append(dialog);
+    const action = focusTrap(dialog);
+    confirm.focus();
+    // An external operation can disable Confirm while this modal stays open.
+    confirm.disabled = true;
+    const tab = new KeyboardEvent('keydown', {
+      key: 'Tab', shiftKey: reverse, bubbles: true, cancelable: true
+    });
+    confirm.dispatchEvent(tab);
+    expect(tab.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(cancel);
+    action.destroy();
+  });
+
   it('moves forward and backward from the initially focused dialog container', () => {
     const dialog = document.createElement('div');
     dialog.tabIndex = -1;

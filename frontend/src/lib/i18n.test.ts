@@ -10,6 +10,12 @@ import {
   saveLanguagePreference, setLanguagePreference, setLocale, t
 } from './i18n.svelte';
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
 afterEach(() => {
   vi.useRealTimers();
   vi.resetAllMocks();
@@ -67,6 +73,77 @@ describe('language persistence', () => {
     const retry = await saveLanguagePreference('zh-CN');
     expect(retry.saved).toBe(true);
     expect(backend.SetLanguage).toHaveBeenCalledWith('zh-CN');
+  });
+
+  it('applies a language write that succeeds after its watchdog timed out', async () => {
+    vi.useFakeTimers();
+    let persisted = '';
+    const releaseSave = deferred<void>();
+    backend.GetLanguage.mockImplementation(async () => persisted);
+    backend.SetLanguage.mockImplementation(async (value: string) => {
+      await releaseSave.promise;
+      persisted = value;
+    });
+
+    const save = saveLanguagePreference('zh-CN');
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect((await save).saved).toBe(false);
+    expect(languagePreference()).toBe('system');
+
+    releaseSave.resolve(undefined);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(persisted).toBe('zh-CN');
+    expect(languagePreference()).toBe('zh-CN');
+    expect(locale()).toBe('zh-CN');
+  });
+
+  it('uses the persisted language when an older timed-out write overwrites a newer save', async () => {
+    vi.useFakeTimers();
+    let persisted = '';
+    const releaseFirst = deferred<void>();
+    backend.GetLanguage.mockImplementation(async () => persisted);
+    backend.SetLanguage.mockImplementation(async (value: string) => {
+      if (value === 'zh-CN') await releaseFirst.promise;
+      persisted = value;
+    });
+
+    const first = saveLanguagePreference('zh-CN');
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect((await first).saved).toBe(false);
+    expect((await saveLanguagePreference('en')).saved).toBe(true);
+    expect(persisted).toBe('en');
+
+    releaseFirst.resolve(undefined);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(persisted).toBe('zh-CN');
+    expect(languagePreference()).toBe('zh-CN');
+  });
+
+  it('does not replace a new language choice with a late reconciliation read', async () => {
+    vi.useFakeTimers();
+    let persisted = '';
+    const releaseFirst = deferred<void>();
+    const releaseRead = deferred<string>();
+    backend.GetLanguage.mockReturnValue(releaseRead.promise);
+    backend.SetLanguage.mockImplementation(async (value: string) => {
+      if (value === 'zh-CN') await releaseFirst.promise;
+      persisted = value;
+    });
+
+    const first = saveLanguagePreference('zh-CN');
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect((await first).saved).toBe(false);
+    releaseFirst.resolve(undefined);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(backend.GetLanguage).toHaveBeenCalledOnce();
+
+    const next = saveLanguagePreference('en');
+    expect(languagePreference()).toBe('en');
+    releaseRead.resolve(persisted);
+    await vi.advanceTimersByTimeAsync(0);
+    expect((await next).saved).toBe(true);
+    expect(persisted).toBe('en');
+    expect(languagePreference()).toBe('en');
   });
 });
 

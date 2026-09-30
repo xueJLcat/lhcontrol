@@ -94,6 +94,12 @@ export class StationActionController {
     this.cancelBulkCancelWatchdog();
   }
 
+  private notify(...args: Parameters<typeof pushToast>) {
+    // A superseded operation still reports its failure while this page lives.
+    // After disposal, its global toast would leak into a replacement page.
+    if (!this.host.disposed) pushToast(...args);
+  }
+
   private cancelBulkCancelWatchdog() {
     if (this.bulkCancelWatchdogTimer !== null) clearTimeout(this.bulkCancelWatchdogTimer);
     this.bulkCancelWatchdogTimer = null;
@@ -124,7 +130,7 @@ export class StationActionController {
     host.bulkTarget = null;
     const message = t('Stopping bulk power timed out; the operation state was reset.');
     host.statusMessage = message;
-    pushToast(message, 'warning');
+    this.notify(message, 'warning');
   }
   private async fetchLatestList(revision = this.host.listRevisions.next()): Promise<boolean> {
     const capturedStationRevisions = this.host.gates.snapshotStationRevisions();
@@ -160,6 +166,7 @@ export class StationActionController {
   }
 
   async setPower(station: StationInfo, state: PowerTarget) {
+    if (this.host.disposed) return;
     if (!canSetPower(station, state) || this.host.stationBusy(station.address) || this.host.gattLockedFor(station.address)) return;
     const targetLabel = powerTargetLabel(state);
     const operationEpoch = this.host.gates.currentScanEpoch;
@@ -175,6 +182,7 @@ export class StationActionController {
     this.host.statusMessage = t('Setting {name} to {target}…', { name: station.name, target: targetLabel });
     try {
       const result = await SetStationPower(station.address, state);
+      const targetLabel = powerTargetLabel(state);
       if (!this.host.gates.canCommitStationOperation(operationEpoch, station.address, operationRevision)) {
         // The promise settled but a newer scan owns the list now. Clear the
         // orphan pending note instead of leaving it to the long retention
@@ -211,19 +219,19 @@ export class StationActionController {
             : t('{name}: {target} command sent; this firmware cannot confirm the state.', { name: station.name, target: targetLabel });
       }
     } catch (error) {
-      const failureMessage = `${t('Power change failed for {name}', { name: station.name })}: ${backendCopy(String(error))}`;
+      const failureMessage = () => `${t('Power change failed for {name}', { name: station.name })}: ${backendCopy(String(error))}`;
       if (!this.host.gates.canCommitStationOperation(operationEpoch, station.address, operationRevision)) {
         this.host.powerFeedback.clear(station.address);
         // A newer scan owns the list, but the failure is real and has no
         // other visible surface; the bulk path already reports superseded
         // failures the same way.
-        pushToast(failureMessage);
+        this.notify(failureMessage());
         return;
       }
       const actual = await this.fetchStationUpdate(station.address, operationEpoch, operationRevision);
       if (!this.host.gates.canCommitStationOperation(operationEpoch, station.address, operationRevision)) {
         this.host.powerFeedback.clear(station.address);
-        pushToast(failureMessage);
+        this.notify(failureMessage());
         return;
       }
       this.host.powerFeedback.set(station.address, {
@@ -233,12 +241,12 @@ export class StationActionController {
         readAt: actual?.lastPowerReadAt
       });
       if (this.host.gates.canCommitStatus(statusOperation)) {
-        this.host.statusMessage = failureMessage;
+        this.host.statusMessage = failureMessage();
       }
       // The failure toast must not be gated by status-line ownership: a newer
       // owner (for example an auto-sleep event) can take the footer while this
       // operation was in flight, yet the user still needs to see the failure.
-      pushToast(failureMessage);
+      this.notify(failureMessage());
     } finally {
       if (this.host.gates.canCleanupStationOperation(station.address, operationRevision)) {
         const nextTargets = { ...this.host.powerTargetByAddress };
@@ -254,6 +262,7 @@ export class StationActionController {
   }
 
   requestBulkPower(state: PowerTarget) {
+    if (this.host.disposed) return;
     // Do not duplicate backend capability/state decisions here. Cached
     // frontend data can be stale after scanning, while the backend refreshes
     // capabilities and returns a result for every known station.
@@ -274,7 +283,7 @@ export class StationActionController {
   // these identical guards synchronously before its first await, so a start
   // accepted here cannot be rejected by the run below.
   canStartBulkPower(state: PowerTarget): boolean {
-    return !this.host.bulkLocked && this.actionablePowerStations(state).length > 0;
+    return !this.host.disposed && !this.host.bulkLocked && this.actionablePowerStations(state).length > 0;
   }
 
   // Returns whether the bulk operation actually started. The confirmation
@@ -286,7 +295,7 @@ export class StationActionController {
     // runBulkPower directly; re-check so a lock (external scan/operation or
     // auto-sleep) that lands between the modal opening and the confirm click
     // cannot start a bulk operation against a busy backend.
-    if (this.host.bulkLocked || this.actionablePowerStations(state).length === 0) return false;
+    if (!this.canStartBulkPower(state)) return false;
     await this.executeBulkPower(state);
     return true;
   }
@@ -314,6 +323,8 @@ export class StationActionController {
         await this.fetchLatestList();
         committable = this.host.gates.canCommitOperation(operationEpoch);
       }
+      // Both the command and list reconciliation may outlive a locale change.
+      const targetLabel = powerTargetLabel(state);
       if (committable) {
         for (const item of results) {
           const feedback: Pick<PowerFeedback, 'kind' | 'text'> = item.skipped
@@ -354,7 +365,7 @@ export class StationActionController {
       // already force-reset by the watchdog (and possibly replaced by a newer
       // bulk) must not surface a stale summary over the current state.
       if (this.bulkRunGeneration === runGeneration) {
-        pushToast(toastMessage, toastKind);
+        this.notify(toastMessage, toastKind);
       }
       if (this.bulkRunGeneration === runGeneration && committable && this.host.gates.canCommitStatus(statusOperation)) {
         this.host.statusMessage = statusText;
@@ -365,12 +376,13 @@ export class StationActionController {
       if (this.host.gates.canCommitOperation(operationEpoch)) {
         await this.fetchLatestList();
       }
+      const targetLabel = powerTargetLabel(state);
       const failureMessage = `${t('Bulk {target} operation partially failed', { target: targetLabel })}: ${backendCopy(String(error))}`;
       if (this.host.gates.canCommitOperation(operationEpoch) && this.host.gates.canCommitStatus(statusOperation)) {
         this.host.statusMessage = failureMessage;
       }
       if (this.bulkRunGeneration === runGeneration) {
-        pushToast(failureMessage);
+        this.notify(failureMessage);
       }
     } finally {
       // The bulk settled, so the cancel watchdog no longer needs to recover
@@ -396,6 +408,7 @@ export class StationActionController {
   }
 
   async cancelBulkPower() {
+    if (this.host.disposed) return;
     if (this.host.globalOperation !== 'bulk-power' || this.host.cancellingBulk) return;
     this.host.cancellingBulk = true;
     // The watchdog outlives this request on purpose: CancelBulkPower can
@@ -419,7 +432,7 @@ export class StationActionController {
       if (!this.host.disposed && cancelGeneration === this.bulkCancelGeneration) {
         const message = `${t('Cancel bulk power')}: ${backendCopy(String(error))}`;
         if (this.host.gates.canCommitStatus(statusOperation)) this.host.statusMessage = message;
-        pushToast(message);
+        this.notify(message);
       }
     } finally {
       // Gate the cleanup on the cancel generation like the catch path: a
@@ -441,6 +454,7 @@ export class StationActionController {
   }
 
   startRename(station: StationInfo) {
+    if (this.host.disposed) return;
     if (this.host.stationBusy(station.address) || this.host.stationLocked) return;
     this.host.editingAddress = station.address;
   }
@@ -450,6 +464,7 @@ export class StationActionController {
   }
 
   async saveRename(station: StationInfo, name: string) {
+    if (this.host.disposed) return;
     if (this.host.configBusy(station.address)) {
       // This rename's own save is still settling; a repeated Enter or blur
       // must not be reported as a conflict with itself.
@@ -461,7 +476,7 @@ export class StationActionController {
       const statusOperation = this.host.gates.beginStatusOperation();
       const reason = t('Rename blocked: another operation is in progress for {name}.', { name: station.name });
       if (this.host.gates.canCommitStatus(statusOperation)) this.host.statusMessage = reason;
-      pushToast(reason, 'warning');
+      this.notify(reason, 'warning');
       return;
     }
     if (name === station.name) {
@@ -489,7 +504,7 @@ export class StationActionController {
       if (!this.host.gates.canCommitStationOperation(operationEpoch, station.address, operationRevision)) {
         // Superseded by a newer scan, but the rename still failed; keep the
         // failure visible instead of dropping it with the stale epoch.
-        pushToast(failureMessage);
+        this.notify(failureMessage);
         return;
       }
       if (this.host.gates.canCommitStatus(statusOperation)) {
@@ -497,7 +512,7 @@ export class StationActionController {
       }
       // As with power failures, the toast must not be gated by status-line
       // ownership or a concurrent owner swallows the only failure notice.
-      pushToast(failureMessage);
+      this.notify(failureMessage);
     } finally {
       this.host.apiStatus.refresh();
       if (this.host.gates.canCleanupStationOperation(station.address, operationRevision)) {
@@ -507,6 +522,7 @@ export class StationActionController {
   }
 
   async identify(station: StationInfo) {
+    if (this.host.disposed) return;
     if (this.host.stationBusy(station.address) || this.host.gattLockedFor(station.address)) return;
     this.host.setGattBusy(station.address, true);
     const statusOperation = this.host.gates.beginStatusOperation();
@@ -519,22 +535,22 @@ export class StationActionController {
       if (!this.host.gates.canCommitStationOperation(operationEpoch, station.address, operationRevision)) return;
       if (this.host.gates.canCommitStatus(statusOperation)) this.host.statusMessage = t('Identify signal sent to {name}.', { name: station.name });
     } catch (error) {
-      const failureMessage = `${t('Identify failed for {name}', { name: station.name })}: ${backendCopy(String(error))}`;
+      const failureMessage = () => `${t('Identify failed for {name}', { name: station.name })}: ${backendCopy(String(error))}`;
       if (!this.host.gates.canCommitStationOperation(operationEpoch, station.address, operationRevision)) {
-        pushToast(failureMessage);
+        this.notify(failureMessage());
         return;
       }
       await this.fetchStationUpdate(station.address, operationEpoch, operationRevision);
       if (!this.host.gates.canCommitStationOperation(operationEpoch, station.address, operationRevision)) {
-        pushToast(failureMessage);
+        this.notify(failureMessage());
         return;
       }
       if (this.host.gates.canCommitStatus(statusOperation)) {
-        this.host.statusMessage = failureMessage;
+        this.host.statusMessage = failureMessage();
       }
       // As with power failures, the toast must not be gated by status-line
       // ownership or a concurrent owner swallows the only failure notice.
-      pushToast(failureMessage);
+      this.notify(failureMessage());
     } finally {
       if (this.host.gates.canCleanupStationOperation(station.address, operationRevision)) {
         this.host.setGattBusy(station.address, false);
@@ -543,6 +559,7 @@ export class StationActionController {
   }
 
   async refreshCapabilities(station: StationInfo) {
+    if (this.host.disposed) return;
     if (this.host.stationBusy(station.address) || this.host.gattLockedFor(station.address)) return;
     this.host.setGattBusy(station.address, true);
     const statusOperation = this.host.gates.beginStatusOperation();
@@ -562,24 +579,24 @@ export class StationActionController {
       }
       // As with failure toasts, the partial-success warning must not be gated
       // by status-line ownership; it has no other visible surface.
-      if (updated.lastError) pushToast(message, 'warning');
+      if (updated.lastError) this.notify(message, 'warning');
     } catch (error) {
-      const failureMessage = `${t('Capability refresh failed for {name}', { name: station.name })}: ${backendCopy(String(error))}`;
+      const failureMessage = () => `${t('Capability refresh failed for {name}', { name: station.name })}: ${backendCopy(String(error))}`;
       if (!this.host.gates.canCommitStationOperation(operationEpoch, station.address, operationRevision)) {
-        pushToast(failureMessage);
+        this.notify(failureMessage());
         return;
       }
       await this.fetchStationUpdate(station.address, operationEpoch, operationRevision);
       if (!this.host.gates.canCommitStationOperation(operationEpoch, station.address, operationRevision)) {
-        pushToast(failureMessage);
+        this.notify(failureMessage());
         return;
       }
       if (this.host.gates.canCommitStatus(statusOperation)) {
-        this.host.statusMessage = failureMessage;
+        this.host.statusMessage = failureMessage();
       }
       // As with power failures, the toast must not be gated by status-line
       // ownership or a concurrent owner swallows the only failure notice.
-      pushToast(failureMessage);
+      this.notify(failureMessage());
     } finally {
       if (this.host.gates.canCleanupStationOperation(station.address, operationRevision)) {
         this.host.setGattBusy(station.address, false);
@@ -593,6 +610,7 @@ export class StationActionController {
   }
 
   async saveChannel(station: StationInfo, targetChannel: number, allowUnknownConflictRisk: boolean) {
+    if (this.host.disposed) return;
     if (!station) return;
     const blockedReason = channelChangeBlockedReason(station);
     if (blockedReason) {
@@ -641,20 +659,20 @@ export class StationActionController {
         ? t('Channel changed from {previous} to {channel}. {warnings}', { previous: result.previousChannel || t('unknown'), channel: result.channel, warnings: joinBackendCopy(result.warnings) })
         : t('Channel already set to {channel}; no command was sent. {warnings}', { channel: result.channel, warnings: joinBackendCopy(result.warnings) });
     } catch (error) {
-      const errorMessage = backendCopy(String(error));
+      const errorMessage = () => backendCopy(String(error));
       if (!this.host.gates.canCommitStationOperation(operationEpoch, address, operationRevision)) {
         // A newer scan owns the list, but the channel write still failed and
         // must not disappear with the stale epoch; the channel editor state
         // belongs to the newer owner, so only the toast is surfaced.
-        pushToast(`${t('Channel change failed')}: ${errorMessage}`);
+        this.notify(`${t('Channel change failed')}: ${errorMessage()}`);
         return;
       }
       const actual = await this.fetchStationUpdate(address, operationEpoch, operationRevision);
       if (!this.host.gates.canCommitStationOperation(operationEpoch, address, operationRevision)) {
-        pushToast(`${t('Channel change failed')}: ${errorMessage}`);
+        this.notify(`${t('Channel change failed')}: ${errorMessage()}`);
         return;
       }
-      this.host.channelError = `${errorMessage} ${t('Readback')}: ${this.channelReadbackLabel(actual)}.`;
+      this.host.channelError = `${errorMessage()} ${t('Readback')}: ${this.channelReadbackLabel(actual)}.`;
       this.host.channelWarning = false;
       const failureMessage = `${t('Channel change failed')}: ${this.host.channelError}`;
       if (this.host.gates.canCommitStatus(statusOperation)) {
@@ -662,7 +680,7 @@ export class StationActionController {
       }
       // As with power failures, the toast must not be gated by status-line
       // ownership or a concurrent owner swallows the only failure notice.
-      pushToast(failureMessage);
+      this.notify(failureMessage);
     } finally {
       if (this.host.gates.canCleanupStationOperation(address, operationRevision)) {
         this.host.setGattBusy(address, false);

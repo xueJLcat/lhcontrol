@@ -45,15 +45,19 @@ func (m *Manager) RenameStationByAddress(address, newName string) error {
 	// The station has not been discovered in this session (no successful
 	// scan yet, Bluetooth unavailable, or scan-on-startup disabled), or its
 	// lock is wedged. Still allow renaming by address so callers can manage
-	// aliases for known devices. There is no scan-known original name to
-	// preserve, so no legacy per-name tombstone applies; a malformed address
-	// is rejected.
+	// aliases for known devices; a malformed address is rejected.
 	canonical, ok := bluetooth.CanonicalAddress(address)
 	if !ok {
 		if err != nil {
 			return err
 		}
 		return fmt.Errorf("%w: %s", ErrNotFound, address)
+	}
+	if err == nil && newName == "" {
+		// This station is known, but its factory name is inaccessible. An
+		// explicit reset must shadow any legacy name alias that may apply
+		// once its lock is released.
+		return m.config.ResetKnownStationNameWithoutFactoryName(canonical)
 	}
 	return m.config.SetRenamedStationByAddress(canonical, "", newName)
 }

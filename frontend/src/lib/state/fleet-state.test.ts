@@ -189,4 +189,76 @@ describe('FleetState channel conflict risk', () => {
       vi.useRealTimers();
     }
   });
+
+  it('expires operation freshness after elapsed time when the system clock moves back', async () => {
+    vi.useFakeTimers();
+    const fleet = new FleetState();
+    try {
+      const deadline = new Date(Date.now() + 45_000).toISOString();
+      fleet.replace([createStation({
+        powerOperationalFreshUntil: deadline,
+        channelOperationalFreshUntil: deadline
+      })]);
+      await vi.advanceTimersByTimeAsync(20_000);
+      vi.setSystemTime(new Date(Date.now() - 60_000));
+      await vi.advanceTimersByTimeAsync(25_001);
+
+      expect(fleet.stations[0].powerOperationallyFresh).toBe(false);
+      expect(fleet.stations[0].channelOperationallyFresh).toBe(false);
+    } finally {
+      fleet.stopChannelMemoryExpiry();
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps separate elapsed deadlines across partial updates after a clock rollback', async () => {
+    vi.useFakeTimers();
+    const fleet = new FleetState();
+    try {
+      const firstDeadline = new Date(Date.now() + 30_000).toISOString();
+      const secondDeadline = new Date(Date.now() + 45_000).toISOString();
+      fleet.replace([
+        createStation({ address: 'AA', powerOperationalFreshUntil: firstDeadline,
+          channelOperationalFreshUntil: firstDeadline }),
+        createStation({ address: 'BB', powerOperationalFreshUntil: secondDeadline,
+          channelOperationalFreshUntil: secondDeadline })
+      ]);
+      await vi.advanceTimersByTimeAsync(10_000);
+      vi.setSystemTime(new Date(Date.now() - 60_000));
+      await vi.advanceTimersByTimeAsync(20_001);
+      expect(fleet.stations.find((station) => station.address === 'AA')?.powerOperationallyFresh).toBe(false);
+      expect(fleet.stations.find((station) => station.address === 'BB')?.powerOperationallyFresh).toBe(true);
+
+      fleet.merge([createStation({ address: 'BB', powerOperationalFreshUntil: secondDeadline,
+        channelOperationalFreshUntil: secondDeadline })]);
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(fleet.stations.find((station) => station.address === 'BB')?.powerOperationallyFresh).toBe(false);
+      expect(fleet.stations.find((station) => station.address === 'BB')?.channelOperationallyFresh).toBe(false);
+    } finally {
+      fleet.stopChannelMemoryExpiry();
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not revive an expired read from a late snapshot after a clock rollback', async () => {
+    vi.useFakeTimers();
+    const fleet = new FleetState();
+    try {
+      const deadline = new Date(Date.now() + 45_000).toISOString();
+      const oldRead = createStation({ address: 'AA', channel: 3,
+        powerOperationalFreshUntil: deadline, channelOperationalFreshUntil: deadline });
+      fleet.replace([oldRead]);
+      vi.setSystemTime(new Date(Date.now() - 60_000));
+      await vi.advanceTimersByTimeAsync(45_001);
+      expect(fleet.stations[0].powerOperationallyFresh).toBe(false);
+
+      fleet.merge([oldRead]);
+      expect(fleet.stations[0].powerOperationallyFresh).toBe(false);
+      expect(fleet.stations[0].channelOperationallyFresh).toBe(false);
+      expect(fleet.occupiedChannelsExcluding(null).has(3)).toBe(false);
+    } finally {
+      fleet.stopChannelMemoryExpiry();
+      vi.useRealTimers();
+    }
+  });
 });

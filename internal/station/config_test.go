@@ -126,3 +126,41 @@ func TestRenameStationByAddressDoesNotBlockOnWedgedStation(t *testing.T) {
 		t.Fatalf("display name = %q ok=%v, want Wedged Rename", got, ok)
 	}
 }
+
+func TestResetKnownStationNameWhileLockedShadowsLegacyAlias(t *testing.T) {
+	t.Setenv("AppData", t.TempDir())
+	cfg := config.NewConfig()
+	cfg.RenamedStations["LHB-WEDGED-RESET"] = "Legacy name"
+	manager := NewManager(cfg)
+	address := "11:22:33:44:55:92"
+	station := &internalbluetooth.BaseStation{
+		Name: "LHB-WEDGED-RESET", Address: mustAddress(t, address), Present: true,
+	}
+	manager.stations[address] = station
+
+	done := make(chan error, 1)
+	go station.HoldLockWhile(func() {
+		done <- manager.RenameStationByAddress(address, "")
+	})
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("RenameStationByAddress() error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("reset blocked behind the station lock")
+	}
+	if got, renamed := cfg.GetStationDisplayName(address, "LHB-WEDGED-RESET"); renamed || got != "LHB-WEDGED-RESET" {
+		t.Fatalf("display name after reset = %q, renamed=%v; want factory name", got, renamed)
+	}
+	if got, renamed := cfg.GetStationDisplayName("11:22:33:44:55:93", "LHB-WEDGED-RESET"); !renamed || got != "Legacy name" {
+		t.Fatalf("other station display name = %q, renamed=%v; want shared legacy alias", got, renamed)
+	}
+	reloaded := config.NewConfig()
+	if err := reloaded.Load(); err != nil {
+		t.Fatalf("Config.Load() error = %v", err)
+	}
+	if got, renamed := reloaded.GetStationDisplayName(address, "LHB-WEDGED-RESET"); renamed || got != "LHB-WEDGED-RESET" {
+		t.Fatalf("reloaded display name = %q, renamed=%v; want persisted reset", got, renamed)
+	}
+}

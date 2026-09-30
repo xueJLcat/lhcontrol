@@ -26,7 +26,10 @@ export function focusTrap(node: HTMLElement) {
     const first = items[0];
     const last = items[items.length - 1];
     const active = document.activeElement;
-    if (active === node || !node.contains(active)) {
+    // A busy-state update can disable the currently focused control without
+    // moving focus. It remains inside the dialog but is no longer a Tab stop;
+    // re-enter the eligible list before native navigation escapes the trap.
+    if (active === node || !items.includes(active as HTMLElement)) {
       event.preventDefault();
       (event.shiftKey ? last : first).focus();
     } else if (event.shiftKey && active === first) {

@@ -430,11 +430,11 @@ func (m *Manager) selectBulkPowerCandidates() []bulkPowerCandidate {
 	for _, stationPtr := range stationPtrs {
 		// Non-blocking snapshot: a station wedged inside a transport call must
 		// not hang candidate selection (and with it the whole bulk); it is
-		// projected from its most recent state instead.
-		snapshot, ok := stationPtr.SnapshotNonBlocking()
-		if !ok {
-			continue
-		}
+		// projected from its most recent state or its immutable identity if
+		// the first read has not produced a cached snapshot yet. The worker
+		// then reports the locked station as busy instead of silently omitting
+		// it from the promised per-station result list.
+		snapshot := stationSnapshotOrIdentity(stationPtr)
 		name := snapshot.Name
 		if renamedName, renamed := m.config.GetStationDisplayName(snapshot.Address, snapshot.Name); renamed {
 			name = renamedName
@@ -613,6 +613,16 @@ func (m *Manager) applyBulkPowerCommand(operationContext context.Context, s *blu
 				stationResult.Reason = ReasonAlreadyAtTarget
 				return true, false, nil
 			}
+		}
+		if contextErr := operationContext.Err(); contextErr != nil {
+			// Do not enter discovery or writing after verification exhausted the
+			// budget. Preserve a pre-read failure for the worker finalizer to book
+			// once; structured failures were already booked by verification.
+			var initialErr *bluetooth.InitialReadError
+			if readErr != nil && !errors.As(readErr, &initialErr) {
+				return false, verificationProvedDeadLink, errors.Join(readErr, contextErr)
+			}
+			return false, verificationProvedDeadLink, contextErr
 		}
 	}
 	snapshot = s.Snapshot()

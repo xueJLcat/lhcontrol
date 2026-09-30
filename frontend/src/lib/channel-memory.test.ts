@@ -54,6 +54,27 @@ describe('ChannelMemory', () => {
     }
   });
 
+  it('expires after the TTL even when the system clock moves backwards', () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-09-23T10:00:00Z'));
+      const memory = new ChannelMemory(45_000);
+      memory.refresh([withChannel(3)]);
+      const wiped = withChannel(0, { channelFresh: false });
+      memory.refresh([wiped]);
+
+      vi.advanceTimersByTime(30_000);
+      vi.setSystemTime(new Date('2026-09-23T09:00:00Z'));
+      expect(memory.displayChannel(wiped)).toBe(3);
+      vi.advanceTimersByTime(15_001);
+
+      expect(memory.displayChannel(wiped)).toBe(0);
+      expect(memory.pruneExpired()).toBe(Number.POSITIVE_INFINITY);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('drops entries for stations that left the list', () => {
     const memory = new ChannelMemory();
     memory.refresh([withChannel(3)]);

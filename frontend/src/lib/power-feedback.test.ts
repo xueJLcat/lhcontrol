@@ -55,6 +55,20 @@ describe('PowerFeedbackRegistry', () => {
     expect(snapshot['AA']).toBeUndefined();
   });
 
+  it('honors the pending hard age cap after a system clock rollback', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-09-23T10:00:00Z'));
+    let snapshot: Record<string, unknown> = {};
+    const registry = new PowerFeedbackRegistry((next) => { snapshot = next; }, () => true);
+    registry.set('AA', { kind: 'pending', text: 'Switching to On…', target: 'on' });
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    vi.setSystemTime(new Date('2026-09-23T09:00:00Z'));
+    await vi.advanceTimersByTimeAsync(90_001);
+
+    expect(snapshot['AA']).toBeUndefined();
+  });
+
   it('expires settled notes regardless of the busy state', async () => {
     vi.useFakeTimers();
     let snapshot: Record<string, unknown> = {};

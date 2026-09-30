@@ -393,6 +393,20 @@ func (bs *BaseStation) TryMarkSeen(now time.Time) (transitioned, ok bool) {
 	return bs.markSeenLocked(now), true
 }
 
+// TryApplyScanObservation updates a discovered station's name and presence
+// together. A scan merge must not apply one field while a competing GATT
+// operation prevents it from applying the other.
+func (bs *BaseStation) TryApplyScanObservation(now time.Time, name string) (transitioned, ok bool) {
+	if !bs.mutex.TryLock() {
+		return false, false
+	}
+	defer bs.mutex.Unlock()
+	if name != "" {
+		bs.Name = name
+	}
+	return bs.markSeenLocked(now), true
+}
+
 func (bs *BaseStation) markSeenLocked(now time.Time) bool {
 	wasAbsent := !bs.Present
 	bs.Present = true

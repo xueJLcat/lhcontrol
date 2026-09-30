@@ -18,7 +18,9 @@ export class ChannelMemory {
   // entries for stations that left the list so long sessions do not
   // accumulate stale addresses.
   refresh(stations: StationInfo[]) {
-    const now = Date.now();
+    // This is a duration, not a calendar deadline. A Windows clock change
+    // must not extend display-only memory beyond its TTL.
+    const now = performance.now();
     const present = new Set<string>();
     for (const station of stations) {
       present.add(station.address);
@@ -45,7 +47,7 @@ export class ChannelMemory {
     if (station.channel > 0) return station.channel;
     const cached = this.entries.get(station.address);
     if (!cached) return 0;
-    return cached.missingSince === null || Date.now() - cached.missingSince <= this.ttlMs
+    return cached.missingSince === null || performance.now() - cached.missingSince <= this.ttlMs
       ? cached.channel
       : 0;
   }
@@ -56,13 +58,11 @@ export class ChannelMemory {
   // change, so an expiry alone would never re-render them; the caller schedules
   // a tick at this delay to do so.
   pruneExpired(): number {
-    const now = Date.now();
+    const now = performance.now();
     let nextExpiry = Number.POSITIVE_INFINITY;
     for (const [address, entry] of [...this.entries]) {
       if (entry.missingSince === null) continue;
-      // Clamp the remaining window so a backwards wall-clock adjustment cannot
-      // schedule an expiry timer longer than the retention period itself.
-      const remaining = Math.min(this.ttlMs, Math.max(0, entry.missingSince + this.ttlMs - now));
+      const remaining = Math.max(0, entry.missingSince + this.ttlMs - now);
       if (remaining <= 0) {
         this.entries.delete(address);
       } else if (remaining < nextExpiry) {

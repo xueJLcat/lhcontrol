@@ -264,4 +264,147 @@ describe('AsyncSetting', () => {
     expect(setting.value).toBe(20);
     expect(setting.busy).toBe(false);
   });
+
+  it('reconciles a timed-out save that finishes after Retry read the old value', async () => {
+    vi.useFakeTimers();
+    try {
+      let persisted = 5;
+      const releaseSave = deferred<void>();
+      const getter = vi.fn(async () => persisted);
+      const afterSave = vi.fn();
+      const setting = new AsyncSetting({
+        getter,
+        setter: async (value: number) => {
+          await releaseSave.promise;
+          persisted = value;
+        },
+        loadMessage: 'Scan duration could not be loaded',
+        saveMessage: 'Scan duration could not be saved',
+        afterSave,
+        timeoutMs: 20
+      });
+      await setting.load();
+      const save = setting.change(10);
+      await vi.advanceTimersByTimeAsync(21);
+      await save;
+      expect(setting.value).toBeNull();
+
+      await setting.load();
+      expect(setting.value).toBe(5);
+      releaseSave.resolve(undefined);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(persisted).toBe(10);
+      expect(setting.value).toBe(10);
+      expect(afterSave).toHaveBeenCalledExactlyOnceWith(10);
+      expect(getter).toHaveBeenCalledTimes(4);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('reconciles an older timed-out write that finishes after a newer save', async () => {
+    vi.useFakeTimers();
+    try {
+      let persisted = 5;
+      const releaseFirst = deferred<void>();
+      const getter = vi.fn(async () => persisted);
+      const afterSave = vi.fn();
+      const setting = new AsyncSetting({
+        getter,
+        setter: async (value: number) => {
+          if (value === 10) await releaseFirst.promise;
+          persisted = value;
+        },
+        loadMessage: 'Scan duration could not be loaded',
+        saveMessage: 'Scan duration could not be saved',
+        afterSave,
+        timeoutMs: 20
+      });
+      await setting.load();
+      const first = setting.change(10);
+      await vi.advanceTimersByTimeAsync(21);
+      await first;
+      await setting.load();
+      await setting.change(20);
+      expect(persisted).toBe(20);
+
+      releaseFirst.resolve(undefined);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(persisted).toBe(10);
+      expect(setting.value).toBe(10);
+      expect(afterSave.mock.calls.map(([value]) => value)).toEqual([20, 10]);
+      expect(getter).toHaveBeenCalledTimes(4);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('reapplies the persisted runtime setting when a timed-out save later fails', async () => {
+    vi.useFakeTimers();
+    try {
+      let persisted = 5;
+      const releaseSave = deferred<void>();
+      const afterSave = vi.fn();
+      const setting = new AsyncSetting({
+        getter: async () => persisted,
+        setter: async (_value: number) => {
+          await releaseSave.promise;
+          throw new Error('save rejected');
+        },
+        loadMessage: 'Scan duration could not be loaded',
+        saveMessage: 'Scan duration could not be saved',
+        afterSave,
+        timeoutMs: 20
+      });
+      await setting.load();
+      const save = setting.change(10);
+      await vi.advanceTimersByTimeAsync(21);
+      await save;
+      expect(setting.value).toBeNull();
+
+      releaseSave.resolve(undefined);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(persisted).toBe(5);
+      expect(setting.value).toBe(5);
+      expect(afterSave).toHaveBeenCalledExactlyOnceWith(5);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('reconciles a reopened panel after an earlier instance timed out', async () => {
+    vi.useFakeTimers();
+    try {
+      let persisted = 5;
+      const releaseSave = deferred<void>();
+      const getter = vi.fn(async () => persisted);
+      const afterSave = vi.fn();
+      const setter = async (value: number) => {
+        await releaseSave.promise;
+        persisted = value;
+      };
+      const options = {
+        getter, setter,
+        loadMessage: 'Scan duration could not be loaded' as const,
+        saveMessage: 'Scan duration could not be saved' as const,
+        afterSave,
+        timeoutMs: 20
+      };
+      const firstPanel = new AsyncSetting(options);
+      await firstPanel.load();
+      const save = firstPanel.change(10);
+      await vi.advanceTimersByTimeAsync(21);
+      await save;
+
+      const reopenedPanel = new AsyncSetting(options);
+      await reopenedPanel.load();
+      expect(reopenedPanel.value).toBe(5);
+      releaseSave.resolve(undefined);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(reopenedPanel.value).toBe(10);
+      expect(afterSave).toHaveBeenCalledExactlyOnceWith(10);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

@@ -26,6 +26,10 @@ export class FleetState {
   private channelMemoryTick = $state(0);
   private channelMemoryTimer: ReturnType<typeof setTimeout> | null = null;
   private operationalFreshnessTimer: ReturnType<typeof setTimeout> | null = null;
+  private operationalDeadlines = new Map<string, {
+    power?: { source: string; due: number };
+    channel?: { source: string; due: number };
+  }>();
 
   channelDisplayByAddress = $derived.by(() => {
     void this.channelMemoryTick;
@@ -134,6 +138,23 @@ export class FleetState {
     const deduped = new Map(
       updated.filter((station) => Boolean(station?.address)).map((station) => [station.address, station])
     );
+    // A late list response can contain the same read that already expired in
+    // this view. Keep its elapsed-time deadline authoritative even after the
+    // visible flag was cleared, including when the wall clock moved back.
+    const now = performance.now();
+    for (const [address, station] of deduped) {
+      const deadlines = this.operationalDeadlines.get(address);
+      const expirePower = station.powerOperationallyFresh &&
+        deadlines?.power?.source === station.powerOperationalFreshUntil && deadlines.power.due <= now;
+      const expireChannel = station.channelOperationallyFresh &&
+        deadlines?.channel?.source === station.channelOperationalFreshUntil && deadlines.channel.due <= now;
+      if (expirePower || expireChannel) {
+        deduped.set(address, this.patch(station, {
+          powerOperationallyFresh: expirePower ? false : station.powerOperationallyFresh,
+          channelOperationallyFresh: expireChannel ? false : station.channelOperationallyFresh
+        }));
+      }
+    }
     // A single-station response cannot update the peer's old conflict flag.
     // Recompute this fleet property after every merge and freshness expiry,
     // using the same operational evidence as channel-change validation.
@@ -176,36 +197,64 @@ export class FleetState {
   }
 
   // Operation freshness is deliberately shorter than display freshness. A
-  // long polling interval can therefore cross the write-safety deadline
-  // without receiving another backend snapshot. Expire the projected flags
-  // at the backend-provided timestamps so buttons and channel-risk prompts
-  // stay aligned with the command validators between polls.
+  // long polling interval can cross the write-safety deadline without another
+  // backend snapshot. Convert each backend timestamp to an elapsed-time
+  // deadline when received; retaining that deadline across partial commits
+  // prevents clock changes and unrelated updates from extending stale flags.
   private scheduleOperationalFreshnessExpiry() {
     if (this.operationalFreshnessTimer !== null) {
       clearTimeout(this.operationalFreshnessTimer);
       this.operationalFreshnessTimer = null;
     }
+    const previousDeadlines = this.operationalDeadlines;
+    const nextDeadlines = new Map<string, {
+      power?: { source: string; due: number };
+      channel?: { source: string; due: number };
+    }>();
+    const now = performance.now();
+    const wallNow = Date.now();
     let nearest = Number.POSITIVE_INFINITY;
     for (const station of this.stations) {
+      const previous = previousDeadlines.get(station.address);
+      const deadlines: {
+        power?: { source: string; due: number };
+        channel?: { source: string; due: number };
+      } = { ...previous };
       if (station.powerOperationallyFresh) {
-        nearest = Math.min(nearest, this.parseOperationalFreshUntil(station.powerOperationalFreshUntil));
+        deadlines.power = this.monotonicDeadline(
+          station.powerOperationalFreshUntil, previous?.power, now, wallNow
+        );
+        nearest = Math.min(nearest, deadlines.power.due);
       }
       if (station.channelOperationallyFresh) {
-        nearest = Math.min(nearest, this.parseOperationalFreshUntil(station.channelOperationalFreshUntil));
+        deadlines.channel = this.monotonicDeadline(
+          station.channelOperationalFreshUntil, previous?.channel, now, wallNow
+        );
+        nearest = Math.min(nearest, deadlines.channel.due);
       }
+      if (deadlines.power || deadlines.channel) nextDeadlines.set(station.address, deadlines);
     }
+    this.operationalDeadlines = nextDeadlines;
     if (nearest === Number.POSITIVE_INFINITY) return;
-    const delay = Math.min(OPERATIONAL_SAFETY_WINDOW_MS, Math.max(0, nearest - Date.now()));
+    const delay = Math.max(0, nearest - performance.now());
     this.operationalFreshnessTimer = setTimeout(() => {
       this.operationalFreshnessTimer = null;
-      // setTimeout is armed from a wall-clock deadline but fires on a
-      // monotonic timer; a backward clock change after scheduling would let
-      // `nearest` expire entries whose deadline has not actually been
-      // reached. Clamp the effective deadline to the current time so only
-      // genuinely expired entries downgrade; the reschedule path re-arms
-      // the rest once nothing changes.
-      this.expireOperationalFreshnessThrough(Math.min(nearest, Date.now()));
+      this.expireOperationalFreshnessThrough(performance.now());
     }, delay);
+  }
+
+  private monotonicDeadline(
+    source: string,
+    previous: { source: string; due: number } | undefined,
+    now: number,
+    wallNow: number
+  ): { source: string; due: number } {
+    if (previous?.source === source) return previous;
+    const remaining = Math.min(
+      OPERATIONAL_SAFETY_WINDOW_MS,
+      Math.max(0, this.parseOperationalFreshUntil(source) - wallNow)
+    );
+    return { source, due: now + remaining };
   }
 
   private parseOperationalFreshUntil(value: string): number {
@@ -218,10 +267,11 @@ export class FleetState {
   private expireOperationalFreshnessThrough(deadline: number) {
     let changed = false;
     const updated = this.stations.map((station) => {
+      const deadlines = this.operationalDeadlines.get(station.address);
       const expirePower = station.powerOperationallyFresh &&
-        this.parseOperationalFreshUntil(station.powerOperationalFreshUntil) <= deadline;
+        (deadlines?.power?.due ?? Number.NEGATIVE_INFINITY) <= deadline;
       const expireChannel = station.channelOperationallyFresh &&
-        this.parseOperationalFreshUntil(station.channelOperationalFreshUntil) <= deadline;
+        (deadlines?.channel?.due ?? Number.NEGATIVE_INFINITY) <= deadline;
       if (!expirePower && !expireChannel) return station;
       changed = true;
       return this.patch(station, {

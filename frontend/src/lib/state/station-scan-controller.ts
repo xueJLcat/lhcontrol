@@ -335,6 +335,7 @@ export class StationScanController {
   }
 
   async periodicStatusCheck() {
+    if (this.host.disposed) return;
     // External HTTP operations hold the backend's global operation lock, so a
     // status poll started in that window can only fail with "operation in
     // progress" and would overwrite the status line with a spurious error.
@@ -441,7 +442,7 @@ export class StationScanController {
   // the scan from starting, so callers such as the startup flow can defer and
   // retry instead of silently giving up.
   async startScan(): Promise<boolean> {
-    if (this.host.isLoading || this.host.scanLocked) return false;
+    if (this.host.disposed || this.host.isLoading || this.host.scanLocked) return false;
     this.host.prepareForScan();
     // A pending stop belongs to the superseded scan. Its StopScan promise
     // can still be settling while the empty fleet lets the user start a new
@@ -545,7 +546,7 @@ export class StationScanController {
   }
 
   async stopScan() {
-    if (!this.host.scanningActive || this.host.stoppingScan) return;
+    if (this.host.disposed || !this.host.scanningActive || this.host.stoppingScan) return;
     const operationEpoch = this.host.gates.currentScanEpoch;
     // Own the status line for the stop so the terminal message can be gated
     // against newer owners (an auto-sleep or HTTP event that lands while
@@ -601,6 +602,7 @@ export class StationScanController {
       // A scan that finished while the stop request failed keeps its
       // completion summary instead of a misleading stop-failure toast.
       const summary = await this.completedScanSummary();
+      if (this.host.disposed) return;
       if (summary !== null && this.host.gates.canCommitStatus(statusOperation)) {
         this.host.stoppingScan = false;
         this.host.statusMessage = summary;
@@ -631,7 +633,7 @@ export class StationScanController {
     } finally {
       // Terminal scan events can advance scanEpoch before StopScan settles.
       // Clear this request by identity rather than treating it as stale.
-      if (this.host.stopRequestGeneration === requestGeneration) {
+      if (!this.host.disposed && this.host.stopRequestGeneration === requestGeneration) {
         this.host.stopRequestPending = false;
         if (this.host.globalOperation !== 'scanning' && !this.host.externalScanning) this.host.stoppingScan = false;
       }

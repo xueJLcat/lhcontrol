@@ -118,6 +118,17 @@ func (c *Config) GetStationDisplayName(address, originalName string) (string, bo
 }
 
 func (c *Config) SetRenamedStationByAddress(address, originalName, newName string) error {
+	return c.setRenamedStationByAddress(address, originalName, newName, false)
+}
+
+// ResetKnownStationNameWithoutFactoryName records an explicit reset for a
+// discovered station whose factory name cannot be read while its lock is held.
+// The tombstone prevents a legacy name alias from reappearing after unlock.
+func (c *Config) ResetKnownStationNameWithoutFactoryName(address string) error {
+	return c.setRenamedStationByAddress(address, "", "", true)
+}
+
+func (c *Config) setRenamedStationByAddress(address, originalName, newName string, forceTombstone bool) error {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 	c.recoverBlockedPersistenceLocked()
@@ -134,17 +145,16 @@ func (c *Config) SetRenamedStationByAddress(address, originalName, newName strin
 			// removing that alias from other devices with the same factory name.
 			c.RenamedStationsByAddress[address] = ""
 		case originalName == "":
-			// The factory name is unknown (the station has not been scanned
-			// this session), so a legacy alias may still apply to this device
-			// even when this setter cannot see it. Keep the existing entry as
-			// a tombstone: deleting it would silently resurrect the legacy
-			// alias once a scan rediscovers the device. With no existing entry
-			// there is nothing to suppress or remove; a blocked persistence
-			// still reports the block like every other setter instead of
+			// The factory name is unavailable, so a legacy alias may still
+			// apply to this device. Keep an existing entry as a tombstone;
+			// deleting it could silently resurrect that alias. A known locked
+			// station needs a new tombstone for an explicit reset, while an
+			// unscanned address without an entry has nothing to suppress. A
+			// blocked persistence still reports the block instead of
 			// claiming success. A pending persistence error also keeps the
 			// rewrite: rewriting unchanged content is exactly what clears it,
 			// matching SetAPIListenAddress.
-			if !addressExisted {
+			if !addressExisted && !forceTombstone {
 				if c.persistenceBlockedErr != nil {
 					return blockedSaveError(c.persistenceBlockedErr)
 				}

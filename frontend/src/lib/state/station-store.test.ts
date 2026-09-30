@@ -38,7 +38,7 @@ vi.mock('../toast', async (importOriginal) => {
 import { StationStore, type StationStoreUi } from './station-store.svelte.ts';
 import { pushToast } from '../toast';
 import { createStation } from '../../test/fixtures';
-import { setLanguagePreference } from '../i18n.svelte';
+import { setLanguagePreference, t } from '../i18n.svelte';
 
 function createUi(): StationStoreUi {
   return {
@@ -247,6 +247,77 @@ describe('StationStore projection settings', () => {
 });
 
 describe('StationStore locale changes', () => {
+  it.each(['power', 'identify', 'capabilities', 'channel'] as const)('translates %s errors after a language change during recovery readback', async (action) => {
+    store = new StationStore(createUi());
+    store.startupPending = false;
+    const station = createStation();
+    store.stations = [station];
+    const list = deferred<ReturnType<typeof createStation>[]>();
+    backend.GetCurrentStationInfo.mockReturnValueOnce(list.promise);
+    const command = action === 'power' ? backend.SetStationPower
+      : action === 'identify' ? backend.IdentifyStation
+        : action === 'capabilities' ? backend.RefreshStationCapabilities : backend.SetStationChannel;
+    command.mockRejectedValueOnce('station is busy');
+    const pending = action === 'power' ? store.setPower(station, 'on')
+      : action === 'identify' ? store.identify(station)
+        : action === 'capabilities' ? store.refreshCapabilities(station)
+          : store.saveChannel(station, 4, false);
+    await vi.waitFor(() => expect(backend.GetCurrentStationInfo).toHaveBeenCalledOnce());
+    setLanguagePreference('zh-CN');
+    store.onLocaleChanged();
+    list.resolve([station]);
+    await pending;
+    expect(store.statusMessage).toContain(t('station is busy'));
+    expect(store.statusMessage).not.toContain('station is busy');
+    expect(pushToast).toHaveBeenCalledWith(expect.stringContaining(t('station is busy')));
+  });
+
+  it('translates a pending single power result using the language at completion', async () => {
+    store = new StationStore(createUi());
+    store.startupPending = false;
+    const station = createStation();
+    store.stations = [station];
+    const command = deferred<{ station: ReturnType<typeof createStation>; commandSent: boolean; confirmed: boolean }>();
+    backend.SetStationPower.mockReturnValueOnce(command.promise);
+    const pending = store.setPower(station, 'on');
+    setLanguagePreference('zh-CN');
+    store.onLocaleChanged();
+    command.resolve({ station: createStation({ powerState: 1 }), commandSent: true, confirmed: true });
+    await pending;
+    expect(store.powerFeedbackMap[station.address]?.text).toBe(t('{target} confirmed', { target: t('On') }));
+    expect(store.statusMessage).toBe(t('{name} is {target}.', { name: station.name, target: t('On') }));
+  });
+
+  it.each([false, true])('translates bulk completion after a language change during list reconciliation (failure=%s)', async (failed) => {
+    store = new StationStore(createUi());
+    store.startupPending = false;
+    const station = createStation();
+    store.stations = [station];
+    const list = deferred<ReturnType<typeof createStation>[]>();
+    backend.GetCurrentStationInfo.mockReturnValueOnce(list.promise);
+    if (failed) {
+      backend.SetAllStationsPowerDetailed.mockRejectedValueOnce(new Error('write failed'));
+    } else {
+      backend.SetAllStationsPowerDetailed.mockResolvedValueOnce({ target: 'on', results: [{
+        address: station.address, name: station.name, skipped: false, commandSent: true,
+        success: true, confirmed: true, station: createStation({ powerState: 1 })
+      }] });
+    }
+    const pending = store.runBulkPower('on');
+    await vi.waitFor(() => expect(backend.GetCurrentStationInfo).toHaveBeenCalledOnce());
+    setLanguagePreference('zh-CN');
+    store.onLocaleChanged();
+    list.resolve([createStation({ powerState: 1 })]);
+    await pending;
+    expect(store.statusMessage).toContain(t('On'));
+    expect(store.statusMessage).not.toContain('On');
+    if (failed) expect(pushToast).toHaveBeenCalledWith(expect.stringContaining(t('On')));
+    else expect(pushToast).toHaveBeenCalledWith(expect.stringContaining(t('On')), 'success');
+    if (!failed) {
+      expect(store.powerFeedbackMap[station.address]?.text).toBe(t('{target} confirmed', { target: t('On') }));
+    }
+  });
+
   it('rebuilds transient messages and clears old-language feedback', async () => {
     const { store } = mountStore();
     await vi.waitFor(() => expect(store.stations).toHaveLength(1));
@@ -289,6 +360,81 @@ describe('StationStore locale changes', () => {
 });
 
 describe('StationStore lifecycle', () => {
+  it.each(['power', 'rename', 'identify', 'capabilities', 'channel', 'bulk'] as const)('does not toast a delayed %s failure after disposal', async (action) => {
+    store = new StationStore(createUi());
+    store.startupPending = false;
+    const station = createStation();
+    store.stations = [station];
+    const response = deferred<void>();
+    const command = action === 'power' ? backend.SetStationPower
+      : action === 'rename' ? backend.RenameStationByAddress
+        : action === 'identify' ? backend.IdentifyStation
+          : action === 'capabilities' ? backend.RefreshStationCapabilities
+            : action === 'channel' ? backend.SetStationChannel : backend.SetAllStationsPowerDetailed;
+    command.mockReturnValueOnce(response.promise.then(() => { throw new Error('late failure'); }));
+    const pending = action === 'power' ? store.setPower(station, 'on')
+      : action === 'rename' ? store.saveRename(station, 'New name')
+        : action === 'identify' ? store.identify(station)
+          : action === 'capabilities' ? store.refreshCapabilities(station)
+            : action === 'channel' ? store.saveChannel(station, 4, false) : store.runBulkPower('on');
+    expect(command).toHaveBeenCalledOnce();
+    store.dispose();
+    response.resolve();
+    await pending;
+    expect(pushToast).not.toHaveBeenCalled();
+    expect(backend.GetCurrentStationInfo).not.toHaveBeenCalled();
+  });
+
+  it('does not toast a delayed successful bulk result after disposal', async () => {
+    store = new StationStore(createUi());
+    store.startupPending = false;
+    store.stations = [createStation()];
+    const response = deferred<{ target: string; results: never[] }>();
+    backend.SetAllStationsPowerDetailed.mockReturnValueOnce(response.promise);
+    const pending = store.runBulkPower('on');
+    store.dispose();
+    response.resolve({ target: 'on', results: [] });
+    await pending;
+    expect(pushToast).not.toHaveBeenCalled();
+  });
+
+  it('rejects command entry points on a disposed store', async () => {
+    store = new StationStore(createUi());
+    store.startupPending = false;
+    const station = createStation();
+    store.stations = [station];
+    store.dispose();
+    expect(store.canStartBulkPower('on')).toBe(false);
+    store.startRename(station);
+    store.requestBulkPower('on');
+    expect(await store.runBulkPower('on')).toBe(false);
+    await store.setPower(station, 'on');
+    await store.saveRename(station, 'New name');
+    await store.identify(station);
+    await store.refreshCapabilities(station);
+    await store.saveChannel(station, 4, false);
+    expect(await store.startScan()).toBe(false);
+    for (const command of [backend.SetStationPower, backend.RenameStationByAddress,
+      backend.IdentifyStation, backend.RefreshStationCapabilities, backend.SetStationChannel,
+      backend.SetAllStationsPowerDetailed, backend.ScanAndFetchStations]) expect(command).not.toHaveBeenCalled();
+    expect(store.editingAddress).toBeNull();
+  });
+
+  it('does not toast a stop failure when disposal occurs during its summary read', async () => {
+    store = new StationStore(createUi());
+    store.startupPending = false;
+    store.globalOperation = 'scanning';
+    backend.StopScan.mockRejectedValueOnce(new Error('stop failed'));
+    const summary = deferred<{ state: string; found: number; warnings: string[] }>();
+    backend.GetScanStatus.mockReturnValueOnce(summary.promise);
+    const pending = store.stopScan();
+    await vi.waitFor(() => expect(backend.GetScanStatus).toHaveBeenCalledOnce());
+    store.dispose();
+    summary.resolve({ state: 'failed', found: 0, warnings: [] });
+    await pending;
+    expect(pushToast).not.toHaveBeenCalled();
+  });
+
   it('does not register dead listeners when mounting a disposed store', () => {
     const local = new StationStore(createUi());
     local.mount();

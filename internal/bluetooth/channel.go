@@ -31,20 +31,16 @@ func IdentifyContext(ctx context.Context, station *BaseStation) error {
 		if err := connectAndDiscoverInternalContext(ctx, station); err != nil {
 			if isConnectNotStarted(err) {
 				// The attempt never started; keep the cached session and report
-				// the cancellation instead of tearing down before noticing it.
-				return err
+				// the cancellation without losing an earlier attempt's failure.
+				return errors.Join(lastErr, err)
 			}
 			if contextErr := ctx.Err(); contextErr != nil {
-				// The interruption stopped the attempt; report the cancellation
-				// itself instead of booking it as a failed identify that
-				// exhausted its retries. The half-opened session still needs
-				// the same cleanup the retry path runs. A previous attempt's
-				// observed failure is joined so it is not swallowed.
+				// Preserve this attempt's error as well as any previous failure:
+				// a transport fault and cancellation can arrive together. Pure
+				// interruptions stay pure, while an observed broken link retains
+				// its recovery classification. Clean up the half-opened session.
 				_ = disconnectInternal(station)
-				if lastErr != nil {
-					return errors.Join(lastErr, contextErr)
-				}
-				return contextErr
+				return errors.Join(lastErr, err, contextErr)
 			}
 			lastErr = err
 		} else if !station.Capabilities.Identify || station.identifyCharacteristic == nil {
@@ -181,7 +177,7 @@ func SetChannelContext(ctx context.Context, station *BaseStation, channel int) (
 					return result, nil
 				}
 				writeErr = fmt.Errorf(
-					"write reported %v, but readback reported channel %d instead of %d",
+					"write reported %w, but readback reported channel %d instead of %d",
 					writeErr,
 					station.Channel,
 					channel,

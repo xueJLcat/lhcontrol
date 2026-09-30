@@ -186,9 +186,17 @@ func (m *Manager) nextStatusRecoveryDelay() (time.Duration, bool) {
 		return 0, false
 	}
 	eligible := make(map[string]struct{}, len(retries))
+	stationLockBusy := false
 	for _, station := range m.stationPointers() {
 		snapshot, ok := station.SnapshotNonBlocking()
 		if !ok {
+			// A newly discovered station can be locked by its first GATT read
+			// before any snapshot has been cached. Its retry is still pending:
+			// releasing the station lock does not wake this scheduler, so keep
+			// polling briefly instead of sleeping until an unrelated event.
+			if _, tracked := retries[station.Address.String()]; tracked {
+				stationLockBusy = true
+			}
 			continue
 		}
 		address := snapshot.Address
@@ -213,12 +221,19 @@ func (m *Manager) nextStatusRecoveryDelay() (time.Duration, bool) {
 		}
 	}
 	if earliest.IsZero() {
+		if stationLockBusy {
+			return m.statusBusyRetry, true
+		}
 		return 0, false
 	}
 	if !now.Before(earliest) {
 		return 0, true
 	}
-	return earliest.Sub(now), true
+	delay := earliest.Sub(now)
+	if stationLockBusy && delay > m.statusBusyRetry {
+		return m.statusBusyRetry, true
+	}
+	return delay, true
 }
 func (m *Manager) initializationRetryDelay() time.Duration {
 	m.initializeMutex.Lock()

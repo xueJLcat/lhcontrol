@@ -90,6 +90,14 @@ func (m *Manager) SetStationPower(address, state string) (PowerActionResult, err
 		}
 		verificationProvedDeadLink = m.recordPowerVerificationResult(stationPtr, canonicalAddress, snapshot, readErr)
 		if err := operationContext.Err(); err != nil {
+			// No later Bluetooth phase will book a pre-read connection failure
+			// once the operation budget is spent. Structured field failures were
+			// already booked above; observe only the unstructured failure here.
+			var initialErr *bluetooth.InitialReadError
+			if readErr != nil && !errors.As(readErr, &initialErr) {
+				m.observeStationBluetoothError(stationPtr, canonicalAddress, readErr)
+				return PowerActionResult{}, m.stationOperationContextError(errors.Join(readErr, err))
+			}
 			return PowerActionResult{}, m.stationOperationContextError(err)
 		}
 		snapshot = stationPtr.Snapshot()

@@ -354,13 +354,9 @@ func TestScanRevivesRecoveryForReturningAbsentStation(t *testing.T) {
 	}
 }
 
-// TestScanDoesNotReviveStationThatOnlyCrossedMissThreshold guards the revival
-// hook against a false positive: a station present before the merge can cross
-// the miss threshold during the merge's own MarkMissed, and MarkSeen then
-// reports an absent-to-present transition that never happened. Only genuinely
-// absent stations may re-arm recovery; the flicker case already participates
-// in the same scan's initial reads.
-func TestScanDoesNotReviveStationThatOnlyCrossedMissThreshold(t *testing.T) {
+// A station observed in this scan must not accumulate a temporary miss or be
+// treated as a revival just because its previous scan had missed it.
+func TestScanDoesNotCountDiscoveredStationAsMissedOrRevived(t *testing.T) {
 	manager := NewManager(config.NewConfig())
 	defer manager.Shutdown()
 	address := "11:22:33:44:55:6E"
@@ -381,14 +377,30 @@ func TestScanDoesNotReviveStationThatOnlyCrossedMissThreshold(t *testing.T) {
 	if _, err := manager.ScanAndFetchStations(); err != nil {
 		t.Fatalf("ScanAndFetchStations() error = %v", err)
 	}
-	if !station.Snapshot().Present {
-		t.Fatal("scan merge did not keep the flickering station present")
+	if snapshot := station.Snapshot(); !snapshot.Present || snapshot.MissedScans != 0 {
+		t.Fatalf("discovered station presence = %+v, want present with no misses", snapshot)
 	}
 	manager.statusRetryMutex.Lock()
 	retry, tracked := manager.statusRetries[address]
 	manager.statusRetryMutex.Unlock()
 	if tracked {
-		t.Fatalf("scan merge re-armed recovery for a station that only crossed the miss threshold: %+v", retry)
+		t.Fatalf("scan merge re-armed recovery for a station that was already present: %+v", retry)
+	}
+}
+
+func TestScanMissBookkeepingSkipsDiscoveredStation(t *testing.T) {
+	address := "11:22:33:44:55:6F"
+	station := &internalbluetooth.BaseStation{
+		Name: "LHB-FOUND", Address: mustAddress(t, address),
+		Present: true, MissedScans: 1,
+	}
+	markScanMisses(
+		[]*internalbluetooth.BaseStation{station},
+		map[string]struct{}{address: {}},
+		nil,
+	)
+	if snapshot := station.Snapshot(); !snapshot.Present || snapshot.MissedScans != 1 {
+		t.Fatalf("positive discovery changed miss history before MarkSeen: %+v", snapshot)
 	}
 }
 
@@ -459,6 +471,81 @@ func TestScanMergeSkipsWedgedStationLock(t *testing.T) {
 	}
 }
 
+func TestScanReconcilesDiscoveredStationAfterGATTLockReleases(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	manager.statusRecoveryStart.Do(func() {})
+	address := "11:22:33:44:55:B2"
+	station := &internalbluetooth.BaseStation{
+		Name: "LHB-OLD", Address: mustAddress(t, address), Present: false, MissedScans: 3,
+	}
+	manager.stations[address] = station
+	manager.markScanStarted()
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseLock := func() { releaseOnce.Do(func() { close(release) }) }
+	lockHeld := make(chan struct{})
+	lockReleased := make(chan struct{})
+	go func() {
+		station.HoldLockWhile(func() { close(lockHeld); <-release })
+		close(lockReleased)
+	}()
+	<-lockHeld
+	t.Cleanup(func() { releaseLock(); <-lockReleased; manager.Shutdown() })
+
+	started := time.Now()
+	manager.mergeDiscoveredStations([]internalbluetooth.DiscoveredStation{{
+		Name: "LHB-RETURNED", Address: mustAddress(t, address),
+	}}, nil)
+	if time.Since(started) > time.Second {
+		t.Fatal("scan merge blocked on the station's GATT lock")
+	}
+	releaseLock()
+	<-lockReleased
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		snapshot := station.Snapshot()
+		manager.statusRetryMutex.Lock()
+		retry, tracked := manager.statusRetries[address]
+		manager.statusRetryMutex.Unlock()
+		if snapshot.Present && snapshot.MissedScans == 0 && snapshot.Name == "LHB-RETURNED" &&
+			tracked && retry.kinds&statusRetryConnection != 0 {
+			return
+		}
+	}
+	t.Fatalf("discovered station did not become present and re-arm recovery: %+v", station.Snapshot())
+}
+
+func TestNewScanSupersedesBusyDiscoveryReconciliation(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	manager.statusRecoveryStart.Do(func() {})
+	address := "11:22:33:44:55:B3"
+	station := &internalbluetooth.BaseStation{
+		Name: "LHB-ABSENT", Address: mustAddress(t, address), Present: false, MissedScans: 3,
+	}
+	manager.stations[address] = station
+	manager.markScanStarted()
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseLock := func() { releaseOnce.Do(func() { close(release) }) }
+	lockHeld := make(chan struct{})
+	lockReleased := make(chan struct{})
+	go func() {
+		station.HoldLockWhile(func() { close(lockHeld); <-release })
+		close(lockReleased)
+	}()
+	<-lockHeld
+	t.Cleanup(func() { releaseLock(); <-lockReleased; manager.Shutdown() })
+	manager.mergeDiscoveredStations([]internalbluetooth.DiscoveredStation{{
+		Name: "LHB-STALE", Address: mustAddress(t, address),
+	}}, nil)
+	manager.markScanStarted()
+	releaseLock()
+	<-lockReleased
+	time.Sleep(2 * scanObservationRetryInterval)
+	if snapshot := station.Snapshot(); snapshot.Present || snapshot.Name != "LHB-ABSENT" {
+		t.Fatalf("superseded discovery changed station state: %+v", snapshot)
+	}
+}
+
 // TestScanRevivesAbsentStationWhoseReleaseFailed guards the revival hook for
 // unreliable-presence stations: when a genuinely absent station's cached
 // connection cannot be released before the scan, presence for that station is
@@ -497,6 +584,53 @@ func TestScanRevivesAbsentStationWhoseReleaseFailed(t *testing.T) {
 	}
 	if effectiveStatusRetryKinds(retry)&statusRetryConnection == 0 {
 		t.Fatalf("revival retry = %+v, want connection recovery", retry)
+	}
+}
+
+func TestRevivedStationRecoveryDoesNotNeedAnotherSnapshot(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	defer manager.Shutdown()
+	manager.statusRecoveryStart.Do(func() {})
+	address := "11:22:33:44:55:80"
+	station := &internalbluetooth.BaseStation{
+		Name: "LHB-RETURNED", Address: mustAddress(t, address), Present: false,
+	}
+	if !station.MarkSeen(time.Now()) {
+		t.Fatal("station did not report an absent-to-present transition")
+	}
+	lockHeld := make(chan struct{})
+	release := make(chan struct{})
+	lockReleased := make(chan struct{})
+	go func() {
+		station.HoldLockWhile(func() {
+			close(lockHeld)
+			<-release
+		})
+		close(lockReleased)
+	}()
+	<-lockHeld
+	defer func() {
+		close(release)
+		<-lockReleased
+	}()
+
+	// The lock can be acquired by another BLE worker after MarkSeen succeeds.
+	// The revival still needs a retry without waiting for that worker to end.
+	done := make(chan struct{})
+	go func() {
+		manager.rearmRevivedStations([]*internalbluetooth.BaseStation{station})
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("revival recovery waited for a station snapshot")
+	}
+	manager.statusRetryMutex.Lock()
+	retry, tracked := manager.statusRetries[address]
+	manager.statusRetryMutex.Unlock()
+	if !tracked || effectiveStatusRetryKinds(retry)&statusRetryConnection == 0 {
+		t.Fatalf("revival recovery = %+v (tracked=%v), want connection recovery", retry, tracked)
 	}
 }
 

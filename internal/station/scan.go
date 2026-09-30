@@ -359,6 +359,12 @@ func (m *Manager) releaseStationsForScan(ctx context.Context) (map[string]struct
 	return unreliablePresence, nil
 }
 
+type discoveredMerge struct {
+	value   bluetooth.DiscoveredStation
+	station *bluetooth.BaseStation
+	isNew   bool
+}
+
 // mergeDiscoveredStations applies one scan's discovery results to the fleet:
 // marks missed stations, registers newly discovered stations, records revivals
 // (re-arming recovery for genuinely absent returners), and returns the
@@ -369,52 +375,22 @@ func (m *Manager) mergeDiscoveredStations(
 ) []*bluetooth.BaseStation {
 	stationsToFetch := make([]*bluetooth.BaseStation, 0)
 	scanTime := time.Now()
+	discoveredAddresses := make(map[string]struct{}, len(discoveredValues))
+	for _, discovered := range discoveredValues {
+		discoveredAddresses[discovered.Address.String()] = struct{}{}
+	}
 	// Snapshot and Mark* calls below take each station's own mutex, which an
 	// abandoned WinRT cleanup can hold for a long time; running them outside
 	// the fleet lock keeps every fleet reader and writer (and the scan's
 	// in-progress state) from queueing behind one wedged station.
 	stationPtrs := m.stationPointers()
-	// Snapshot absence before the miss marking below: a station seen this
-	// round can still cross the miss threshold during MarkMissed, and MarkSeen
-	// would then report an absent-to-present transition that never happened.
-	// Only genuinely absent stations are revivals worth re-arming recovery
-	// for; the others already participate in this scan's own initial reads.
-	previouslyAbsent := make(map[*bluetooth.BaseStation]bool, len(stationPtrs))
-	for _, stationPtr := range stationPtrs {
-		// Non-blocking snapshot: a station wedged inside a transport call must
-		// not hang the merge (and with it the whole scan); it simply keeps its
-		// previous presence bookkeeping this round.
-		snapshot, ok := stationPtr.SnapshotNonBlocking()
-		if !ok {
-			continue
-		}
-		if _, unreliable := unreliablePresence[strings.ToLower(snapshot.Address)]; unreliable {
-			// An unreliable station still needs its absence snapshotted: when
-			// its cached connection could not be released, a genuinely absent
-			// station this scan sees advertising again must still count as a
-			// revival so recovery is re-armed below.
-			if !snapshot.Present {
-				previouslyAbsent[stationPtr] = true
-			}
-			// Non-blocking mark: the same wedged lock that can stall a
-			// snapshot can be held here too; the station keeps its previous
-			// presence bookkeeping instead of hanging the whole scan.
-			stationPtr.TryMarkPresenceUncertain()
-			continue
-		}
-		if !snapshot.Present {
-			previouslyAbsent[stationPtr] = true
-		}
-		stationPtr.TryMarkMissed()
-	}
+	// A discovered address is never marked missed in this round, so MarkSeen's
+	// transition below is enough to identify a genuine revival even if its
+	// lock was busy while the miss pass inspected the fleet.
+	markScanMisses(stationPtrs, discoveredAddresses, unreliablePresence)
 	// Resolve map membership under the write lock, but restrict that section
 	// to map work: newly created stations are not published until they are
 	// inserted, and existing pointers stay valid after the unlock.
-	type discoveredMerge struct {
-		value   bluetooth.DiscoveredStation
-		station *bluetooth.BaseStation
-		isNew   bool
-	}
 	merges := make([]discoveredMerge, 0, len(discoveredValues))
 	m.stationsMutex.Lock()
 	for _, currentScanStation := range discoveredValues {
@@ -443,37 +419,119 @@ func (m *Manager) mergeDiscoveredStations(
 	}
 	m.stationsMutex.Unlock()
 	revivedStations := make([]*bluetooth.BaseStation, 0)
+	busyObservations := make([]discoveredMerge, 0)
 	for _, merge := range merges {
 		stationPtr := merge.station
 		if merge.isNew {
 			stationsToFetch = append(stationsToFetch, stationPtr)
 			continue
 		}
-		// Non-blocking marks: a wedged station lock must not hang the merge.
-		// A skipped update keeps the previous name/presence for this round;
-		// the next scan or refresh redelivers both.
-		if merge.value.Name != "" {
-			stationPtr.TryUpdateName(merge.value.Name)
-		}
-		if transitioned, ok := stationPtr.TryMarkSeen(scanTime); ok && transitioned && previouslyAbsent[stationPtr] {
-			revivedStations = append(revivedStations, stationPtr)
+		// Keep the merge non-blocking, but remember a positive discovery that
+		// could not take the station lock. Otherwise an absent station remains
+		// absent and its recovery is not re-armed until another scan.
+		if transitioned, ok := stationPtr.TryApplyScanObservation(scanTime, merge.value.Name); ok {
+			if transitioned {
+				revivedStations = append(revivedStations, stationPtr)
+			}
+		} else {
+			busyObservations = append(busyObservations, merge)
 		}
 		if snapshot, ok := stationPtr.SnapshotNonBlocking(); !ok || !snapshot.Connected {
 			stationsToFetch = append(stationsToFetch, stationPtr)
 		}
 	}
 	// A station that returns after its absent recovery was pruned or exhausted
-	// has no retry entry left, and the initial read below can still be skipped
-	// (a cancellation landing in the merge window, or an already connected
-	// station). Re-arm recovery for a revived but disconnected station so it
-	// does not sit untracked until the next status poll or user action.
-	for _, stationPtr := range revivedStations {
-		snapshot, ok := stationPtr.SnapshotNonBlocking()
-		if ok && !snapshot.Connected {
-			m.rebaseRecoveryForRevivedStation(snapshot.Address)
-		}
+	// has no retry entry left. Initial reads may be skipped by cancellation or
+	// by an old connection handle still appearing connected. Re-arm every real
+	// revival so the recovery worker verifies the state even in those cases.
+	// Address is immutable, so this also works when the station lock becomes
+	// busy again after MarkSeen succeeded.
+	m.rearmRevivedStations(revivedStations)
+	if len(busyObservations) > 0 {
+		go m.reconcileBusyScanObservations(m.GetScanStatus().ID, scanTime, busyObservations)
 	}
 	return stationsToFetch
+}
+
+const scanObservationRetryInterval = 100 * time.Millisecond
+const scanObservationRetryWindow = 10 * time.Second
+
+// A short GATT lock collision should not discard a completed scan's positive
+// discovery. Retry without blocking the scan, but stop after a bounded window
+// or when a newer scan supersedes this observation; old evidence must not
+// revive a station after a later scan marked it absent.
+func (m *Manager) reconcileBusyScanObservations(scanID uint64, observedAt time.Time, pending []discoveredMerge) {
+	deadline := time.NewTimer(scanObservationRetryWindow)
+	defer deadline.Stop()
+	ticker := time.NewTicker(scanObservationRetryInterval)
+	defer ticker.Stop()
+	for len(pending) > 0 {
+		select {
+		case <-ticker.C:
+		case <-deadline.C:
+			return
+		case <-m.shutdownCh:
+			return
+		}
+		// reserveScan advances the ID while holding this mutex. Keep it
+		// through the non-blocking updates so a new scan cannot start between
+		// the supersession check and a stale observation being applied.
+		m.scanTransitionMutex.Lock()
+		if m.shuttingDown.Load() || m.GetScanStatus().ID != scanID {
+			m.scanTransitionMutex.Unlock()
+			return
+		}
+		remaining := pending[:0]
+		for _, observation := range pending {
+			transitioned, ok := observation.station.TryApplyScanObservation(observedAt, observation.value.Name)
+			if !ok {
+				remaining = append(remaining, observation)
+				continue
+			}
+			if transitioned {
+				m.rebaseRecoveryForRevivedStation(observation.station.Address.String())
+			}
+		}
+		pending = remaining
+		m.scanTransitionMutex.Unlock()
+	}
+}
+
+func (m *Manager) rearmRevivedStations(stations []*bluetooth.BaseStation) {
+	for _, stationPtr := range stations {
+		m.rebaseRecoveryForRevivedStation(stationPtr.Address.String())
+	}
+}
+
+// markScanMisses applies absence evidence only to addresses not found in the
+// completed scan. It runs before the discovery updates.
+func markScanMisses(
+	stationPtrs []*bluetooth.BaseStation,
+	discoveredAddresses, unreliablePresence map[string]struct{},
+) {
+	for _, stationPtr := range stationPtrs {
+		// Address is immutable. Check positive discovery before trying the
+		// station lock, so a briefly busy returner cannot be mistaken for a
+		// missed station or lose its revival when the lock becomes free.
+		if _, discovered := discoveredAddresses[stationPtr.Address.String()]; discovered {
+			continue
+		}
+		// Non-blocking snapshot: a station wedged inside a transport call must
+		// not hang the merge (and with it the whole scan); it simply keeps its
+		// previous presence bookkeeping this round.
+		snapshot, ok := stationPtr.SnapshotNonBlocking()
+		if !ok {
+			continue
+		}
+		if _, unreliable := unreliablePresence[strings.ToLower(snapshot.Address)]; unreliable {
+			// Non-blocking mark: the same wedged lock that can stall a
+			// snapshot can be held here too; the station keeps its previous
+			// presence bookkeeping instead of hanging the whole scan.
+			stationPtr.TryMarkPresenceUncertain()
+			continue
+		}
+		stationPtr.TryMarkMissed()
+	}
 }
 
 type initialScanReadResult struct {

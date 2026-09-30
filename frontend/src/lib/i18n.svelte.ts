@@ -607,15 +607,41 @@ const LANGUAGE_PROBE_TIMEOUT_MS = 5000;
 // module-scoped languageSaveTail, so one hang disables language switching
 // for the whole session with no error surface. Bound the physical call; a
 // timeout is treated as a failed save, and the existing revision/revert
-// logic decides what the UI shows. The backend write may still land later —
-// the next launch then applies the persisted preference.
+// logic decides what the UI shows. The physical write may still settle later.
 const LANGUAGE_SAVE_TIMEOUT_MS = 10_000;
+
+function reconcileLateLanguageSave(): void {
+  // Capture the latest user intent when the physical call settles, not when
+  // it started: an older timed-out write can overwrite a newer successful
+  // save. A choice made after settlement must keep its optimistic display.
+  const revisionAtSettlement = languageSaveRevision;
+  const operation = languageSaveTail.then(async () => {
+    const persisted = await readPersistedLanguagePreference();
+    confirmedLanguagePreference = persisted;
+    if (languageSaveRevision === revisionAtSettlement) setLanguagePreference(persisted);
+  });
+  languageSaveTail = operation.then(
+    () => undefined,
+    () => undefined
+  );
+  // A failed reconciliation must not block another explicit language save.
+  void operation.catch(() => {});
+}
 
 function saveLanguageWithTimeout(preference: LanguagePreference): Promise<void> {
   const value = preference === 'system' ? '' : preference;
+  let physicalSave: Promise<void>;
+  try {
+    physicalSave = SetLanguage(value);
+  } catch (error) {
+    return Promise.reject(error);
+  }
   return new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('Language save timed out')), LANGUAGE_SAVE_TIMEOUT_MS);
-    void SetLanguage(value).then(
+    const timer = setTimeout(() => {
+      reject(new Error('Language save timed out'));
+      void physicalSave.then(reconcileLateLanguageSave, reconcileLateLanguageSave);
+    }, LANGUAGE_SAVE_TIMEOUT_MS);
+    void physicalSave.then(
       () => {
         clearTimeout(timer);
         resolve();
@@ -642,9 +668,7 @@ function listenForSystemLanguageChanges(): void {
   });
 }
 
-export async function initializeLocale(): Promise<Locale> {
-  listenForSystemLanguageChanges();
-  let preference: LanguagePreference = 'system';
+async function readPersistedLanguagePreference(): Promise<LanguagePreference> {
   let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
   try {
     const persisted = await Promise.race([
@@ -653,12 +677,20 @@ export async function initializeLocale(): Promise<Locale> {
         timeoutHandle = setTimeout(() => reject(new Error('language preference read timed out')), LANGUAGE_PROBE_TIMEOUT_MS);
       })
     ]);
-    if (isLocale(persisted)) preference = persisted;
+    return isLocale(persisted) ? persisted : 'system';
+  } finally {
+    if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
+  }
+}
+
+export async function initializeLocale(): Promise<Locale> {
+  listenForSystemLanguageChanges();
+  let preference: LanguagePreference = 'system';
+  try {
+    preference = await readPersistedLanguagePreference();
   } catch {
     // A missing WebView binding, an unreadable config, or a hung getter must
     // not block startup.
-  } finally {
-    if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
   }
   return setLanguagePreference(preference);
 }

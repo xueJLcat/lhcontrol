@@ -15,6 +15,26 @@ import (
 	tinybluetooth "tinygo.org/x/bluetooth"
 )
 
+func TestStatusRefreshJoinBudgetCoversConfiguredRead(t *testing.T) {
+	for _, test := range []struct {
+		name             string
+		readBudget       time.Duration
+		refreshRemaining time.Duration
+		want             time.Duration
+	}{
+		{"long valid read", 60 * time.Second, 100 * time.Second, 62 * time.Second},
+		{"fleet deadline binds", 60 * time.Second, 30 * time.Second, 32 * time.Second},
+		{"short read keeps minimum", 5 * time.Second, 100 * time.Second, statusRefreshJoinLimit},
+		{"expired fleet keeps minimum", 60 * time.Second, -time.Second, statusRefreshJoinLimit},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := statusRefreshJoinBudget(test.readBudget, test.refreshRemaining); got != test.want {
+				t.Fatalf("join budget = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
 func TestIsRecentRejectsFutureTimestamps(t *testing.T) {
 	now := time.Now()
 	window := 45 * time.Second
@@ -220,6 +240,58 @@ func TestRecoverySchedulerTreatsZeroScheduleAsImmediatelyDue(t *testing.T) {
 	}
 }
 
+func TestRecoverySchedulerRetriesStationWithoutCachedSnapshot(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	manager.statusBusyRetry = 20 * time.Millisecond
+	address := "11:22:33:44:55:88"
+	station := &internalbluetooth.BaseStation{Address: mustAddress(t, address), Present: true}
+	manager.stations[address] = station
+	manager.statusRetries[address] = statusRetry{
+		kinds:  statusRetryConnection,
+		nextAt: time.Now().Add(-time.Second),
+	}
+	// A healthy station with a distant deadline must not postpone the
+	// first station merely because its lock hides its initial snapshot.
+	futureAddress := "11:22:33:44:55:89"
+	manager.stations[futureAddress] = &internalbluetooth.BaseStation{Address: mustAddress(t, futureAddress)}
+	manager.statusRetries[futureAddress] = statusRetry{
+		kinds:  statusRetryConnection,
+		nextAt: time.Now().Add(time.Hour),
+	}
+	locked := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		station.HoldLockWhile(func() {
+			close(locked)
+			<-release
+		})
+	}()
+	<-locked
+	var releaseOnce sync.Once
+	releaseLock := func() { releaseOnce.Do(func() { close(release) }) }
+	defer func() {
+		releaseLock()
+		<-done
+	}()
+
+	if _, ok := station.SnapshotNonBlocking(); ok {
+		t.Fatal("station unexpectedly had a cached snapshot")
+	}
+	delay, scheduled := manager.nextStatusRecoveryDelay()
+	if !scheduled || delay != manager.statusBusyRetry {
+		t.Fatalf("locked station recovery delay = %v, %v; want %v, true", delay, scheduled, manager.statusBusyRetry)
+	}
+
+	releaseLock()
+	<-done
+	delay, scheduled = manager.nextStatusRecoveryDelay()
+	if !scheduled || delay != 0 {
+		t.Fatalf("unlocked station recovery delay = %v, %v; want 0, true", delay, scheduled)
+	}
+}
+
 func TestStationGATTFailureInvalidatesConnectionAndRegistersRecovery(t *testing.T) {
 	manager := NewManager(config.NewConfig())
 	address := "11:22:33:44:55:61"
@@ -282,6 +354,42 @@ func TestStatusCheckSchedulesInitialRecoveryForDisconnectedStation(t *testing.T)
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("background recovery did not create a retry backoff")
+}
+
+func TestStatusCheckTracksLockedStationWithoutFirstSnapshot(t *testing.T) {
+	manager := NewManager(config.NewConfig())
+	manager.statusRecoveryStart.Do(func() {})
+	address := "11:22:33:44:55:93"
+	station := &internalbluetooth.BaseStation{
+		Name: "LHB-NO-SNAPSHOT", Address: mustAddress(t, address), Present: true,
+	}
+	manager.stations[address] = station
+	release := make(chan struct{})
+	defer close(release)
+	locked := make(chan struct{})
+	go station.HoldLockWhile(func() {
+		close(locked)
+		<-release
+	})
+	<-locked
+
+	started := time.Now()
+	infos, err := manager.CheckAllStationStatuses()
+	if err != nil {
+		t.Fatalf("CheckAllStationStatuses() error = %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("status refresh waited %v on the locked station", elapsed)
+	}
+	if len(infos) != 1 || infos[0].Address != address {
+		t.Fatalf("status projection = %+v, want the known station", infos)
+	}
+	manager.statusRetryMutex.Lock()
+	retry, tracked := manager.statusRetries[address]
+	manager.statusRetryMutex.Unlock()
+	if !tracked || effectiveStatusRetryKinds(retry)&statusRetryConnection == 0 {
+		t.Fatalf("locked station retry = %+v, tracked=%v; want connection recovery", retry, tracked)
+	}
 }
 
 func TestStatusCheckReadsConnectedAndTracksDisconnectedStationsTogether(t *testing.T) {
